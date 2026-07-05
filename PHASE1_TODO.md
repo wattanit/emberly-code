@@ -17,7 +17,7 @@ driven by a scripted fake provider, under the panic-free lint gate.
 |---|---|---|
 | 0. Prerequisite (Phase 0) | [x] | Workspace + lint gates green (2026-07-06) |
 | 1. Event model & channels | [x] | Done 2026-07-06; 4 round-trip tests green |
-| 2. Provider trait + FakeProvider | [ ] | |
+| 2. Provider trait + FakeProvider | [x] | Done 2026-07-06; 8 tests green |
 | 3. Tool trait + ToolCtx | [ ] | |
 | 4. Tools: read / write / edit / bash | [ ] | |
 | 5. Truncation at ingestion | [ ] | |
@@ -76,16 +76,26 @@ driven by a scripted fake provider, under the panic-free lint gate.
 
 ## 2. Provider trait + FakeProvider  *(A-2, P-1; Tech Spec §4.1, §14.1)*
 
-- [ ] `Provider` trait: `id`, `model_info`, `stream_completion`,
-      `count_tokens`. Normalized `CompletionRequest` (messages + tool
-      schemas).
-- [ ] `CompletionStream` yielding normalized `StreamEvent`:
-      `TextDelta`, `ToolCallStart/Delta/End`, `Usage`, `Done`, `Err`.
-      No wire types cross the boundary.
-- [ ] `ProviderError` (`thiserror`).
-- [ ] `FakeProvider`: constructed from a script of canned `StreamEvent`s;
-      supports text, tool calls, error, and mid-stream drop scenarios.
-- [ ] `count_tokens` chars/4 approximation (trigger-grade, P-6).
+- [x] `Provider` trait (`provider.rs`): `id`, `model_info`,
+      `stream_completion`, `count_tokens`. Normalized `CompletionRequest`
+      (system + `Message`/`ContentBlock` + `ToolSchema`) in `message.rs`.
+- [x] `CompletionStream` (`stream.rs`) yielding normalized `StreamEvent`
+      (`TextDelta`, `ToolCall{Start,Delta,End}`, `Usage`, `Done`). **Design
+      refinement:** the spec's `Err` event is modeled as the `Err` arm of the
+      stream item `Result<StreamEvent, ProviderError>` — idiomatic, and keeps
+      `StreamEvent` `Clone`/`Serialize`. Documented in `stream.rs`. No wire
+      types cross the boundary (P-1).
+- [x] `ProviderError` (`error.rs`, `thiserror`) with `is_retryable()` /
+      `retry_after()` classification pre-wired for the Phase 3 retry policy.
+- [x] `FakeProvider` (`fake.rs`): queue of `ScriptedResponse`s, one per
+      completion; helpers for text / tool-call / mid-stream-error /
+      mid-stream-drop / connect-error. → `tests/fake_provider.rs` (8 tests).
+- [x] `count_tokens` chars/4 (`div_ceil`), flagged `approximate` (P-6).
+
+**Layering decision:** `ToolCallId` and `TokenUsage` now live in
+`emberly-providers` (they originate on the provider wire / are the accounting
+unit); `emberly-core` re-exports them, so there is one definition and no
+boundary translation. `Pricing::estimate_usd` added for Phase 3 cost (P-6).
 
 ## 3. Tool trait + ToolCtx  *(HC-6, T-7; Tech Spec §5.1)*
 

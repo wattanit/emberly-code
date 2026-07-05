@@ -32,6 +32,7 @@ toml = "0.8"
 time = { version = "0.3", features = ["serde-well-known", "formatting", "parsing"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1"
+futures = "0.3"
 
 [profile.release]
 # Fully static musl builds (HC-2) prefer small, predictable binaries.

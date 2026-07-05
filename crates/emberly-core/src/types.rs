@@ -105,16 +105,6 @@ impl PermissionDecision {
 
 /// Provider-reported or estimated token counts for a completion
 /// (Requirements P-6, Tech Spec §4.4). Drives the context indicator and the
-/// cost estimate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub input: u64,
-    pub output: u64,
-}
-
-impl TokenUsage {
-    #[must_use]
-    pub fn total(&self) -> u64 {
-        self.input.saturating_add(self.output)
-    }
-}
+/// cost estimate. Defined in `emberly-providers` and re-exported so the two
+/// crates agree on the accounting unit.
+pub use emberly_providers::TokenUsage;
