@@ -1,0 +1,14 @@
+[package]
+name = "emberly-tui"
+description = "The ratatui terminal frontend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Internal (tui -> core only; nothing depends on tui).
+emberly-core = { path = "../emberly-core" }
+
+# External. ratatui/crossterm/syntect/unicode-* arrive in Phase 4.

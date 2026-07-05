@@ -1,0 +1,21 @@
+[package]
+name = "emberly"
+description = "Emberly Code — an interactive AI coding agent for the terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "emberly"
+path = "src/main.rs"
+
+[dependencies]
+# Internal (bin -> {tui, core}).
+emberly-core = { path = "../emberly-core" }
+emberly-tui = { path = "../emberly-tui" }
+
+# External. anyhow is confined to the binary edge (Tech Spec §1, §11).
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

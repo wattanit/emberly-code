@@ -1,0 +1,14 @@
+[package]
+name = "emberly-tools"
+description = "Tool trait and the built-in tool suite (read, write, edit, bash, glob, grep)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true

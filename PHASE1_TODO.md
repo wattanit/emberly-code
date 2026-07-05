@@ -15,7 +15,7 @@ driven by a scripted fake provider, under the panic-free lint gate.
 
 | Group | Status | Notes |
 |---|---|---|
-| 0. Prerequisite (Phase 0) | [ ] | Workspace + lint gates must be green first |
+| 0. Prerequisite (Phase 0) | [x] | Workspace + lint gates green (2026-07-06) |
 | 1. Event model & channels | [ ] | |
 | 2. Provider trait + FakeProvider | [ ] | |
 | 3. Tool trait + ToolCtx | [ ] | |
@@ -35,15 +35,21 @@ driven by a scripted fake provider, under the panic-free lint gate.
 
 > Not part of M1 proper, but Phase 1 cannot start until these are green.
 
-- [ ] Cargo workspace with the six crates (`emberly-core`,
+- [x] Cargo workspace with the six crates (`emberly-core`,
       `emberly-providers`, `emberly-tools`, `emberly-sandbox`, `emberly-tui`,
-      `emberly`) and one-way dependency direction wired.
-- [ ] Lint gates: `#![forbid(unsafe_code)]` everywhere;
+      `emberly`) and one-way dependency direction wired *and verified*.
+- [x] Lint gates: `#![forbid(unsafe_code)]` everywhere;
       `#![deny(clippy::unwrap_used, clippy::expect_used)]` on core/providers/
-      tools/sandbox. `anyhow` binary-only; `thiserror` in libs.
-- [ ] Initial dependency set (Tech Spec §12), `rustls`-only, `Cargo.lock`
-      committed.
-- [ ] CI: fmt + clippy-as-errors + test + musl build check green.
+      tools/sandbox. `anyhow` binary-only; `thiserror` in libs. Verified the
+      gate bites (an `unwrap` in core is a hard compile error).
+- [x] Foundational dependency set declared centrally in
+      `[workspace.dependencies]`, `Cargo.lock` committed (54 packages, no C
+      deps). Heavier per-layer deps (reqwest/ratatui/syntect/landlock/…) added
+      by the phase that introduces them — see decisions log.
+- [x] CI workflow (`.github/workflows/ci.yml`): fmt + clippy-as-errors + test
+      + `x86_64-unknown-linux-musl` static build + `cargo deny` + `cargo vet`.
+      `deny.toml` bans the canonical C deps (openssl/native-tls/libgit2).
+      *(musl build + deny/vet run in CI; not exercised on the macOS host.)*
 
 ---
 
@@ -187,6 +193,17 @@ driven by a scripted fake provider, under the panic-free lint gate.
   there is no reason to wait for Phase 2. (Owner decision.)
 - **2026-07-06:** `full_output_ref` sidecar file writing stays deferred to
   Phase 5; Phase 1 implements truncation math + marker only. (Owner decision.)
+
+- **2026-07-06 (Phase 0):** Deferred the heavier leaf dependencies
+  (`reqwest`, `ratatui`, `crossterm`, `syntect`, `landlock`, `ignore`,
+  `grep-searcher`, `globset`, `similar`, `unicode-*`, `nucleo-matcher`) to the
+  phases that introduce them, rather than adding the full Tech Spec §12 set at
+  scaffold time. Rationale: keeps the audited tree small and reviewable, and
+  each addition gets `cargo vet`/`deny` acceptance when it actually lands.
+  Versions are pinned centrally in `[workspace.dependencies]` as they arrive.
+- **2026-07-06 (Phase 0):** `cargo vet` CI job is `continue-on-error` until the
+  audit-import set is seeded, then tightened to required. Recorded so it is not
+  mistaken for a permanently-soft gate.
 
 *(Continue recording deviations, deferrals, and decisions here as work
 proceeds — e.g. the first-party-vs-crate SSE question if it surfaces early.)*
