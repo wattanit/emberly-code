@@ -27,6 +27,17 @@ pub struct ToolSpec {
     pub input_schema: Value,
 }
 
+/// A file created or modified by a tool, with line deltas. Carried on a
+/// successful [`ToolOutcome`] so the engine can emit `FileModified` for the
+/// sidebar's modified-files list (Design §3.1) — tools have no event channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChange {
+    /// Path relative to the project root.
+    pub path: String,
+    pub adds: u32,
+    pub dels: u32,
+}
+
 /// The result of running a tool, always handed to the model as data (HC-6).
 ///
 /// `ok == false` is a *structured failure* (file not found, no edit match,
@@ -42,6 +53,9 @@ pub struct ToolOutcome {
     pub content: String,
     /// One-line summary for the UI (`ToolFinished` summary).
     pub summary: String,
+    /// A file change to surface, if this tool wrote or edited a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_change: Option<FileChange>,
 }
 
 impl ToolOutcome {
@@ -52,6 +66,7 @@ impl ToolOutcome {
             ok: true,
             content: content.into(),
             summary: summary.into(),
+            file_change: None,
         }
     }
 
@@ -63,7 +78,15 @@ impl ToolOutcome {
             ok: false,
             content: content.into(),
             summary: summary.into(),
+            file_change: None,
         }
+    }
+
+    /// Attach a file change to a (typically successful) outcome.
+    #[must_use]
+    pub fn with_file_change(mut self, change: FileChange) -> Self {
+        self.file_change = Some(change);
+        self
     }
 
     /// A failure produced because the user denied the action (Requirements

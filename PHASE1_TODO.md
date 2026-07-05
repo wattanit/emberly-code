@@ -19,7 +19,7 @@ driven by a scripted fake provider, under the panic-free lint gate.
 | 1. Event model & channels | [x] | Done 2026-07-06; 4 round-trip tests green |
 | 2. Provider trait + FakeProvider | [x] | Done 2026-07-06; 8 tests green |
 | 3. Tool trait + ToolCtx | [x] | Done 2026-07-06; 6 tests green |
-| 4. Tools: read / write / edit / bash | [ ] | |
+| 4. Tools: read / write / edit / bash | [x] | Done 2026-07-06; 14 tests green |
 | 5. Truncation at ingestion | [ ] | |
 | 6. Permission gate (rule-layer) | [ ] | |
 | 7. Agent loop | [ ] | |
@@ -121,20 +121,30 @@ the user's richer `PermissionDecision` into allow/deny for the tool.
 
 ## 4. Tools: read / write / edit / bash  *(T-1, T-2, T-3, T-4; Tech Spec §5.2)*
 
-- [ ] `read_file`: path-normalize (resolve symlinks, collapse `..`) then
-      root-check; bounded output via truncation (group 5).
-- [ ] `edit_file`: exact string match-and-replace; failure messages
-      distinguish **no match** vs **N matches found**; no-match includes a
-      `similar`-based closest-region fuzzy hint (T-3).
-- [ ] `bash`: `tokio::process`, default 120s timeout configurable up to a
-      ceiling; child in its own **process group** so timeout/cancel kills the
-      whole tree (S-4); scrubbed env allowlist (PATH/HOME/LANG/TERM +
-      config additions).
-- [ ] `write_file`: creates or replaces a file; creates parent dirs inside
-      root only; refuses `.git/` paths at the tool layer (HC-5 tool-level
-      check — does not depend on the OS sandbox). Emits `FileModified`.
-- [ ] All four route execution *through* the permission gate; none can
-      bypass it.
+- [x] `read_file` (`builtin/read.rs`): `resolve_in_root` (canonicalize
+      existing prefix → symlink-safe, collapse `..`, classify outside-root);
+      in-root reads free, outside-root reads ask (HC-4). Full content returned;
+      engine truncates at ingestion (group 5).
+- [x] `edit_file` (`builtin/edit.rs`): exact match-and-replace; **no match** vs
+      **N matches found** distinguished; no-match includes a `similar`-based
+      closest-line hint (T-3); optional `replace_all`; unified diff in the
+      prompt (Design §5).
+- [x] `bash` (`builtin/bash.rs`): `tokio::process`, 120s default / 600s ceiling
+      timeout; child in its own **process group** (`process_group(0)`, unix);
+      `kill_on_drop` kills the leader on timeout (S-4 — harness never hangs);
+      env scrubbed to PATH/HOME/LANG/TERM allowlist. Non-zero exit = data.
+- [x] `write_file` (`builtin/write.rs`): create/replace; parent dirs inside
+      root; **hard-refuses `.git/`** at the tool layer (HC-5, no gate);
+      `FileChange` (adds/dels) attached for the engine to emit `FileModified`.
+- [x] All four authorize through `ctx.authorize()` (read only when
+      outside-root, per §6.2). Path resolution in `path.rs`, diff/hint helpers
+      in `diff.rs`. → `tests/builtin_tools.rs` (14 tests).
+
+**Deferred to Phase 2 (noted in `bash.rs`):** killing the whole descendant
+*tree* needs a group-kill signal (a vetted syscall dep like `rustix`/`nix`),
+decided alongside the sandbox. Phase 1 sets the process group + leader-kill +
+timeout, which satisfies "a hung child must not hang the harness." Avoids an
+unlisted dependency and `unsafe` (HC-1).
 
 ## 5. Truncation at ingestion  *(§8.1; Tech Spec §5.3)*
 
