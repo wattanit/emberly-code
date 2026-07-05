@@ -18,9 +18,11 @@ pub mod path;
 pub mod permission;
 pub mod registry;
 pub mod tool;
+pub mod truncate;
 
 pub use builtin::{default_registry, BashTool, EditFileTool, ReadFileTool, WriteFileTool};
 pub use ctx::{ToolCtx, TruncateConfig};
 pub use permission::{PermissionGate, PermissionOutcome, PermissionRequest};
 pub use registry::ToolRegistry;
 pub use tool::{FileChange, Tool, ToolOutcome, ToolSpec};
+pub use truncate::{truncate_output, Truncation};

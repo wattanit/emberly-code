@@ -20,7 +20,7 @@ driven by a scripted fake provider, under the panic-free lint gate.
 | 2. Provider trait + FakeProvider | [x] | Done 2026-07-06; 8 tests green |
 | 3. Tool trait + ToolCtx | [x] | Done 2026-07-06; 6 tests green |
 | 4. Tools: read / write / edit / bash | [x] | Done 2026-07-06; 14 tests green |
-| 5. Truncation at ingestion | [ ] | |
+| 5. Truncation at ingestion | [x] | Done 2026-07-06; 5 tests green |
 | 6. Permission gate (rule-layer) | [ ] | |
 | 7. Agent loop | [ ] | |
 | 8. Line-mode frontend | [ ] | |
@@ -148,13 +148,18 @@ unlisted dependency and `unsafe` (HC-1).
 
 ## 5. Truncation at ingestion  *(§8.1; Tech Spec §5.3)*
 
-- [ ] On appending a tool result: if over `truncate.max_lines` (400) or
-      `truncate.max_bytes` (64 KiB), keep head (150) + tail (100), insert
+- [x] `truncate_output(&str, &TruncateConfig) -> Truncation` (`truncate.rs`):
+      over `max_lines` (400) → keep head (150) + tail (100) with
       `[... N lines elided — /view to open full output ...]`.
-- [ ] Deterministic, per-event, **no model call**. Applies to bash output and
-      file reads alike.
-- [ ] `full_output_ref` sidecar wiring stubbed (real file lands Phase 5);
-      truncation math and marker are complete and tested here.
+- [x] Deterministic, pure, **no model call**. Second byte-wise pass for
+      still-oversized output (huge single lines), UTF-8-boundary safe.
+- [x] `Truncation` reports `truncated` + `original_lines`/`original_bytes`;
+      `full_output_ref` sidecar is set by the transcript layer in Phase 5, not
+      here (as planned). → 5 inline unit tests (incl. multibyte boundary).
+
+**Note:** engine calls `truncate_output` when ingesting a tool result
+(group 7). Byte-elision marker reads "N bytes elided"; line-elision "N lines
+elided".
 
 ## 6. Permission gate — rule-layer only  *(§6.6, HC-6; Tech Spec §6.1 partial)*
 
