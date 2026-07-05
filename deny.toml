@@ -1,0 +1,47 @@
+# cargo-deny configuration (Requirements §10, Tech Spec §12, §13).
+# Enforces the dependency policy in CI: advisories, licenses, and duplicate/
+# source checks. New dependencies require explicit acceptance; additions to
+# emberly-sandbox require owner sign-off (Tech Spec §1).
+
+[advisories]
+version = 2
+yanked = "deny"
+# Fail CI on any known security advisory in the tree.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses aligned with an Apache-2.0 project. Additions are a
+# deliberate policy decision, not a default.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Duplicate versions are a smell (bloat, audit surface); warn and review.
+multiple-versions = "warn"
+wildcard-dependencies = "deny"
+# HC-2: no third-party C libraries linked or bundled. OpenSSL is the canonical
+# offender we replace with rustls; ban it outright so a transitive pull fails
+# CI loudly. (OS-provided system interfaces are exempt per HC-2 and are not
+# crates, so they are not affected by this list.)
+deny = [
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+    { name = "libgit2-sys" },
+    { name = "git2" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

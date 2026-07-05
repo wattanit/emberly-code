@@ -1,0 +1,15 @@
+[package]
+name = "emberly-sandbox"
+description = "Permission rule engine and OS-level confinement (Landlock, Seatbelt)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Security-critical crate: dependency list is frozen harder than the rest
+# (Tech Spec §1, §15). Additions require explicit owner sign-off. Landlock
+# (Linux) and the macOS confinement path arrive in Phases 2 and 5.
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # fmt + clippy-as-errors + tests. Clippy carries the lint policy of
+  # Tech Spec §1 (unsafe forbidden everywhere; unwrap/expect denied in the
+  # library crates) as hard errors via RUSTFLAGS + the crate-level attributes.
+  check:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features
+      - name: test
+        run: cargo test --workspace --all-features
+
+  # HC-2: the default build must produce fully static musl binaries with no
+  # libc surprises. Proven in CI from Phase 0 on the primary musl target.
+  musl-build:
+    name: musl static build (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (static musl)
+        run: cargo build --workspace --target x86_64-unknown-linux-musl
+
+  # Dependency policy (Requirements §10, Tech Spec §12): advisories, licenses,
+  # duplicate/source checks, and the C-dependency ban in deny.toml.
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # cargo vet — importable audit records (Google/Mozilla/Rust). Runs in
+  # non-blocking form until the audit set is seeded; tighten to required once
+  # the initial imports land.
+  vet:
+    name: cargo vet
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-vet
+        run: cargo install cargo-vet --locked
+      - name: Vet
+        run: cargo vet --locked || cargo vet

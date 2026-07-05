@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/emberly-core",
+    "crates/emberly-providers",
+    "crates/emberly-tools",
+    "crates/emberly-sandbox",
+    "crates/emberly-tui",
+    "crates/emberly",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+license = "Apache-2.0"
+authors = ["Wattanit"]
+repository = ""
+
+# Centralized dependency versions (HC-2: pure-Rust, rustls-only, no C deps).
+# Foundational deps are declared here from Phase 0; heavier per-layer deps
+# (reqwest, ratatui, syntect, landlock, ignore/grep-searcher, similar, …) are
+# added to this table by the phase that introduces them — see
+# IMPLEMENTATION_PLAN.md and docs/emberly-code-tech-spec-v0.1.md §12.
+[workspace.dependencies]
+tokio = { version = "1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+toml = "0.8"
+time = { version = "0.3", features = ["serde-well-known", "formatting", "parsing"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+async-trait = "0.1"
+futures = "0.3"
+similar = "2"
+
+[profile.release]
+# Fully static musl builds (HC-2) prefer small, predictable binaries.
+strip = true
+lto = "thin"

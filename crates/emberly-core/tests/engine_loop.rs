@@ -1,0 +1,275 @@
+//! Agent-loop integration tests (Phase 1, groups 6 + 7). A `FakeProvider`
+//! scripts the model side; the test plays the frontend — sending `UserInput`,
+//! answering `PermissionRequest`s, and observing `UiEvent`s. Exercises the
+//! gate round trip, tool-result feedback, denial-as-data (HC-6), `FileModified`,
+//! and cancellation.
+//!
+//! No `.unwrap()`/`.expect()`: setup `panic!`s with context; the frontend
+//! reads events and asserts on them.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use emberly_core::{channel, Command, Engine, EngineConfig, PermissionDecision, UiEvent};
+use emberly_providers::{FakeProvider, Provider, ScriptedResponse};
+use emberly_tools::{default_registry, TruncateConfig};
+use tokio::sync::mpsc;
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn temp_project() -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("emberly-engine-{}-{}", std::process::id(), n));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        panic!("failed to create temp project dir: {e}");
+    }
+    dir
+}
+
+struct Harness {
+    commands_tx: mpsc::Sender<Command>,
+    events_rx: mpsc::Receiver<UiEvent>,
+}
+
+fn start(scripts: Vec<ScriptedResponse>, root: PathBuf) -> Harness {
+    let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(scripts));
+    let config = EngineConfig {
+        provider,
+        tools: default_registry(),
+        project_root: root,
+        model: "fake-1".into(),
+        system: None,
+        truncate: TruncateConfig::default(),
+    };
+    let (engine_ports, frontend) = channel();
+    let (engine, asks_rx) = Engine::new(config, engine_ports.events_tx);
+    tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx));
+    Harness {
+        commands_tx: frontend.commands_tx,
+        events_rx: frontend.events_rx,
+    }
+}
+
+impl Harness {
+    async fn send(&self, command: Command) {
+        let _ = self.commands_tx.send(command).await;
+    }
+
+    /// Collect events until the stream goes idle, auto-answering permission
+    /// prompts with `answer` (if any).
+    async fn collect(&mut self, answer: Option<PermissionDecision>) -> Vec<UiEvent> {
+        let mut events = Vec::new();
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(250), self.events_rx.recv()).await
+        {
+            if let UiEvent::PermissionRequest { id, .. } = &event {
+                if let Some(decision) = answer {
+                    self.send(Command::PermissionAnswer { id: *id, decision })
+                        .await;
+                }
+            }
+            events.push(event);
+        }
+        events
+    }
+}
+
+fn deltas(events: &[UiEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            UiEvent::AssistantDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_tool_finished(events: &[UiEvent], ok: bool) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, UiEvent::ToolFinished { ok: o, .. } if *o == ok))
+}
+
+#[tokio::test]
+async fn text_only_turn_streams_and_reports_usage() {
+    let mut h = start(vec![ScriptedResponse::text("hello สวัสดี")], temp_project());
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let events = h.collect(None).await;
+
+    assert_eq!(deltas(&events), "hello สวัสดี");
+    assert!(events.iter().any(|e| matches!(e, UiEvent::AssistantDone)));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::ContextUsage { .. })));
+}
+
+#[tokio::test]
+async fn tool_call_allowed_runs_and_feeds_result_back() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "write_file",
+            r#"{"path":"out.txt","content":"hello\n"}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = start(scripts, root.clone());
+    h.send(Command::UserInput {
+        text: "write it".into(),
+    })
+    .await;
+    let events = h.collect(Some(PermissionDecision::AllowOnce)).await;
+
+    // The file was created.
+    assert_eq!(
+        std::fs::read_to_string(root.join("out.txt")).unwrap_or_default(),
+        "hello\n"
+    );
+    // A prompt was raised, the tool succeeded, and the change was surfaced.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::PermissionRequest { .. })));
+    assert!(has_tool_finished(&events, true));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        UiEvent::FileModified { path, adds, dels } if path == "out.txt" && *adds == 1 && *dels == 0
+    )));
+    // The model got the tool result and produced a closing message.
+    assert_eq!(deltas(&events), "done");
+}
+
+#[tokio::test]
+async fn denied_tool_feeds_failure_and_model_continues() {
+    // HC-6 / §6.6: a denial is data the model reacts to, not a dead end.
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "write_file", r#"{"path":"out.txt","content":"x"}"#),
+        ScriptedResponse::text("understood, skipping"),
+    ];
+    let mut h = start(scripts, root.clone());
+    h.send(Command::UserInput {
+        text: "write it".into(),
+    })
+    .await;
+    let events = h.collect(Some(PermissionDecision::Deny)).await;
+
+    assert!(
+        !root.join("out.txt").exists(),
+        "denied write must not touch disk"
+    );
+    assert!(
+        has_tool_finished(&events, false),
+        "denied tool finishes as failure"
+    );
+    assert_eq!(deltas(&events), "understood, skipping");
+}
+
+#[tokio::test]
+async fn unknown_tool_is_a_recoverable_failure() {
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "no_such_tool", "{}"),
+        ScriptedResponse::text("recovered"),
+    ];
+    let mut h = start(scripts, temp_project());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = h.collect(Some(PermissionDecision::AllowOnce)).await;
+
+    assert!(has_tool_finished(&events, false));
+    assert_eq!(deltas(&events), "recovered");
+}
+
+/// The Phase 1 exit criterion (IMPLEMENTATION_PLAN.md): a scripted session
+/// reads a file, proposes an edit, prompts for permission, runs a bash
+/// command, and terminates — all end-to-end through the engine.
+#[tokio::test]
+async fn full_workflow_read_edit_permission_bash() {
+    let root = temp_project();
+    if let Err(e) = std::fs::write(root.join("f.txt"), "hello\nworld\n") {
+        panic!("seed failed: {e}");
+    }
+
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "read_file", r#"{"path":"f.txt"}"#),
+        ScriptedResponse::tool_call(
+            "c2",
+            "edit_file",
+            r#"{"path":"f.txt","old_string":"world","new_string":"emberly"}"#,
+        ),
+        ScriptedResponse::tool_call("c3", "bash", r#"{"command":"echo done"}"#),
+        ScriptedResponse::text("workflow complete"),
+    ];
+    let mut h = start(scripts, root.clone());
+    h.send(Command::UserInput {
+        text: "do the workflow".into(),
+    })
+    .await;
+    let events = h.collect(Some(PermissionDecision::AllowOnce)).await;
+
+    // The edit landed and bash ran; the model produced its closing message.
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap_or_default(),
+        "hello\nemberly\n"
+    );
+    assert_eq!(deltas(&events), "workflow complete");
+
+    // The in-root read did NOT prompt; the edit and bash did (HC-4/§6.2).
+    let prompts = events
+        .iter()
+        .filter(|e| matches!(e, UiEvent::PermissionRequest { .. }))
+        .count();
+    assert_eq!(prompts, 2, "edit + bash prompt; in-root read does not");
+
+    // Every tool finished successfully, and the edit surfaced a file change.
+    assert!(
+        !has_tool_finished(&events, false),
+        "no tool failures expected"
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        UiEvent::FileModified { path, .. } if path == "f.txt"
+    )));
+}
+
+#[tokio::test]
+async fn cancel_during_bash_stops_promptly() {
+    let scripts = vec![ScriptedResponse::tool_call(
+        "c1",
+        "bash",
+        r#"{"command":"sleep 5"}"#,
+    )];
+    let mut h = start(scripts, temp_project());
+    h.send(Command::UserInput { text: "run".into() }).await;
+
+    let started = Instant::now();
+    let mut events = Vec::new();
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(500), h.events_rx.recv()).await
+    {
+        match &event {
+            UiEvent::PermissionRequest { id, .. } => {
+                h.send(Command::PermissionAnswer {
+                    id: *id,
+                    decision: PermissionDecision::AllowOnce,
+                })
+                .await;
+            }
+            UiEvent::ToolStarted { .. } => {
+                h.send(Command::Cancel).await;
+            }
+            _ => {}
+        }
+        events.push(event);
+    }
+
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "cancel should kill the sleep well before its 5s timeout"
+    );
+    assert!(
+        has_tool_finished(&events, false),
+        "canceled tool finishes as failure"
+    );
+}

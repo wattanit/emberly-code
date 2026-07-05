@@ -1,0 +1,14 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Emberly session data / project config materialized by `emberly init`
+.agents/sessions/
+.agents/sessions-*/
+
+# Local secrets — never committed (Tech Spec §8)
+keys.toml
+
+# Editor / OS cruft
+.DS_Store
+*.swp
