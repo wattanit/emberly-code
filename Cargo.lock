@@ -51,8 +51,12 @@ name = "emberly"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "emberly-core",
+ "emberly-providers",
+ "emberly-tools",
  "emberly-tui",
+ "futures",
  "tokio",
 ]
 

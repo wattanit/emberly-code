@@ -320,13 +320,14 @@ impl Engine {
             PermissionId,
             tokio::sync::oneshot::Sender<PermissionOutcome>,
         )> = Vec::new();
+        let mut commands_open = true;
 
         loop {
             tokio::select! {
                 outcome = &mut exec => return ToolCallResult::Completed(outcome),
                 Some(ask) = asks_rx.recv() => self.on_permission_ask(ask, &mut pending).await,
-                Some(command) = commands_rx.recv() => match command {
-                    Command::PermissionAnswer { id, decision } => {
+                command = commands_rx.recv(), if commands_open => match command {
+                    Some(Command::PermissionAnswer { id, decision }) => {
                         if let Some(pos) = pending.iter().position(|(pid, _)| *pid == id) {
                             let (_, reply) = pending.swap_remove(pos);
                             let outcome = if decision.is_allow() {
@@ -337,8 +338,17 @@ impl Engine {
                             let _ = reply.send(outcome);
                         }
                     }
-                    Command::Cancel => return ToolCallResult::Canceled,
-                    _ => {}
+                    Some(Command::Cancel) => return ToolCallResult::Canceled,
+                    Some(_) => {}
+                    None => {
+                        // No more input (frontend gone): deny anything pending
+                        // as the safe default and stop watching commands, so we
+                        // never hang on an answer that cannot arrive.
+                        commands_open = false;
+                        for (_, reply) in pending.drain(..) {
+                            let _ = reply.send(PermissionOutcome::Deny);
+                        }
+                    }
                 },
             }
         }

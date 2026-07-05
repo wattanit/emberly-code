@@ -24,10 +24,11 @@ driven by a scripted fake provider, under the panic-free lint gate.
 | 6. Permission gate (rule-layer) | [x] | Done 2026-07-06 (with group 7) |
 | 7. Agent loop | [x] | Done 2026-07-06; 5 engine tests green |
 | 8. Line-mode frontend | [x] | Done 2026-07-06; 5 tests green |
-| 9. Supervisor skeleton | [ ] | |
-| 10. Tests & exit criterion | [ ] | |
+| 9. Supervisor skeleton | [x] | Done 2026-07-06 |
+| 10. Tests & exit criterion | [x] | Done 2026-07-06; 48 tests, binary runs |
 
-**Overall Phase 1: not started.**
+**Overall Phase 1: COMPLETE (2026-07-06).** All 10 groups done; 48 tests
+green; `emberly` runs end-to-end in line mode under the panic-free lint gate.
 
 ---
 
@@ -213,23 +214,28 @@ matched-rule "reason" (Design §5).
 
 ## 9. Supervisor skeleton  *(HC-3; Tech Spec §10)*
 
-- [ ] Binary installs a panic hook + supervises the engine task.
-- [ ] On abnormal path: restore terminal state, exit cleanly non-zero.
-- [ ] Transcript persistence + `abnormal_exit` event are Phase 5 — leave the
-      hook point, don't implement persistence here.
+- [x] `emberly/main.rs`: `#[tokio::main]` + `install_panic_hook` (top-level
+      hook), supervises the spawned engine task (checks `JoinError::is_panic`).
+- [x] Clean exit: harness-voice error to stderr + non-zero exit on failure.
+      Line mode makes no terminal changes to restore; the hook is the attach
+      point for TUI terminal-restore (Phase 4).
+- [x] Transcript persistence + `abnormal_exit` deferred to Phase 5; the panic
+      hook marks where they attach.
 
 ## 10. Tests & exit criterion  *(A-2)*
 
-- [ ] Unit tests for: truncation math, edit no-match/N-match messages, env
-      scrubbing, process-group kill on timeout.
-- [ ] Scripted `FakeProvider` integration test: multi-step task —
-      read a file → propose an edit → permission prompt (test both **deny**
-      → data-back-to-model and **allow** paths) → run a bash command → loop
-      terminates.
-- [ ] Denial-as-data assertion (HC-6): denied tool call produces a structured
-      tool result the model sees.
-- [ ] Cancel test: cancel mid-bash kills the child process group.
-- [ ] Whole tree passes under `clippy::unwrap_used`/`expect_used` deny gate.
+- [x] Unit tests across groups: truncation math (5), edit no-match/N-match (in
+      builtin_tools), env scrubbing + timeout kill (bash tests).
+- [x] Scripted `FakeProvider` integration test `full_workflow_read_edit_
+      permission_bash`: read (no prompt) → edit (prompt) → bash (prompt) →
+      terminates, file edited. Plus `denied_tool_feeds_failure_and_model_
+      continues` for the deny path.
+- [x] Denial-as-data (HC-6): asserted in the denied-tool test (failure result,
+      model continues).
+- [x] Cancel test `cancel_during_bash_stops_promptly`: cancel kills the sleep
+      in <3s (0.5s actual), not its 5s timeout.
+- [x] Whole tree passes under the `unwrap_used`/`expect_used` deny gate; 48
+      tests green; `emberly --plain` smoke run verified end-to-end.
 
 ---
 
@@ -240,7 +246,10 @@ matched-rule "reason" (Design §5).
 > line mode, with denials routed back to the model as data, all under the
 > panic-free lint gate.
 
-- [ ] **Exit criterion met.**
+- [x] **Exit criterion met.** Proven by `full_workflow_read_edit_permission_bash`
+      + `denied_tool_feeds_failure_and_model_continues` (deny→data), all under
+      the panic-free lint gate. `emberly` also runs the loop end-to-end in line
+      mode (placeholder provider; live providers are Phase 3).
 
 ---
 

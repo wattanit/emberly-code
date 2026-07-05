@@ -12,10 +12,16 @@ name = "emberly"
 path = "src/main.rs"
 
 [dependencies]
-# Internal (bin -> {tui, core}).
+# Internal. As the composition root, the binary also depends on the concrete
+# providers/tools crates to construct the provider and tool registry it wires
+# into the engine (Phase 3 builds the live providers here).
 emberly-core = { path = "../emberly-core" }
 emberly-tui = { path = "../emberly-tui" }
+emberly-providers = { path = "../emberly-providers" }
+emberly-tools = { path = "../emberly-tools" }
 
 # External. anyhow is confined to the binary edge (Tech Spec §1, §11).
 anyhow.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+async-trait.workspace = true
+futures.workspace = true

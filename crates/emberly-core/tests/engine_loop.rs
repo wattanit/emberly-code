@@ -181,6 +181,58 @@ async fn unknown_tool_is_a_recoverable_failure() {
     assert_eq!(deltas(&events), "recovered");
 }
 
+/// The Phase 1 exit criterion (IMPLEMENTATION_PLAN.md): a scripted session
+/// reads a file, proposes an edit, prompts for permission, runs a bash
+/// command, and terminates — all end-to-end through the engine.
+#[tokio::test]
+async fn full_workflow_read_edit_permission_bash() {
+    let root = temp_project();
+    if let Err(e) = std::fs::write(root.join("f.txt"), "hello\nworld\n") {
+        panic!("seed failed: {e}");
+    }
+
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "read_file", r#"{"path":"f.txt"}"#),
+        ScriptedResponse::tool_call(
+            "c2",
+            "edit_file",
+            r#"{"path":"f.txt","old_string":"world","new_string":"emberly"}"#,
+        ),
+        ScriptedResponse::tool_call("c3", "bash", r#"{"command":"echo done"}"#),
+        ScriptedResponse::text("workflow complete"),
+    ];
+    let mut h = start(scripts, root.clone());
+    h.send(Command::UserInput {
+        text: "do the workflow".into(),
+    })
+    .await;
+    let events = h.collect(Some(PermissionDecision::AllowOnce)).await;
+
+    // The edit landed and bash ran; the model produced its closing message.
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap_or_default(),
+        "hello\nemberly\n"
+    );
+    assert_eq!(deltas(&events), "workflow complete");
+
+    // The in-root read did NOT prompt; the edit and bash did (HC-4/§6.2).
+    let prompts = events
+        .iter()
+        .filter(|e| matches!(e, UiEvent::PermissionRequest { .. }))
+        .count();
+    assert_eq!(prompts, 2, "edit + bash prompt; in-root read does not");
+
+    // Every tool finished successfully, and the edit surfaced a file change.
+    assert!(
+        !has_tool_finished(&events, false),
+        "no tool failures expected"
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        UiEvent::FileModified { path, .. } if path == "f.txt"
+    )));
+}
+
 #[tokio::test]
 async fn cancel_during_bash_stops_promptly() {
     let scripts = vec![ScriptedResponse::tool_call(

@@ -119,9 +119,13 @@ pub fn parse_permission_answer(line: &str) -> PermissionDecision {
 ///
 /// While a permission prompt is open, the next input line is its answer; a
 /// `/cancel` line cancels the current turn; anything else is a user message.
-pub async fn run(mut ports: FrontendPorts) -> io::Result<()> {
+pub async fn run(ports: FrontendPorts) -> io::Result<()> {
     let renderer = LineRenderer::new();
     let mut stdout = io::stdout();
+    let mut events_rx = ports.events_rx;
+    // Held in an Option so stdin EOF can drop it, signaling the engine to
+    // finish; we keep draining events until it closes its side.
+    let mut commands_tx = Some(ports.commands_tx);
 
     let (lines_tx, mut lines_rx) = mpsc::channel::<String>(16);
     tokio::spawn(async move {
@@ -134,9 +138,10 @@ pub async fn run(mut ports: FrontendPorts) -> io::Result<()> {
     });
 
     let mut pending: Option<PermissionId> = None;
+    let mut stdin_open = true;
     loop {
         tokio::select! {
-            event = ports.events_rx.recv() => match event {
+            event = events_rx.recv() => match event {
                 Some(event) => {
                     renderer.render(&event, &mut stdout)?;
                     stdout.flush()?;
@@ -144,20 +149,26 @@ pub async fn run(mut ports: FrontendPorts) -> io::Result<()> {
                         pending = Some(id);
                     }
                 }
-                None => break, // engine gone
+                None => break, // engine finished and closed its events
             },
-            line = lines_rx.recv() => match line {
-                Some(line) => {
+            line = lines_rx.recv(), if stdin_open => match (line, commands_tx.as_ref()) {
+                (Some(line), Some(tx)) => {
                     if let Some(id) = pending.take() {
-                        let decision = parse_permission_answer(&line);
-                        let _ = ports.commands_tx.send(Command::PermissionAnswer { id, decision }).await;
+                        let _ = tx.send(Command::PermissionAnswer { id, decision: parse_permission_answer(&line) }).await;
                     } else if line.trim() == "/cancel" {
-                        let _ = ports.commands_tx.send(Command::Cancel).await;
+                        let _ = tx.send(Command::Cancel).await;
                     } else if !line.trim().is_empty() {
-                        let _ = ports.commands_tx.send(Command::UserInput { text: line }).await;
+                        let _ = tx.send(Command::UserInput { text: line }).await;
                     }
                 }
-                None => break, // stdin closed
+                _ => {
+                    // stdin closed: drop the command sender so the engine
+                    // finishes the current turn and closes its events. We keep
+                    // draining events until it does (no forced cancel — an
+                    // in-flight reply should still be shown).
+                    commands_tx = None;
+                    stdin_open = false;
+                }
             },
         }
     }
