@@ -11,4 +11,9 @@ authors.workspace = true
 # Internal (tui -> core only; nothing depends on tui).
 emberly-core = { path = "../emberly-core" }
 
-# External. ratatui/crossterm/syntect/unicode-* arrive in Phase 4.
+# External. The Phase 1 line-mode frontend needs only stdio + channels;
+# ratatui/crossterm/syntect/unicode-* arrive with the full TUI in Phase 4.
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "sync", "rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

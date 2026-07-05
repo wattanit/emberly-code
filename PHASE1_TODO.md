@@ -23,7 +23,7 @@ driven by a scripted fake provider, under the panic-free lint gate.
 | 5. Truncation at ingestion | [x] | Done 2026-07-06; 5 tests green |
 | 6. Permission gate (rule-layer) | [x] | Done 2026-07-06 (with group 7) |
 | 7. Agent loop | [x] | Done 2026-07-06; 5 engine tests green |
-| 8. Line-mode frontend | [ ] | |
+| 8. Line-mode frontend | [x] | Done 2026-07-06; 5 tests green |
 | 9. Supervisor skeleton | [ ] | |
 | 10. Tests & exit criterion | [ ] | |
 
@@ -199,12 +199,17 @@ matched-rule "reason" (Design §5).
 
 ## 8. Line-mode frontend  *(A-1; Tech Spec §9 degraded contract)*
 
-- [ ] Minimal append-only line output consuming `UiEvent`, producing
-      `Command`. ASCII markers, no cursor repositioning.
-- [ ] Renders assistant deltas, tool start/finish, and the permission prompt
-      (full content, explicit approve key) in line form.
-- [ ] This is **not** the real TUI (Phase 4); it is the driving/observing
-      harness for the loop and the seed of degraded mode.
+- [x] `emberly-tui/line.rs`: `LineRenderer::render` (pure, writes to any
+      `Write`) + async `run(FrontendPorts)` driver. ASCII markers, no color,
+      no cursor repositioning.
+- [x] Renders deltas (stream, no newline), tool start/finish, file changes,
+      harness errors, and the permission prompt: **full content** (untruncated
+      detail), OUTSIDE-PROJECT banner in caps, `[Enter] DENY` default, `[y]`
+      explicit approve. `parse_permission_answer` defaults to deny.
+- [x] Input driver: stdin lines → `UserInput`; while a prompt is open the next
+      line is the answer; `/cancel` → `Command::Cancel`. → 5 unit tests.
+- [x] Seed of degraded/`--plain` mode and the headless-frontend contract; the
+      rich `ratatui` TUI is Phase 4.
 
 ## 9. Supervisor skeleton  *(HC-3; Tech Spec §10)*
 
