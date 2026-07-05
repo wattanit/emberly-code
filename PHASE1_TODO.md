@@ -16,7 +16,7 @@ driven by a scripted fake provider, under the panic-free lint gate.
 | Group | Status | Notes |
 |---|---|---|
 | 0. Prerequisite (Phase 0) | [x] | Workspace + lint gates green (2026-07-06) |
-| 1. Event model & channels | [ ] | |
+| 1. Event model & channels | [x] | Done 2026-07-06; 4 round-trip tests green |
 | 2. Provider trait + FakeProvider | [ ] | |
 | 3. Tool trait + ToolCtx | [ ] | |
 | 4. Tools: read / write / edit / bash | [ ] | |
@@ -55,19 +55,24 @@ driven by a scripted fake provider, under the panic-free lint gate.
 
 ## 1. Event model & channels  *(A-1, A-3; Tech Spec §2, §3)*
 
-- [ ] Define `UiEvent` enum (non-exhaustive, `Serialize`): `AssistantDelta`,
-      `AssistantDone`, `ToolStarted`, `ToolFinished`, `PermissionRequest`,
-      `ContextUsage`, `HarnessError`, `SessionMeta`, `FileModified`.
-      *(Cost/SandboxStatus/CompactionStatus variants may be declared but
-      unused until later phases.)*
-- [ ] Define `TranscriptEvent` enum (`Serialize`/`Deserialize`) with the `v`
-      schema version field. Full persistence lands in Phase 5, but the type
-      is serializable from day one.
-- [ ] Define `Command` enum (in): user input, permission answer, cancel.
-      *(mode change / `/compact` variants declared, handled later.)*
-- [ ] Engine owns state; wire `mpsc::Sender<UiEvent>` out and
-      `mpsc::Receiver<Command>` in. No `Arc<Mutex<_>>` shared state.
-- [ ] Round-trip serialization test for every event/command variant.
+- [x] Define `UiEvent` enum (non-exhaustive, `Serialize`): all §3.1 variants
+      including `Cost/SandboxStatus/ModeChanged/CompactionStatus` (declared,
+      exercised from later phases). → `event.rs`
+- [x] Define `TranscriptEvent` enum (`Serialize`/`Deserialize`) with the `v`
+      schema version field, wrapped in `TranscriptRecord { v, ts, #[flatten]
+      event }` producing `{"v":1,"ts":…,"type":…,…}`. → `transcript.rs`
+- [x] Define `Command` enum (in): user input, permission answer, cancel;
+      `set_mode`/`compact` declared, handled later. → `command.rs`
+- [x] Engine owns state; `channels::channel()` returns paired
+      `EnginePorts`/`FrontendPorts` over `mpsc` (bounded, backpressure). No
+      `Arc<Mutex<_>>`. → `channels.rs`
+- [x] Round-trip serialization test for every event/command/transcript variant
+      + wire-shape assertion + Thai-content round-trip. → `tests/event_model.rs`
+      (4 tests green)
+
+**Supporting types added:** `id.rs` (`SessionId`/`ToolCallId`/`PermissionId`),
+`types.rs` (`Mode`, `SandboxStatus`, `PermissionRendering`,
+`PermissionDecision`, `TokenUsage`).
 
 ## 2. Provider trait + FakeProvider  *(A-2, P-1; Tech Spec §4.1, §14.1)*
 
