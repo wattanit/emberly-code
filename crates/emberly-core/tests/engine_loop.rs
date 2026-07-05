@@ -12,8 +12,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use emberly_core::{channel, Command, Engine, EngineConfig, PermissionDecision, UiEvent};
-use emberly_providers::{FakeProvider, Provider, ScriptedResponse};
+use emberly_core::{
+    channel, Command, Engine, EngineConfig, PermissionDecision, RetryPolicy, UiEvent,
+};
+use emberly_providers::{FakeProvider, Provider, ProviderError, ScriptedResponse, StreamEvent};
 use emberly_tools::{default_registry, TruncateConfig};
 use tokio::sync::mpsc;
 
@@ -42,6 +44,12 @@ fn start(scripts: Vec<ScriptedResponse>, root: PathBuf) -> Harness {
         model: "fake-1".into(),
         system: None,
         truncate: TruncateConfig::default(),
+        // Fast retries so retry tests don't wait on real backoff.
+        retry: RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+        },
     };
     let (engine_ports, frontend) = channel();
     let (engine, asks_rx) = Engine::new(config, engine_ports.events_tx);
@@ -231,6 +239,57 @@ async fn full_workflow_read_edit_permission_bash() {
         e,
         UiEvent::FileModified { path, .. } if path == "f.txt"
     )));
+}
+
+#[tokio::test]
+async fn retries_retryable_pre_stream_failure_then_succeeds() {
+    // First completion fails to start with a retryable connect error; the
+    // engine retries and the second attempt streams a reply (S-3).
+    let scripts = vec![
+        ScriptedResponse::connect_error(ProviderError::Connect("reset".into())),
+        ScriptedResponse::text("recovered after retry"),
+    ];
+    let mut h = start(scripts, temp_project());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e, UiEvent::Retrying { .. })),
+        "the retry must be surfaced, never silent"
+    );
+    assert_eq!(deltas(&events), "recovered after retry");
+}
+
+#[tokio::test]
+async fn non_retryable_failure_is_not_retried() {
+    let scripts = vec![ScriptedResponse::connect_error(ProviderError::Auth)];
+    let mut h = start(scripts, temp_project());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = h.collect(None).await;
+
+    assert!(!events.iter().any(|e| matches!(e, UiEvent::Retrying { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::HarnessError { .. })));
+}
+
+#[tokio::test]
+async fn mid_stream_drop_retries_the_whole_turn() {
+    // The first turn streams partial text then the connection drops; the
+    // engine retries the whole turn (partial not stitched, Tech Spec §4.3).
+    let scripts = vec![
+        ScriptedResponse::drop_after(vec![StreamEvent::TextDelta {
+            text: "partial…".into(),
+        }]),
+        ScriptedResponse::text("recovered"),
+    ];
+    let mut h = start(scripts, temp_project());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = h.collect(None).await;
+
+    assert!(events.iter().any(|e| matches!(e, UiEvent::Retrying { .. })));
+    // The partial was shown live; the recovered turn also streamed.
+    assert!(deltas(&events).contains("recovered"));
 }
 
 #[tokio::test]

@@ -79,6 +79,7 @@ async fn run() -> anyhow::Result<()> {
         model: "placeholder".into(),
         system: None,
         truncate: TruncateConfig::default(),
+        retry: emberly_core::RetryPolicy::default(),
     };
 
     let (engine_ports, frontend) = channel();

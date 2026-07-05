@@ -25,6 +25,7 @@ pub mod types;
 
 pub use channels::{channel, channel_with_capacity, EnginePorts, FrontendPorts};
 pub use command::Command;
+pub use emberly_providers::RetryPolicy;
 pub use engine::{Engine, EngineConfig};
 pub use event::UiEvent;
 pub use gate::PermissionAsk;

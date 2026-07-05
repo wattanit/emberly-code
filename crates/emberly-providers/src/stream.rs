@@ -40,10 +40,11 @@ pub enum StreamEvent {
 }
 
 /// Why a completion stopped.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum StopReason {
+    #[default]
     /// The model finished its turn normally.
     EndTurn,
     /// The model stopped to call one or more tools.

@@ -18,17 +18,20 @@ the Phase 1 engine from a placeholder demo into something that actually codes.
 
 | Group | Status | Notes |
 |---|---|---|
-| 0. Prerequisites & dependencies | [ ] | **HC-2 crypto decision** lives here |
-| 1. First-party SSE parser | [ ] | pure, unit-tested |
-| 2. Anthropic Messages API client | [ ] | |
-| 3. OpenAI-compatible client | [ ] | covers Ollama/vLLM/OpenRouter (P-2) |
-| 4. Retry & failure policy | [ ] | + engine whole-turn retry on drop |
+| 0. Prerequisites & dependencies | [x] | reqwest C-free; **crypto deferred to g7** |
+| 1. First-party SSE parser | [x] | 8 tests (split frames, multibyte, crlf) |
+| 2. Anthropic Messages API client | [x] | 3 mock tests |
+| 3. OpenAI-compatible client | [x] | 2 mock tests; covers Ollama/vLLM (P-2) |
+| 4. Retry & failure policy | [x] | 3 retry unit + 3 engine tests |
 | 5. Token & cost accounting | [ ] | wires real ContextUsage/CostEstimate |
 | 6. Secrets & configuration | [ ] | env-first, keys.toml 0600, redaction |
-| 7. Binary wiring & provider selection | [ ] | replaces PlaceholderProvider |
+| 7. Binary wiring & provider selection | [ ] | replaces PlaceholderProvider; **TLS decision** |
 | 8. Tests & live smoke (exit criterion) | [ ] | unit+mock in CI; live keyed |
 
-**Overall Phase 3: not started.**
+**Overall Phase 3: groups 0–4 done (2026-07-06); 67 workspace tests green.**
+Groups 5–8 remain. **The TLS/crypto backend decision (HC-2) is deferred to
+group 7** — provider clients take an injected `reqwest::Client`, so everything
+so far is C-free and tested over plain HTTP; real HTTPS use needs that call.
 
 ---
 
@@ -49,76 +52,69 @@ unit- or mock-tested with no API key and runs in CI:
 ## 0. Prerequisites & dependencies  *(§10 policy; HC-2; Tech Spec §12, §16)*
 
 - [ ] **HC-2 crypto-provider decision (do first — it gates everything).**
-      `reqwest`'s `rustls-tls` pulls a crypto backend that is **not pure Rust**
-      (`ring`/`aws-lc-rs` have C/assembly), which conflicts with HC-2
-      ("pure-Rust crypto") and the memory-safety priority. Plan: use `rustls`
-      with a **pure-Rust provider** (RustCrypto via `rustls`'s provider API),
-      built into a `ClientConfig` and handed to reqwest via
-      `.use_preconfigured_tls(...)`, with reqwest's own TLS features **off**.
-      Validate this compiles static-musl and connects, before building clients.
-      Fallback to record if pure-Rust is unworkable: an explicit, owner-approved
-      HC-2 exception for a vetted `ring`/`aws-lc-rs`.
-- [ ] Add `reqwest` (default features **off**; `json`, `stream`; TLS via the
-      preconfigured pure-Rust rustls above — **not** the `rustls-tls` feature
-      if that forces `ring`). Confirm the tree stays C-free (`cargo deny`).
-- [ ] **SSE decision (Tech Spec §16, bias first-party):** implement a
-      first-party SSE frame parser (group 1) rather than `eventsource-stream`;
-      record the call.
-- [ ] Jitter source for backoff (group 4): prefer a tiny pure-Rust RNG
-      (`fastrand`) or derive jitter from elapsed nanos — no C, no unsafe in
-      first-party. Decide here.
-- [ ] Add a **mock HTTP server** dev-dependency (e.g. `wiremock`) for
-      client/retry integration tests without a key.
-- [ ] `cargo vet`/`deny` acceptance for every addition; C-dep ban stays green.
+      `reqwest`'s `rustls-tls` pulls `ring`/`aws-lc-rs` (C/assembly), conflicting
+      with HC-2. **Decision made: DEFERRED to group 7.** Provider clients take an
+      **injected `reqwest::Client`**, so the TLS/crypto backend is chosen only
+      at binary-wiring time — the client library and all tests run over plain
+      HTTP and stay C-free. The pure-Rust-vs-`ring` (unaudited-vs-C) call is
+      still an **owner decision** to make in group 7. **Real HTTPS use is
+      blocked until then.**
+- [x] Added `reqwest` (default features **off**; `json`, `stream`; no TLS
+      feature). Tree confirmed C-free (`grep` for openssl/ring/aws-lc = none).
+- [x] **SSE:** first-party parser (group 1), not `eventsource-stream`.
+- [x] Jitter: `fastrand` (tiny, pure-Rust) — used by `RetryPolicy` (group 4).
+- [x] `wiremock` dev-dependency for keyless client/retry HTTP tests.
+- [x] Deps added to `emberly-providers`; C-dep ban stays green. `cargo
+      vet`/`deny` run in CI.
 
 ## 1. First-party SSE parser  *(P-5; Tech Spec §4.3, §16)*
 
-- [ ] Parse an SSE byte stream into events: accumulate `data:` lines until a
-      blank line, handle multi-line data, comments (`:`), and `[DONE]`
-      sentinels. ~100 lines, no dependency.
-- [ ] Streaming-friendly: works over a `bytes` stream with partial frames
-      across chunk boundaries.
-- [ ] Pure + unit-tested with canned byte slices (including split frames).
-      Feeds both provider clients.
+- [x] `sse.rs`: byte-buffered parser → `SseEvent { event, data }`; multi-line
+      data joined, comments/`[DONE]` handled, `\n\n` and `\r\n\r\n` terminators.
+- [x] Streaming-friendly: buffers raw bytes so multibyte UTF-8 split across
+      chunks is never decoded mid-character; `finish()` flushes a trailing frame.
+- [x] 8 unit tests (split frames, multibyte split, crlf, comments, `[DONE]`).
 
 ## 2. Anthropic Messages API client  *(P-1, P-4, P-5; Tech Spec §4.2)*
 
-- [ ] Thin first-party `reqwest` client (no vendor SDK — P-4).
-- [ ] Request mapping: normalized `CompletionRequest` → Anthropic Messages
-      body (system, messages, `content` blocks, `tools`, `max_tokens`).
-      `ContentBlock::{Text,ToolUse,ToolResult}` ↔ Anthropic content blocks.
-- [ ] SSE response → normalized `StreamEvent`: `content_block_delta` (text) →
-      `TextDelta`; `content_block_start/delta/stop` for `tool_use` →
-      `ToolCall{Start,Delta,End}`; `message_delta`/`message_stop` → `Usage` +
-      `Done{stop_reason}`. No wire type crosses the boundary (P-1).
-- [ ] Authoritative `usage` (input/output tokens) surfaced as `Usage`.
-- [ ] Auth header (`x-api-key`, `anthropic-version`); errors → `ProviderError`.
+- [x] `anthropic.rs`: thin `reqwest` client, injected `Client`, no SDK (P-4).
+- [x] Request mapping (`build_body`): system top-level, messages → content
+      blocks; `Role::Tool` → user-role `tool_result` blocks; tools mapped.
+- [x] SSE → `StreamEvent` (`AnthropicMapper`): text_delta → `TextDelta`;
+      tool_use `content_block_*`/`input_json_delta` → `ToolCall{Start,Delta,End}`;
+      `message_delta`/`message_stop` → `Usage` + `Done`; `error` → `Err`. (P-1)
+- [x] Authoritative `usage` (input from `message_start`, output from
+      `message_delta`) surfaced as `Usage`.
+- [x] `x-api-key` + `anthropic-version`; status → `ProviderError` (`wire.rs`).
+      → 3 mock tests (text+usage, tool call, auth error).
 
 ## 3. OpenAI-compatible client  *(P-1, P-2, P-4, P-5; Tech Spec §4.2)*
 
-- [ ] Thin `reqwest` client; **configurable base URL** → transitively covers
-      Ollama, vLLM, OpenRouter, private deployments (P-2).
-- [ ] Request mapping: `/v1/chat/completions`, `messages`, `tools`
-      (function schema), `stream: true`. Normalized ↔ OpenAI `tool_calls`.
-- [ ] SSE `delta` chunks → `TextDelta`; streamed `tool_calls` (index-keyed
-      fragments) → `ToolCall{Start,Delta,End}`; `finish_reason` → `Done`;
-      `usage` (when the endpoint sends it) → `Usage`.
-- [ ] Bearer auth; base URL + model from config (group 6).
+- [x] `openai.rs`: thin `reqwest` client; **configurable base URL** (covers
+      Ollama/vLLM/OpenRouter/private — P-2).
+- [x] Request mapping (`build_body`): `/chat/completions`, `messages` (system
+      prepended, assistant `tool_calls`, `tool` role results), `tools` as
+      functions, `stream:true`, `stream_options.include_usage`.
+- [x] SSE → `StreamEvent` (`OpenAiMapper`): `delta.content` → `TextDelta`;
+      index-keyed `tool_calls` fragments → `ToolCall{Start,Delta,End}`;
+      `finish_reason` → `Done`; `usage` → `Usage`; `[DONE]` ignored.
+- [x] Bearer auth (when key non-empty). → 2 mock tests (text+usage, split
+      tool call across chunks).
 
 ## 4. Retry & failure policy  *(S-3; Tech Spec §4.3)*
 
-- [ ] Client-side retry for **pre-stream** failures: exponential backoff +
-      jitter on connect errors / 429 / 5xx, honoring `Retry-After`; **max 3**
-      attempts. Uses `ProviderError::is_retryable()`/`retry_after()` from
-      Phase 1.
-- [ ] Every retry surfaced as a dimmed harness-voice line (never silent) —
-      an event the frontend renders.
-- [ ] **Mid-stream drop** (Phase 1 `StreamEnd::Dropped`): keep the partial
-      assistant text visible + marked interrupted, then **retry the whole
-      turn** (partial turns are not stitched). This updates the engine's
-      `run_turn` drop handling — bounded retry count, then a HarnessError.
-- [ ] Post-retry failure → harness-world error; **session stays live and
-      resumable** (S-3). Injectable clock/sleep so tests are deterministic.
+- [x] `retry.rs`: `RetryPolicy` (max_attempts 3, base 500ms, cap 8s) with
+      exponential backoff + **full jitter** (`fastrand`); `delay_for`/`may_retry`.
+      3 pure unit tests (bounds, exponential, max-attempts).
+- [x] **Retry loop lives in the engine** (it owns the event channel; policy is
+      provider data) — `open_stream_with_retry` retries retryable pre-stream
+      failures honoring `Retry-After`; every retry emits `UiEvent::Retrying`
+      (never silent), rendered by the line frontend.
+- [x] **Mid-stream drop** → engine retries the **whole turn** (`StreamEnd::
+      Dropped`); partial text shown live but **not stitched** into the retry
+      (message commit moved out of `consume_stream`); bounded, then HarnessError.
+- [x] Post-retry failure → HarnessError; session stays live (S-3). → 3 engine
+      tests (pre-stream retry, non-retryable not retried, whole-turn drop retry).
 
 ## 5. Token & cost accounting  *(P-6; Tech Spec §4.4; Design §3.1)*
 
@@ -183,8 +179,27 @@ unit- or mock-tested with no API key and runs in CI:
 
 ## Notes / decisions log
 
-*(Pre-seeded with decisions to confirm during Phase 3; add outcomes as work
-proceeds.)*
+### Groups 0–4 outcomes (2026-07-06)
+
+- **TLS/crypto — DEFERRED to group 7, not decided.** Rather than resolve the
+  pure-Rust-vs-`ring` question up front, provider clients take an **injected
+  `reqwest::Client`**. reqwest is built with **no TLS feature** → the whole
+  provider layer + tests are C-free and run over plain HTTP (`wiremock`). This
+  cleanly unblocked groups 0–4 without silently pulling `ring`. **Owner
+  decision still needed in group 7** (pure-Rust RustCrypto = memory-safe but
+  unaudited, vs `ring` = vetted but C/asm). **Real HTTPS is blocked on it.**
+- **Retry loop is in the engine, not the client** (refines §4.3's "client-side"
+  wording): the engine owns the event channel and must surface each retry, and
+  whole-turn drop-retry is inherently engine-level. `RetryPolicy` (data +
+  jitter) stays in `emberly-providers`; clients are single-attempt.
+- **Deterministic retry tests without a clock:** the engine test harness uses a
+  `RetryPolicy` with 1–2ms delays, so retry paths run fast without injecting a
+  clock (simpler than `tokio` time control here).
+- **`consume_stream` refactor:** message-commit moved from `consume_stream` to
+  `run_turn`, so a dropped turn's partial is shown live but not committed/
+  stitched into the retry. Phase 1 engine tests unaffected.
+
+### Pre-seeded plans (some superseded above)
 
 - **HC-2 crypto provider (biggest decision):** rustls' default backends
   (`ring`, `aws-lc-rs`) are not pure Rust. To honor HC-2 + the memory-safety

@@ -34,6 +34,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1"
 futures = "0.3"
 similar = "2"
+# HTTP client for provider backends. Default features OFF (no bundled TLS): the
+# TLS crypto backend is a deliberate HC-2 decision made at binary-wiring time
+# (Phase 3 group 7); provider clients take an injected `reqwest::Client`, so the
+# client library and its tests need only plain HTTP.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+bytes = "1"
+fastrand = "2"
 
 [profile.release]
 # Fully static musl builds (HC-2) prefer small, predictable binaries.
