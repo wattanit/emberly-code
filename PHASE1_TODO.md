@@ -18,7 +18,7 @@ driven by a scripted fake provider, under the panic-free lint gate.
 | 0. Prerequisite (Phase 0) | [x] | Workspace + lint gates green (2026-07-06) |
 | 1. Event model & channels | [x] | Done 2026-07-06; 4 round-trip tests green |
 | 2. Provider trait + FakeProvider | [x] | Done 2026-07-06; 8 tests green |
-| 3. Tool trait + ToolCtx | [ ] | |
+| 3. Tool trait + ToolCtx | [x] | Done 2026-07-06; 6 tests green |
 | 4. Tools: read / write / edit / bash | [ ] | |
 | 5. Truncation at ingestion | [ ] | |
 | 6. Permission gate (rule-layer) | [ ] | |
@@ -99,14 +99,25 @@ boundary translation. `Pricing::estimate_usd` added for Phase 3 cost (P-6).
 
 ## 3. Tool trait + ToolCtx  *(HC-6, T-7; Tech Spec §5.1)*
 
-- [ ] `Tool` trait: `spec() -> ToolSpec` (name, description, JSON schema),
-      `async execute(args, ctx) -> ToolOutcome`. `execute` never returns a
-      harness-level `Err`.
-- [ ] `ToolOutcome`: structured success | structured failure (HC-6).
-- [ ] `ToolCtx`: project root, truncation config, permission-gate handle.
-      *(sandbox handle field declared; wired in Phase 2.)* Transport-agnostic
-      so a future MCP adapter implements `Tool` (T-7).
-- [ ] Tool registry the engine iterates to build provider tool schemas.
+- [x] `Tool` trait (`tool.rs`): `spec() -> ToolSpec`, `async execute(args,
+      ctx) -> ToolOutcome`; never returns a harness-level `Err`. Object-safe
+      via `async-trait` so `Arc<dyn Tool>` works (T-7).
+- [x] `ToolOutcome` (`tool.rs`): `{ ok, content, summary }` with
+      `success`/`failure`/`denied` constructors (HC-6). Full content returned;
+      truncation is engine-side at ingestion (group 5), not the tool's job.
+- [x] `ToolCtx` (`ctx.rs`): project root, `TruncateConfig`, and the gate;
+      `authorize()` is the single path to permission. Sandbox handle noted as
+      the Phase 2 addition — the tool interface won't change when it lands.
+- [x] `ToolRegistry` (`registry.rs`): name-indexed; `register`/`get`/`specs`/
+      `names`; engine iterates `specs()` to build provider `ToolSchema`s.
+- [x] Tests: `tests/tool_trait.rs` (6) — allow/deny gate, denial-as-data
+      (HC-6), bad-args-as-data, registry ops.
+
+**Layering decision:** the permission **gate is a trait in `emberly-tools`**
+(`PermissionGate` + `PermissionRequest`/`PermissionOutcome`), implemented by
+`emberly-core`. Keeps `tools` independent of `sandbox`; core enriches the
+request with the matched-rule reason, runs the UI round trip, and collapses
+the user's richer `PermissionDecision` into allow/deny for the tool.
 
 ## 4. Tools: read / write / edit / bash  *(T-1, T-2, T-3, T-4; Tech Spec §5.2)*
 
