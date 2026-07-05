@@ -16,14 +16,18 @@
 
 pub mod channels;
 pub mod command;
+pub mod engine;
 pub mod event;
+pub mod gate;
 pub mod id;
 pub mod transcript;
 pub mod types;
 
 pub use channels::{channel, channel_with_capacity, EnginePorts, FrontendPorts};
 pub use command::Command;
+pub use engine::{Engine, EngineConfig};
 pub use event::UiEvent;
+pub use gate::PermissionAsk;
 pub use id::{PermissionId, SessionId, ToolCallId};
 pub use transcript::{ConfigProvenance, TranscriptEvent, TranscriptRecord, SCHEMA_VERSION};
 pub use types::{Mode, PermissionDecision, PermissionRendering, SandboxStatus, TokenUsage};

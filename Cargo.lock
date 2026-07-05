@@ -60,9 +60,11 @@ dependencies = [
 name = "emberly-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "emberly-providers",
  "emberly-sandbox",
  "emberly-tools",
+ "futures",
  "serde",
  "serde_json",
  "thiserror",

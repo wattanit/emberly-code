@@ -21,8 +21,8 @@ driven by a scripted fake provider, under the panic-free lint gate.
 | 3. Tool trait + ToolCtx | [x] | Done 2026-07-06; 6 tests green |
 | 4. Tools: read / write / edit / bash | [x] | Done 2026-07-06; 14 tests green |
 | 5. Truncation at ingestion | [x] | Done 2026-07-06; 5 tests green |
-| 6. Permission gate (rule-layer) | [ ] | |
-| 7. Agent loop | [ ] | |
+| 6. Permission gate (rule-layer) | [x] | Done 2026-07-06 (with group 7) |
+| 7. Agent loop | [x] | Done 2026-07-06; 5 engine tests green |
 | 8. Line-mode frontend | [ ] | |
 | 9. Supervisor skeleton | [ ] | |
 | 10. Tests & exit criterion | [ ] | |
@@ -163,27 +163,39 @@ elided".
 
 ## 6. Permission gate — rule-layer only  *(§6.6, HC-6; Tech Spec §6.1 partial)*
 
-- [ ] Per-action ask flow: tool requests → engine emits
-      `UiEvent::PermissionRequest{id, rendering}` → waits for
-      `Command`-carried answer (deny / allow-once).
-- [ ] **Deny returns to the model as a structured tool result** ("user denied
-      this command"), never a silent drop (§6.6, HC-6).
-- [ ] Enter/Esc default maps to **deny**; approval is a distinct deliberate
-      key (Design §5 — even in line mode).
-- [ ] No OS sandbox, no `permissions.toml`, no session-persist grants yet
-      (those are Phase 2). Simple in-memory per-action decision only.
+- [x] Per-action ask flow (`gate.rs` + `engine.rs`): tool's `authorize()`
+      sends a `PermissionAsk` (request + reply oneshot) over an internal
+      channel; the engine emits `UiEvent::PermissionRequest{id, rendering}`,
+      stores the reply keyed by id, and resolves it on `Command::PermissionAnswer`.
+- [x] **Deny returns to the model as data** via `ToolOutcome::denied`, ingested
+      as a `tool_result` with `is_error=true`; the model then continues (proven
+      by `denied_tool_feeds_failure_and_model_continues`). Never a silent drop.
+- [x] `ChannelGate` **fails closed** (Deny) if the engine/reply is gone. The
+      deny-as-default *keypress* mapping is a group 8 frontend concern; the gate
+      contract makes deny the safe fallback.
+- [x] No OS sandbox / `permissions.toml` / persisted grants (Phase 2). The
+      Phase-1 gate always prompts for whatever reaches it (in-root reads don't).
+
+**Concurrency (Tech Spec §2):** no `Arc<Mutex<_>>`. The tool future borrows
+only Arc clones (not `&mut self`), so the engine `select!`s it against
+`commands_rx` and the ask channel within one task. `build_rendering` adds the
+matched-rule "reason" (Design §5).
 
 ## 7. Agent loop  *(Tech Spec §2, §3)*
 
-- [ ] Sequential loop: send `CompletionRequest` → consume `StreamEvent`s →
-      on tool call, run through gate + tool → append `ToolOutcome` (truncated)
-      → continue until `Done` with no pending tool calls.
-- [ ] One in-flight completion at a time.
-- [ ] Cancel (`Command`) handled at the next await point; a running bash child
-      is killed by process group.
-- [ ] Mid-stream drop from the provider: partial assistant text kept + marked
-      interrupted (full retry policy is Phase 3; here just don't crash).
-- [ ] Emit `FileModified{path, adds, dels}` when edit/write changes a file.
+- [x] Sequential loop (`engine.rs` `run_turn`): build `CompletionRequest` →
+      `consume_stream` (emit deltas, accumulate tool calls) → run tool calls
+      through gate + tool → truncate + append `tool_result` → loop until `Done`
+      with no tool calls.
+- [x] One in-flight completion at a time; tool calls run sequentially.
+- [x] Cancel handled at each await point (streaming and tool exec); the bash
+      child is killed via `kill_on_drop` when the exec future is dropped.
+      Canceled/remaining tool calls get backfilled `tool_result`s so the
+      conversation stays well-formed.
+- [x] Mid-stream drop → `StreamEnd::Dropped` → HarnessError, partial text kept,
+      no crash (Phase 3 adds retry). Mid-stream error → HarnessError.
+- [x] Emits `FileModified{path, adds, dels}` from the tool's `FileChange`;
+      `ContextUsage` after each step. → `tests/engine_loop.rs` (5 tests).
 
 ## 8. Line-mode frontend  *(A-1; Tech Spec §9 degraded contract)*
 
