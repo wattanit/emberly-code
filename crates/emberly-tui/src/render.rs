@@ -10,6 +10,7 @@
 
 use emberly_core::{Mode, SandboxStatus};
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
+use ratatui::style::Color;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
@@ -152,7 +153,11 @@ fn render_palette(f: &mut Frame, app: &App, screen: Rect) {
 /// Draw the active overlay as a centered, scrollable pane over the screen.
 fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
     let theme = &app.theme;
-    let area = centered(screen, 82, 82);
+    // Brief ease-in: the overlay expands from ~70% to its full 82% over a frame
+    // or two (Design §6.4). Settled overlays render at full size.
+    let p = app.overlay_ease_progress();
+    let pct = 70 + (12.0 * p) as u16;
+    let area = centered(screen, pct, pct);
     f.render_widget(Clear, area); // clear whatever is behind it
 
     let block = Block::default()
@@ -220,12 +225,22 @@ fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
 fn render_conversation(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
 
+    // While the model streams, the wordmark accent pulses gently — the ember
+    // glowing (Design §6.4). Ambient only: it carries no information.
+    let title_style = if app.is_working() && app.streaming {
+        ratatui::style::Style::default()
+            .fg(glow(theme.palette().accent, glow_pct(app.anim_frame())))
+            .add_modifier(ratatui::style::Modifier::BOLD)
+    } else {
+        theme.accent()
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.chrome())
         .title(Span::styled(
             format!(" {} ", strings::brand::NAME),
-            theme.accent(),
+            title_style,
         ));
     let inner = block.inner(area);
     let width = usize::from(inner.width);
@@ -438,11 +453,18 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
     if app.modified_files.is_empty() {
         lines.push(Line::from(Span::styled("  —", theme.chrome())));
     } else {
-        for file in &app.modified_files {
+        let last = app.modified_files.len() - 1;
+        for (i, file) in app.modified_files.iter().enumerate() {
             let counts = format!(" +{} -{}", file.adds, file.dels);
             let path_w = w.saturating_sub(text::width(&counts));
+            // The newest entry briefly settles in on the accent (Design §6.4).
+            let path_style = if i == last && app.sidebar_settling() {
+                theme.accent()
+            } else {
+                theme.primary()
+            };
             lines.push(Line::from(vec![
-                Span::styled(fit(&file.path, path_w), theme.primary()),
+                Span::styled(fit(&file.path, path_w), path_style),
                 Span::styled(format!(" +{}", file.adds), theme.diff_add()),
                 Span::styled(format!(" -{}", file.dels), theme.diff_del()),
             ]));
@@ -569,9 +591,9 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
 
     let mut spans: Vec<Span> = Vec::new();
     // The ember-pulse spinner + verb (+ elapsed after 5s) while the model works
-    // (Design §6.3). Rendered only while animating, so it is absent at idle and
-    // during a permission prompt.
-    if app.is_animating() {
+    // (Design §6.3). Absent at idle, during a permission prompt, and it does not
+    // fire for transient effects (overlay ease / sidebar settle).
+    if app.is_working() {
         let verb = app.spinner_verb();
         let elapsed = app
             .spinner_elapsed()
@@ -742,6 +764,33 @@ fn is_unified_diff(detail: &str) -> bool {
 }
 
 // ---- small helpers -------------------------------------------------------
+
+/// A brightness percentage that rises and falls in a slow triangle wave — the
+/// ember pulse for the streaming glow (Design §6.4). Kept in 75..=99 so the
+/// accent only ever dims slightly, never flashes.
+fn glow_pct(frame: usize) -> u16 {
+    const PERIOD: usize = 8;
+    let phase = frame % PERIOD;
+    let up = if phase <= PERIOD / 2 {
+        phase
+    } else {
+        PERIOD - phase
+    };
+    75 + u16::try_from(up).unwrap_or(0) * 6
+}
+
+/// Scale an RGB colour's brightness by `pct` percent (non-RGB colours pass
+/// through unchanged).
+fn glow(color: Color, pct: u16) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(scale(r, pct), scale(g, pct), scale(b, pct)),
+        other => other,
+    }
+}
+
+fn scale(channel: u8, pct: u16) -> u8 {
+    u8::try_from((u16::from(channel) * pct / 100).min(255)).unwrap_or(channel)
+}
 
 /// Terse, lower-case mode name (Design §6.2).
 fn mode_name(mode: Mode) -> &'static str {

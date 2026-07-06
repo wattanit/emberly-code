@@ -32,7 +32,7 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 | 6. Diffs first-class (inline + overlay) | [x] | diffview.rs + FileDiff plumbing; inline (capped) + Ctrl+O overlay; /view → group 8 |
 | 7. The permission prompt | [x] | scrollable full-content, loud outside-root, deny-default, diff-rendered; 5 render/behavior tests |
 | 8. Command palette + command registry | [x] | commands.rs registry; Ctrl+P fuzzy palette + /slash + /help; PTY-verified; /view=in-TUI |
-| 9. Motion | [x] | single ~12fps ticker; ember-pulse spinner + verb + elapsed; gated off (prompt/motion=false); 2 tests |
+| 9. Motion | [x] | ticker + ember-pulse spinner + streaming glow + overlay ease-in + sidebar settle; gated off; 5 tests |
 | 10. Degraded mode parity | [x] | pure `decide()` predicate; line-mode diffs + ASCII; no-ANSI + prompt-guarantee tests; --plain verified |
 | 11. Tests, fixtures & exit criterion | [ ] | Thai + degraded + permission-prompt guarantees |
 
@@ -346,11 +346,20 @@ implementation fixes:
       perfectly still), when `motion=false` (`EMBERLY_MOTION=0`/`NO_MOTION`), and
       in degraded mode (the line frontend has no ticker at all). 2 tests
       (busy spans the turn + prompt/off gates; motion=false disables).
-- [~] Streaming accent-glow, overlay ease-in, and sidebar settle: **deferred as
-      subtle polish.** The ember-pulse spinner already carries the "alive"
-      feeling; these micro-animations are refinement (the owner flagged UX
-      polish for later) and add color-interpolation / per-frame layout work for
-      little information value. Noted, not built.
+- [x] Streaming accent-glow, overlay ease-in, and sidebar settle (the deferred
+      polish, now done):
+      - **Glow**: the wordmark accent pulses via a slow triangle wave (75–99%
+        brightness) while the model streams — ambient, carries no information.
+      - **Overlay ease-in**: overlays expand ~70%→82% over `EASE_FRAMES` (2)
+        frames on open, then settle.
+      - **Sidebar settle**: a newly-landed modified-file entry highlights on the
+        accent for `SETTLE_FRAMES` (5), then fades to primary. Updates to an
+        existing entry don't re-trigger it.
+      - All are transient (finite) so an idle screen goes still; `is_animating`
+        now = working OR a transient countdown, while the spinner uses the
+        narrower `is_working`. All gated off during prompts / `motion=false`.
+        3 tests (ease animates-then-settles, settle only on new entries, motion
+        off skips both).
 
 ---
 

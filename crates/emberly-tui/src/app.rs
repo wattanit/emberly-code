@@ -30,6 +30,11 @@ pub const ANIM_FPS: usize = 12;
 const SPINNER: [&str; 4] = ["·", "•", "●", "•"];
 /// Elapsed time appears only after this many seconds (Design §6.3).
 const ELAPSED_AFTER_SECS: usize = 5;
+/// Frames an overlay eases in over (one or two frames of expansion, not a slide
+/// show — Design §6.4).
+pub const EASE_FRAMES: u8 = 2;
+/// Frames a freshly-landed modified-file entry stays highlighted as it settles.
+pub const SETTLE_FRAMES: u8 = 5;
 
 /// One rendered item in the conversation flow. Group 5 enriches assistant text
 /// with the markdown pass; group 6 adds diffs.
@@ -164,6 +169,10 @@ pub struct App {
     /// Animation frame counter, advanced by the ticker only while animating.
     /// Time-source-free: elapsed ≈ `anim_frame / ANIM_FPS`.
     anim_frame: usize,
+    /// Frames remaining in an overlay's ease-in expansion (Design §6.4).
+    overlay_ease: u8,
+    /// Frames remaining in the newest modified-file's settle highlight.
+    sidebar_settle: u8,
     /// The active theme (Design §2). One source the renderer reads; swapping it
     /// (mode/light-fallback later) is a value change, not a refactor.
     pub theme: Theme,
@@ -195,6 +204,8 @@ impl App {
             busy: false,
             motion: true,
             anim_frame: 0,
+            overlay_ease: 0,
+            sidebar_settle: 0,
             theme: Theme::rich(),
         }
     }
@@ -297,7 +308,11 @@ impl App {
             }
             UiEvent::FileModified { path, adds, dels } => {
                 self.last_modified = Some(path.clone());
-                self.upsert_modified(path, adds, dels);
+                let is_new = self.upsert_modified(path, adds, dels);
+                // A newly-landed entry gets a brief settle highlight (Design §6.4).
+                if is_new && self.motion {
+                    self.sidebar_settle = SETTLE_FRAMES;
+                }
             }
             UiEvent::FileDiff { path, unified } => {
                 // Show it inline when the edit executes (Design §4.2) …
@@ -322,12 +337,15 @@ impl App {
             .find(|item| matches!(item, ConvItem::Tool { call_id: c, .. } if c == call_id))
     }
 
-    fn upsert_modified(&mut self, path: String, adds: u32, dels: u32) {
+    /// Insert or update a modified-file entry; returns `true` if it was new.
+    fn upsert_modified(&mut self, path: String, adds: u32, dels: u32) -> bool {
         if let Some(existing) = self.modified_files.iter_mut().find(|f| f.path == path) {
             existing.adds = adds;
             existing.dels = dels;
+            false
         } else {
             self.modified_files.push(ModifiedFile { path, adds, dels });
+            true
         }
     }
 
@@ -459,19 +477,55 @@ impl App {
 
     // ---- motion (Design §6.4) --------------------------------------------
 
-    /// Whether anything is animating right now. Motion is ambient status only:
-    /// it runs while the model is working, and is skipped entirely when motion
-    /// is off or a permission prompt is open (that screen is perfectly still).
+    /// Whether the model is actively working — drives the spinner and the
+    /// streaming accent glow. Off during a permission prompt and when motion is
+    /// disabled (that screen is perfectly still).
+    #[must_use]
+    pub fn is_working(&self) -> bool {
+        self.motion && self.busy && self.pending_permission.is_none()
+    }
+
+    /// Whether *anything* is animating right now — the working spinner/glow, or
+    /// a transient effect (overlay ease-in, sidebar settle). The ticker redraws
+    /// only while this is true, so idle screens stay quiet. Always false during
+    /// a permission prompt or with motion off.
     #[must_use]
     pub fn is_animating(&self) -> bool {
-        self.motion && self.busy && self.pending_permission.is_none()
+        if !self.motion || self.pending_permission.is_some() {
+            return false;
+        }
+        self.busy || self.overlay_ease > 0 || self.sidebar_settle > 0
     }
 
     /// Advance one animation frame. Called by the ticker only while
     /// [`is_animating`](Self::is_animating) — so the frame count doubles as an
-    /// elapsed timer without a wall clock.
+    /// elapsed timer without a wall clock. Transient effects count down here.
     pub fn tick(&mut self) {
         self.anim_frame = self.anim_frame.wrapping_add(1);
+        self.overlay_ease = self.overlay_ease.saturating_sub(1);
+        self.sidebar_settle = self.sidebar_settle.saturating_sub(1);
+    }
+
+    /// Ease-in progress for the overlay, 0.0 (just opened) → 1.0 (settled). Used
+    /// to scale the overlay's size for its brief expansion.
+    #[must_use]
+    pub fn overlay_ease_progress(&self) -> f32 {
+        if self.overlay_ease == 0 {
+            return 1.0;
+        }
+        1.0 - f32::from(self.overlay_ease) / f32::from(EASE_FRAMES)
+    }
+
+    /// Whether the newest modified-file entry is still settling (highlighted).
+    #[must_use]
+    pub fn sidebar_settling(&self) -> bool {
+        self.sidebar_settle > 0
+    }
+
+    /// The current animation frame (for phase-based effects like the glow).
+    #[must_use]
+    pub fn anim_frame(&self) -> usize {
+        self.anim_frame
     }
 
     /// The current spinner glyph.
@@ -597,8 +651,9 @@ impl App {
     pub fn open_last_diff(&mut self) {
         if let Some(path) = self.last_modified.clone() {
             if let Some(unified) = self.latest_diffs.get(&path) {
-                self.overlays.push(Overlay {
-                    title: format!("diff: {path}"),
+                let title = format!("diff: {path}");
+                self.push_overlay(Overlay {
+                    title,
                     content: OverlayContent::Diff(unified.clone()),
                     scroll: 0,
                 });
@@ -608,11 +663,19 @@ impl App {
 
     /// Push an arbitrary text overlay (help, untruncated output — group 8).
     pub fn open_text_overlay(&mut self, title: impl Into<String>, body: impl Into<String>) {
-        self.overlays.push(Overlay {
+        self.push_overlay(Overlay {
             title: title.into(),
             content: OverlayContent::Text(body.into()),
             scroll: 0,
         });
+    }
+
+    /// Push an overlay and start its brief ease-in (Design §6.4).
+    fn push_overlay(&mut self, overlay: Overlay) {
+        self.overlays.push(overlay);
+        if self.motion {
+            self.overlay_ease = EASE_FRAMES;
+        }
     }
 
     /// The overlay on top, if any (read by the renderer).
@@ -928,6 +991,58 @@ mod tests {
         a.motion = false;
         a.busy = true;
         assert!(!a.is_animating(), "motion=false is the off switch");
+    }
+
+    #[test]
+    fn overlay_ease_animates_then_settles() {
+        let mut a = app();
+        a.open_text_overlay("t", "body");
+        // Idle, but the ease-in makes it animate briefly, and start scaled down.
+        assert!(a.is_animating());
+        assert!(!a.is_working(), "ease-in is not the working spinner");
+        assert!(a.overlay_ease_progress() < 1.0);
+        for _ in 0..EASE_FRAMES {
+            a.tick();
+        }
+        assert!((a.overlay_ease_progress() - 1.0).abs() < f32::EPSILON);
+        assert!(!a.is_animating(), "settles to a still screen when idle");
+    }
+
+    #[test]
+    fn sidebar_settle_highlights_only_new_entries() {
+        let mut a = app();
+        a.apply_event(UiEvent::FileModified {
+            path: "a.rs".into(),
+            adds: 1,
+            dels: 0,
+        });
+        assert!(a.sidebar_settling(), "a new entry settles in");
+        for _ in 0..SETTLE_FRAMES {
+            a.tick();
+        }
+        assert!(!a.sidebar_settling());
+        // An update to an existing entry does not re-trigger the settle.
+        a.apply_event(UiEvent::FileModified {
+            path: "a.rs".into(),
+            adds: 2,
+            dels: 1,
+        });
+        assert!(
+            !a.sidebar_settling(),
+            "updates don't settle, only new entries"
+        );
+    }
+
+    #[test]
+    fn motion_off_skips_transient_effects() {
+        let mut a = app();
+        a.motion = false;
+        a.open_text_overlay("t", "body");
+        assert!(!a.is_animating());
+        assert!(
+            (a.overlay_ease_progress() - 1.0).abs() < f32::EPSILON,
+            "no ease-in scaling with motion off"
+        );
     }
 
     #[test]
