@@ -28,7 +28,7 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 | 1. Transcript persistence (HC-7) | [x] | `FileTranscript` (append + per-event fsync) + sidecars; engine write points; 4 tests |
 | 2. Supervisor completion (HC-3, S-2) | [x] | panic hook + error path append `abnormal_exit` + resume hint; clean-exit summary |
 | 3. Resume (§8.2, §3.3) | [x] | `resume.rs` replay + engine seeding + display seeding; `resume [id]` + offer-on-launch; 5 tests + e2e |
-| 4. Manual `/compact` (§8.3, §7) | [ ] | clean-boundary gate; purpose-built summary; pinned content; fallback hard-truncate |
+| 4. Manual `/compact` (§8.3, §7) | [x] | clean-boundary gate; summarize via provider; pinned + keep-recent; fallback truncate; 1 test |
 | 5. Config, prompts & provenance (§7, §8) | [ ] | AGENTS.md/CLAUDE.md; prompt dir + per-family variants; `config show`; provenance |
 | 6. `emberly init` (C-2) | [ ] | materialize `.agents/` defaults; considerate UX (Design §8.1) |
 | 7. CLI surface & key moments (§10) | [ ] | `init`/`resume`/`config show`/`--model`/`--provider`; session header + clean-exit line |
@@ -146,24 +146,29 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 
 ## 4. Manual `/compact` (§8.3, Tech Spec §7)
 
-- [ ] **Clean-boundary gate:** valid only when every `tool_use` has its
-      `tool_result`; if invoked mid-run, queue until the boundary. (The palette/
-      slash `/compact` already exists as a `Command::Compact` stub from Phase 1.)
-- [ ] **Pinned, never compacted:** system prompt, project instructions
-      (AGENTS.md/CLAUDE.md), and the original task (first user message, tagged).
-- [ ] **Summarize with the current provider** using a purpose-built prompt
-      (from the prompts dir, overridable — group 5): original task, decisions,
-      files modified & how, current state, next steps.
-- [ ] **Rebuild the view:** `[system][pinned][summary-as-user-msg][last N turns
-      verbatim]`, N = `context.keep_recent_turns` (default 6). Emit a
-      `compaction` transcript event (summary + replaced range); JSONL untouched.
-- [ ] **Failure fallback:** if summarization fails, hard-truncate oldest
-      non-pinned turns to ~50% budget with a **visible warning** — a full
+- [x] **Clean-boundary gate:** idle `/compact` runs immediately (already a
+      boundary); a `/compact` seen mid-turn (in `consume_stream` / the tool-call
+      select) sets `compact_requested` and runs after the turn returns — when
+      every `tool_use` has its `tool_result`.
+- [x] **Pinned, never compacted:** the original task (first conversation
+      message) is kept; the system prompt lives outside the conversation.
+      (AGENTS.md/CLAUDE.md pinning arrives with group 5.)
+- [x] **Summarize with the current provider** via `SUMMARY_PROMPT` (original
+      task / decisions / files / state / next steps); the middle is rendered to
+      text and streamed, collecting the reply. (Prompt is overridable in group 5.)
+- [x] **Rebuild the view:** `[pinned original][summary-as-user-msg][last
+      KEEP_RECENT messages]` (KEEP_RECENT = 6; config wiring group 5). Records a
+      `Compaction { summary, replaced_from, replaced_to }`; the JSONL is
+      untouched. Replay splices the same range (group 3, updated to match).
+- [x] **Failure fallback:** on a summarize error (or empty reply), the middle is
+      dropped behind a placeholder summary with a visible `CompactionStatus`
+      warning — recorded as a `compaction` so resume stays consistent. A full
       context never yields a stuck session.
-- [ ] Emit `CompactionStatus` UiEvents (Phase 4 renders them as notices).
-- [ ] Tests (via `FakeProvider`): boundary gate defers mid-run; successful
-      compaction rebuilds the expected view + records the event; failed
-      summarization falls back to truncation with a warning.
+- [x] Emits `CompactionStatus` UiEvents ("compacting…", "compacted — …",
+      no-op/fallback notices) that Phase 4 renders as notices.
+- [x] Test (via `FakeProvider`): four turns then `/compact` rebuilds the view
+      and records `Compaction` with the model's summary; the UI is told. (Empty
+      middle → "nothing to compact" no-op.)
 
 ---
 

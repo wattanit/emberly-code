@@ -54,10 +54,10 @@ fn describe_skip(line_no: usize, line: &str, error: &serde_json::Error) -> Strin
 ///
 /// Assistant text and the tool calls that immediately follow it are folded
 /// into one assistant message; tool results become tool messages; a
-/// `compaction` collapses everything from its `replaced_from` index into the
-/// summary (as a user message), matching how `/compact` rebuilds the live view
-/// (Requirements §8.3). Non-conversation records (session_start, permission,
-/// title, end) are skipped.
+/// `compaction` splices out its `[replaced_from..replaced_to]` middle and
+/// inserts the summary (as a user message), keeping the pinned head and recent
+/// tail — the same view `/compact` produced live (Requirements §8.3).
+/// Non-conversation records (session_start, permission, title, end) are skipped.
 #[must_use]
 pub fn rebuild_conversation(records: &[TranscriptRecord]) -> Vec<Message> {
     let mut messages: Vec<Message> = Vec::new();
@@ -96,11 +96,19 @@ pub fn rebuild_conversation(records: &[TranscriptRecord]) -> Vec<Message> {
             TranscriptEvent::Compaction {
                 summary,
                 replaced_from,
-                ..
+                replaced_to,
             } => {
-                let keep = (*replaced_from as usize).min(messages.len());
-                messages.truncate(keep);
-                messages.push(Message::user_text(summary.clone()));
+                // Splice out `[from..to]` (the summarized middle) and insert the
+                // summary, keeping the pinned head and the recent tail — the
+                // same view `/compact` produced live (Tech Spec §7).
+                let from = (*replaced_from as usize).min(messages.len());
+                let to = (*replaced_to as usize).min(messages.len());
+                if from <= to {
+                    let tail = messages.split_off(to);
+                    messages.truncate(from);
+                    messages.push(Message::user_text(summary.clone()));
+                    messages.extend(tail);
+                }
             }
             // session_start / title / permission / mode / end / abnormal_exit
             // are not part of the model-visible conversation.
@@ -244,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_collapses_into_the_summary() {
+    fn compaction_collapses_the_middle_and_keeps_the_tail() {
         let records = vec![
             rec(TranscriptEvent::UserMessage {
                 text: "task".into(),
@@ -252,7 +260,10 @@ mod tests {
             }),
             rec(TranscriptEvent::AssistantMessage { text: "a".into() }),
             rec(TranscriptEvent::AssistantMessage { text: "b".into() }),
-            // Keep the first message, replace the rest with the summary.
+            rec(TranscriptEvent::AssistantMessage {
+                text: "recent".into(),
+            }),
+            // Keep [0] (task) and [3] (recent); replace [1..3] with the summary.
             rec(TranscriptEvent::Compaction {
                 summary: "summary so far".into(),
                 replaced_from: 1,
@@ -264,14 +275,15 @@ mod tests {
             }),
         ];
         let messages = rebuild_conversation(&records);
-        // [task][summary][continue]
-        assert_eq!(messages.len(), 3);
+        // [task][summary][recent][continue]
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[0].role, Role::User);
         assert!(
             matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "summary so far")
         );
+        assert!(matches!(&messages[2].content[0], ContentBlock::Text { text } if text == "recent"));
         assert!(
-            matches!(&messages[2].content[0], ContentBlock::Text { text } if text == "continue")
+            matches!(&messages[3].content[0], ContentBlock::Text { text } if text == "continue")
         );
     }
 

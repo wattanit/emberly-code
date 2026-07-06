@@ -250,6 +250,41 @@ async fn transcript_records_the_durable_session() {
 }
 
 #[tokio::test]
+async fn compact_summarizes_the_middle_and_records_the_event() {
+    // Four text turns build 8 messages; the fifth scripted response is consumed
+    // by the summarization call that `/compact` makes.
+    let scripts = vec![
+        ScriptedResponse::text("r1"),
+        ScriptedResponse::text("r2"),
+        ScriptedResponse::text("r3"),
+        ScriptedResponse::text("r4"),
+        ScriptedResponse::text("SUMMARY OF THE MIDDLE"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, temp_project());
+    for i in 0..4 {
+        h.send(Command::UserInput {
+            text: format!("msg {i}"),
+        })
+        .await;
+        let _ = h.collect(None).await;
+    }
+
+    h.send(Command::Compact).await;
+    let events = h.collect(None).await;
+
+    // The UI is told compaction happened.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        UiEvent::CompactionStatus { message } if message.contains("compacted")
+    )));
+    // The transcript records the compaction with the model's summary.
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::Compaction { summary, .. } if summary == "SUMMARY OF THE MIDDLE"
+    )));
+}
+
+#[tokio::test]
 async fn denied_tool_feeds_failure_and_model_continues() {
     // HC-6 / §6.6: a denial is data the model reacts to, not a dead end.
     let root = temp_project();

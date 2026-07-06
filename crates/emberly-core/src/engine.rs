@@ -35,6 +35,17 @@ use crate::types::{PermissionRendering, SandboxStatus, TokenUsage};
 /// (Tech Spec §16 — the heuristic v1 title).
 const TITLE_CLIP: usize = 60;
 
+/// How many trailing messages `/compact` keeps verbatim (`context.
+/// keep_recent_turns`, default 6 — Tech Spec §7; config wiring is group 5).
+const KEEP_RECENT: usize = 6;
+
+/// The purpose-built summarization prompt for `/compact` (Tech Spec §7). Made
+/// overridable from the prompts directory in group 5.
+const SUMMARY_PROMPT: &str = "You are compacting a coding session's context. \
+Summarize the conversation so work can continue with less context, covering, \
+concisely and factually: the original task, key decisions made, files created \
+or modified and how, the current state, and the next steps. No preamble.";
+
 /// Reserve this many tokens for model output when computing context usage,
 /// or the model's max output, whichever is smaller (Tech Spec §7).
 const OUTPUT_RESERVE: u64 = 8_000;
@@ -136,6 +147,9 @@ pub struct Engine {
     original_task_recorded: bool,
     /// True when this run resumed an existing transcript (skips `session_start`).
     resuming: bool,
+    /// Set when `/compact` arrives mid-turn; performed at the next clean
+    /// boundary (Tech Spec §7).
+    compact_requested: bool,
 }
 
 impl Engine {
@@ -171,6 +185,7 @@ impl Engine {
             // On resume the original task already lives in the restored history.
             original_task_recorded: config.resuming,
             resuming: config.resuming,
+            compact_requested: false,
         };
         (engine, asks_rx)
     }
@@ -208,11 +223,18 @@ impl Engine {
                     // The engine is idle again; let the frontend stop its
                     // "working" affordance (Design §6.3).
                     self.emit(UiEvent::TurnEnded).await;
+                    // A `/compact` sent mid-turn runs now, at the clean boundary
+                    // (every tool_use has its tool_result — Tech Spec §7).
+                    if std::mem::take(&mut self.compact_requested) {
+                        self.compact().await;
+                    }
                 }
                 // No turn is running while idle; these are strays or no-ops here.
                 Command::Cancel | Command::PermissionAnswer { .. } => {}
-                Command::SetMode { .. } | Command::Compact => {
-                    // Handled in Phase 2 / Phase 5.
+                // Idle is already a clean boundary — compact immediately.
+                Command::Compact => self.compact().await,
+                Command::SetMode { .. } => {
+                    // Auto-accept modes are Phase 2 (gated on the sandbox).
                 }
             }
         }
@@ -236,6 +258,92 @@ impl Engine {
                 title: clip_title(text),
             });
         }
+    }
+
+    /// Manual `/compact` at a clean boundary (Tech Spec §7). Replaces the middle
+    /// of the conversation — everything after the pinned original task and
+    /// before the last [`KEEP_RECENT`] messages — with a model-written summary,
+    /// keeping the session usable when context grows. The pinned content
+    /// (system prompt, original task) is never compacted; the JSONL log is
+    /// untouched (the compaction is recorded as one event, replayed on resume).
+    async fn compact(&mut self) {
+        // Pinned = the original task (the system prompt lives outside the
+        // conversation). Keep the tail verbatim; summarize the middle.
+        let pinned = usize::from(!self.conversation.is_empty());
+        let len = self.conversation.len();
+        let keep = KEEP_RECENT.min(len.saturating_sub(pinned));
+        let from = pinned;
+        let to = len.saturating_sub(keep);
+        if to <= from {
+            self.emit(UiEvent::CompactionStatus {
+                message: "nothing to compact yet".into(),
+            })
+            .await;
+            return;
+        }
+
+        self.emit(UiEvent::CompactionStatus {
+            message: "compacting the conversation…".into(),
+        })
+        .await;
+
+        let summary = match self.summarize(&self.conversation[from..to]).await {
+            Ok(text) if !text.is_empty() => text,
+            // Failure fallback (Tech Spec §7): drop the middle behind a
+            // placeholder with a visible warning — a full context never yields a
+            // stuck session. Recorded as a compaction so resume stays consistent.
+            other => {
+                let why = match other {
+                    Ok(_) => "the summary came back empty".to_string(),
+                    Err(error) => error.to_string(),
+                };
+                self.emit(UiEvent::CompactionStatus {
+                    message: format!("summarization failed ({why}); truncated older context"),
+                })
+                .await;
+                format!("[older context was truncated — summarization failed: {why}]")
+            }
+        };
+
+        // Rebuild: [original task][summary as user message][recent verbatim].
+        let mut rebuilt = Vec::with_capacity(2 + keep);
+        rebuilt.extend(self.conversation[..from].iter().cloned());
+        rebuilt.push(Message::user_text(summary.clone()));
+        rebuilt.extend(self.conversation[to..].iter().cloned());
+        self.conversation = rebuilt;
+
+        self.write_transcript(TranscriptEvent::Compaction {
+            summary,
+            replaced_from: u32::try_from(from).unwrap_or(u32::MAX),
+            replaced_to: u32::try_from(to).unwrap_or(u32::MAX),
+        });
+        self.emit(UiEvent::CompactionStatus {
+            message: format!("compacted — kept the task, a summary, and the last {keep} messages"),
+        })
+        .await;
+        self.emit_context_usage().await;
+    }
+
+    /// Summarize a slice of the conversation with the current provider using the
+    /// purpose-built prompt (Tech Spec §7). Drains the stream collecting text;
+    /// tool calls are not offered.
+    async fn summarize(&self, messages: &[Message]) -> Result<String, ProviderError> {
+        let request = CompletionRequest {
+            model: self.model.clone(),
+            system: Some(SUMMARY_PROMPT.to_string()),
+            messages: vec![Message::user_text(render_for_summary(messages))],
+            tools: Vec::new(),
+            max_output_tokens: Some(self.provider.model_info().max_output_tokens),
+            temperature: None,
+        };
+        let mut stream = self.provider.stream_completion(request).await?;
+        let mut text = String::new();
+        while let Some(item) = stream.next().await {
+            if let StreamEvent::TextDelta { text: delta } = item? {
+                text.push_str(&delta);
+            }
+        }
+        Ok(text.trim().to_string())
     }
 
     /// Drive completions until the model stops without requesting tools, an
@@ -375,10 +483,13 @@ impl Engine {
                     None => break if saw_done { StreamEnd::Done { tool_calls: std::mem::take(&mut tool_calls) } } else { StreamEnd::Dropped },
                 },
                 Some(command) = commands_rx.recv() => {
-                    if matches!(command, Command::Cancel) {
-                        break StreamEnd::Interrupted;
+                    match command {
+                        Command::Cancel => break StreamEnd::Interrupted,
+                        // Queue a compaction for the clean boundary (Tech Spec §7).
+                        Command::Compact => self.compact_requested = true,
+                        // Ignore permission answers / other commands mid-stream.
+                        _ => {}
                     }
-                    // Ignore permission answers / other commands mid-stream.
                 }
             }
         };
@@ -519,6 +630,8 @@ impl Engine {
                         }
                     }
                     Some(Command::Cancel) => return ToolCallResult::Canceled,
+                    // Queue a compaction for the clean boundary (Tech Spec §7).
+                    Some(Command::Compact) => self.compact_requested = true,
                     Some(_) => {}
                     None => {
                         // No more input (frontend gone): deny anything pending
@@ -789,6 +902,34 @@ fn clip_title(text: &str) -> String {
         title.push('…');
     }
     title
+}
+
+/// Render conversation messages as plain text for the summarization prompt: one
+/// `role: …` block per message, tool calls and results flattened to text.
+fn render_for_summary(messages: &[Message]) -> String {
+    let mut out = String::new();
+    for message in messages {
+        let role = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+            Role::System => "system",
+        };
+        for block in &message.content {
+            let piece = match block {
+                ContentBlock::Text { text } => text.clone(),
+                ContentBlock::ToolUse { name, input, .. } => format!("[tool call: {name} {input}]"),
+                ContentBlock::ToolResult { content, .. } => format!("[tool result: {content}]"),
+            };
+            if !piece.is_empty() {
+                out.push_str(role);
+                out.push_str(": ");
+                out.push_str(&piece);
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 /// Number of result lines shown inline under a finished tool call.
