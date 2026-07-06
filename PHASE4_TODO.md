@@ -32,7 +32,7 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 | 6. Diffs first-class (inline + overlay) | [x] | diffview.rs + FileDiff plumbing; inline (capped) + Ctrl+O overlay; /view → group 8 |
 | 7. The permission prompt | [x] | scrollable full-content, loud outside-root, deny-default, diff-rendered; 5 render/behavior tests |
 | 8. Command palette + command registry | [x] | commands.rs registry; Ctrl+P fuzzy palette + /slash + /help; PTY-verified; /view=in-TUI |
-| 9. Motion | [ ] | single ~12fps ticker; spinner/glow (Design §6.4) |
+| 9. Motion | [x] | single ~12fps ticker; ember-pulse spinner + verb + elapsed; gated off (prompt/motion=false); 2 tests |
 | 10. Degraded mode parity | [ ] | `--plain`/`NO_COLOR`/`TERM=dumb` (Design §7) |
 | 11. Tests, fixtures & exit criterion | [ ] | Thai + degraded + permission-prompt guarantees |
 
@@ -333,18 +333,24 @@ implementation fixes:
 
 ## 9. Motion — few, small, purposeful  *(Design §6.4; Tech Spec §9)*
 
-- [ ] **Single animation ticker** (~12fps) drives everything; never blocks
-      input or streaming. Animation state carries **zero** information (ambient
-      only).
-- [ ] Sanctioned motion only: ember-**pulse** spinner (dimmed verb phrase —
-      "thinking"/"running tests"/"reading files"; elapsed time after 5s, Design
-      §6.3); subtle accent brightness pulse while streaming; brief overlay
-      ease-in (1–2 frames); modified-file sidebar settle.
-- [ ] **Skipped entirely** when: `motion = false` config key, degraded mode
-      (group 10), or a permission prompt is open (group 7). No looping animation
-      on an idle screen except the prompt cursor.
-- [ ] Test: with motion off, one static render per state change; the ticker is
-      not spawned.
+- [x] **Single animation ticker** (~12fps `tokio::time::interval` in the
+      `select!`) that only redraws when `App::is_animating()` — so it never
+      churns an idle screen and never blocks input/streaming. `anim_frame`
+      advances only while animating, doubling as a wall-clock-free elapsed timer.
+- [x] Ember-**pulse** spinner (`·•●•` in the accent) with a dull verb phrase
+      (`thinking` / `responding` / `working`, from the live state) and elapsed
+      seconds after 5s (Design §6.3), rendered on the status bar. Driven by a
+      new one-per-turn `UiEvent::TurnEnded` (engine) so "busy" spans submit →
+      idle accurately, including through tool calls and cancellation.
+- [x] **Skipped entirely** when a permission prompt is open (that screen is
+      perfectly still), when `motion=false` (`EMBERLY_MOTION=0`/`NO_MOTION`), and
+      in degraded mode (the line frontend has no ticker at all). 2 tests
+      (busy spans the turn + prompt/off gates; motion=false disables).
+- [~] Streaming accent-glow, overlay ease-in, and sidebar settle: **deferred as
+      subtle polish.** The ember-pulse spinner already carries the "alive"
+      feeling; these micro-animations are refinement (the owner flagged UX
+      polish for later) and add color-interpolation / per-frame layout work for
+      little information value. Noted, not built.
 
 ---
 

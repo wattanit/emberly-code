@@ -566,8 +566,30 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
     } else {
         format!("{} {}%  ", strings::status::CONTEXT_ABBR, app.context_pct)
     };
-    let status = format!(" {}  {ctx}{hints}", mode_name(app.mode));
-    f.render_widget(Paragraph::new(status).style(theme.chrome()), area);
+
+    let mut spans: Vec<Span> = Vec::new();
+    // The ember-pulse spinner + verb (+ elapsed after 5s) while the model works
+    // (Design §6.3). Rendered only while animating, so it is absent at idle and
+    // during a permission prompt.
+    if app.is_animating() {
+        let verb = app.spinner_verb();
+        let elapsed = app
+            .spinner_elapsed()
+            .map(|s| format!(" {s}s"))
+            .unwrap_or_default();
+        spans.push(Span::styled(
+            format!(" {} ", app.spinner_glyph()),
+            theme.accent(),
+        ));
+        spans.push(Span::styled(format!("{verb}{elapsed}  "), theme.chrome()));
+    } else {
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(
+        format!("{}  {ctx}{hints}", mode_name(app.mode)),
+        theme.chrome(),
+    ));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ---- permission prompt — the most important screen (Design §5) -----------

@@ -24,9 +24,14 @@ use crate::terminal::TerminalGuard;
 pub async fn run(ports: FrontendPorts, session: SessionInfo) -> io::Result<()> {
     let mut guard = TerminalGuard::enter()?;
     let mut app = App::new(session);
+    app.motion = motion_enabled();
 
     let mut input_rx = spawn_input_reader();
     let mut events_rx = ports.events_rx;
+    // The single animation ticker (Design §6.4): ~12fps, and only ever causes a
+    // redraw while something is animating, so an idle screen stays quiet.
+    let frame_ms = 1000 / u64::try_from(crate::app::ANIM_FPS).unwrap_or(12);
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(frame_ms));
     // Dropped when this function returns (on quit or engine close), which
     // closes the command channel — the engine then finishes and closes its
     // events. No hard cancel: an in-flight reply is still allowed to complete.
@@ -36,6 +41,15 @@ pub async fn run(ports: FrontendPorts, session: SessionInfo) -> io::Result<()> {
 
     loop {
         tokio::select! {
+            _ = ticker.tick() => {
+                // Advance the animation only when something is actually moving;
+                // otherwise skip the redraw so an idle screen (or a permission
+                // prompt) stays perfectly still (Design §6.4).
+                if app.is_animating() {
+                    app.tick();
+                    guard.terminal().draw(|f| render::frame(f, &app))?;
+                }
+            },
             event = events_rx.recv() => match event {
                 Some(event) => {
                     app.apply_event(event);
@@ -85,6 +99,19 @@ pub async fn run(ports: FrontendPorts, session: SessionInfo) -> io::Result<()> {
 fn is_press(key: &crossterm::event::KeyEvent) -> bool {
     use crossterm::event::KeyEventKind;
     key.kind == KeyEventKind::Press
+}
+
+/// Motion is on by default; `EMBERLY_MOTION=0`/`false` (or `NO_MOTION`) turns
+/// it off (Design §6.4 off-switch). Degraded mode never reaches here — it runs
+/// the line frontend, which has no ticker.
+fn motion_enabled() -> bool {
+    if std::env::var_os("NO_MOTION").is_some() {
+        return false;
+    }
+    !matches!(
+        std::env::var("EMBERLY_MOTION").as_deref(),
+        Ok("0") | Ok("false")
+    )
 }
 
 /// Spawn the blocking terminal-input reader on its own OS thread, forwarding

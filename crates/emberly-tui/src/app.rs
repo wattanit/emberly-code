@@ -23,6 +23,14 @@ use crate::theme::Theme;
 /// Rows the conversation scrolls per PageUp/PageDown.
 const SCROLL_STEP: usize = 5;
 
+/// Animation ticker rate (Design §6.4 — a handful of cells at ~12fps).
+pub const ANIM_FPS: usize = 12;
+/// The ember-pulse spinner: a dot that swells and fades, in the accent — an
+/// ember glowing, not a generic line spinner (Design §6.4).
+const SPINNER: [&str; 4] = ["·", "•", "●", "•"];
+/// Elapsed time appears only after this many seconds (Design §6.3).
+const ELAPSED_AFTER_SECS: usize = 5;
+
 /// One rendered item in the conversation flow. Group 5 enriches assistant text
 /// with the markdown pass; group 6 adds diffs.
 #[derive(Debug, Clone, PartialEq)]
@@ -147,6 +155,15 @@ pub struct App {
     pub overlays: Vec<Overlay>,
     /// The command palette, when open (Ctrl+P). Modal while present.
     pub palette: Option<PaletteState>,
+    /// True while a turn is in flight (submit → `TurnEnded`): drives the
+    /// "working" spinner (Design §6.3).
+    pub busy: bool,
+    /// Whether motion is enabled (Design §6.4 off-switch). Off in degraded mode
+    /// (line frontend has no ticker) and via config/env.
+    pub motion: bool,
+    /// Animation frame counter, advanced by the ticker only while animating.
+    /// Time-source-free: elapsed ≈ `anim_frame / ANIM_FPS`.
+    anim_frame: usize,
     /// The active theme (Design §2). One source the renderer reads; swapping it
     /// (mode/light-fallback later) is a value change, not a refactor.
     pub theme: Theme,
@@ -175,6 +192,9 @@ impl App {
             last_modified: None,
             overlays: Vec::new(),
             palette: None,
+            busy: false,
+            motion: true,
+            anim_frame: 0,
             theme: Theme::rich(),
         }
     }
@@ -194,6 +214,10 @@ impl App {
                 self.conversation.push(ConvItem::Assistant(text));
             }
             UiEvent::AssistantDone => self.streaming = false,
+            UiEvent::TurnEnded => {
+                self.busy = false;
+                self.streaming = false;
+            }
             UiEvent::ToolStarted {
                 call_id,
                 tool,
@@ -382,6 +406,10 @@ impl App {
                     if let Some(name) = text.strip_prefix('/') {
                         self.run_slash(name)
                     } else {
+                        // Enter the "working" state (Design §6.3); the spinner
+                        // runs from frame 0 until TurnEnded.
+                        self.busy = true;
+                        self.anim_frame = 0;
                         Action::Command(Command::UserInput { text })
                     }
                 }
@@ -427,6 +455,54 @@ impl App {
     fn edit(&mut self, f: impl FnOnce(&mut LineEditor)) -> Action {
         f(&mut self.editor);
         Action::None
+    }
+
+    // ---- motion (Design §6.4) --------------------------------------------
+
+    /// Whether anything is animating right now. Motion is ambient status only:
+    /// it runs while the model is working, and is skipped entirely when motion
+    /// is off or a permission prompt is open (that screen is perfectly still).
+    #[must_use]
+    pub fn is_animating(&self) -> bool {
+        self.motion && self.busy && self.pending_permission.is_none()
+    }
+
+    /// Advance one animation frame. Called by the ticker only while
+    /// [`is_animating`](Self::is_animating) — so the frame count doubles as an
+    /// elapsed timer without a wall clock.
+    pub fn tick(&mut self) {
+        self.anim_frame = self.anim_frame.wrapping_add(1);
+    }
+
+    /// The current spinner glyph.
+    #[must_use]
+    pub fn spinner_glyph(&self) -> &'static str {
+        SPINNER[self.anim_frame % SPINNER.len()]
+    }
+
+    /// Elapsed seconds shown next to the spinner, once past the threshold
+    /// (Design §6.3). `None` before then.
+    #[must_use]
+    pub fn spinner_elapsed(&self) -> Option<usize> {
+        let secs = self.anim_frame / ANIM_FPS;
+        (secs >= ELAPSED_AFTER_SECS).then_some(secs)
+    }
+
+    /// A dull, truthful verb phrase for the spinner (Design §6.3).
+    #[must_use]
+    pub fn spinner_verb(&self) -> &'static str {
+        let tool_running = self
+            .conversation
+            .iter()
+            .rev()
+            .any(|i| matches!(i, ConvItem::Tool { done: None, .. }));
+        if tool_running {
+            "working"
+        } else if self.streaming {
+            "responding"
+        } else {
+            "thinking"
+        }
     }
 
     /// Handle a mouse-wheel scroll, routed to whatever is focused: an open
@@ -809,6 +885,49 @@ mod tests {
             a.active_overlay().map(|o| &o.content),
             Some(OverlayContent::Diff(_))
         ));
+    }
+
+    #[test]
+    fn busy_spinner_spans_the_turn_and_respects_gates() {
+        let mut a = app();
+        // Submitting a message enters the busy/working state.
+        a.on_key(KeyEvent::from(KeyCode::Char('h')));
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(a.busy);
+        assert!(a.is_animating(), "spinner runs while working");
+        // No elapsed time before the threshold; the glyph cycles on tick.
+        assert_eq!(a.spinner_elapsed(), None);
+        for _ in 0..ANIM_FPS * ELAPSED_AFTER_SECS {
+            a.tick();
+        }
+        assert_eq!(a.spinner_elapsed(), Some(ELAPSED_AFTER_SECS));
+        // A permission prompt freezes motion (that screen is perfectly still).
+        a.apply_event(UiEvent::PermissionRequest {
+            id: PermissionId(1),
+            rendering: PermissionRendering {
+                tool: "bash".into(),
+                summary: "run: x".into(),
+                detail: "x".into(),
+                affected_paths: vec![],
+                outside_root: false,
+                reason: "asks".into(),
+            },
+        });
+        assert!(!a.is_animating(), "no motion during a permission prompt");
+        // Answering resumes; TurnEnded stops the spinner.
+        a.on_key(KeyEvent::from(KeyCode::Enter)); // deny
+        assert!(a.is_animating());
+        a.apply_event(UiEvent::TurnEnded);
+        assert!(!a.busy);
+        assert!(!a.is_animating());
+    }
+
+    #[test]
+    fn motion_off_disables_animation() {
+        let mut a = app();
+        a.motion = false;
+        a.busy = true;
+        assert!(!a.is_animating(), "motion=false is the off switch");
     }
 
     #[test]

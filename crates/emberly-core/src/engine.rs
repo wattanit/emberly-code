@@ -135,6 +135,9 @@ impl Engine {
                     self.conversation.push(Message::user_text(text));
                     self.emit_context_usage().await;
                     self.run_turn(&mut commands_rx, &mut asks_rx).await;
+                    // The engine is idle again; let the frontend stop its
+                    // "working" affordance (Design §6.3).
+                    self.emit(UiEvent::TurnEnded).await;
                 }
                 // No turn is running while idle; these are strays or no-ops here.
                 Command::Cancel | Command::PermissionAnswer { .. } => {}

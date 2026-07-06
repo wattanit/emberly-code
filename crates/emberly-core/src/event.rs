@@ -26,6 +26,11 @@ pub enum UiEvent {
     /// The assistant's turn finished streaming (no more deltas for this turn).
     AssistantDone,
 
+    /// The whole turn is complete and the engine is idle again (the model
+    /// stopped without more tool calls, or the turn errored/was canceled). Lets
+    /// a frontend stop its "working" affordance (Design §6.3). One per turn.
+    TurnEnded,
+
     /// A tool began executing.
     ToolStarted {
         call_id: ToolCallId,
