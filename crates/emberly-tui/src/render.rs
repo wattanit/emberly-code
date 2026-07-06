@@ -225,23 +225,11 @@ fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
 fn render_conversation(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
 
-    // While the model streams, the wordmark accent pulses gently — the ember
-    // glowing (Design §6.4). Ambient only: it carries no information.
-    let title_style = if app.is_working() && app.streaming {
-        ratatui::style::Style::default()
-            .fg(glow(theme.palette().accent, glow_pct(app.anim_frame())))
-            .add_modifier(ratatui::style::Modifier::BOLD)
-    } else {
-        theme.accent()
-    };
-
+    // No pane title — the wordmark lives in the sidebar. The conversation is a
+    // plain bordered transcript of both sides, top to bottom.
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme.chrome())
-        .title(Span::styled(
-            format!(" {} ", strings::brand::NAME),
-            title_style,
-        ));
+        .border_style(theme.chrome());
     let inner = block.inner(area);
     let width = usize::from(inner.width);
     let height = usize::from(inner.height);
@@ -394,8 +382,17 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     // Wordmark + version (Design §1.1): ember `emberly`, dimmed `code` + version.
+    // While the model streams, the wordmark accent pulses gently — the ember
+    // glowing (Design §6.4). Ambient only; it carries no information.
+    let wordmark_style = if app.is_working() && app.streaming {
+        ratatui::style::Style::default()
+            .fg(glow(theme.palette().accent, glow_pct(app.anim_frame())))
+            .add_modifier(ratatui::style::Modifier::BOLD)
+    } else {
+        theme.accent()
+    };
     lines.push(Line::from(vec![
-        Span::styled(strings::brand::NAME, theme.accent()),
+        Span::styled(strings::brand::NAME, wordmark_style),
         Span::styled(
             format!(" {} v{}", strings::brand::SUFFIX, env!("CARGO_PKG_VERSION")),
             theme.chrome(),

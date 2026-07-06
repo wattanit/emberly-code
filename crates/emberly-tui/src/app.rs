@@ -424,6 +424,9 @@ impl App {
                     if let Some(name) = text.strip_prefix('/') {
                         self.run_slash(name)
                     } else {
+                        // Echo the prompt into the timeline so the main pane is
+                        // a single top-to-bottom transcript of both sides.
+                        self.conversation.push(ConvItem::User(text.clone()));
                         // Enter the "working" state (Design §6.3); the spinner
                         // runs from frame 0 until TurnEnded.
                         self.busy = true;
@@ -1188,5 +1191,22 @@ mod tests {
             Action::Command(Command::UserInput { text: "hi".into() })
         );
         assert!(a.editor.is_empty());
+        // The prompt is echoed into the timeline so the pane is a full
+        // top-to-bottom transcript of both sides.
+        assert_eq!(a.conversation.last(), Some(&ConvItem::User("hi".into())));
+    }
+
+    #[test]
+    fn slash_command_is_not_echoed_as_a_message() {
+        let mut a = app();
+        for c in "/help".chars() {
+            a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        // A slash command runs (opens the help overlay); it is not a message.
+        assert!(!a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::User(_))));
     }
 }
