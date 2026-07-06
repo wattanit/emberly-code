@@ -31,7 +31,7 @@ pub use event::UiEvent;
 pub use gate::PermissionAsk;
 pub use id::{PermissionId, SessionId, ToolCallId};
 pub use transcript::{
-    CaptureSink, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord,
-    TranscriptSink, SCHEMA_VERSION,
+    append_abnormal_exit, CaptureSink, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent,
+    TranscriptRecord, TranscriptSink, SCHEMA_VERSION,
 };
 pub use types::{Mode, PermissionDecision, PermissionRendering, SandboxStatus, TokenUsage};

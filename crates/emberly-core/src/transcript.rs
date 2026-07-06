@@ -276,6 +276,31 @@ impl TranscriptSink for FileTranscript {
     }
 }
 
+/// Append a single record to an existing transcript file by reopening it —
+/// the crash-path counterpart to [`FileTranscript`], used by the supervisor's
+/// panic hook where the engine (and its live sink) is unreachable. Best-effort
+/// and standalone: it needs only the path. Safe because every prior event was
+/// already fsynced, so we only ever add one trailing line.
+pub fn append_abnormal_exit(path: &Path, reason: &str) {
+    let record = TranscriptRecord::new(
+        OffsetDateTime::now_utc(),
+        TranscriptEvent::AbnormalExit {
+            reason: reason.to_string(),
+        },
+    );
+    let _ = append_record(path, &record);
+}
+
+fn append_record(path: &Path, record: &TranscriptRecord) -> std::io::Result<()> {
+    let line = serde_json::to_string(record).map_err(std::io::Error::other)?;
+    let mut file = OpenOptions::new().append(true).open(path)?;
+    file.write_all(line.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    file.sync_data()?;
+    Ok(())
+}
+
 /// Keep sidecar filenames to a safe alphabet (tool-call ids are provider-issued
 /// strings like `toolu_1` / `call_1`, but never trust them as path fragments).
 fn sanitize(s: &str) -> String {
@@ -318,6 +343,37 @@ mod tests {
             Err(e) => panic!("parse: {e}"),
         };
         assert_eq!(parsed, rec);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_abnormal_exit_adds_a_trailing_line() {
+        let dir = std::env::temp_dir().join(format!("emberly-tx-ax-{}", std::process::id()));
+        let session = SessionId::new();
+        {
+            let mut sink = match FileTranscript::create(&dir, session) {
+                Ok(s) => s,
+                Err(e) => panic!("create: {e}"),
+            };
+            sink.record(&TranscriptRecord::new(
+                OffsetDateTime::UNIX_EPOCH,
+                TranscriptEvent::SessionEnd { reason: None },
+            ));
+        } // drop the live sink; the panic-path append reopens the file
+
+        let path = dir.join(format!("{session}.jsonl"));
+        append_abnormal_exit(&path, "boom");
+
+        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        let last = contents.lines().last().unwrap_or_default();
+        let record: TranscriptRecord = match serde_json::from_str(last) {
+            Ok(r) => r,
+            Err(e) => panic!("parse: {e}"),
+        };
+        assert!(matches!(
+            record.event,
+            TranscriptEvent::AbnormalExit { reason } if reason == "boom"
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

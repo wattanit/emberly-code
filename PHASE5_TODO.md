@@ -26,7 +26,7 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 |---|---|---|
 | 0. Prerequisites: session identity & the writer seam | [x] | `TranscriptSink`/`NoopSink`/`CaptureSink`; session id + `.agents/sessions/` |
 | 1. Transcript persistence (HC-7) | [x] | `FileTranscript` (append + per-event fsync) + sidecars; engine write points; 4 tests |
-| 2. Supervisor completion (HC-3, S-2) | [ ] | abnormal-exit: restore + fsync + `abnormal_exit` + resume hint + non-zero |
+| 2. Supervisor completion (HC-3, S-2) | [x] | panic hook + error path append `abnormal_exit` + resume hint; clean-exit summary |
 | 3. Resume (§8.2, §3.3) | [ ] | replay JSONL → view; apply compaction; unknown `v` warns; offer-on-launch; `resume [id]` |
 | 4. Manual `/compact` (§8.3, §7) | [ ] | clean-boundary gate; purpose-built summary; pinned content; fallback hard-truncate |
 | 5. Config, prompts & provenance (§7, §8) | [ ] | AGENTS.md/CLAUDE.md; prompt dir + per-family variants; `config show`; provenance |
@@ -100,20 +100,21 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 
 ## 2. Supervisor completion (HC-3, S-2, Tech Spec §10)
 
-- [ ] Abnormal-exit path (panic, engine task death, fatal error): **restore the
-      terminal** (already via the TUI guard + hook — extend the hook to also)
-      **flush + fsync the transcript**, append `abnormal_exit { reason }`, print
-      the **resume hint** (`emberly resume` / the session id), exit non-zero.
-- [ ] Clean-exit path: append `session_end`, print the one-line summary (Design
-      §8.3: name, duration, cost, transcript path).
-- [ ] The panic hook currently prints a calm notice (Phase 1) and restores the
-      terminal (Phase 4). Extend it to persist — but a panic hook cannot hold
-      `&mut engine`; design a shared, panic-reachable handle to the transcript
-      path + a best-effort "append abnormal_exit" that doesn't need engine state
-      (e.g. the writer flushes per event already, so the hook only appends one
-      line via a cheap reopen-append).
-- [ ] Tests: simulate an abnormal exit (injected error) → assert `abnormal_exit`
-      is the last line and the transcript is otherwise intact.
+- [x] Abnormal-exit paths: the **panic hook** and the `run() -> Err` path both
+      append `abnormal_exit { reason }` and print the resume hint (non-zero exit
+      via the existing error path). Terminal restore is already handled by the
+      TUI guard's hook (Phase 4), which wraps this one and runs first.
+- [x] Clean-exit path: the engine records `session_end` on channel close; the
+      binary prints a one-line summary (`session ended · <mm:ss> · transcript:
+      <path>`). Title/cost live engine-side — surfacing them is a later
+      refinement (would need a final summary event).
+- [x] **Panic-reachable handle:** a `static SESSION_PATH: OnceLock<PathBuf>` set
+      when the transcript opens. The hook cannot hold `&mut engine`, so it calls
+      `emberly_core::append_abnormal_exit(path, reason)` — a standalone
+      reopen-append (safe because every prior event was fsynced).
+- [x] Test: `append_abnormal_exit_adds_a_trailing_line` writes a session,
+      reopens it, and asserts `abnormal_exit` is the intact trailing line.
+      (Binary panic-path is mechanically wired; forced-panic smoke → group 10.)
 
 ---
 
