@@ -36,6 +36,10 @@ pub struct FileChange {
     pub path: String,
     pub adds: u32,
     pub dels: u32,
+    /// A unified diff of this change (we own both sides — no external diff
+    /// binary), for the frontend to render inline and in the diff overlay
+    /// (Design §4.2). `None` when a tool reports a change without one.
+    pub diff: Option<String>,
 }
 
 /// The result of running a tool, always handed to the model as data (HC-6).

@@ -14,6 +14,8 @@ use emberly_core::{
     UiEvent,
 };
 
+use std::collections::HashMap;
+
 use crate::editor::LineEditor;
 use crate::theme::Theme;
 
@@ -39,6 +41,28 @@ pub enum ConvItem {
     /// A harness-world line (error, retry) — rendered out-of-band from the
     /// conversation voice (Design §6.1).
     Notice(String),
+    /// A unified diff shown inline when an edit executes (Design §4.2). Capped
+    /// on render; the full diff is available in the overlay (Ctrl+O).
+    Diff { unified: String },
+}
+
+/// A dismissable, scrollable pane overlay (Design §4.2). Modal for navigation:
+/// while an overlay is open, keys scroll or dismiss it. The permission prompt
+/// (group 7) and help (group 8) build on the same mechanism.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Overlay {
+    pub title: String,
+    pub content: OverlayContent,
+    /// Scroll offset in rows from the top.
+    pub scroll: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OverlayContent {
+    /// A unified diff, rendered with diff colours.
+    Diff(String),
+    /// Plain text (help, untruncated output).
+    Text(String),
 }
 
 /// A file the agent created or changed this session (sidebar list, Design §3.1).
@@ -94,6 +118,14 @@ pub struct App {
     /// latest output; larger values scroll up into history. Clamped to content
     /// at render time (Design §3.1 — the main pane owns scrollback).
     pub scroll: usize,
+    /// Latest unified diff per modified file, for the diff overlay (Design
+    /// §4.2). Keyed by path.
+    pub latest_diffs: HashMap<String, String>,
+    /// The most recently modified file (target of the Ctrl+O diff overlay until
+    /// sidebar selection lands in group 8).
+    pub last_modified: Option<String>,
+    /// The overlay stack; the last entry is on top and receives input.
+    pub overlays: Vec<Overlay>,
     /// The active theme (Design §2). One source the renderer reads; swapping it
     /// (mode/light-fallback later) is a value change, not a refactor.
     pub theme: Theme,
@@ -117,6 +149,9 @@ impl App {
             pending_permission: None,
             sidebar_visible: true,
             scroll: 0,
+            latest_diffs: HashMap::new(),
+            last_modified: None,
+            overlays: Vec::new(),
             theme: Theme::rich(),
         }
     }
@@ -205,7 +240,18 @@ impl App {
                     project_root,
                 };
             }
-            UiEvent::FileModified { path, adds, dels } => self.upsert_modified(path, adds, dels),
+            UiEvent::FileModified { path, adds, dels } => {
+                self.last_modified = Some(path.clone());
+                self.upsert_modified(path, adds, dels);
+            }
+            UiEvent::FileDiff { path, unified } => {
+                // Show it inline when the edit executes (Design §4.2) …
+                self.conversation.push(ConvItem::Diff {
+                    unified: unified.clone(),
+                });
+                // … and keep the latest per file for the on-demand overlay.
+                self.latest_diffs.insert(path, unified);
+            }
             UiEvent::CompactionStatus { message } => {
                 self.conversation.push(ConvItem::Notice(message));
             }
@@ -237,6 +283,12 @@ impl App {
     /// Esc) denies — deny is the safe default (Design §5). The full prompt
     /// screen and scrolling arrive in group 7; the guarantees hold from now.
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
+        // An open overlay is modal for navigation: scroll or dismiss (Design
+        // §4.2). It sits above the permission check so a diff can be reviewed,
+        // but note we never open an overlay while a permission prompt is up.
+        if !self.overlays.is_empty() {
+            return self.on_overlay_key(key);
+        }
         if let Some((id, _)) = self.pending_permission.as_ref().map(|(i, r)| (*i, r)) {
             return self.answer_permission(id, key);
         }
@@ -263,6 +315,12 @@ impl App {
             }
             KeyCode::Char('b') if ctrl => {
                 self.sidebar_visible = !self.sidebar_visible;
+                Action::None
+            }
+            // Open the most-recently-modified file's diff in an overlay. Sidebar
+            // entry selection arrives with the command system (group 8).
+            KeyCode::Char('o') if ctrl => {
+                self.open_last_diff();
                 Action::None
             }
             // Emacs-style line editing.
@@ -323,9 +381,10 @@ impl App {
     }
 
     /// Insert pasted text (bracketed paste) into the input, unless a permission
-    /// prompt is open — nothing may be typed into a decision (Design §5).
+    /// prompt or overlay is open — nothing may be typed into a decision, and an
+    /// overlay is read-only (Design §5, §4.2).
     pub fn on_paste(&mut self, text: &str) {
-        if self.pending_permission.is_none() {
+        if self.pending_permission.is_none() && self.overlays.is_empty() {
             self.editor.insert_str(text);
         }
     }
@@ -339,6 +398,66 @@ impl App {
         };
         self.pending_permission = None;
         Action::Command(Command::PermissionAnswer { id, decision })
+    }
+
+    // ---- overlays ---------------------------------------------------------
+
+    /// Open the diff overlay for the most-recently-modified file, if any.
+    pub fn open_last_diff(&mut self) {
+        if let Some(path) = self.last_modified.clone() {
+            if let Some(unified) = self.latest_diffs.get(&path) {
+                self.overlays.push(Overlay {
+                    title: format!("diff: {path}"),
+                    content: OverlayContent::Diff(unified.clone()),
+                    scroll: 0,
+                });
+            }
+        }
+    }
+
+    /// Push an arbitrary text overlay (help, untruncated output — group 8).
+    pub fn open_text_overlay(&mut self, title: impl Into<String>, body: impl Into<String>) {
+        self.overlays.push(Overlay {
+            title: title.into(),
+            content: OverlayContent::Text(body.into()),
+            scroll: 0,
+        });
+    }
+
+    /// The overlay on top, if any (read by the renderer).
+    #[must_use]
+    pub fn active_overlay(&self) -> Option<&Overlay> {
+        self.overlays.last()
+    }
+
+    /// Keys while an overlay is open: Esc/q dismiss; the rest scroll.
+    fn on_overlay_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+            }
+            KeyCode::Char('c') if ctrl => {
+                self.overlays.pop();
+            }
+            KeyCode::Up => self.scroll_overlay(-1),
+            KeyCode::Down => self.scroll_overlay(1),
+            KeyCode::PageUp => self.scroll_overlay(-(SCROLL_STEP as isize)),
+            KeyCode::PageDown => self.scroll_overlay(SCROLL_STEP as isize),
+            KeyCode::Home => {
+                if let Some(o) = self.overlays.last_mut() {
+                    o.scroll = 0;
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    fn scroll_overlay(&mut self, delta: isize) {
+        if let Some(o) = self.overlays.last_mut() {
+            o.scroll = o.scroll.saturating_add_signed(delta);
+        }
     }
 }
 
@@ -382,6 +501,43 @@ mod tests {
             }
             other => panic!("expected a tool item, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn file_diff_shows_inline_and_opens_overlay() {
+        let mut a = app();
+        a.apply_event(UiEvent::FileModified {
+            path: "a.rs".into(),
+            adds: 1,
+            dels: 0,
+        });
+        a.apply_event(UiEvent::FileDiff {
+            path: "a.rs".into(),
+            unified: "--- a/a.rs\n+++ b/a.rs\n+x".into(),
+        });
+        // Inline diff item recorded.
+        assert!(matches!(a.conversation.last(), Some(ConvItem::Diff { .. })));
+        assert_eq!(a.last_modified.as_deref(), Some("a.rs"));
+        // Ctrl+O opens the overlay for the most-recent file.
+        a.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert_eq!(a.overlays.len(), 1);
+        assert!(matches!(
+            a.active_overlay().map(|o| &o.content),
+            Some(OverlayContent::Diff(_))
+        ));
+    }
+
+    #[test]
+    fn overlay_scrolls_and_dismisses() {
+        let mut a = app();
+        a.open_text_overlay("t", "line1\nline2\nline3");
+        a.on_key(KeyEvent::from(KeyCode::PageDown));
+        assert!(a.active_overlay().is_some_and(|o| o.scroll > 0));
+        // Typing does not leak into the editor while an overlay is modal.
+        a.on_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(a.editor.is_empty());
+        a.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(a.overlays.is_empty());
     }
 
     #[test]

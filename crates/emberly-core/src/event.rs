@@ -98,6 +98,12 @@ pub enum UiEvent {
     /// sidebar's modified-files list (Design §3.1).
     FileModified { path: String, adds: u32, dels: u32 },
 
+    /// The unified diff of a file change, for inline display and the diff
+    /// overlay (Design §4.2). Emitted alongside [`UiEvent::FileModified`] when
+    /// the tool supplied a diff. Separate from `FileModified` so a frontend
+    /// that only wants line counts can ignore it.
+    FileDiff { path: String, unified: String },
+
     /// Progress/outcome of a `/compact` operation (Requirements §8.3). Emitted
     /// from Phase 5 onward.
     CompactionStatus { message: String },

@@ -472,11 +472,18 @@ impl Engine {
 
         if let Some(change) = outcome.file_change {
             self.emit(UiEvent::FileModified {
-                path: change.path,
+                path: change.path.clone(),
                 adds: change.adds,
                 dels: change.dels,
             })
             .await;
+            if let Some(unified) = change.diff {
+                self.emit(UiEvent::FileDiff {
+                    path: change.path,
+                    unified,
+                })
+                .await;
+            }
         }
         self.emit_context_usage().await;
     }

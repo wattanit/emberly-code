@@ -129,6 +129,7 @@ impl Tool for EditFileTool {
         }
 
         let (adds, dels) = line_deltas(&content, &new_content);
+        let diff = unified_diff(&rel, &content, &new_content);
         ToolOutcome::success(
             format!("Edited {rel} (+{adds} -{dels})."),
             format!("edited {rel} (+{adds} -{dels})"),
@@ -137,6 +138,7 @@ impl Tool for EditFileTool {
             path: rel,
             adds,
             dels,
+            diff: Some(diff),
         })
     }
 }

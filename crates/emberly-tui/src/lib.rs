@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod diffview;
 pub mod editor;
 pub mod frontend;
 pub mod line;

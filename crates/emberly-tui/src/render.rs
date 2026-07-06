@@ -9,12 +9,12 @@
 //! sidebar shows is also reachable by command, so nothing is sidebar-exclusive.
 
 use emberly_core::{Mode, SandboxStatus};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, ConvItem};
+use crate::app::{App, ConvItem, Overlay, OverlayContent};
 use crate::text;
 use crate::theme::Theme;
 use crate::{strings, strings::markers};
@@ -27,6 +27,8 @@ const COLLAPSE_BELOW: u16 = 100;
 const MAX_INPUT_ROWS: usize = 6;
 /// The prompt gutter (`"› "`) reserved on every input row.
 const GUTTER: u16 = 2;
+/// Inline diffs show at most this many rows before pointing at the overlay.
+const INLINE_DIFF_CAP: usize = 20;
 
 /// Draw one full frame.
 pub fn frame(f: &mut Frame, app: &App) {
@@ -64,6 +66,79 @@ pub fn frame(f: &mut Frame, app: &App) {
         render_sidebar(f, app, area);
     }
     render_status(f, app, status, sidebar_shown);
+
+    // Overlays draw last, on top of everything (Design §4.2).
+    if let Some(overlay) = app.active_overlay() {
+        render_overlay(f, app, overlay, area);
+    }
+}
+
+// ---- overlay -------------------------------------------------------------
+
+/// Draw the active overlay as a centered, scrollable pane over the screen.
+fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
+    let theme = &app.theme;
+    let area = centered(screen, 82, 82);
+    f.render_widget(Clear, area); // clear whatever is behind it
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.dim_accent())
+        .title(Span::styled(format!(" {} ", overlay.title), theme.accent()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 2 || inner.width == 0 {
+        return;
+    }
+
+    // One row is reserved at the bottom for the dismiss/scroll hint.
+    let body_h = usize::from(inner.height - 1);
+    let body_w = usize::from(inner.width);
+
+    let lines: Vec<Line> = match &overlay.content {
+        OverlayContent::Diff(unified) => crate::diffview::render_unified(unified, theme),
+        OverlayContent::Text(body) => body
+            .split('\n')
+            .flat_map(|l| text::wrap(l, body_w))
+            .map(|row| Line::from(Span::styled(row, theme.primary())))
+            .collect(),
+    };
+
+    let total = lines.len();
+    let max_scroll = total.saturating_sub(body_h);
+    let scroll = overlay.scroll.min(max_scroll);
+    let end = (scroll + body_h).min(total);
+    let visible: Vec<Line> = lines[scroll..end].to_vec();
+
+    let body_area = Rect {
+        height: inner.height - 1,
+        ..inner
+    };
+    f.render_widget(Paragraph::new(visible), body_area);
+
+    let more = if scroll < max_scroll {
+        "  ↓ more"
+    } else {
+        ""
+    };
+    let hint = format!(" Esc close · ↑↓ PgUp/PgDn scroll{more}");
+    let hint_area = Rect {
+        y: inner.y + inner.height - 1,
+        height: 1,
+        ..inner
+    };
+    f.render_widget(Paragraph::new(hint).style(theme.chrome()), hint_area);
+}
+
+/// A rectangle centered in `area` at the given width/height percentages.
+fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
+    let [h] = Layout::horizontal([Constraint::Percentage(pct_w)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [v] = Layout::vertical([Constraint::Percentage(pct_h)])
+        .flex(Flex::Center)
+        .areas(h);
+    v
 }
 
 // ---- conversation --------------------------------------------------------
@@ -157,6 +232,19 @@ fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                     "  ",
                     theme.chrome(),
                 );
+            }
+            ConvItem::Diff { unified } => {
+                // Inline diff on execute (Design §4.2), capped — the full diff
+                // is one Ctrl+O away in the overlay.
+                let (rows, hidden) =
+                    crate::diffview::render_unified_capped(unified, theme, INLINE_DIFF_CAP);
+                out.extend(rows);
+                if hidden > 0 {
+                    out.push(Line::from(Span::styled(
+                        format!("  … {hidden} more lines — Ctrl+O to view"),
+                        theme.chrome(),
+                    )));
+                }
             }
         }
     }

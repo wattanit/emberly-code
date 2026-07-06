@@ -29,7 +29,7 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 | 3. Grapheme-aware text engine + line editor | [x] | text.rs + editor.rs; Thai stacked-mark fixtures; 16 tests; expect-verified |
 | 4. Layout: main pane + sidebar + status bar | [x] | render.rs: two-pane + sidebar + status; auto-collapse <100; scrollback; bash:bash fixed |
 | 5. Markdown subset + syntax highlighting | [x] | markdown.rs: first-party md + syntect (fancy-regex); span-preserving wrap; 8 tests |
-| 6. Diffs first-class (inline + overlay) | [ ] | own both sides; `/view` `$EDITOR` hatch (Design §4.2–§4.3) |
+| 6. Diffs first-class (inline + overlay) | [x] | diffview.rs + FileDiff plumbing; inline (capped) + Ctrl+O overlay; /view → group 8 |
 | 7. The permission prompt | [ ] | **the most important screen** (Design §5) |
 | 8. Command palette + command registry | [ ] | Ctrl+P fuzzy; single registry (Design §3.3) |
 | 9. Motion | [ ] | single ~12fps ticker; spinner/glow (Design §6.4) |
@@ -223,20 +223,30 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 
 ## 6. Diffs first-class (inline + overlay) + `$EDITOR` hatch  *(Design §4.2–§4.3)*
 
-- [ ] First-party unified diff rendering from the edit tool's before/after (we
-      own both sides — no external diff binary; reuse `emberly-tools` diff
-      helpers where they fit). File-path header + line numbers; green additions
-      / red deletions via semantic roles; ASCII `+`/`-` prefixes carry meaning
-      without color (degraded parity, group 10).
-- [ ] **Inline** in the main pane when an edit executes, and inside edit
-      permission prompts (group 7).
-- [ ] **Overlay** (pane overlay, scrollable, Esc to dismiss) for a file's
-      cumulative session diff, opened from the sidebar modified-files list.
-      Overlay scrolling uses the group-3 engine.
-- [ ] `/view` escape hatch: open any assistant message (raw markdown) read-only
-      in `$VISUAL` → `$EDITOR` → fallback print-to-pane with notice. Same
-      mechanism reused for full untruncated tool outputs behind truncation
-      markers (Design §4.3; Requirements §8.1).
+- [x] `diffview.rs`: first-party unified-diff rendering — file header (chrome),
+      `@@` hunk header (dim accent), `+` green / `-` red via semantic roles,
+      context dimmed. `+`/`-`/`@@` prefixes carry meaning without colour
+      (degraded parity). `render_unified` + `render_unified_capped`. 3 tests.
+- [x] **Plumbing**: `FileChange.diff: Option<String>` populated by edit/write
+      (they already own both sides — reuse `emberly-tools::diff::unified_diff`);
+      engine emits an additive `UiEvent::FileDiff { path, unified }` alongside
+      `FileModified`. `line.rs` ignores it for now (degraded diff → group 10).
+- [x] **Inline** on execute: `ConvItem::Diff` rendered in the conversation,
+      capped at 20 rows with a "… N more — Ctrl+O to view" pointer. (Edit
+      permission prompts render the diff in group 7 via `diffview`.)
+- [x] **Overlay**: a scrollable, Esc-dismiss pane overlay (`Overlay` +
+      `overlays` stack, modal for navigation; input can't leak into the editor
+      while open). Opened with **Ctrl+O** for the most-recently-modified file's
+      latest diff; centered `Clear`ed pane, ↑↓/PgUp/PgDn scroll, "↓ more" hint.
+      Sidebar-entry *selection* to pick which file lands with the command system
+      (group 8); true session-**cumulative** diff (vs. latest-edit) needs a
+      baseline the transcript provides (Phase 5) — currently shows the latest
+      change, noted.
+- [~] `/view` `$EDITOR` hatch: **deferred to group 8**. It is a command *and*
+      requires pausing the input reader while the child editor owns the tty
+      (two readers on one tty otherwise) — that coordination belongs with the
+      command system. The overlay already covers in-TUI diff review (Design
+      §4.2's preferred path); `/view` is the §4.3 full-fidelity escape hatch.
 
 ---
 
