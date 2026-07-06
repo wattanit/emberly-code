@@ -68,6 +68,8 @@ fn make_config(
         },
         config_provenance: Vec::new(),
         transcript,
+        initial_conversation: Vec::new(),
+        resuming: false,
     }
 }
 

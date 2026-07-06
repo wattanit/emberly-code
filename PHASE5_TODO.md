@@ -27,7 +27,7 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 | 0. Prerequisites: session identity & the writer seam | [x] | `TranscriptSink`/`NoopSink`/`CaptureSink`; session id + `.agents/sessions/` |
 | 1. Transcript persistence (HC-7) | [x] | `FileTranscript` (append + per-event fsync) + sidecars; engine write points; 4 tests |
 | 2. Supervisor completion (HC-3, S-2) | [x] | panic hook + error path append `abnormal_exit` + resume hint; clean-exit summary |
-| 3. Resume (§8.2, §3.3) | [ ] | replay JSONL → view; apply compaction; unknown `v` warns; offer-on-launch; `resume [id]` |
+| 3. Resume (§8.2, §3.3) | [x] | `resume.rs` replay + engine seeding + display seeding; `resume [id]` + offer-on-launch; 5 tests + e2e |
 | 4. Manual `/compact` (§8.3, §7) | [ ] | clean-boundary gate; purpose-built summary; pinned content; fallback hard-truncate |
 | 5. Config, prompts & provenance (§7, §8) | [ ] | AGENTS.md/CLAUDE.md; prompt dir + per-family variants; `config show`; provenance |
 | 6. `emberly init` (C-2) | [ ] | materialize `.agents/` defaults; considerate UX (Design §8.1) |
@@ -120,22 +120,27 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 
 ## 3. Resume (§8.2, Tech Spec §3.3, Design §8.3)
 
-- [ ] **Replay:** read `<id>.jsonl`, rebuild the conversation view — messages,
-      tool calls/results — into the engine's `conversation` and the frontend
-      timeline. Assistant/user/tool events map back to `Message`s.
-- [ ] **Compaction as a view transform:** a `compaction` event replaces its
-      `replaced_from..replaced_to` view turns with the summary (as a user-role
-      message) when rebuilding — the JSONL itself is untouched.
-- [ ] **Forward-compat:** a record with `v` newer than `SCHEMA_VERSION`, or an
-      unknown `type`, is **surfaced as a warning and skipped, not a crash**
-      (Tech Spec §3.3). Test with a fixture containing an unknown event.
-- [ ] **`emberly resume [id]`:** with an id, resume that session; without, the
-      most recent in `.agents/sessions/`.
-- [ ] **Offer-on-next-launch (Design §8.3):** on plain `emberly`, if the last
-      session in this project ended abnormally, offer "Found an interrupted
-      session from HH:MM — resume? (y/N)". **Never auto-resume.**
-- [ ] Tests: recorded JSONL fixture → rebuilt view matches expected messages;
-      compaction fixture collapses the right range; unknown-event fixture warns.
+- [x] **Replay:** `resume::read_records` (lenient) → `rebuild_conversation`
+      folds assistant text + following `tool_call`s into one assistant message
+      and `tool_result`s into tool messages. The engine is seeded via
+      `EngineConfig.initial_conversation` (+ `resuming`, which skips a fresh
+      `session_start` and keeps appending to the same file); the frontend
+      timeline is seeded via `App::seed_history`.
+- [x] **Compaction as a view transform:** a `compaction` record truncates the
+      rebuilt messages to `replaced_from` and appends the summary as a user
+      message — the JSONL is untouched. Tested.
+- [x] **Forward-compat:** `read_records` warns-and-skips unknown `type` /
+      newer-`v` lines (never crashes), reporting a newer schema distinctly.
+      Tested with a good + unknown + newer fixture.
+- [x] **`emberly resume [id]`:** id → that session; no id → `latest_session`.
+- [x] **Offer-on-launch (Design §8.3):** interactive launches call
+      `offer_resume` — if the newest session is `interrupted()`, prompt "Found
+      an interrupted session … resume? (y/N)"; only "y" resumes. Never
+      auto-resumes; silent when nothing is interrupted.
+- [x] Tests: `rebuild_conversation` (tool turn), compaction collapse,
+      `interrupted` (clean/crash/kill/empty), `read_records` warn-skip. **E2E
+      smoke:** run → resume appends to the same file (1 `session_start`, 2
+      `session_end`), banner shows "resumed session (N earlier events)".
 
 ---
 

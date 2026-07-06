@@ -12,7 +12,7 @@
 use std::io;
 
 use crossterm::event::Event;
-use emberly_core::FrontendPorts;
+use emberly_core::{FrontendPorts, TranscriptRecord};
 use tokio::sync::mpsc;
 
 use crate::app::{Action, App, SessionInfo};
@@ -20,10 +20,16 @@ use crate::render;
 use crate::terminal::TerminalGuard;
 
 /// Run the rich TUI until the user quits or the engine closes its event stream.
-/// Sets up and tears down the terminal via [`TerminalGuard`] (HC-3).
-pub async fn run(ports: FrontendPorts, session: SessionInfo) -> io::Result<()> {
+/// Sets up and tears down the terminal via [`TerminalGuard`] (HC-3). `history`
+/// seeds the conversation timeline when resuming a session (Tech Spec §3.3).
+pub async fn run(
+    ports: FrontendPorts,
+    session: SessionInfo,
+    history: Vec<TranscriptRecord>,
+) -> io::Result<()> {
     let mut guard = TerminalGuard::enter()?;
     let mut app = App::new(session);
+    app.seed_history(&history);
     app.motion = motion_enabled();
 
     let mut input_rx = spawn_input_reader();

@@ -230,14 +230,27 @@ impl FileTranscript {
     /// Create or open `<dir>/<session>.jsonl` for append, creating `<dir>` if
     /// needed. Nothing is written until the first [`record`](Self::record).
     pub fn create(dir: &Path, session: SessionId) -> std::io::Result<Self> {
-        fs::create_dir_all(dir)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join(format!("{session}.jsonl")))?;
+        Self::open(&dir.join(format!("{session}.jsonl")))
+    }
+
+    /// Open an existing (or new) transcript file for append — the resume path
+    /// (Tech Spec §3.3), which continues writing to the same session file.
+    pub fn open(path: &Path) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("session");
+        let outputs_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{stem}-outputs"));
         Ok(Self {
             file,
-            outputs_dir: dir.join(format!("{session}-outputs")),
+            outputs_dir,
             healthy: true,
         })
     }

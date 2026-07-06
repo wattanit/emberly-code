@@ -60,6 +60,12 @@ pub struct EngineConfig {
     /// Where durable events go. Defaults to [`NoopSink`] via
     /// [`EngineConfig::no_transcript`] for tests that don't assert on it.
     pub transcript: Box<dyn TranscriptSink>,
+    /// Conversation to start from when resuming a session (Tech Spec §3.3);
+    /// empty for a fresh session.
+    pub initial_conversation: Vec<Message>,
+    /// True when resuming an existing transcript: no fresh `session_start` is
+    /// written and the original task is treated as already recorded.
+    pub resuming: bool,
 }
 
 impl EngineConfig {
@@ -128,6 +134,8 @@ pub struct Engine {
     /// Whether the first (pinned, `original_task`) user message has been
     /// recorded — also gates the one-time `session_title`.
     original_task_recorded: bool,
+    /// True when this run resumed an existing transcript (skips `session_start`).
+    resuming: bool,
 }
 
 impl Engine {
@@ -150,7 +158,7 @@ impl Engine {
             retry: config.retry,
             gate: Arc::new(ChannelGate { asks: asks_tx }),
             events_tx,
-            conversation: Vec::new(),
+            conversation: config.initial_conversation,
             session_usage: TokenUsage::default(),
             session_cost_usd: 0.0,
             context_tokens_authoritative: None,
@@ -160,7 +168,9 @@ impl Engine {
             provider_label: config.provider_label,
             sandbox: config.sandbox,
             config_provenance: config.config_provenance,
-            original_task_recorded: false,
+            // On resume the original task already lives in the restored history.
+            original_task_recorded: config.resuming,
+            resuming: config.resuming,
         };
         (engine, asks_rx)
     }
@@ -173,14 +183,20 @@ impl Engine {
         mut commands_rx: mpsc::Receiver<Command>,
         mut asks_rx: mpsc::Receiver<PermissionAsk>,
     ) {
-        self.write_transcript(TranscriptEvent::SessionStart {
-            session_id: self.session_id,
-            provider: self.provider_label.clone(),
-            model: self.model.clone(),
-            project_root: self.project_root.display().to_string(),
-            sandbox: self.sandbox.clone(),
-            config_provenance: self.config_provenance.clone(),
-        });
+        if self.resuming {
+            // Continuing an existing transcript: no fresh session_start, but
+            // surface the restored context size right away (Design §8.4).
+            self.emit_context_usage().await;
+        } else {
+            self.write_transcript(TranscriptEvent::SessionStart {
+                session_id: self.session_id,
+                provider: self.provider_label.clone(),
+                model: self.model.clone(),
+                project_root: self.project_root.display().to_string(),
+                sandbox: self.sandbox.clone(),
+                config_provenance: self.config_provenance.clone(),
+            });
+        }
 
         while let Some(command) = commands_rx.recv().await {
             match command {

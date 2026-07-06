@@ -10,7 +10,7 @@
 
 use std::io::{self, IsTerminal};
 
-use emberly_core::FrontendPorts;
+use emberly_core::{FrontendPorts, TranscriptRecord};
 
 use crate::app::SessionInfo;
 use crate::{line, tui};
@@ -53,10 +53,18 @@ pub fn detect(force_plain: bool) -> FrontendKind {
     decide(force_plain, no_color, term_dumb, io::stdout().is_terminal())
 }
 
-/// Run the selected frontend to completion over `ports`.
-pub async fn run(kind: FrontendKind, ports: FrontendPorts, session: SessionInfo) -> io::Result<()> {
+/// Run the selected frontend to completion over `ports`. `history` seeds the
+/// timeline when resuming (Tech Spec §3.3); it is empty for a fresh session.
+pub async fn run(
+    kind: FrontendKind,
+    ports: FrontendPorts,
+    session: SessionInfo,
+    history: Vec<TranscriptRecord>,
+) -> io::Result<()> {
     match kind {
-        FrontendKind::Rich => tui::run(ports, session).await,
+        FrontendKind::Rich => tui::run(ports, session, history).await,
+        // Line mode notes the resumed-event count in its banner (see the
+        // binary); it does not replay the timeline.
         FrontendKind::Plain => line::run(ports).await,
     }
 }

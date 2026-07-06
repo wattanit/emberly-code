@@ -20,12 +20,13 @@ pub mod engine;
 pub mod event;
 pub mod gate;
 pub mod id;
+pub mod resume;
 pub mod transcript;
 pub mod types;
 
 pub use channels::{channel, channel_with_capacity, EnginePorts, FrontendPorts};
 pub use command::Command;
-pub use emberly_providers::RetryPolicy;
+pub use emberly_providers::{Message, RetryPolicy};
 pub use engine::{Engine, EngineConfig};
 pub use event::UiEvent;
 pub use gate::PermissionAsk;

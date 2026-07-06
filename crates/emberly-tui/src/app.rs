@@ -11,7 +11,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use emberly_core::{
     Command, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus, TokenUsage,
-    ToolCallId, UiEvent,
+    ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
 };
 
 use std::collections::HashMap;
@@ -212,6 +212,67 @@ impl App {
             sidebar_settle: 0,
             theme: Theme::rich(),
         }
+    }
+
+    /// Seed the conversation timeline from a resumed transcript (Tech Spec
+    /// §3.3), so the restored session shows its history rather than a blank
+    /// pane. Maps durable records to display items; non-conversation records
+    /// (session_start/title/permission/end) are skipped.
+    pub fn seed_history(&mut self, records: &[TranscriptRecord]) {
+        for record in records {
+            match &record.event {
+                TranscriptEvent::UserMessage { text, .. } => {
+                    self.conversation.push(ConvItem::User(text.clone()));
+                }
+                TranscriptEvent::AssistantMessage { text } => {
+                    self.conversation.push(ConvItem::Assistant(text.clone()));
+                }
+                TranscriptEvent::ToolCall {
+                    call_id,
+                    tool,
+                    args,
+                } => {
+                    // Reconstruct a readable label from the recorded args.
+                    let summary = args
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .map(|c| format!("run: {c}"))
+                        .or_else(|| {
+                            args.get("path")
+                                .and_then(|v| v.as_str())
+                                .map(|p| format!("{tool} {p}"))
+                        })
+                        .unwrap_or_else(|| tool.clone());
+                    self.conversation.push(ConvItem::Tool {
+                        call_id: call_id.clone(),
+                        tool: tool.clone(),
+                        summary,
+                        done: None,
+                        result: None,
+                        preview: None,
+                    });
+                }
+                TranscriptEvent::ToolResult {
+                    call_id,
+                    ok,
+                    output,
+                    ..
+                } => {
+                    if let Some(ConvItem::Tool { done, preview, .. }) = self.find_tool_mut(call_id)
+                    {
+                        *done = Some(*ok);
+                        *preview = Some(output.clone());
+                    }
+                }
+                TranscriptEvent::Compaction { summary, .. } => {
+                    self.conversation
+                        .push(ConvItem::Notice(format!("compacted — {summary}")));
+                }
+                _ => {}
+            }
+        }
+        // Resumed content scrolls off the top; start pinned to the latest.
+        self.scroll = 0;
     }
 
     /// Fold one engine event into the view-model. Pure over `self` — no I/O — so
