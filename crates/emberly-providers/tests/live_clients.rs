@@ -11,7 +11,7 @@ use emberly_providers::{
 };
 use futures::StreamExt;
 use serde_json::json;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// A reqwest client with the pure-Rust crypto provider installed once. Needed
@@ -227,6 +227,31 @@ async fn openai_streams_text_and_usage() {
             stop_reason: StopReason::EndTurn
         }
     )));
+}
+
+#[tokio::test]
+async fn openai_uses_max_completion_tokens_not_max_tokens() {
+    // Newer OpenAI models reject `max_tokens`; the body must carry
+    // `max_completion_tokens`. If it doesn't, the body matcher won't match,
+    // wiremock 404s, and drain() panics — so this asserts the field name.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("max_completion_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(OPENAI_SSE, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiProvider::new(
+        http_client(),
+        "k",
+        format!("{}/v1", server.uri()),
+        model_info(),
+    );
+    let mut req = sample_request();
+    req.max_output_tokens = Some(256);
+    let events = drain(provider.stream_completion(req).await).await;
+    assert_eq!(text(&events), "Hello world");
 }
 
 const OPENAI_TOOL_SSE: &str = "\

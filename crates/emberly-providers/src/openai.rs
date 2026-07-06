@@ -107,7 +107,10 @@ fn build_body(request: &CompletionRequest) -> Value {
             .collect();
     }
     if let Some(max) = request.max_output_tokens {
-        body["max_tokens"] = json!(max);
+        // Newer OpenAI models (gpt-5.x, o-series) reject the legacy `max_tokens`
+        // and require `max_completion_tokens`; current OpenAI-compatible servers
+        // accept it too (or ignore unknown fields).
+        body["max_completion_tokens"] = json!(max);
     }
     if let Some(temp) = request.temperature {
         body["temperature"] = json!(temp);
