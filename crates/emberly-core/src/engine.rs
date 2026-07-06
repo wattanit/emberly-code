@@ -77,6 +77,9 @@ pub struct EngineConfig {
     /// True when resuming an existing transcript: no fresh `session_start` is
     /// written and the original task is treated as already recorded.
     pub resuming: bool,
+    /// A `/compact` summarization-prompt override (P-7); `None` uses the
+    /// built-in default.
+    pub summary_prompt: Option<String>,
 }
 
 impl EngineConfig {
@@ -150,6 +153,8 @@ pub struct Engine {
     /// Set when `/compact` arrives mid-turn; performed at the next clean
     /// boundary (Tech Spec §7).
     compact_requested: bool,
+    /// Optional `/compact` prompt override (P-7).
+    summary_prompt: Option<String>,
 }
 
 impl Engine {
@@ -186,6 +191,7 @@ impl Engine {
             original_task_recorded: config.resuming,
             resuming: config.resuming,
             compact_requested: false,
+            summary_prompt: config.summary_prompt,
         };
         (engine, asks_rx)
     }
@@ -328,9 +334,10 @@ impl Engine {
     /// purpose-built prompt (Tech Spec §7). Drains the stream collecting text;
     /// tool calls are not offered.
     async fn summarize(&self, messages: &[Message]) -> Result<String, ProviderError> {
+        let prompt = self.summary_prompt.as_deref().unwrap_or(SUMMARY_PROMPT);
         let request = CompletionRequest {
             model: self.model.clone(),
-            system: Some(SUMMARY_PROMPT.to_string()),
+            system: Some(prompt.to_string()),
             messages: vec![Message::user_text(render_for_summary(messages))],
             tools: Vec::new(),
             max_output_tokens: Some(self.provider.model_info().max_output_tokens),

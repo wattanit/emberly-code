@@ -29,7 +29,7 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 | 2. Supervisor completion (HC-3, S-2) | [x] | panic hook + error path append `abnormal_exit` + resume hint; clean-exit summary |
 | 3. Resume (§8.2, §3.3) | [x] | `resume.rs` replay + engine seeding + display seeding; `resume [id]` + offer-on-launch; 5 tests + e2e |
 | 4. Manual `/compact` (§8.3, §7) | [x] | clean-boundary gate; summarize via provider; pinned + keep-recent; fallback truncate; 1 test |
-| 5. Config, prompts & provenance (§7, §8) | [ ] | AGENTS.md/CLAUDE.md; prompt dir + per-family variants; `config show`; provenance |
+| 5. Config, prompts & provenance (§7, §8) | [x] | provenance-tracked load; AGENTS/CLAUDE (+notice); family prompts; `config show`; 5 tests |
 | 6. `emberly init` (C-2) | [ ] | materialize `.agents/` defaults; considerate UX (Design §8.1) |
 | 7. CLI surface & key moments (§10) | [ ] | `init`/`resume`/`config show`/`--model`/`--provider`; session header + clean-exit line |
 | 8. macOS Seatbelt (§6.3, §16) | [ ] | confine children via `sandbox-exec` (no FFI → HC-1); SandboxStatus on macOS |
@@ -174,24 +174,28 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 
 ## 5. Configuration, prompts & provenance (§7, §8; C-1/C-3/C-4/P-7)
 
-- [ ] **Project instructions (C-1):** load `AGENTS.md` (native); if absent, read
-      `CLAUDE.md`; if both present, **AGENTS.md wins with a one-time notice**.
-      Fold into the system prompt as pinned context.
-- [ ] **Prompts directory (C-1, P-7):** markdown prompts overridable in
-      `.agents/prompts/`; per-model-family variants resolve `<name>.<family>.md`
-      then fall back to `<name>.md`. At least the system prompt + the `/compact`
-      summarization prompt live here.
-- [ ] **Provenance tracking (C-3):** while resolving config, record each active
-      non-default piece as `ConfigProvenance { piece, source }`. Feed into the
-      `session_start` transcript event and `config show`.
-- [ ] **`emberly config show`:** print every active piece with its provenance
-      tier (default / global / project / env). Secrets never printed (show
-      "set"/"unset" only).
-- [ ] Session-start header (Design §8.2): silent about defaults; one dimmed
-      provenance line per override.
-- [ ] Tests: AGENTS-wins-over-CLAUDE precedence + notice; family variant
-      resolution + fallback; provenance for a layered config; `config show`
-      output shape; secrets never appear.
+- [x] **Project instructions (C-1):** `load_project_instructions` reads
+      `AGENTS.md` (native); `CLAUDE.md` only when AGENTS.md is absent; both
+      present → AGENTS.md wins with a one-time notice. Folded into the system
+      prompt under a `# Project instructions` heading (pinned; never compacted).
+- [x] **Prompts (C-1, P-7):** `load_prompt` resolves `.agents/prompts/
+      <name>.<family>.md` then `<name>.md`, else the built-in default; `family_of`
+      maps the model (claude / gpt / generic). Covers `system` and `compact`.
+- [x] **Provenance (C-3):** `load` tracks per-field source (env > project >
+      global > default) and records non-default pieces as `ConfigProvenance`.
+      Fed into `session_start` (via `EngineConfig.config_provenance`) and
+      `config show`.
+- [x] **`emberly config show`:** prints values, prompt/instruction sources, an
+      overrides list, and secret status (set/unset — never printed).
+- [x] Session-start header (Design §8.2): plain-mode banner prints one line per
+      override + any notice; silent about pure defaults. (Rich-mode surfacing is
+      a later refinement; the data is in the transcript regardless.)
+- [x] The system prompt + `/compact` prompt override flow to the engine
+      (`EngineConfig.system` + new `summary_prompt`; `summarize` uses it or the
+      built-in default).
+- [x] Tests: AGENTS-wins + notice, CLAUDE fallback + none, family variant +
+      fallback, layered-config provenance + system-prompt assembly. `config
+      show` smoke verified.
 
 ---
 

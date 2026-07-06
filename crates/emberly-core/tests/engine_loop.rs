@@ -70,6 +70,7 @@ fn make_config(
         transcript,
         initial_conversation: Vec::new(),
         resuming: false,
+        summary_prompt: None,
     }
 }
 

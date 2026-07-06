@@ -144,6 +144,17 @@ async fn run() -> anyhow::Result<()> {
                     }
                 }
             }
+            // `emberly config show` (C-3).
+            "config" => match args.next().as_deref() {
+                Some("show") => {
+                    config::show(&std::env::current_dir()?)?;
+                    return Ok(());
+                }
+                other => anyhow::bail!(
+                    "unknown config subcommand: {} (try `config show`)",
+                    other.unwrap_or("(none)")
+                ),
+            },
             other => {
                 anyhow::bail!("unknown argument: {other}");
             }
@@ -232,6 +243,13 @@ async fn run() -> anyhow::Result<()> {
         if resuming {
             println!("resumed session ({} earlier events)", history.len());
         }
+        // Silence about defaults; speech about deviations (Design §8.2).
+        for notice in &resolved.notices {
+            println!("note: {notice}");
+        }
+        for entry in &resolved.provenance {
+            println!("  config: {} <- {}", entry.piece, entry.source);
+        }
         println!("Ctrl-D to exit.");
         println!();
     }
@@ -241,7 +259,7 @@ async fn run() -> anyhow::Result<()> {
         tools: default_registry(),
         project_root,
         model,
-        system: None,
+        system: resolved.system_prompt.clone(),
         truncate: TruncateConfig::default(),
         retry: emberly_core::RetryPolicy::default(),
         session_id,
@@ -254,10 +272,11 @@ async fn run() -> anyhow::Result<()> {
         sandbox: SandboxStatus::Unavailable {
             reason: "no OS sandbox configured yet".into(),
         },
-        config_provenance: Vec::new(),
+        config_provenance: resolved.provenance.clone(),
         transcript,
         initial_conversation,
         resuming,
+        summary_prompt: resolved.summary_prompt.clone(),
     };
 
     let (engine_ports, frontend_ports) = channel();
