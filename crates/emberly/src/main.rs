@@ -28,6 +28,7 @@ use emberly_tools::{default_registry, TruncateConfig};
 use emberly_tui::{frontend, SessionInfo};
 
 mod config;
+mod init;
 mod placeholder;
 mod provider_setup;
 use placeholder::PlaceholderProvider;
@@ -143,6 +144,11 @@ async fn run() -> anyhow::Result<()> {
                         resume_id = args.next();
                     }
                 }
+            }
+            // `emberly init` — materialize `.agents/` defaults (C-2).
+            "init" => {
+                init::init(&std::env::current_dir()?)?;
+                return Ok(());
             }
             // `emberly config show` (C-3).
             "config" => match args.next().as_deref() {

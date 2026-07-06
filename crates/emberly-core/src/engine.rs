@@ -39,9 +39,10 @@ const TITLE_CLIP: usize = 60;
 /// keep_recent_turns`, default 6 — Tech Spec §7; config wiring is group 5).
 const KEEP_RECENT: usize = 6;
 
-/// The purpose-built summarization prompt for `/compact` (Tech Spec §7). Made
-/// overridable from the prompts directory in group 5.
-const SUMMARY_PROMPT: &str = "You are compacting a coding session's context. \
+/// The purpose-built summarization prompt for `/compact` (Tech Spec §7).
+/// Overridable from the prompts directory (P-7); `emberly init` materializes
+/// this text as the editable default.
+pub const SUMMARY_PROMPT: &str = "You are compacting a coding session's context. \
 Summarize the conversation so work can continue with less context, covering, \
 concisely and factually: the original task, key decisions made, files created \
 or modified and how, the current state, and the next steps. No preamble.";

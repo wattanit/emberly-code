@@ -30,7 +30,7 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 | 3. Resume (§8.2, §3.3) | [x] | `resume.rs` replay + engine seeding + display seeding; `resume [id]` + offer-on-launch; 5 tests + e2e |
 | 4. Manual `/compact` (§8.3, §7) | [x] | clean-boundary gate; summarize via provider; pinned + keep-recent; fallback truncate; 1 test |
 | 5. Config, prompts & provenance (§7, §8) | [x] | provenance-tracked load; AGENTS/CLAUDE (+notice); family prompts; `config show`; 5 tests |
-| 6. `emberly init` (C-2) | [ ] | materialize `.agents/` defaults; considerate UX (Design §8.1) |
+| 6. `emberly init` (C-2) | [x] | materializes `.agents/` (config/prompts/permissions/.gitignore); no-clobber; 2 tests |
 | 7. CLI surface & key moments (§10) | [ ] | `init`/`resume`/`config show`/`--model`/`--provider`; session header + clean-exit line |
 | 8. macOS Seatbelt (§6.3, §16) | [ ] | confine children via `sandbox-exec` (no FFI → HC-1); SandboxStatus on macOS |
 | 9. Release pipeline (§13) | [ ] | musl x86_64/aarch64 + aarch64-darwin; name-collision + `--plain` smoke |
@@ -201,19 +201,18 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 
 ## 6. `emberly init` (C-2, Design §8.1)
 
-- [ ] Materialize active defaults into `.agents/`: `config.toml` (commented),
-      `prompts/` (the built-in prompts), and — reserving the pattern —
-      `permissions.toml` (the Phase 2 rule file, written as a documented default
-      even though the rule engine is Phase 2). Never overwrite existing files
-      without consent.
-- [ ] **UX (Design §8.1):** print exactly what it created, where, and the one
-      next command worth knowing. No walls of text — "a considerate colleague,
-      not an installer wizard."
-- [ ] `.gitignore` guidance: `.agents/sessions/` (transcripts) should be ignored
-      by default; `.agents/config.toml`/prompts are shareable. Init writes/append
-      a `.agents/.gitignore` accordingly.
-- [ ] Tests: init into a temp dir creates the expected tree; re-running is safe
-      (no clobber); the printed summary lists what was made.
+- [x] `init.rs` materializes `.agents/`: `config.toml` (commented), `prompts/
+      {system,compact}.md` (the baked-in defaults — `DEFAULT_SYSTEM_PROMPT` +
+      `emberly_core::SUMMARY_PROMPT`, now public/DRY), `permissions.toml`
+      (documented Phase-2 rule-file template, reserving the pattern), and
+      `.agents/.gitignore`. `write_if_absent` never clobbers.
+- [x] **UX (Design §8.1):** lists exactly what was created (paths relative to
+      the root) + one next command; "Nothing to do" when already set up.
+- [x] `.agents/.gitignore` ignores `sessions/` (transcripts local); config +
+      prompts stay shareable.
+- [x] `init` subcommand wired in `main.rs`. Tests: creates the expected tree
+      (+ system prompt is the default); re-run preserves an existing file while
+      still creating the rest. Idempotent smoke verified.
 
 ---
 
