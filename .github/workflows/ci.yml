@@ -44,6 +44,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build (static musl)
         run: cargo build --workspace --target x86_64-unknown-linux-musl
+      # HC-2: no C crypto/TLS in the actual build graph. Checks the resolved
+      # graph (not Cargo.lock, which records dormant optional deps like the
+      # `ring` feature of rustls-webpki that we never enable). TLS is pure-Rust
+      # rustls + rustls-rustcrypto.
+      - name: No C crypto in the build graph (HC-2)
+        run: |
+          if cargo tree --workspace -e normal --target all --prefix none \
+              | awk '{print $1}' | sort -u \
+              | grep -iqxE '(ring|openssl|openssl-sys|native-tls|aws-lc-rs|aws-lc-sys)'; then
+            echo "HC-2 violation: a C crypto/TLS crate is in the build graph"
+            exit 1
+          fi
+          echo "ok — build graph is C-crypto-free"
 
   # Dependency policy (Requirements §10, Tech Spec §12): advisories, licenses,
   # duplicate/source checks, and the C-dependency ban in deny.toml.

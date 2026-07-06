@@ -24,14 +24,17 @@ the Phase 1 engine from a placeholder demo into something that actually codes.
 | 3. OpenAI-compatible client | [x] | 2 mock tests; covers Ollama/vLLM (P-2) |
 | 4. Retry & failure policy | [x] | 3 retry unit + 3 engine tests |
 | 5. Token & cost accounting | [ ] | wires real ContextUsage/CostEstimate |
-| 6. Secrets & configuration | [ ] | env-first, keys.toml 0600, redaction |
-| 7. Binary wiring & provider selection | [ ] | replaces PlaceholderProvider; **TLS decision** |
-| 8. Tests & live smoke (exit criterion) | [ ] | unit+mock in CI; live keyed |
+| 6. Secrets & configuration | [~] | env config done; keys.toml/config.toml/redaction remain |
+| 7. Binary wiring & provider selection | [x] | pure-Rust TLS; replaces placeholder |
+| 8. Tests & live smoke (exit criterion) | [ ] | unit+mock done; live keyed remains |
 
-**Overall Phase 3: groups 0–4 done (2026-07-06); 67 workspace tests green.**
-Groups 5–8 remain. **The TLS/crypto backend decision (HC-2) is deferred to
-group 7** — provider clients take an injected `reqwest::Client`, so everything
-so far is C-free and tested over plain HTTP; real HTTPS use needs that call.
+**Overall Phase 3: groups 0–4 + 7 done, 6 partial (2026-07-06); 67 tests green.**
+**TLS decision RESOLVED (owner): pure-Rust `rustls` + `rustls-rustcrypto`**
+(alpha, tracked for v1). Verified the actual build graph is C-crypto-free (no
+`ring`/`aws-lc`); a CI step guards HC-2. `emberly` now selects a live provider
+from `EMBERLY_PROVIDER`/`EMBERLY_MODEL` + API key and talks real HTTPS.
+**Remaining: group 5 (accounting), rest of 6 (keys.toml/config file/redaction),
+group 8 (live keyed smoke — needs your API key).**
 
 ---
 
@@ -140,8 +143,20 @@ unit- or mock-tested with no API key and runs in CI:
       auth headers **redacted** (matters once transcripts land in Phase 5 —
       keep the redaction seam now).
 
-## 7. Binary wiring & provider selection  *(P-2, P-3)*
+## 7. Binary wiring & provider selection  *(P-2, P-3)* — DONE
 
+- [x] **Pure-Rust TLS (owner decision):** reqwest `rustls-tls-webpki-roots-
+      no-provider` (rustls **without** ring) + `rustls-rustcrypto` provider
+      installed at startup (`provider_setup::build_https_client`). Build graph
+      verified C-crypto-free; CI HC-2 guard added. Alpha crate, tracked for v1.
+- [x] `provider_setup::select_provider`: builds Anthropic / OpenAI-compat from
+      `EMBERLY_PROVIDER` + `EMBERLY_MODEL` + key (+ `EMBERLY_BASE_URL`,
+      `EMBERLY_CONTEXT_WINDOW`, `EMBERLY_MAX_OUTPUT`). Unset → offline
+      placeholder. Verified end-to-end (real client builds, retries, fails
+      gracefully against a bogus endpoint — no panic).
+- [x] Clear behavior when unconfigured: offline placeholder with a hint line.
+
+### Historic (superseded — TLS resolved here, not deferred)
 - [ ] Replace `PlaceholderProvider` selection: build the real provider from
       config/flags — `--provider`, `--model`, base URL, key.
 - [ ] Clear failure when no provider/key is configured (harness voice, next

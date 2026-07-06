@@ -14,6 +14,18 @@ use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// A reqwest client with the pure-Rust crypto provider installed once. Needed
+/// because under `--workspace` reqwest's rustls feature is unified on, so even
+/// a plain-HTTP client's construction configures TLS.
+fn http_client() -> reqwest::Client {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls_rustcrypto::provider().install_default();
+    });
+    reqwest::Client::new()
+}
+
 fn model_info() -> ModelInfo {
     ModelInfo {
         model: "test-model".into(),
@@ -85,12 +97,7 @@ async fn anthropic_streams_text_and_usage() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(
-        reqwest::Client::new(),
-        "test-key",
-        server.uri(),
-        model_info(),
-    );
+    let provider = AnthropicProvider::new(http_client(), "test-key", server.uri(), model_info());
     let events = drain(provider.stream_completion(sample_request()).await).await;
 
     assert_eq!(text(&events), "Hello สวัสดี");
@@ -134,7 +141,7 @@ async fn anthropic_streams_tool_call() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(reqwest::Client::new(), "k", server.uri(), model_info());
+    let provider = AnthropicProvider::new(http_client(), "k", server.uri(), model_info());
     let mut req = sample_request();
     req.tools = vec![ToolSchema {
         name: "read_file".into(),
@@ -171,8 +178,7 @@ async fn anthropic_maps_auth_error() {
         .mount(&server)
         .await;
 
-    let provider =
-        AnthropicProvider::new(reqwest::Client::new(), "bad", server.uri(), model_info());
+    let provider = AnthropicProvider::new(http_client(), "bad", server.uri(), model_info());
     match provider.stream_completion(sample_request()).await {
         Err(ProviderError::Auth) => {}
         other => panic!("expected auth error, got {:?}", other.err()),
@@ -204,7 +210,7 @@ async fn openai_streams_text_and_usage() {
         .await;
 
     let provider = OpenAiProvider::new(
-        reqwest::Client::new(),
+        http_client(),
         "test-key",
         format!("{}/v1", server.uri()),
         model_info(),
@@ -244,7 +250,7 @@ async fn openai_streams_tool_call_across_chunks() {
         .await;
 
     let provider = OpenAiProvider::new(
-        reqwest::Client::new(),
+        http_client(),
         "k",
         format!("{}/v1", server.uri()),
         model_info(),
