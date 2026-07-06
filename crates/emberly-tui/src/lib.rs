@@ -14,6 +14,7 @@ pub mod app;
 pub mod editor;
 pub mod frontend;
 pub mod line;
+pub mod render;
 pub mod strings;
 pub mod terminal;
 pub mod text;

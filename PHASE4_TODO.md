@@ -27,7 +27,7 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 | 1. Frontend abstraction & terminal lifecycle | [x] | seam + RAII guard + panic-safe restore (HC-3); loop + view-model; PTY-verified |
 | 2. Centralized theme & string table | [x] | theme.rs (named roles + reserved safety band) + strings.rs; 3 theme tests |
 | 3. Grapheme-aware text engine + line editor | [x] | text.rs + editor.rs; Thai stacked-mark fixtures; 16 tests; expect-verified |
-| 4. Layout: main pane + sidebar + status bar | [ ] | auto-collapse <100 cols (Design §3) |
+| 4. Layout: main pane + sidebar + status bar | [x] | render.rs: two-pane + sidebar + status; auto-collapse <100; scrollback; bash:bash fixed |
 | 5. Markdown subset + syntax highlighting | [ ] | first-party md; syntect fancy-regex (Design §4.1) |
 | 6. Diffs first-class (inline + overlay) | [ ] | own both sides; `/view` `$EDITOR` hatch (Design §4.2–§4.3) |
 | 7. The permission prompt | [ ] | **the most important screen** (Design §5) |
@@ -170,27 +170,31 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 
 ## 4. Layout: main pane + sidebar + status bar  *(Design §3; Tech Spec §9)*
 
-- [ ] **Main pane** — the conversation: user prompts, assistant text (group 5),
-      tool activity, diffs (group 6), permission prompts (group 7). Owns
-      scrollback (PageUp/Down, wheel). Fold in the known **`> bash: bash`**
-      cosmetic fix here: tool-activity lines render `verb + summary`, not a
-      redundant `tool: tool` label.
-- [ ] **Right sidebar** (fixed width, collapsible keybinding), in order:
-      wordmark + version · session title (renamable) · project root (`~`-abbrev)
-      · model block (provider/model, context %, session cost "est.", sandbox
-      status — dimmed when confined, warning styling + reason when degraded) ·
-      **modified files** (path + `+adds/-dels`, selectable → cumulative diff
-      overlay, group 6). Extension sections (MCP/LSP/Skills) absent in v1 —
-      reserve the pattern, not empty stubs.
-- [ ] **Status bar** (bottom, one line): current mode · context % · 3–5
-      contextual keybinding hints (dimmed), hints change with state (e.g. the
-      permission prompt's keys while it's open).
-- [ ] **Auto-collapse below 100 columns** (Tech Spec §9): sidebar hides;
-      context % and mode migrate to the status line. Everything in the sidebar
-      also reachable via commands (`/files`, `/session`) so nothing is
-      sidebar-exclusive (Design §3.2).
-- [ ] Box-drawing minimal: section dividers + the sidebar separator only;
-      content never trapped in full boxes (Design §2).
+- [x] **Main pane** — conversation with user prompts, assistant text, tool
+      activity, notices; permission prompt takes over the pane (group 7 makes
+      it scrollable). **Scrollback** via PageUp/PageDown over rows pre-wrapped
+      through the text engine (exact row math); a dim "↓ more" hint when
+      scrolled up; jumps to bottom on submit. Mouse-wheel deferred (needs mouse
+      capture, which fights terminal selection — noted). **`bash: bash` fixed**:
+      tool rows render the summary verb phrase with no redundant `tool:` prefix.
+- [x] **Right sidebar** (`render_sidebar`, width 32, Ctrl-B toggles): wordmark +
+      version · session title (or "untitled session") · `~`-abbreviated root ·
+      model block (provider/model, context % with warn/error colour ≥75/≥90,
+      cost "est." when known, sandbox status — dim confined / warning
+      partial+unavailable / "—" unknown) · **modified files** (path fit to
+      width + green `+adds` / red `-dels`, or "—"). Extension sections omitted,
+      not stubbed.
+- [x] **Status bar** (bottom, full width): mode · context % · state-dependent
+      hints (permission keys while a prompt is open).
+- [x] **Auto-collapse below 100 columns**: sidebar hidden; context % and mode
+      remain on the status bar (their only home when collapsed). Reaching the
+      rest by command is group 8 (`/files`, `/session`).
+- [x] Box-drawing minimal: conversation/input use a border block; the sidebar
+      uses a single LEFT separator; content is never trapped in a full box.
+- [x] Rendering moved to a dedicated `render` module (pure over `&App`); `tui`
+      is now just the driver. 4 render unit tests (fit/ellipsis, cluster-aware
+      fit, `~` abbreviation, conversation wrap row count). Visually verified via
+      a 120-col PTY smoke (sidebar shown, streamed reply, clean exit + restore).
 
 ---
 

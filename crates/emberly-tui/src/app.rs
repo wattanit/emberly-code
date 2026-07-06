@@ -17,6 +17,9 @@ use emberly_core::{
 use crate::editor::LineEditor;
 use crate::theme::Theme;
 
+/// Rows the conversation scrolls per PageUp/PageDown.
+const SCROLL_STEP: usize = 5;
+
 /// One rendered item in the conversation flow. Group 5 enriches assistant text
 /// with the markdown pass; group 6 adds diffs.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +90,10 @@ pub struct App {
     /// the prompt owns the screen and normal input is suspended (Design §5).
     pub pending_permission: Option<(PermissionId, PermissionRendering)>,
     pub sidebar_visible: bool,
+    /// Conversation scrollback offset in rows *from the bottom*: 0 follows the
+    /// latest output; larger values scroll up into history. Clamped to content
+    /// at render time (Design §3.1 — the main pane owns scrollback).
+    pub scroll: usize,
     /// The active theme (Design §2). One source the renderer reads; swapping it
     /// (mode/light-fallback later) is a value change, not a refactor.
     pub theme: Theme,
@@ -109,6 +116,7 @@ impl App {
             modified_files: Vec::new(),
             pending_permission: None,
             sidebar_visible: true,
+            scroll: 0,
             theme: Theme::rich(),
         }
     }
@@ -266,9 +274,21 @@ impl App {
             // plain Enter submits.
             KeyCode::Enter if shift => self.edit(|e| e.newline()),
             KeyCode::Enter => match self.editor.submit() {
-                Some(text) => Action::Command(Command::UserInput { text }),
+                Some(text) => {
+                    self.scroll = 0; // jump back to the latest output
+                    Action::Command(Command::UserInput { text })
+                }
                 None => Action::None,
             },
+            // Scroll the conversation history.
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_add(SCROLL_STEP);
+                Action::None
+            }
+            KeyCode::PageDown => {
+                self.scroll = self.scroll.saturating_sub(SCROLL_STEP);
+                Action::None
+            }
             KeyCode::Backspace => self.edit(|e| e.backspace()),
             KeyCode::Delete => self.edit(|e| e.delete()),
             KeyCode::Left if ctrl => self.edit(|e| e.word_left()),
