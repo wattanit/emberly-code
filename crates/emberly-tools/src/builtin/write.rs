@@ -41,6 +41,12 @@ impl Tool for WriteFileTool {
         }
     }
 
+    fn describe(&self, args: &Value) -> Option<String> {
+        serde_json::from_value::<WriteArgs>(args.clone())
+            .ok()
+            .map(|a| format!("write {}", a.path))
+    }
+
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: WriteArgs = match serde_json::from_value(args) {
             Ok(a) => a,
@@ -101,6 +107,7 @@ impl Tool for WriteFileTool {
         }
 
         let (adds, dels) = line_deltas(&old, &args.content);
+        let diff = unified_diff(&rel, &old, &args.content);
         ToolOutcome::success(
             format!("Wrote {rel} (+{adds} -{dels})."),
             format!("wrote {rel} (+{adds} -{dels})"),
@@ -109,6 +116,7 @@ impl Tool for WriteFileTool {
             path: rel,
             adds,
             dels,
+            diff: Some(diff),
         })
     }
 }

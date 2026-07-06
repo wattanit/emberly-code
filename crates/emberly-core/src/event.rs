@@ -26,6 +26,11 @@ pub enum UiEvent {
     /// The assistant's turn finished streaming (no more deltas for this turn).
     AssistantDone,
 
+    /// The whole turn is complete and the engine is idle again (the model
+    /// stopped without more tool calls, or the turn errored/was canceled). Lets
+    /// a frontend stop its "working" affordance (Design §6.3). One per turn.
+    TurnEnded,
+
     /// A tool began executing.
     ToolStarted {
         call_id: ToolCallId,
@@ -35,11 +40,14 @@ pub enum UiEvent {
     },
     /// A tool finished. `ok` distinguishes a success payload from a structured
     /// failure payload — both are normal data to the model (HC-6), never a
-    /// harness error.
+    /// harness error. `preview` is a short, already-truncated excerpt of the
+    /// result for the conversation, so the user sees what the tool produced
+    /// (Design §6.1) without the frontend holding the full output.
     ToolFinished {
         call_id: ToolCallId,
         ok: bool,
         summary: String,
+        preview: String,
     },
 
     /// The engine needs a permission decision before proceeding. The frontend
@@ -58,6 +66,11 @@ pub enum UiEvent {
     /// Running session cost estimate (Requirements P-6, Design §3.1). Always
     /// labeled "est." in the UI. Emitted from Phase 3 onward.
     CostEstimate { usage: TokenUsage, usd: f64 },
+
+    /// Cumulative billed tokens this session (input + output). Emitted on every
+    /// accounting update regardless of whether a pricing table exists, so the
+    /// sidebar can always show a session total (Design §3.1).
+    SessionUsage { usage: TokenUsage },
 
     /// Sandbox status changed or was (re)probed (Requirements §6.7). Emitted
     /// from Phase 2 onward.
@@ -97,6 +110,12 @@ pub enum UiEvent {
     /// A file was created or changed this session, with line deltas, for the
     /// sidebar's modified-files list (Design §3.1).
     FileModified { path: String, adds: u32, dels: u32 },
+
+    /// The unified diff of a file change, for inline display and the diff
+    /// overlay (Design §4.2). Emitted alongside [`UiEvent::FileModified`] when
+    /// the tool supplied a diff. Separate from `FileModified` so a frontend
+    /// that only wants line counts can ignore it.
+    FileDiff { path: String, unified: String },
 
     /// Progress/outcome of a `/compact` operation (Requirements §8.3). Emitted
     /// from Phase 5 onward.

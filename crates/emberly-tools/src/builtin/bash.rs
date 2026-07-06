@@ -123,6 +123,12 @@ impl Tool for BashTool {
         }
     }
 
+    fn describe(&self, args: &Value) -> Option<String> {
+        serde_json::from_value::<BashArgs>(args.clone())
+            .ok()
+            .map(|a| summarize(&a.command))
+    }
+
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: BashArgs = match serde_json::from_value(args) {
             Ok(a) => a,

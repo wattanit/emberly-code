@@ -11,9 +11,20 @@ authors.workspace = true
 # Internal (tui -> core only; nothing depends on tui).
 emberly-core = { path = "../emberly-core" }
 
-# External. The Phase 1 line-mode frontend needs only stdio + channels;
-# ratatui/crossterm/syntect/unicode-* arrive with the full TUI in Phase 4.
-tokio = { workspace = true, features = ["io-std", "io-util", "macros", "sync", "rt"] }
+# External. The line-mode frontend needs only stdio + channels; the rich TUI
+# (Phase 4) adds ratatui + grapheme-aware text + syntax highlighting. crossterm
+# is used via ratatui's re-export (`ratatui::crossterm`) — not declared here —
+# so exactly one crossterm version is in the graph.
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "sync", "rt", "time"] }
+ratatui = { workspace = true }
+# crossterm pinned to ratatui's version (0.28) so feature unification yields a
+# single copy in the graph — not a duplicate. We need `events` (read key/resize)
+# and `bracketed-paste` (paste as one event, group 3), which are not implied by
+# ratatui's backend use. Used directly (`crossterm::…`) for the input reader.
+crossterm = { workspace = true }
+syntect = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

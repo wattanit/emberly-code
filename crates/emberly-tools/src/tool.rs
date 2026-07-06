@@ -36,6 +36,10 @@ pub struct FileChange {
     pub path: String,
     pub adds: u32,
     pub dels: u32,
+    /// A unified diff of this change (we own both sides — no external diff
+    /// binary), for the frontend to render inline and in the diff overlay
+    /// (Design §4.2). `None` when a tool reports a change without one.
+    pub diff: Option<String>,
 }
 
 /// The result of running a tool, always handed to the model as data (HC-6).
@@ -106,6 +110,15 @@ impl ToolOutcome {
 pub trait Tool: Send + Sync {
     /// The tool's name, description, and argument schema.
     fn spec(&self) -> ToolSpec;
+
+    /// A one-line, human-readable description of *this* invocation, from its
+    /// arguments — e.g. `run: cargo test`, `read src/main.rs`. Shown as the
+    /// tool-activity label the moment a call starts, before any output exists
+    /// (Design §6.3). Defaults to `None`, and the engine falls back to the
+    /// tool's name.
+    fn describe(&self, _args: &Value) -> Option<String> {
+        None
+    }
 
     /// Run the tool. Any error is returned as a failure [`ToolOutcome`], never
     /// as `Err` (HC-6). Actions requiring permission must go through

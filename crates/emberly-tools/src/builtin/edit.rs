@@ -46,6 +46,12 @@ impl Tool for EditFileTool {
         }
     }
 
+    fn describe(&self, args: &Value) -> Option<String> {
+        serde_json::from_value::<EditArgs>(args.clone())
+            .ok()
+            .map(|a| format!("edit {}", a.path))
+    }
+
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: EditArgs = match serde_json::from_value(args) {
             Ok(a) => a,
@@ -129,6 +135,7 @@ impl Tool for EditFileTool {
         }
 
         let (adds, dels) = line_deltas(&content, &new_content);
+        let diff = unified_diff(&rel, &content, &new_content);
         ToolOutcome::success(
             format!("Edited {rel} (+{adds} -{dels})."),
             format!("edited {rel} (+{adds} -{dels})"),
@@ -137,6 +144,7 @@ impl Tool for EditFileTool {
             path: rel,
             adds,
             dels,
+            diff: Some(diff),
         })
     }
 }

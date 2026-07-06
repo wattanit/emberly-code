@@ -35,12 +35,28 @@ impl LineRenderer {
             UiEvent::ToolStarted { tool, summary, .. } => {
                 writeln!(out, "\n> {tool}: {summary}")?;
             }
-            UiEvent::ToolFinished { ok, summary, .. } => {
+            UiEvent::ToolFinished {
+                ok,
+                summary,
+                preview,
+                ..
+            } => {
                 let tag = if *ok { "ok" } else { "FAILED" };
                 writeln!(out, "  [{tag}] {summary}")?;
+                // Show the result excerpt, indented, so the plain frontend also
+                // says what the tool produced (Design §6.1).
+                for line in preview.lines() {
+                    writeln!(out, "    {line}")?;
+                }
             }
             UiEvent::FileModified { path, adds, dels } => {
                 writeln!(out, "  ~ {path} (+{adds} -{dels})")?;
+            }
+            UiEvent::FileDiff { unified, .. } => {
+                // The +/- prefixes carry the change without colour (Design §7).
+                for line in unified.lines() {
+                    writeln!(out, "  {line}")?;
+                }
             }
             UiEvent::PermissionRequest { rendering, .. } => {
                 self.render_permission(rendering, out)?
@@ -58,7 +74,7 @@ impl LineRenderer {
             } => {
                 writeln!(
                     out,
-                    "  … retrying ({attempt}/{max_attempts}) in {delay_ms}ms — {reason}"
+                    "  ... retrying ({attempt}/{max_attempts}) in {delay_ms}ms - {reason}"
                 )?;
             }
             UiEvent::SessionMeta {
@@ -88,21 +104,32 @@ impl LineRenderer {
         rendering: &PermissionRendering,
         out: &mut impl Write,
     ) -> io::Result<()> {
+        use crate::strings::permission as p;
         writeln!(out)?;
         if rendering.outside_root {
-            writeln!(out, "!! THIS ACTION AFFECTS FILES OUTSIDE YOUR PROJECT !!")?;
+            // Capitalised banner carries the meaning colour would in rich mode
+            // (Design §7); shared verbatim with the TUI for parity.
+            writeln!(out, "!! {} !!", p::OUTSIDE_ROOT_BANNER)?;
         }
-        writeln!(out, "PERMISSION REQUIRED: {}", rendering.summary)?;
-        writeln!(out, "  why: {}", rendering.reason)?;
+        writeln!(out, "{}: {}", p::HEADING, rendering.summary)?;
+        writeln!(out, "  {}: {}", p::WHY_LABEL, rendering.reason)?;
         if !rendering.affected_paths.is_empty() {
-            writeln!(out, "  paths: {}", rendering.affected_paths.join(", "))?;
+            writeln!(
+                out,
+                "  {}: {}",
+                p::PATHS_LABEL,
+                rendering.affected_paths.join(", ")
+            )?;
         }
         writeln!(out, "--- details ---")?;
         writeln!(out, "{}", rendering.detail.trim_end())?;
         writeln!(out, "---------------")?;
         writeln!(
             out,
-            "Allow?  [y] allow once   [s] allow this session   [Enter] DENY"
+            "Allow?  [y] {}   [s] {}   [Enter] {}",
+            p::ALLOW_ONCE,
+            p::ALLOW_SESSION,
+            p::DENY
         )?;
         Ok(())
     }
@@ -208,17 +235,66 @@ mod tests {
     }
 
     #[test]
+    fn file_diff_shows_plus_minus_prefixes() {
+        let out = render_to_string(&UiEvent::FileDiff {
+            path: "a.rs".into(),
+            unified: "--- a/a.rs\n+++ b/a.rs\n-old\n+new".into(),
+        });
+        assert!(out.contains("-old"), "deletions carry a - prefix");
+        assert!(out.contains("+new"), "additions carry a + prefix");
+    }
+
+    #[test]
+    fn degraded_output_has_no_ansi_escapes() {
+        // Degraded mode is colourless and append-only: no ANSI/cursor control
+        // ever reaches the stream (Design §7).
+        let events = [
+            UiEvent::AssistantDelta {
+                text: "สวัสดี".into(),
+            },
+            UiEvent::ToolStarted {
+                call_id: ToolCallId::new("c"),
+                tool: "bash".into(),
+                summary: "run: ls".into(),
+            },
+            UiEvent::ToolFinished {
+                call_id: ToolCallId::new("c"),
+                ok: true,
+                summary: "exit 0".into(),
+                preview: "total 0".into(),
+            },
+            UiEvent::FileDiff {
+                path: "a".into(),
+                unified: "-x\n+y".into(),
+            },
+            UiEvent::Retrying {
+                attempt: 1,
+                max_attempts: 3,
+                delay_ms: 500,
+                reason: "429".into(),
+            },
+        ];
+        for e in events {
+            let s = render_to_string(&e);
+            assert!(!s.contains('\u{1b}'), "no ANSI escape in {s:?}");
+        }
+    }
+
+    #[test]
     fn tool_finished_shows_status() {
         let ok = render_to_string(&UiEvent::ToolFinished {
             call_id: ToolCallId::new("c1"),
             ok: true,
             summary: "wrote a.txt".into(),
+            preview: "done".into(),
         });
         assert!(ok.contains("[ok]"));
+        assert!(ok.contains("done"), "preview shown in degraded mode");
         let failed = render_to_string(&UiEvent::ToolFinished {
             call_id: ToolCallId::new("c1"),
             ok: false,
             summary: "denied".into(),
+            preview: String::new(),
         });
         assert!(failed.contains("[FAILED]"));
     }
