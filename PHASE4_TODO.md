@@ -24,7 +24,7 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 | Group | Status | Notes |
 |---|---|---|
 | 0. Prerequisites & dependencies | [x] | ratatui 0.29 / syntect 5.3 (fancy-regex) / unicode-*; HC-2 verified C-free |
-| 1. Frontend abstraction & terminal lifecycle | [ ] | `Frontend` trait, raw-mode/alt-screen guard, panic-safe restore (HC-3) |
+| 1. Frontend abstraction & terminal lifecycle | [x] | seam + RAII guard + panic-safe restore (HC-3); loop + view-model; PTY-verified |
 | 2. Centralized theme & string table | [ ] | one theme file, one strings module (Design §2, §6.2) |
 | 3. Grapheme-aware text engine + line editor | [ ] | Thai width/wrap/cursor; the input box (Tech Spec §9) |
 | 4. Layout: main pane + sidebar + status bar | [ ] | auto-collapse <100 cols (Design §3) |
@@ -92,26 +92,33 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 
 ## 1. Frontend abstraction & terminal lifecycle  *(A-1; HC-3; Design §7; Tech Spec §9, §10)*
 
-- [ ] Define a `Frontend` seam so line-mode and the rich TUI are two
-      implementations over the same `FrontendPorts` (A-1 — the second frontend
-      consuming the same events is the whole point). Line mode stays as the
-      degraded/`--plain`/headless path.
-- [ ] **Terminal guard (RAII):** enter raw mode + alternate screen + hide
-      cursor + enable bracketed paste on construct; restore all on `Drop`.
-- [ ] **Panic-safe restore (HC-3):** `main.rs` panic hook restores the terminal
-      *before* printing the calm bug notice. Verify manually: force a panic and
-      confirm the shell is usable afterward. (Transcript flush still Phase 5;
-      leave the marker.)
-- [ ] Frontend selection in `main.rs`: rich TUI by default; line mode when
-      `--plain`, `NO_COLOR`, `TERM=dumb`, or non-tty stdout (group 10 finalizes
-      the predicate). One place decides.
-- [ ] Main event loop: `select!` over engine `UiEvent`s, crossterm input
-      events, and the animation tick (group 9). Never blocks the engine; input
-      handling is never delayed by a redraw or a frame.
-- [ ] Local view-model struct: conversation log, sidebar state (session meta,
-      context %, cost, sandbox, mode, modified files), status/mode, overlay
-      stack, palette state. Updated from events; the single source the renderer
-      reads.
+- [x] `Frontend` seam: `frontend::{FrontendKind, detect, run}` dispatches to the
+      rich TUI (`tui::run`) or line-mode (`line::run`) over the same
+      `FrontendPorts` (A-1). Line mode is retained as the degraded/headless path.
+- [x] **Terminal guard (RAII):** `terminal::TerminalGuard::enter()` enters raw
+      mode + alternate screen + hides the cursor + enables bracketed paste;
+      `Drop` calls `restore_terminal()`. PTY smoke confirmed the exact enter/
+      leave escape sequences (`1049h/2004h/25l` up, `2004l/1049l/25h` down).
+- [x] **Panic-safe restore (HC-3):** the guard installs a panic hook that calls
+      `restore_terminal()` *before* the binary's existing hook prints the calm
+      bug notice — so the message lands on a usable terminal, not inside the
+      cleared alternate screen. Same restore fn as `Drop`; idempotent, so the
+      "hook + unwind Drop" double-call is safe. (Live forced-panic check folded
+      into group 11's manual smoke; transcript flush still Phase 5 — marker
+      kept.)
+- [x] Frontend selection in `main.rs`: `frontend::detect(force_plain)` — rich by
+      default; line mode on `--plain`, `NO_COLOR`, `TERM=dumb`, or non-tty
+      stdout. One place decides; group 10 finalizes/tests the predicate. Banner
+      printed only in plain mode (the alt screen would wipe it in rich mode).
+- [x] Main event loop: `select!` over engine `UiEvent`s and terminal input
+      (read on a dedicated OS thread → channel, since `crossterm::event::read`
+      blocks). Redraw on event/input/resize; never blocks the engine. The
+      animation-tick arm is added in group 9.
+- [x] Local view-model (`app::App`): session meta, conversation log, streaming
+      flag, input buffer, context %/cost, sandbox, mode, modified files, pending
+      permission, sidebar visibility. Updated by the pure `apply_event` reducer;
+      6 reducer/input unit tests (accumulate deltas, tool-finish correlation,
+      modified-file upsert, permission deny-default + deliberate-allow, submit).
 
 ---
 

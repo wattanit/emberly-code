@@ -18,7 +18,7 @@ use std::sync::Arc;
 use emberly_core::{channel, Engine, EngineConfig};
 use emberly_providers::Provider;
 use emberly_tools::{default_registry, TruncateConfig};
-use emberly_tui::line;
+use emberly_tui::{frontend, SessionInfo};
 
 mod config;
 mod placeholder;
@@ -50,15 +50,16 @@ fn install_panic_hook() {
 }
 
 async fn run() -> anyhow::Result<()> {
+    let mut force_plain = false;
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--version" => {
                 println!("emberly {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
-            // `--plain` is the only mode in Phase 1; accept it as a no-op so
-            // scripts and the release smoke run work unchanged.
-            "--plain" => {}
+            // Force degraded/line mode (Design §7). Also implied by `NO_COLOR`,
+            // `TERM=dumb`, and a non-tty stdout — see `frontend::detect`.
+            "--plain" => force_plain = true,
             other => {
                 anyhow::bail!("unknown argument: {other}");
             }
@@ -79,10 +80,24 @@ async fn run() -> anyhow::Result<()> {
         ),
     };
 
-    println!("emberly code — running in {}", project_root.display());
-    println!("model: {label}");
-    println!("Ctrl-D to exit.");
-    println!();
+    let kind = frontend::detect(force_plain);
+
+    let session = SessionInfo {
+        title: String::new(),
+        provider: resolved.provider.clone().unwrap_or_default(),
+        model: model.clone(),
+        project_root: project_root.display().to_string(),
+    };
+
+    // In line mode the banner is the session header; the rich TUI shows the
+    // same information in-pane (and the alternate screen would wipe stdout
+    // anyway), so print it only in degraded mode.
+    if kind == frontend::FrontendKind::Plain {
+        println!("emberly code — running in {}", project_root.display());
+        println!("model: {label}");
+        println!("Ctrl-D to exit.");
+        println!();
+    }
 
     let config = EngineConfig {
         provider,
@@ -94,13 +109,15 @@ async fn run() -> anyhow::Result<()> {
         retry: emberly_core::RetryPolicy::default(),
     };
 
-    let (engine_ports, frontend) = channel();
+    let (engine_ports, frontend_ports) = channel();
     let (engine, asks_rx) = Engine::new(config, engine_ports.events_tx);
     let engine_task = tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx));
 
-    // Drive the session until stdin closes; the frontend then drops its
-    // command sender, the engine finishes, and its events channel closes.
-    line::run(frontend).await?;
+    // Drive the session until the user quits or the engine closes its events.
+    // The frontend drops its command sender on quit, the engine finishes, and
+    // its events channel closes. The terminal is restored by the TUI's guard
+    // (HC-3) on every exit path, including panics.
+    frontend::run(kind, frontend_ports, session).await?;
 
     match engine_task.await {
         Ok(()) => {}
@@ -110,6 +127,8 @@ async fn run() -> anyhow::Result<()> {
         Err(_) => {}
     }
 
-    println!("\nsession ended.");
+    // The terminal is back to normal here (guard dropped). A single closing
+    // line; the richer clean-exit summary (name, duration, cost) is Phase 5.
+    println!("session ended.");
     Ok(())
 }

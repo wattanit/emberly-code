@@ -50,6 +50,11 @@ rustls-rustcrypto = "=0.0.2-alpha"
 # re-exported `crossterm` rather than declaring it separately, so there is one
 # crossterm version in the graph — no duplicate-version split (cargo-deny).
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+# crossterm pinned to the version ratatui 0.29 uses (0.28) so feature
+# unification produces ONE copy. Declared directly (not just via ratatui's
+# re-export) because we need `bracketed-paste` + the `events` reader, which
+# ratatui's backend feature does not turn on.
+crossterm = { version = "0.28", features = ["bracketed-paste"] }
 # syntect for fenced-code highlighting. HC-2: `default-features = false` +
 # `default-fancy` selects the pure-Rust `fancy-regex` engine; the default
 # `default-onig` backend is Oniguruma (C) and is forbidden.

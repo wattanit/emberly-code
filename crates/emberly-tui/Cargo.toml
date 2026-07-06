@@ -17,6 +17,11 @@ emberly-core = { path = "../emberly-core" }
 # so exactly one crossterm version is in the graph.
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "sync", "rt", "time"] }
 ratatui = { workspace = true }
+# crossterm pinned to ratatui's version (0.28) so feature unification yields a
+# single copy in the graph — not a duplicate. We need `events` (read key/resize)
+# and `bracketed-paste` (paste as one event, group 3), which are not implied by
+# ratatui's backend use. Used directly (`crossterm::…`) for the input reader.
+crossterm = { workspace = true }
 syntect = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
