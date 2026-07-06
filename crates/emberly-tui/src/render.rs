@@ -957,6 +957,28 @@ mod tests {
     }
 
     #[test]
+    fn thai_content_renders_in_the_conversation() {
+        // A stacked-mark Thai word must survive into the rendered buffer intact
+        // (grapheme-correct wrap, §2.1).
+        let mut app = App::new(SessionInfo::default());
+        app.apply_event(UiEvent::AssistantDelta {
+            text: "สวัสดี ที่".into(),
+        });
+        app.apply_event(UiEvent::AssistantDone);
+        let screen = draw(&app, 120, 20);
+        assert!(screen.contains("ที่"), "stacked Thai cluster rendered");
+        assert!(screen.contains("สวัสดี"), "Thai word rendered");
+    }
+
+    #[test]
+    fn sidebar_hides_below_the_collapse_threshold() {
+        let app = App::new(SessionInfo::default());
+        // Sidebar-only chrome present when wide, absent when narrow.
+        assert!(draw(&app, 120, 20).contains("modified files"));
+        assert!(!draw(&app, 80, 20).contains("modified files"));
+    }
+
+    #[test]
     fn sidebar_shows_session_token_total() {
         let mut app = App::new(SessionInfo::default());
         app.apply_event(UiEvent::SessionUsage {

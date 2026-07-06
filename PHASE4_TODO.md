@@ -34,9 +34,15 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 | 8. Command palette + command registry | [x] | commands.rs registry; Ctrl+P fuzzy palette + /slash + /help; PTY-verified; /view=in-TUI |
 | 9. Motion | [x] | ticker + ember-pulse spinner + streaming glow + overlay ease-in + sidebar settle; gated off; 5 tests |
 | 10. Degraded mode parity | [x] | pure `decide()` predicate; line-mode diffs + ASCII; no-ANSI + prompt-guarantee tests; --plain verified |
-| 11. Tests, fixtures & exit criterion | [ ] | Thai + degraded + permission-prompt guarantees |
+| 11. Tests, fixtures & exit criterion | [x] | Thai/degraded/permission/layout covered; 145 tests; PTY full-session; live smoke = owner |
 
-**Overall Phase 4: groups 0–7 done (branch `phase-4-tui`); groups 8–11 remain.**
+**Overall Phase 4: COMPLETE (branch `phase-4-tui`).** All 11 groups done + the
+motion polish + owner UI refinements. **145 tests** green; fmt + clippy clean;
+HC-2 build graph verified C-free (syntect on fancy-regex, no onig). The rich
+`ratatui` TUI and the degraded line frontend are two implementations over the
+same `FrontendPorts` (A-1). Exit criterion met on the automated half; the
+live-provider eyeball smoke is the one owner-run item (checklist in group 11).
+Not yet merged to `main`.
 
 ### Post-group-7 UI adjustments (owner feedback, 2026-07-06)
 
@@ -401,28 +407,56 @@ implementation fixes:
 
 ## 11. Tests, fixtures & exit criterion  *(Tech Spec §14; A-1)*
 
-- [ ] **Thai fixtures** (stacked vowel/tone marks): width, wrap, cursor motion,
-      and that content renders/wraps correctly in main pane, input, and overlay.
-- [ ] **Degraded-mode tests:** line output is append-only/ASCII; degraded
-      predicate picks the right frontend per env.
-- [ ] **Permission-prompt guarantees** as assertions in both rich and degraded
-      renderings: full content shown, deny is default, outside-root banner
-      present, no forbidden pattern (no timeout, no batching).
-- [ ] View-model reducer tests: feeding a canned `UiEvent` sequence produces
-      the expected sidebar/status/modified-files state (pure, no terminal).
-- [ ] Layout tests: sidebar auto-collapses below 100 columns and info migrates
-      to the status line.
-- [ ] fmt + clippy (unwrap/expect gates) clean; HC-2 guard passes with the new
-      deps; full workspace test suite green.
-- [ ] **Manual smoke (macOS, live provider):** drive a full real session —
-      stream markdown + highlighted code, run a tool with a permission prompt,
-      view an inline diff and a sidebar cumulative-diff overlay, type Thai in the
-      input, use Ctrl+P, toggle the sidebar, resize below 100 cols, run
-      `--plain`. Panic/Ctrl-C leaves the terminal usable.
+- [x] **Thai fixtures** (stacked vowel/tone marks): `text.rs` (width/cluster/
+      boundary/col round-trip/wrap), `editor.rs` (backspace deletes a whole
+      cluster, cluster-wise motion, multiline), and a render test that a stacked
+      Thai word survives into the drawn buffer intact.
+- [x] **Degraded-mode tests** (group 10): pure `decide()` predicate ×2, line
+      output emits no ANSI escape over a mixed event stream (incl. Thai + diff),
+      `FileDiff` shows `+`/`-` prefixes.
+- [x] **Permission-prompt guarantees** in both modes: rich via `TestBackend`
+      (full content, deny-default, loud outside-root banner, more-below
+      indicator, diff rendered, scroll-doesn't-decide); degraded via line tests
+      (full content, capitals banner, `[Enter] DENY`).
+- [x] View-model reducer tests: delta accumulation, tool-finish correlation,
+      modified-file upsert, file-diff inline+overlay, session usage, busy/motion
+      gating — all pure, no terminal.
+- [x] Layout tests: sidebar hides below 100 cols (`modified files` absent at 80,
+      present at 120) and context % migrates to the status bar.
+- [x] fmt + clippy (unwrap/expect gates) clean; **HC-2 build graph verified
+      C-free** (no onig/ring/openssl/aws-lc); full suite **145 tests** green.
+- [x] **Automated full-session smoke** (expect/PTY): Thai + multi-line (Ctrl+J)
+      input, palette → help overlay → dismiss, history scroll, sidebar toggle,
+      clean quit + terminal restore. Verified at 120 cols.
+- [ ] **Manual live-provider smoke (owner):** the interactive half — run against
+      Anthropic/OpenAI and eyeball: streamed markdown + highlighted code, a real
+      tool permission prompt, an inline diff + Ctrl+O overlay, the wordmark
+      breathing, session token/cost figures, `--plain`. This needs an API key
+      and a human eye, so it is left for you to run (see checklist below).
 
-**Exit criterion (plan §Phase 4 "Done when"):** the TUI drives a full session;
-Thai-fixture and degraded-mode tests pass; the permission prompt meets every
-Design §5 guarantee in **both** rich and degraded modes.
+**Exit criterion (plan §Phase 4 "Done when"):** ✅ **met (automated half).** The
+TUI drives a full session (PTY smoke); Thai-fixture and degraded-mode tests
+pass; the permission prompt meets every Design §5 guarantee in **both** rich and
+degraded modes. The **live-provider eyeball smoke** is the one remaining
+owner-run item.
+
+### Owner manual smoke checklist (run against a real provider)
+
+```
+EMBERLY_PROVIDER=anthropic EMBERLY_MODEL=claude-… ANTHROPIC_API_KEY=… \
+  cargo run
+```
+- [ ] Ask it to read a file and run a command → tool activity shows `read …` /
+      `run: …`, the permission prompt appears, `y`/`s`/Enter behave.
+- [ ] Ask it to edit a file → inline diff appears; Ctrl+O opens the diff overlay.
+- [ ] Assistant markdown renders (bold, lists, highlighted code fences).
+- [ ] Wordmark breathes while it works; spinner + elapsed on the status bar.
+- [ ] Sidebar shows model, ctx %, `tokens N (↑ ↓)`, cost `est.`.
+- [ ] Type Thai in the input; Shift+Enter (kitty terminals) / Alt+Enter / Ctrl+J
+      make a newline; mouse-wheel scrolls history.
+- [ ] Resize below 100 cols → sidebar collapses, ctx % moves to the status bar.
+- [ ] `cargo run -- --plain` → clean line-mode output.
+- [ ] Ctrl-C during a turn leaves the terminal usable; quit is clean.
 
 ---
 
