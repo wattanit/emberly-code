@@ -382,9 +382,9 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     // Wordmark + version (Design §1.1): ember `emberly`, dimmed `code` + version.
-    // While the model streams, the wordmark accent pulses gently — the ember
-    // glowing (Design §6.4). Ambient only; it carries no information.
-    let wordmark_style = if app.is_working() && app.streaming {
+    // While the model is working, the wordmark breathes — the ember glowing
+    // (Design §6.4). Ambient only; it carries no information.
+    let wordmark_style = if app.is_working() {
         ratatui::style::Style::default()
             .fg(glow(theme.palette().accent, glow_pct(app.anim_frame())))
             .add_modifier(ratatui::style::Modifier::BOLD)
@@ -793,17 +793,18 @@ fn compact_count(n: u64) -> String {
 }
 
 /// A brightness percentage that rises and falls in a slow triangle wave — the
-/// ember pulse for the streaming glow (Design §6.4). Kept in 75..=99 so the
-/// accent only ever dims slightly, never flashes.
+/// ember "breathing" while the model works (Design §6.4). One full cycle takes
+/// `PERIOD` frames (~1.3s at 12fps); brightness swings 55%..=100% so the pulse
+/// is perceptible but never flashes.
 fn glow_pct(frame: usize) -> u16 {
-    const PERIOD: usize = 8;
-    let phase = frame % PERIOD;
+    const PERIOD: usize = 16;
+    let phase = frame % PERIOD; // 0..15
     let up = if phase <= PERIOD / 2 {
         phase
     } else {
         PERIOD - phase
-    };
-    75 + u16::try_from(up).unwrap_or(0) * 6
+    }; // 0..8
+    (55 + u16::try_from(up).unwrap_or(0) * 6).min(100) // 55..=100
 }
 
 /// Scale an RGB colour's brightness by `pct` percent (non-RGB colours pass
