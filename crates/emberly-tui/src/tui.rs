@@ -63,10 +63,14 @@ pub async fn run(ports: FrontendPorts, session: SessionInfo) -> io::Result<()> {
                     }
                     guard.terminal().draw(|f| render(f, &app))?;
                 }
+                Some(Event::Paste(text)) => {
+                    app.on_paste(&text);
+                    guard.terminal().draw(|f| render(f, &app))?;
+                }
                 Some(Event::Resize(_, _)) => {
                     guard.terminal().draw(|f| render(f, &app))?;
                 }
-                Some(_) => {} // paste / mouse / focus — handled in later groups
+                Some(_) => {} // mouse / focus — handled in later groups
                 None => break, // input thread ended (stdin closed)
             },
         }
@@ -99,16 +103,25 @@ fn spawn_input_reader() -> mpsc::Receiver<Event> {
     rx
 }
 
-/// Minimal group-1 render: a bordered conversation pane over a one-line input
-/// and a one-line status bar. This is deliberately plain — the two-pane layout,
-/// sidebar, markdown, and diffs arrive in groups 4–6.
+/// Input box grows with content up to this many text rows before scrolling.
+const MAX_INPUT_ROWS: usize = 6;
+
+/// Draw one frame: a conversation pane over the (grapheme-aware) input editor
+/// and a status bar. The two-pane sidebar layout, markdown, and diffs arrive in
+/// groups 4–6.
 fn render(frame: &mut Frame, app: &App) {
+    // The input box grows with the number of logical lines (up to a cap), then
+    // scrolls internally — so a long multi-line prompt is visible without
+    // permanently stealing the conversation's space.
+    let input_rows = app.editor.line_count().clamp(1, MAX_INPUT_ROWS);
+    let input_height = u16::try_from(input_rows).unwrap_or(1).saturating_add(2); // + borders
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),    // conversation
-            Constraint::Length(3), // input
-            Constraint::Length(1), // status
+            Constraint::Min(1),               // conversation
+            Constraint::Length(input_height), // input
+            Constraint::Length(1),            // status
         ])
         .split(frame.area());
 
@@ -234,21 +247,74 @@ fn render_conversation(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(convo, area);
 }
 
+/// The prompt gutter width (`"› "`), reserved on every input row so cursor
+/// math and multi-line alignment share one offset.
+const GUTTER: u16 = 2;
+
 fn render_input(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
-    let input = Paragraph::new(Line::from(vec![
-        Span::styled(
-            format!("{} ", strings::markers::USER_PROMPT),
-            theme.accent(),
-        ),
-        Span::styled(app.input.clone(), theme.primary()),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme.chrome()),
-    );
-    frame.render_widget(input, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.chrome());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width <= GUTTER || inner.height == 0 {
+        return;
+    }
+    let text_width = usize::from(inner.width - GUTTER);
+    let rows = usize::from(inner.height);
+
+    let (cursor_row, cursor_col) = app.editor.cursor_row_col();
+    let lines: Vec<&str> = app.editor.lines().collect();
+
+    // Vertical scroll: keep the cursor's logical row visible.
+    let top = cursor_row.saturating_sub(rows.saturating_sub(1));
+    // Horizontal scroll: applied only to the cursor's row so its caret stays in
+    // view; other rows render from column 0 (clipped to the width).
+    let h_scroll = cursor_col.saturating_sub(text_width.saturating_sub(1));
+
+    for (screen_row, line_idx) in (top..top + rows).enumerate() {
+        let Some(line) = lines.get(line_idx) else {
+            break;
+        };
+        let start_col = if line_idx == cursor_row { h_scroll } else { 0 };
+        let visible = crate::text::slice_cols(line, start_col, text_width);
+        let y = inner.y + u16::try_from(screen_row).unwrap_or(0);
+
+        // The ember prompt marker on the first logical row only; a blank gutter
+        // keeps continuation rows aligned under the text.
+        let gutter = if line_idx == 0 {
+            Span::styled(
+                format!("{} ", strings::markers::USER_PROMPT),
+                theme.accent(),
+            )
+        } else {
+            Span::raw("  ")
+        };
+        let row_area = Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                gutter,
+                Span::styled(visible, theme.primary()),
+            ])),
+            row_area,
+        );
+    }
+
+    // Place (and thereby show) the terminal cursor at the caret, accounting for
+    // the gutter and any horizontal scroll on the cursor's row.
+    if cursor_row >= top && cursor_row < top + rows {
+        let screen_row = u16::try_from(cursor_row - top).unwrap_or(0);
+        let col_in_view = cursor_col.saturating_sub(h_scroll);
+        let x = inner.x + GUTTER + u16::try_from(col_in_view).unwrap_or(0);
+        frame.set_cursor_position((x.min(inner.x + inner.width - 1), inner.y + screen_row));
+    }
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {

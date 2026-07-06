@@ -14,6 +14,7 @@ use emberly_core::{
     UiEvent,
 };
 
+use crate::editor::LineEditor;
 use crate::theme::Theme;
 
 /// One rendered item in the conversation flow. Group 5 enriches assistant text
@@ -71,9 +72,9 @@ pub struct App {
     pub conversation: Vec<ConvItem>,
     /// True between the first `AssistantDelta` and `AssistantDone` of a turn.
     pub streaming: bool,
-    /// The input line buffer. Group 3 replaces this with the grapheme-aware
-    /// line editor; group 1 uses a plain `String` with byte-wise editing.
-    pub input: String,
+    /// The grapheme-aware input editor (multi-line, history, Thai-correct
+    /// cursor motion). See [`crate::editor`].
+    pub editor: LineEditor,
     pub context_pct: u8,
     pub context_tokens: u64,
     pub cost_usd: f64,
@@ -98,7 +99,7 @@ impl App {
             session,
             conversation: Vec::new(),
             streaming: false,
-            input: String::new(),
+            editor: LineEditor::new(),
             context_pct: 0,
             context_tokens: 0,
             cost_usd: 0.0,
@@ -233,14 +234,22 @@ impl App {
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            // Ctrl-D on an empty line, or Ctrl-C, begins shutdown.
-            KeyCode::Char('d') if ctrl && self.input.is_empty() => Action::Quit,
+            // Ctrl-D on an empty line quits; on a non-empty line it deletes
+            // forward (readline convention).
+            KeyCode::Char('d') if ctrl => {
+                if self.editor.is_empty() {
+                    return Action::Quit;
+                }
+                self.editor.delete();
+                Action::None
+            }
             KeyCode::Char('c') if ctrl => {
-                if self.input.is_empty() {
+                if self.editor.is_empty() {
                     Action::Quit
                 } else {
-                    self.input.clear();
+                    self.editor.clear();
                     Action::None
                 }
             }
@@ -248,24 +257,56 @@ impl App {
                 self.sidebar_visible = !self.sidebar_visible;
                 Action::None
             }
-            KeyCode::Enter => {
-                let text = self.input.trim().to_string();
-                self.input.clear();
-                if text.is_empty() {
-                    Action::None
-                } else {
-                    Action::Command(Command::UserInput { text })
+            // Emacs-style line editing.
+            KeyCode::Char('a') if ctrl => self.edit(|e| e.home()),
+            KeyCode::Char('e') if ctrl => self.edit(|e| e.end()),
+            KeyCode::Char('k') if ctrl => self.edit(|e| e.kill_to_end()),
+            KeyCode::Char('w') if ctrl => self.edit(|e| e.delete_word_back()),
+            // Shift+Enter (where the terminal reports it) inserts a newline;
+            // plain Enter submits.
+            KeyCode::Enter if shift => self.edit(|e| e.newline()),
+            KeyCode::Enter => match self.editor.submit() {
+                Some(text) => Action::Command(Command::UserInput { text }),
+                None => Action::None,
+            },
+            KeyCode::Backspace => self.edit(|e| e.backspace()),
+            KeyCode::Delete => self.edit(|e| e.delete()),
+            KeyCode::Left if ctrl => self.edit(|e| e.word_left()),
+            KeyCode::Right if ctrl => self.edit(|e| e.word_right()),
+            KeyCode::Left => self.edit(|e| e.left()),
+            KeyCode::Right => self.edit(|e| e.right()),
+            KeyCode::Home => self.edit(|e| e.home()),
+            KeyCode::End => self.edit(|e| e.end()),
+            // Up/Down move between logical lines; at the top/bottom edge they
+            // step through input history instead.
+            KeyCode::Up => {
+                if !self.editor.up() {
+                    self.editor.history_prev();
                 }
-            }
-            KeyCode::Backspace => {
-                self.input.pop();
                 Action::None
             }
-            KeyCode::Char(c) => {
-                self.input.push(c);
+            KeyCode::Down => {
+                if !self.editor.down() {
+                    self.editor.history_next();
+                }
                 Action::None
             }
+            KeyCode::Char(c) => self.edit(|e| e.insert_char(c)),
             _ => Action::None,
+        }
+    }
+
+    /// Run an editor mutation and report nothing observable to the loop.
+    fn edit(&mut self, f: impl FnOnce(&mut LineEditor)) -> Action {
+        f(&mut self.editor);
+        Action::None
+    }
+
+    /// Insert pasted text (bracketed paste) into the input, unless a permission
+    /// prompt is open — nothing may be typed into a decision (Design §5).
+    pub fn on_paste(&mut self, text: &str) {
+        if self.pending_permission.is_none() {
+            self.editor.insert_str(text);
         }
     }
 
@@ -400,6 +441,6 @@ mod tests {
             action,
             Action::Command(Command::UserInput { text: "hi".into() })
         );
-        assert!(a.input.is_empty());
+        assert!(a.editor.is_empty());
     }
 }

@@ -26,7 +26,7 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 | 0. Prerequisites & dependencies | [x] | ratatui 0.29 / syntect 5.3 (fancy-regex) / unicode-*; HC-2 verified C-free |
 | 1. Frontend abstraction & terminal lifecycle | [x] | seam + RAII guard + panic-safe restore (HC-3); loop + view-model; PTY-verified |
 | 2. Centralized theme & string table | [x] | theme.rs (named roles + reserved safety band) + strings.rs; 3 theme tests |
-| 3. Grapheme-aware text engine + line editor | [ ] | Thai width/wrap/cursor; the input box (Tech Spec §9) |
+| 3. Grapheme-aware text engine + line editor | [x] | text.rs + editor.rs; Thai stacked-mark fixtures; 16 tests; expect-verified |
 | 4. Layout: main pane + sidebar + status bar | [ ] | auto-collapse <100 cols (Design §3) |
 | 5. Markdown subset + syntax highlighting | [ ] | first-party md; syntect fancy-regex (Design §4.1) |
 | 6. Diffs first-class (inline + overlay) | [ ] | own both sides; `/view` `$EDITOR` hatch (Design §4.2–§4.3) |
@@ -148,18 +148,23 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 
 ## 3. Grapheme-aware text engine + line editor  *(Requirements §2.1; Design §6.2; Tech Spec §9)*
 
-- [ ] `text` module: cluster-wise measurement (`unicode-segmentation` +
-      `unicode-width`) — `display_width(&str)`, wrap-to-width, and
-      cluster-index ↔ column mapping. **Never** `str::len`, **never**
-      chars-as-columns. Thai combining vowel/tone marks are zero-width and must
-      not consume a column; used everywhere (input, wrap, overlay scroll).
-- [ ] **First-party line editor** (grapheme-aware): insert/delete by cluster,
-      left/right by cluster, home/end, word ops, Emacs-style basics; multi-line
-      via Shift+Enter; bracketed paste; history (up/down). Cursor column via the
-      text engine so it lands correctly amid Thai clusters.
-- [ ] Unit tests on Thai fixtures with **stacked** vowel/tone marks: width,
-      wrap boundaries, and cursor motion. These are the §14 correctness anchors
-      — write them here, reuse in group 11.
+- [x] `text.rs`: cluster-wise measurement (`unicode-segmentation` +
+      `unicode-width`) — `width`, `cluster_count`, `prev/next_boundary`,
+      `col_at`/`byte_at_col`, word-aware `wrap`, and `slice_cols` (cluster-
+      aligned horizontal scroll). No `str::len`/chars-as-columns anywhere.
+- [x] **First-party line editor** (`editor.rs`, grapheme-aware): insert/delete
+      by cluster (backspace removes a base + all its stacked marks), left/right
+      by cluster, home/end (logical-line), word left/right + delete-word-back,
+      Ctrl+K kill-to-end, multi-line up/down keeping the display column,
+      Shift+Enter newline, bracketed paste (`insert_str`), and up/down history
+      with draft stash. Wired into `App` (replaces the plain `String`); keys
+      routed in `on_key`; input rendered with a 2-col gutter, vertical +
+      per-line horizontal scroll, and a grapheme-correct terminal cursor.
+- [x] Unit tests on Thai stacked-mark fixtures ("ที่" = 3 scalars, 1 cluster, 1
+      column; "ไทย" = 3 columns): cluster count/width, boundary stepping, col↔
+      byte round-trip, wrap (word-break, hard-break, blank lines), plus editor
+      backspace/motion/word-ops/multiline/submit/history. 16 tests total.
+      Interactive path expect-verified (Thai input → clear → clean exit + restore).
 
 ---
 
