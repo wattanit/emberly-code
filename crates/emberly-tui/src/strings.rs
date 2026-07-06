@@ -40,6 +40,11 @@ pub mod permission {
 pub mod status {
     pub const CONTEXT_ABBR: &str = "ctx";
     pub const COST_ESTIMATE_SUFFIX: &str = "est.";
+    /// Cumulative session token total (input + output).
+    pub const TOKENS_LABEL: &str = "tokens";
+    /// Compact input/output markers for the token breakdown.
+    pub const TOKENS_IN: &str = "↑";
+    pub const TOKENS_OUT: &str = "↓";
     pub const SANDBOX_LABEL: &str = "sandbox";
     pub const SANDBOX_UNKNOWN: &str = "—";
     pub const MODIFIED_FILES_TITLE: &str = "modified files";

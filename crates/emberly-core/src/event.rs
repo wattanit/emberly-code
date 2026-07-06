@@ -67,6 +67,11 @@ pub enum UiEvent {
     /// labeled "est." in the UI. Emitted from Phase 3 onward.
     CostEstimate { usage: TokenUsage, usd: f64 },
 
+    /// Cumulative billed tokens this session (input + output). Emitted on every
+    /// accounting update regardless of whether a pricing table exists, so the
+    /// sidebar can always show a session total (Design §3.1).
+    SessionUsage { usage: TokenUsage },
+
     /// Sandbox status changed or was (re)probed (Requirements §6.7). Emitted
     /// from Phase 2 onward.
     SandboxStatus { status: SandboxStatus },

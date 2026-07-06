@@ -62,6 +62,20 @@ implementation fixes:
   plus a few indented result lines; the line frontend shows the preview too
   (Design §6.1). (§4/§6.1 fix.)
 
+### Later refinements (owner feedback)
+
+- **Full timeline + no pane title**: submitted prompts are echoed into the
+  conversation (`ConvItem::User`) so the main pane is one top-to-bottom
+  transcript of both sides; the `emberly` pane title was removed (wordmark is
+  in the sidebar; the streaming glow moved there too).
+- **Shift+Enter for newline**: the kitty keyboard protocol
+  (`PushKeyboardEnhancementFlags(DISAMBIGUATE_ESCAPE_CODES)`) is enabled at
+  startup where the terminal supports it, so Shift+Enter is distinguishable
+  from Enter; Alt+Enter and Ctrl+J remain the universal fallbacks.
+- **Session token total in the sidebar**: new always-emitted
+  `UiEvent::SessionUsage` (independent of pricing) → a `tokens N (↑in ↓out)`
+  line in the model block, compact-formatted (`12.3k`/`1.2M`).
+
 ---
 
 ## Platform & safety notes (read first)

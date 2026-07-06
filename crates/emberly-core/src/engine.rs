@@ -600,6 +600,12 @@ impl Engine {
         })
         .await;
 
+        // Cumulative session tokens — always available (independent of pricing).
+        self.emit(UiEvent::SessionUsage {
+            usage: self.session_usage,
+        })
+        .await;
+
         // Cost is only knowable with a pricing table (always labeled "est.").
         if info.pricing.is_some() {
             self.emit(UiEvent::CostEstimate {

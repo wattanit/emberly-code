@@ -432,6 +432,25 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
             context_style(theme, app.context_pct),
         ),
     ]));
+    // Cumulative session tokens (in + out), always available (Design §3.1).
+    let usage = &app.session_usage;
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{} ", strings::status::TOKENS_LABEL),
+            theme.chrome(),
+        ),
+        Span::styled(compact_count(usage.input + usage.output), theme.primary()),
+        Span::styled(
+            format!(
+                "  ({}{} {}{})",
+                compact_count(usage.input),
+                strings::status::TOKENS_IN,
+                compact_count(usage.output),
+                strings::status::TOKENS_OUT
+            ),
+            theme.chrome(),
+        ),
+    ]));
     if app.cost_known {
         lines.push(Line::from(vec![
             Span::styled("cost ", theme.chrome()),
@@ -762,6 +781,17 @@ fn is_unified_diff(detail: &str) -> bool {
 
 // ---- small helpers -------------------------------------------------------
 
+/// Format a token count compactly: `950`, `12.3k`, `1.2M`.
+fn compact_count(n: u64) -> String {
+    if n < 1_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    }
+}
+
 /// A brightness percentage that rises and falls in a slow triangle wave — the
 /// ember pulse for the streaming glow (Design §6.4). Kept in 75..=99 so the
 /// accent only ever dims slightly, never flashes.
@@ -923,6 +953,27 @@ mod tests {
             screen.contains("Cargo.toml"),
             "shows a preview of the output"
         );
+    }
+
+    #[test]
+    fn sidebar_shows_session_token_total() {
+        let mut app = App::new(SessionInfo::default());
+        app.apply_event(UiEvent::SessionUsage {
+            usage: emberly_core::TokenUsage {
+                input: 12_000,
+                output: 3_400,
+            },
+        });
+        let screen = draw(&app, 120, 20);
+        assert!(screen.contains("tokens"), "token label in the sidebar");
+        assert!(screen.contains("15.4k"), "total = input + output, compact");
+    }
+
+    #[test]
+    fn compact_count_formats() {
+        assert_eq!(compact_count(950), "950");
+        assert_eq!(compact_count(15_400), "15.4k");
+        assert_eq!(compact_count(1_200_000), "1.2M");
     }
 
     #[test]

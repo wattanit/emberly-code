@@ -10,8 +10,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use emberly_core::{
-    Command, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus, ToolCallId,
-    UiEvent,
+    Command, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus, TokenUsage,
+    ToolCallId, UiEvent,
 };
 
 use std::collections::HashMap;
@@ -133,6 +133,9 @@ pub struct App {
     pub editor: LineEditor,
     pub context_pct: u8,
     pub context_tokens: u64,
+    /// Cumulative billed tokens this session (input + output), for the sidebar
+    /// total. Available regardless of pricing.
+    pub session_usage: TokenUsage,
     pub cost_usd: f64,
     pub cost_known: bool,
     /// `None` until the engine reports confinement status (Phase 2).
@@ -188,6 +191,7 @@ impl App {
             editor: LineEditor::new(),
             context_pct: 0,
             context_tokens: 0,
+            session_usage: TokenUsage::default(),
             cost_usd: 0.0,
             cost_known: false,
             sandbox: None,
@@ -276,6 +280,7 @@ impl App {
                 self.cost_usd = usd;
                 self.cost_known = true;
             }
+            UiEvent::SessionUsage { usage } => self.session_usage = usage,
             UiEvent::SandboxStatus { status } => self.sandbox = Some(status),
             UiEvent::ModeChanged { mode } => self.mode = mode,
             UiEvent::HarnessError { what, why, next } => {
@@ -1056,6 +1061,32 @@ mod tests {
         a.on_key(KeyEvent::from(KeyCode::Char('b')));
         assert_eq!(a.editor.text(), "a\nb");
         assert_eq!(a.editor.line_count(), 2);
+    }
+
+    #[test]
+    fn shift_and_alt_enter_insert_newlines() {
+        // Both modifiers newline (where the terminal reports them); plain Enter
+        // still submits. Shift is enabled by the kitty protocol at runtime.
+        for modifier in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            let mut a = app();
+            a.on_key(KeyEvent::from(KeyCode::Char('a')));
+            a.on_key(KeyEvent::new(KeyCode::Enter, modifier));
+            a.on_key(KeyEvent::from(KeyCode::Char('b')));
+            assert_eq!(a.editor.text(), "a\nb", "{modifier:?}+Enter should newline");
+        }
+    }
+
+    #[test]
+    fn session_usage_is_stored() {
+        let mut a = app();
+        a.apply_event(UiEvent::SessionUsage {
+            usage: TokenUsage {
+                input: 1200,
+                output: 340,
+            },
+        });
+        assert_eq!(a.session_usage.input, 1200);
+        assert_eq!(a.session_usage.output, 340);
     }
 
     #[test]
