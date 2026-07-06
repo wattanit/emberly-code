@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use emberly_core::{
-    channel, Command, Engine, EngineConfig, PermissionDecision, RetryPolicy, UiEvent,
+    channel, CaptureSink, Command, Engine, EngineConfig, PermissionDecision, RetryPolicy,
+    SandboxStatus, SessionId, TranscriptEvent, TranscriptSink, UiEvent,
 };
 use emberly_providers::{
     FakeProvider, ModelInfo, Pricing, Provider, ProviderError, ScriptOutcome, ScriptedResponse,
@@ -42,8 +43,12 @@ fn start(scripts: Vec<ScriptedResponse>, root: PathBuf) -> Harness {
     start_with_provider(Arc::new(FakeProvider::new(scripts)), root)
 }
 
-fn start_with_provider(provider: Arc<dyn Provider>, root: PathBuf) -> Harness {
-    let config = EngineConfig {
+fn make_config(
+    provider: Arc<dyn Provider>,
+    root: PathBuf,
+    transcript: Box<dyn TranscriptSink>,
+) -> EngineConfig {
+    EngineConfig {
         provider,
         tools: default_registry(),
         project_root: root,
@@ -56,7 +61,32 @@ fn start_with_provider(provider: Arc<dyn Provider>, root: PathBuf) -> Harness {
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(2),
         },
-    };
+        session_id: SessionId::new(),
+        provider_label: "fake".into(),
+        sandbox: SandboxStatus::Unavailable {
+            reason: "test".into(),
+        },
+        config_provenance: Vec::new(),
+        transcript,
+    }
+}
+
+fn start_with_provider(provider: Arc<dyn Provider>, root: PathBuf) -> Harness {
+    spawn(make_config(provider, root, EngineConfig::no_transcript()))
+}
+
+/// Start a session with an in-memory transcript sink the test can inspect.
+fn start_capturing(scripts: Vec<ScriptedResponse>, root: PathBuf) -> (Harness, CaptureSink) {
+    let sink = CaptureSink::new();
+    let config = make_config(
+        Arc::new(FakeProvider::new(scripts)),
+        root,
+        Box::new(sink.clone()),
+    );
+    (spawn(config), sink)
+}
+
+fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
     let (engine, asks_rx) = Engine::new(config, engine_ports.events_tx);
     tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx));
@@ -153,6 +183,68 @@ async fn tool_call_allowed_runs_and_feeds_result_back() {
     )));
     // The model got the tool result and produced a closing message.
     assert_eq!(deltas(&events), "done");
+}
+
+#[tokio::test]
+async fn transcript_records_the_durable_session() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "write_file", r#"{"path":"out.txt","content":"hi\n"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, root);
+    h.send(Command::UserInput {
+        text: "write it".into(),
+    })
+    .await;
+    let _ = h.collect(Some(PermissionDecision::AllowOnce)).await;
+
+    let events: Vec<TranscriptEvent> = sink.records().into_iter().map(|r| r.event).collect();
+    // Opens with session_start.
+    assert!(matches!(
+        events.first(),
+        Some(TranscriptEvent::SessionStart { .. })
+    ));
+    // First user message is pinned as the original task, and titles the session.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        TranscriptEvent::UserMessage {
+            original_task: true,
+            ..
+        }
+    )));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, TranscriptEvent::SessionTitle { .. })));
+    // The tool call, its permission round trip, and its result are all recorded.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, TranscriptEvent::ToolCall { tool, .. } if tool == "write_file")));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, TranscriptEvent::PermissionRequest { .. })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        TranscriptEvent::PermissionDecision {
+            decision: PermissionDecision::AllowOnce,
+            ..
+        }
+    )));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, TranscriptEvent::ToolResult { ok: true, .. })));
+    // The closing assistant message is stored complete, not as deltas.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, TranscriptEvent::AssistantMessage { text } if text == "done")));
+
+    // Closing the command channel ends the session cleanly.
+    drop(h);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(matches!(
+        sink.records().last().map(|r| r.event.clone()),
+        Some(TranscriptEvent::SessionEnd { .. })
+    ));
 }
 
 #[tokio::test]

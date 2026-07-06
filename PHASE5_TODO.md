@@ -24,8 +24,8 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 
 | Group | Status | Notes |
 |---|---|---|
-| 0. Prerequisites: session identity & the writer seam | [ ] | `.agents/sessions/` layout; `TranscriptSink` trait; session id/dir |
-| 1. Transcript persistence (HC-7) | [ ] | append-only JSONL, per-event flush+fsync, sidecars for truncated output |
+| 0. Prerequisites: session identity & the writer seam | [x] | `TranscriptSink`/`NoopSink`/`CaptureSink`; session id + `.agents/sessions/` |
+| 1. Transcript persistence (HC-7) | [x] | `FileTranscript` (append + per-event fsync) + sidecars; engine write points; 4 tests |
 | 2. Supervisor completion (HC-3, S-2) | [ ] | abnormal-exit: restore + fsync + `abnormal_exit` + resume hint + non-zero |
 | 3. Resume (§8.2, §3.3) | [ ] | replay JSONL → view; apply compaction; unknown `v` warns; offer-on-launch; `resume [id]` |
 | 4. Manual `/compact` (§8.3, §7) | [ ] | clean-boundary gate; purpose-built summary; pinned content; fallback hard-truncate |
@@ -61,45 +61,40 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 
 ## 0. Prerequisites: session identity & the writer seam
 
-- [ ] **Session identity:** generate a `SessionId` at startup (uuid v4 already
-      a dep). Session file: `.agents/sessions/<id>.jsonl`; sidecars under
-      `.agents/sessions/<id>-outputs/`. Create dirs lazily on first write.
-- [ ] **`TranscriptSink` trait** in `emberly-core` (`write_record(&Record)`,
-      `flush()`), so the engine writes durable events without knowing about the
-      filesystem — keeps core unit-testable. A `Vec`-backed fake for tests; the
-      real file-backed impl (append + fsync) lives behind it. Engine holds a
-      sink (default no-op, so existing tests are unaffected).
-- [ ] **Timestamps:** the engine needs `OffsetDateTime::now_utc()` for records.
-      Confine time reads to the writer path; keep the reducer/logic time-free
-      where practical (tests pass a clock or stamp at the edge).
-- [ ] Decide: writer owned by the engine (it has the data — user/assistant/tool/
-      permission events as they happen) vs. the binary draining a second event
-      stream. **Lean: engine-owned sink** — one write site per durable event,
-      no duplicate stream. Record the decision.
+- [x] **Session identity:** `SessionId::new()` at startup; file
+      `.agents/sessions/<id>.jsonl`; sidecars under `.agents/sessions/<id>-outputs/`;
+      dirs created on open/first sidecar.
+- [x] **`TranscriptSink` trait** in `emberly-core` (`record(&Record)`,
+      `sidecar(call_id, content) -> Option<ref>`), `Send + Sync` (the engine
+      borrows `&self` across awaits, so it must stay `Sync`). `NoopSink` default,
+      `CaptureSink` (Arc<Mutex<Vec>>) for tests, `FileTranscript` for real I/O.
+- [x] **Timestamps** stamped at the write edge (`write_transcript` →
+      `OffsetDateTime::now_utc()`); the record type is time-carrying, logic isn't.
+- [x] **Decision recorded:** engine-owned sink (in `EngineConfig`), one write
+      site per durable event — no second event stream. Default `no_transcript()`
+      keeps existing tests unchanged.
 
 ---
 
 ## 1. Transcript persistence (HC-7, §8.2, Tech Spec §3.2)
 
-- [ ] File-backed `TranscriptSink`: open `<id>.jsonl` append-only; write one
-      `TranscriptRecord` (already `{v,ts,type,…}`) per line; **flush + fsync
-      per event** (S-2 — almost nothing to lose on crash). Never rewrite a line.
-- [ ] Emit the durable events from the engine at the right points:
-      `session_start` (provider/model/root/sandbox/**config provenance**),
-      `user_message` (first one tagged `original_task`), `assistant_message`
-      (complete, post-stream), `tool_call`, `tool_result`, `permission_request`,
-      `permission_decision` (asked / answered / what ran — §6.6), `mode_change`,
-      `session_title`, `session_end`.
-- [ ] **Sidecars for truncated output (§8.1, §5.3):** when a `tool_result` is
-      truncated at ingestion, write the full output to
-      `<id>-outputs/<call_id>.txt` and set `full_output_ref`. This realizes the
-      `/view`-full-output hatch (Design §4.3) — wire it to the group-7 CLI/TUI.
-- [ ] **Session title:** heuristic v1 — first user message, clipped (Tech Spec
-      §16). Emit `session_title`; surface in the sidebar (Phase 4 shows it) and
-      the clean-exit line.
-- [ ] Tests: a fake sink captures the exact record sequence for a scripted
-      `FakeProvider` session; the file impl round-trips (write → read lines →
-      parse) in a temp dir; fsync path exercised.
+- [x] `FileTranscript`: open `<id>.jsonl` append-only; one `TranscriptRecord`
+      per line; **flush + `sync_data` per event** (S-2). Marks itself unhealthy
+      after a write error (reported once, not per event). Never rewrites a line.
+- [x] Engine write points: `session_start` (provider/model/root/sandbox/
+      provenance), `user_message` (+`original_task`), `assistant_message`,
+      `tool_call`, `tool_result` (+truncated/sidecar), `permission_request`,
+      `permission_decision`, `session_title`, `session_end`. (`mode_change` →
+      Phase 2; `compaction` → group 4; `abnormal_exit` → group 2.)
+- [x] **Sidecars for truncated output:** on a truncated `tool_result`, the full
+      output spills to `<id>-outputs/<call_id>.txt` and `full_output_ref` is set.
+      (Wiring the `/view`-full hatch to it is group 7.)
+- [x] **Session title:** first user message clipped to 60 chars (`clip_title`);
+      emitted as `session_title` on the first turn.
+- [x] Tests: `CaptureSink` asserts the durable sequence for a scripted session
+      (incl. `session_end` on channel close); `FileTranscript` round-trips
+      (write → read → parse) and sidecars in a temp dir. Live smoke: a real
+      `--plain` run writes `session_start…session_end` to disk.
 
 ---
 

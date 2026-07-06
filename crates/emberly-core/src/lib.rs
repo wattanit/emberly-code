@@ -30,5 +30,8 @@ pub use engine::{Engine, EngineConfig};
 pub use event::UiEvent;
 pub use gate::PermissionAsk;
 pub use id::{PermissionId, SessionId, ToolCallId};
-pub use transcript::{ConfigProvenance, TranscriptEvent, TranscriptRecord, SCHEMA_VERSION};
+pub use transcript::{
+    CaptureSink, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord,
+    TranscriptSink, SCHEMA_VERSION,
+};
 pub use types::{Mode, PermissionDecision, PermissionRendering, SandboxStatus, TokenUsage};

@@ -19,13 +19,21 @@ use emberly_tools::{
     truncate_output, PermissionOutcome, PermissionRequest, ToolCtx, ToolRegistry, TruncateConfig,
 };
 use futures::StreamExt;
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 
 use crate::command::Command;
 use crate::event::UiEvent;
 use crate::gate::{ChannelGate, PermissionAsk};
-use crate::id::PermissionId;
-use crate::types::{PermissionRendering, TokenUsage};
+use crate::id::{PermissionId, SessionId};
+use crate::transcript::{
+    ConfigProvenance, NoopSink, TranscriptEvent, TranscriptRecord, TranscriptSink,
+};
+use crate::types::{PermissionRendering, SandboxStatus, TokenUsage};
+
+/// The session title is the first user message, clipped to this many chars
+/// (Tech Spec §16 — the heuristic v1 title).
+const TITLE_CLIP: usize = 60;
 
 /// Reserve this many tokens for model output when computing context usage,
 /// or the model's max output, whichever is smaller (Tech Spec §7).
@@ -41,6 +49,26 @@ pub struct EngineConfig {
     pub truncate: TruncateConfig,
     /// Retry policy for retryable provider failures and mid-stream drops.
     pub retry: RetryPolicy,
+    /// Session identity — backs the transcript filename (Tech Spec §3.2).
+    pub session_id: SessionId,
+    /// Provider label for the transcript `session_start` (e.g. `anthropic`).
+    pub provider_label: String,
+    /// OS confinement status at startup (Requirements §6.7).
+    pub sandbox: SandboxStatus,
+    /// Non-default configuration pieces, for `session_start` provenance (C-3).
+    pub config_provenance: Vec<ConfigProvenance>,
+    /// Where durable events go. Defaults to [`NoopSink`] via
+    /// [`EngineConfig::no_transcript`] for tests that don't assert on it.
+    pub transcript: Box<dyn TranscriptSink>,
+}
+
+impl EngineConfig {
+    /// A [`NoopSink`] for the `transcript` field — the convenient default for
+    /// callers (and tests) that don't persist a transcript.
+    #[must_use]
+    pub fn no_transcript() -> Box<dyn TranscriptSink> {
+        Box::new(NoopSink)
+    }
 }
 
 /// A tool call accumulated from the provider stream.
@@ -90,6 +118,16 @@ pub struct Engine {
     /// `None` until the first provider `Usage`; then it drives the context %.
     context_tokens_authoritative: Option<u64>,
     next_permission_id: u64,
+    /// Durable transcript sink (HC-7). Written per event; a `NoopSink` when no
+    /// session file is configured.
+    transcript: Box<dyn TranscriptSink>,
+    session_id: SessionId,
+    provider_label: String,
+    sandbox: SandboxStatus,
+    config_provenance: Vec<ConfigProvenance>,
+    /// Whether the first (pinned, `original_task`) user message has been
+    /// recorded — also gates the one-time `session_title`.
+    original_task_recorded: bool,
 }
 
 impl Engine {
@@ -117,6 +155,12 @@ impl Engine {
             session_cost_usd: 0.0,
             context_tokens_authoritative: None,
             next_permission_id: 0,
+            transcript: config.transcript,
+            session_id: config.session_id,
+            provider_label: config.provider_label,
+            sandbox: config.sandbox,
+            config_provenance: config.config_provenance,
+            original_task_recorded: false,
         };
         (engine, asks_rx)
     }
@@ -129,9 +173,19 @@ impl Engine {
         mut commands_rx: mpsc::Receiver<Command>,
         mut asks_rx: mpsc::Receiver<PermissionAsk>,
     ) {
+        self.write_transcript(TranscriptEvent::SessionStart {
+            session_id: self.session_id,
+            provider: self.provider_label.clone(),
+            model: self.model.clone(),
+            project_root: self.project_root.display().to_string(),
+            sandbox: self.sandbox.clone(),
+            config_provenance: self.config_provenance.clone(),
+        });
+
         while let Some(command) = commands_rx.recv().await {
             match command {
                 Command::UserInput { text } => {
+                    self.record_user_message(&text);
                     self.conversation.push(Message::user_text(text));
                     self.emit_context_usage().await;
                     self.run_turn(&mut commands_rx, &mut asks_rx).await;
@@ -145,6 +199,26 @@ impl Engine {
                     // Handled in Phase 2 / Phase 5.
                 }
             }
+        }
+
+        // Command channel closed: the frontend is gone. Clean end of session.
+        self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+    }
+
+    /// Record a user message durably, tagging the first one as the pinned
+    /// `original_task` and deriving the session title from it (Tech Spec §7,
+    /// §16).
+    fn record_user_message(&mut self, text: &str) {
+        let original_task = !self.original_task_recorded;
+        self.write_transcript(TranscriptEvent::UserMessage {
+            text: text.to_string(),
+            original_task,
+        });
+        if original_task {
+            self.original_task_recorded = true;
+            self.write_transcript(TranscriptEvent::SessionTitle {
+                title: clip_title(text),
+            });
         }
     }
 
@@ -415,6 +489,11 @@ impl Engine {
                     Some(Command::PermissionAnswer { id, decision }) => {
                         if let Some(pos) = pending.iter().position(|(pid, _)| *pid == id) {
                             let (_, reply) = pending.swap_remove(pos);
+                            self.write_transcript(TranscriptEvent::PermissionDecision {
+                                id,
+                                decision,
+                                executed: None,
+                            });
                             let outcome = if decision.is_allow() {
                                 PermissionOutcome::Allow
                             } else {
@@ -451,6 +530,10 @@ impl Engine {
     ) {
         let id = self.take_permission_id();
         let rendering = build_rendering(&ask.request);
+        self.write_transcript(TranscriptEvent::PermissionRequest {
+            id,
+            rendering: rendering.clone(),
+        });
         self.emit(UiEvent::PermissionRequest { id, rendering })
             .await;
         pending.push((id, ask.reply));
@@ -464,6 +547,22 @@ impl Engine {
         outcome: emberly_tools::ToolOutcome,
     ) {
         let truncation = truncate_output(&outcome.content, &self.truncate);
+
+        // Durable record: the model-visible (possibly truncated) output, plus a
+        // sidecar holding the full output when truncated (Requirements §8.1).
+        let full_output_ref = if truncation.truncated {
+            self.transcript.sidecar(&call.id, &outcome.content)
+        } else {
+            None
+        };
+        self.write_transcript(TranscriptEvent::ToolResult {
+            call_id: call.id.clone(),
+            ok: outcome.ok,
+            output: truncation.content.clone(),
+            truncated: truncation.truncated,
+            full_output_ref,
+        });
+
         self.conversation.push(Message::tool_result(
             call.id.clone(),
             truncation.content,
@@ -497,11 +596,17 @@ impl Engine {
     }
 
     async fn push_canceled_result(&mut self, call: &PendingToolCall) {
-        self.conversation.push(Message::tool_result(
-            call.id.clone(),
-            "The user canceled before this tool ran.".to_string(),
-            true,
-        ));
+        let canceled = "The user canceled before this tool ran.".to_string();
+        // Keep the transcript well-formed: every tool_call has a tool_result.
+        self.write_transcript(TranscriptEvent::ToolResult {
+            call_id: call.id.clone(),
+            ok: false,
+            output: canceled.clone(),
+            truncated: false,
+            full_output_ref: None,
+        });
+        self.conversation
+            .push(Message::tool_result(call.id.clone(), canceled, true));
         self.emit(UiEvent::ToolFinished {
             call_id: call.id.clone(),
             ok: false,
@@ -512,9 +617,16 @@ impl Engine {
     }
 
     /// Build the assistant message for the turn: text plus any tool-use blocks.
+    /// Records the complete assistant message and each requested tool call to
+    /// the transcript (Tech Spec §3.2).
     fn push_assistant_message(&mut self, text: &str, tool_calls: &[PendingToolCall]) {
         if text.is_empty() && tool_calls.is_empty() {
             return;
+        }
+        if !text.is_empty() {
+            self.write_transcript(TranscriptEvent::AssistantMessage {
+                text: text.to_string(),
+            });
         }
         let mut content = Vec::new();
         if !text.is_empty() {
@@ -524,6 +636,11 @@ impl Engine {
         }
         for call in tool_calls {
             let input = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
+            self.write_transcript(TranscriptEvent::ToolCall {
+                call_id: call.id.clone(),
+                tool: call.name.clone(),
+                args: input.clone(),
+            });
             content.push(ContentBlock::ToolUse {
                 id: call.id.clone(),
                 name: call.name.clone(),
@@ -569,6 +686,13 @@ impl Engine {
 
     async fn emit(&self, event: UiEvent) {
         let _ = self.events_tx.send(event).await;
+    }
+
+    /// Append one durable event to the transcript (HC-7). Best-effort: the sink
+    /// swallows I/O errors. Stamped with the current time at the write edge.
+    fn write_transcript(&mut self, event: TranscriptEvent) {
+        let record = TranscriptRecord::new(OffsetDateTime::now_utc(), event);
+        self.transcript.record(&record);
     }
 
     async fn emit_provider_error(&self, error: &ProviderError) {
@@ -638,6 +762,17 @@ impl ToolCallResult {
     fn is_canceled(&self) -> bool {
         matches!(self, ToolCallResult::Canceled)
     }
+}
+
+/// The heuristic session title: the first user message, trimmed and clipped
+/// to [`TITLE_CLIP`] characters with an ellipsis when cut (Tech Spec §16).
+fn clip_title(text: &str) -> String {
+    let trimmed = text.trim();
+    let mut title: String = trimmed.chars().take(TITLE_CLIP).collect();
+    if trimmed.chars().count() > TITLE_CLIP {
+        title.push('…');
+    }
+    title
 }
 
 /// Number of result lines shown inline under a finished tool call.

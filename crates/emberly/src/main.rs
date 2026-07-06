@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use emberly_core::{channel, Engine, EngineConfig};
+use emberly_core::{channel, Engine, EngineConfig, FileTranscript, SandboxStatus, SessionId};
 use emberly_providers::Provider;
 use emberly_tools::{default_registry, TruncateConfig};
 use emberly_tui::{frontend, SessionInfo};
@@ -100,6 +100,22 @@ async fn run() -> anyhow::Result<()> {
         println!();
     }
 
+    // Open the durable, append-only transcript for this session (HC-7). A
+    // failure here is non-fatal — the agent still runs, just unrecorded.
+    let session_id = SessionId::new();
+    let sessions_dir = project_root.join(".agents").join("sessions");
+    let transcript: Box<dyn emberly_core::TranscriptSink> =
+        match FileTranscript::create(&sessions_dir, session_id) {
+            Ok(file) => Box::new(file),
+            Err(error) => {
+                eprintln!(
+                    "emberly: could not open the session transcript ({error}); \
+                     continuing without it."
+                );
+                EngineConfig::no_transcript()
+            }
+        };
+
     let config = EngineConfig {
         provider,
         tools: default_registry(),
@@ -108,6 +124,18 @@ async fn run() -> anyhow::Result<()> {
         system: None,
         truncate: TruncateConfig::default(),
         retry: emberly_core::RetryPolicy::default(),
+        session_id,
+        provider_label: resolved
+            .provider
+            .clone()
+            .unwrap_or_else(|| "placeholder".into()),
+        // Real OS confinement arrives with Seatbelt (Phase 5 group 8) / Landlock
+        // (Phase 2); until then the session records an honest "unavailable".
+        sandbox: SandboxStatus::Unavailable {
+            reason: "no OS sandbox configured yet".into(),
+        },
+        config_provenance: Vec::new(),
+        transcript,
     };
 
     let (engine_ports, frontend_ports) = channel();
