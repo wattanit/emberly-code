@@ -76,6 +76,75 @@ pub fn frame(f: &mut Frame, app: &App) {
     if let Some(overlay) = app.active_overlay() {
         render_overlay(f, app, overlay, area);
     }
+    // The command palette sits above overlays when open (Design §3.3).
+    if app.palette.is_some() {
+        render_palette(f, app, area);
+    }
+}
+
+// ---- command palette -----------------------------------------------------
+
+/// Draw the command palette: a query line over a filtered, selectable list.
+fn render_palette(f: &mut Frame, app: &App, screen: Rect) {
+    let theme = &app.theme;
+    let Some(palette) = &app.palette else {
+        return;
+    };
+    let area = centered(screen, 60, 60);
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.dim_accent())
+        .title(Span::styled(" commands ", theme.accent()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 2 || inner.width == 0 {
+        return;
+    }
+
+    // Query line with the ember prompt marker.
+    let query_area = Rect { height: 1, ..inner };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{} ", markers::USER_PROMPT), theme.accent()),
+            Span::styled(palette.query.clone(), theme.primary()),
+        ])),
+        query_area,
+    );
+
+    let matched = crate::commands::matches(&palette.query);
+    let list_h = usize::from(inner.height - 1);
+    let selected = palette.selected.min(matched.len().saturating_sub(1));
+    let top = selected.saturating_sub(list_h.saturating_sub(1));
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (row, &ci) in matched.iter().enumerate().skip(top).take(list_h) {
+        let spec = &crate::commands::COMMANDS[ci];
+        let (marker, name_style) = if row == selected {
+            ("› ", theme.accent())
+        } else {
+            ("  ", theme.primary())
+        };
+        let key = spec.key.map(|k| format!("  [{k}]")).unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::styled(marker, theme.accent()),
+            Span::styled(format!("/{:<9}", spec.name), name_style),
+            Span::styled(spec.desc.to_string(), theme.chrome()),
+            Span::styled(key, theme.chrome()),
+        ]));
+    }
+    if matched.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no matching command",
+            theme.chrome(),
+        )));
+    }
+    let list_area = Rect {
+        y: inner.y + 1,
+        height: inner.height - 1,
+        ..inner
+    };
+    f.render_widget(Paragraph::new(lines), list_area);
 }
 
 // ---- overlay -------------------------------------------------------------

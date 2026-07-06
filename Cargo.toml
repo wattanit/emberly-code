@@ -63,9 +63,6 @@ syntect = { version = "5.2", default-features = false, features = ["default-fanc
 # never str::len, never chars-as-columns.
 unicode-segmentation = "1"
 unicode-width = "0.2"
-# Pure-Rust fuzzy matcher for the command palette (Design §3.3). Wired in at
-# group 8; registered here so the version is centralized.
-nucleo-matcher = "0.3"
 
 [profile.release]
 # Fully static musl builds (HC-2) prefer small, predictable binaries.

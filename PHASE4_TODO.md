@@ -31,7 +31,7 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 | 5. Markdown subset + syntax highlighting | [x] | markdown.rs: first-party md + syntect (fancy-regex); span-preserving wrap; 8 tests |
 | 6. Diffs first-class (inline + overlay) | [x] | diffview.rs + FileDiff plumbing; inline (capped) + Ctrl+O overlay; /view → group 8 |
 | 7. The permission prompt | [x] | scrollable full-content, loud outside-root, deny-default, diff-rendered; 5 render/behavior tests |
-| 8. Command palette + command registry | [ ] | Ctrl+P fuzzy; single registry (Design §3.3) |
+| 8. Command palette + command registry | [x] | commands.rs registry; Ctrl+P fuzzy palette + /slash + /help; PTY-verified; /view=in-TUI |
 | 9. Motion | [ ] | single ~12fps ticker; spinner/glow (Design §6.4) |
 | 10. Degraded mode parity | [ ] | `--plain`/`NO_COLOR`/`TERM=dumb` (Design §7) |
 | 11. Tests, fixtures & exit criterion | [ ] | Thai + degraded + permission-prompt guarantees |
@@ -309,17 +309,25 @@ implementation fixes:
 
 ## 8. Command palette + command registry  *(Design §3.3; Tech Spec §9)*
 
-- [ ] **Single command registry** = one source of truth: name, keybinding,
-      one-line description, handler. Serves the palette, `/command` parsing, and
-      `/help`. All functionality reachable three ways: palette, slash-command,
-      keybinding.
-- [ ] **Ctrl+P** palette: fuzzy match over the registry, keybindings + one-line
-      descriptions shown; Enter runs, Esc dismisses.
-- [ ] Slash-command parser in the input box routes to the same registry.
-- [ ] v1 command set (wire what exists; stub Phase-5 ones as "coming soon" only
-      if listed): `/help`, `/commands`, `/view`, `/files`, `/session`,
-      `/cancel`, sidebar toggle, mode toggle (mode itself is Phase 2), quit.
-      New-user help teaches the palette first (Design §3.3).
+- [x] **Single command registry** (`commands.rs`): one table of {name, key,
+      description, `AppCommand`} serving the palette, `/command` parsing, and
+      `/help`. Adding a command = one entry + one `run_command` arm. `by_name`
+      + fuzzy `matches` (first-party subsequence scorer — no extra dep); 4 tests.
+- [x] **Ctrl+P** palette (`PaletteState`, modal): type to fuzzy-filter, ↑/↓ to
+      select, Enter runs, Esc/Ctrl+P dismiss. Rendered as a centered pane with
+      the query line + selectable list (keys + descriptions).
+- [x] Slash-command parser: a leading `/` on submit routes to the registry via
+      `run_slash`; unknown names surface a calm notice, not a message.
+- [x] v1 command set: `/help`, `/view`, `/diff`, `/files`, `/session`,
+      `/sidebar`, `/cancel`, `/quit`. Status hint now teaches Ctrl-P first
+      (Design §3.3). PTY-verified: Ctrl-P→help→overlay, `/quit` exits.
+- [x] **`/view`** (the group-6 deferral): opens the last assistant message in
+      the scrollable **in-TUI text overlay**. The external `$VISUAL`→`$EDITOR`
+      handoff (Design §4.3) is intentionally **not** wired — it requires pausing
+      the blocking input-reader thread while the child editor owns the tty
+      (two readers on one tty otherwise), a control-flow change better made with
+      session/`$EDITOR` work in Phase 5. In-TUI viewing covers the need now.
+- Mode toggle command omitted: mode changes are gated on the sandbox (Phase 2).
 
 ---
 

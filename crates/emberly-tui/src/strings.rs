@@ -57,8 +57,7 @@ pub mod mode {
 /// Keybinding hints for the status bar (Design §3.1, §6.2 — 2–5 words each).
 /// Hints change with state; the permission set is shown while a prompt is open.
 pub mod hints {
-    pub const NORMAL: &str =
-        "Enter send · Alt+Enter newline · Ctrl-B sidebar · Ctrl-O diff · Ctrl-D quit";
+    pub const NORMAL: &str = "Enter send · Alt+Enter newline · Ctrl-P commands · Ctrl-D quit";
     pub const PERMISSION: &str = "y allow · s session · Enter deny";
 }
 

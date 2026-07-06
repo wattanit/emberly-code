@@ -16,6 +16,7 @@ use emberly_core::{
 
 use std::collections::HashMap;
 
+use crate::commands::{self, AppCommand};
 use crate::editor::LineEditor;
 use crate::theme::Theme;
 
@@ -69,6 +70,15 @@ pub enum OverlayContent {
     Diff(String),
     /// Plain text (help, untruncated output).
     Text(String),
+}
+
+/// The command palette's state (Design §3.3): the fuzzy query and which match
+/// is selected.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PaletteState {
+    pub query: String,
+    /// Index into the *filtered* match list.
+    pub selected: usize,
 }
 
 /// A file the agent created or changed this session (sidebar list, Design §3.1).
@@ -135,6 +145,8 @@ pub struct App {
     pub last_modified: Option<String>,
     /// The overlay stack; the last entry is on top and receives input.
     pub overlays: Vec<Overlay>,
+    /// The command palette, when open (Ctrl+P). Modal while present.
+    pub palette: Option<PaletteState>,
     /// The active theme (Design §2). One source the renderer reads; swapping it
     /// (mode/light-fallback later) is a value change, not a refactor.
     pub theme: Theme,
@@ -162,6 +174,7 @@ impl App {
             latest_diffs: HashMap::new(),
             last_modified: None,
             overlays: Vec::new(),
+            palette: None,
             theme: Theme::rich(),
         }
     }
@@ -301,6 +314,10 @@ impl App {
     /// Esc) denies — deny is the safe default (Design §5). The full prompt
     /// screen and scrolling arrive in group 7; the guarantees hold from now.
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
+        // The command palette is modal while open (Design §3.3).
+        if self.palette.is_some() {
+            return self.on_palette_key(key);
+        }
         // An open overlay is modal for navigation: scroll or dismiss (Design
         // §4.2). It sits above the permission check so a diff can be reviewed,
         // but note we never open an overlay while a permission prompt is up.
@@ -340,8 +357,12 @@ impl App {
                 self.sidebar_visible = !self.sidebar_visible;
                 Action::None
             }
-            // Open the most-recently-modified file's diff in an overlay. Sidebar
-            // entry selection arrives with the command system (group 8).
+            // Open the command palette (Design §3.3).
+            KeyCode::Char('p') if ctrl => {
+                self.palette = Some(PaletteState::default());
+                Action::None
+            }
+            // Open the most-recently-modified file's diff in an overlay.
             KeyCode::Char('o') if ctrl => {
                 self.open_last_diff();
                 Action::None
@@ -357,7 +378,12 @@ impl App {
             KeyCode::Enter => match self.editor.submit() {
                 Some(text) => {
                     self.scroll = 0; // jump back to the latest output
-                    Action::Command(Command::UserInput { text })
+                                     // A leading '/' is a slash command, not a message.
+                    if let Some(name) = text.strip_prefix('/') {
+                        self.run_slash(name)
+                    } else {
+                        Action::Command(Command::UserInput { text })
+                    }
                 }
                 None => Action::None,
             },
@@ -435,7 +461,7 @@ impl App {
     /// prompt or overlay is open — nothing may be typed into a decision, and an
     /// overlay is read-only (Design §5, §4.2).
     pub fn on_paste(&mut self, text: &str) {
-        if self.pending_permission.is_none() && self.overlays.is_empty() {
+        if self.pending_permission.is_none() && self.overlays.is_empty() && self.palette.is_none() {
             self.editor.insert_str(text);
         }
     }
@@ -519,6 +545,154 @@ impl App {
         self.overlays.last()
     }
 
+    // ---- commands & palette ----------------------------------------------
+
+    /// Run a typed `/name` command; unknown names surface a calm notice.
+    fn run_slash(&mut self, name: &str) -> Action {
+        let name = name.trim();
+        match commands::by_name(name) {
+            Some(cmd) => self.run_command(cmd),
+            None => {
+                self.conversation.push(ConvItem::Notice(format!(
+                    "unknown command: /{name} — Ctrl-P lists commands"
+                )));
+                Action::None
+            }
+        }
+    }
+
+    /// Execute a command from the palette, a slash command, or a keybinding.
+    /// One place maps each [`AppCommand`] to its effect.
+    pub fn run_command(&mut self, cmd: AppCommand) -> Action {
+        match cmd {
+            AppCommand::Help => {
+                self.open_text_overlay("commands", help_text());
+                Action::None
+            }
+            AppCommand::View => {
+                match self.last_assistant_text() {
+                    Some(text) => self.open_text_overlay("message", text),
+                    None => self.open_text_overlay("message", "(no assistant message yet)"),
+                }
+                Action::None
+            }
+            AppCommand::Diff => {
+                self.open_last_diff();
+                Action::None
+            }
+            AppCommand::Files => {
+                self.open_text_overlay("modified files", self.files_text());
+                Action::None
+            }
+            AppCommand::Session => {
+                self.open_text_overlay("session", self.session_text());
+                Action::None
+            }
+            AppCommand::ToggleSidebar => {
+                self.sidebar_visible = !self.sidebar_visible;
+                Action::None
+            }
+            AppCommand::Cancel => Action::Command(Command::Cancel),
+            AppCommand::Quit => Action::Quit,
+        }
+    }
+
+    fn last_assistant_text(&self) -> Option<String> {
+        self.conversation.iter().rev().find_map(|item| match item {
+            ConvItem::Assistant(text) => Some(text.clone()),
+            _ => None,
+        })
+    }
+
+    fn files_text(&self) -> String {
+        if self.modified_files.is_empty() {
+            return "No files changed yet.".to_string();
+        }
+        self.modified_files
+            .iter()
+            .map(|f| format!("{}  +{} -{}", f.path, f.adds, f.dels))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn session_text(&self) -> String {
+        let s = &self.session;
+        let title = if s.title.is_empty() {
+            "untitled session"
+        } else {
+            &s.title
+        };
+        let cost = if self.cost_known {
+            format!("${:.4} (est.)", self.cost_usd)
+        } else {
+            "—".to_string()
+        };
+        format!(
+            "title:   {title}\nprovider: {}\nmodel:    {}\nroot:     {}\ncontext:  {}%\ncost:     {cost}",
+            s.provider, s.model, s.project_root, self.context_pct
+        )
+    }
+
+    /// Keys while the palette is open: type to filter, ↑/↓ to move, Enter to
+    /// run the selection, Esc/Ctrl+P to dismiss.
+    fn on_palette_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let filtered = commands::matches(self.palette_query());
+        match key.code {
+            KeyCode::Esc => {
+                self.palette = None;
+                Action::None
+            }
+            KeyCode::Char('p') if ctrl => {
+                self.palette = None;
+                Action::None
+            }
+            KeyCode::Enter => {
+                let chosen = self
+                    .palette
+                    .as_ref()
+                    .and_then(|p| filtered.get(p.selected).copied());
+                self.palette = None;
+                match chosen {
+                    Some(i) => self.run_command(commands::COMMANDS[i].cmd),
+                    None => Action::None,
+                }
+            }
+            KeyCode::Up => {
+                if let Some(p) = self.palette.as_mut() {
+                    p.selected = p.selected.saturating_sub(1);
+                }
+                Action::None
+            }
+            KeyCode::Down => {
+                if let Some(p) = self.palette.as_mut() {
+                    let last = filtered.len().saturating_sub(1);
+                    p.selected = (p.selected + 1).min(last);
+                }
+                Action::None
+            }
+            KeyCode::Backspace => {
+                if let Some(p) = self.palette.as_mut() {
+                    p.query.pop();
+                    p.selected = 0;
+                }
+                Action::None
+            }
+            KeyCode::Char(c) if !ctrl => {
+                if let Some(p) = self.palette.as_mut() {
+                    p.query.push(c);
+                    p.selected = 0;
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn palette_query(&self) -> &str {
+        self.palette.as_ref().map_or("", |p| p.query.as_str())
+    }
+
     /// Keys while an overlay is open: Esc/q dismiss; the rest scroll.
     fn on_overlay_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -548,6 +722,17 @@ impl App {
             o.scroll = o.scroll.saturating_add_signed(delta);
         }
     }
+}
+
+/// The `/help` body: every command with its keybinding and description, from
+/// the single registry (Design §3.3).
+fn help_text() -> String {
+    let mut out = String::from("Commands — run via Ctrl-P, /name, or a keybinding.\n\n");
+    for spec in commands::COMMANDS {
+        let key = spec.key.map(|k| format!("  [{k}]")).unwrap_or_default();
+        out.push_str(&format!("/{:<9}{}\n    {}\n", spec.name, key, spec.desc));
+    }
+    out
 }
 
 #[cfg(test)]
