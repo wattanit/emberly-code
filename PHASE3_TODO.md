@@ -23,12 +23,13 @@ the Phase 1 engine from a placeholder demo into something that actually codes.
 | 2. Anthropic Messages API client | [x] | 3 mock tests |
 | 3. OpenAI-compatible client | [x] | 2 mock tests; covers Ollama/vLLM (P-2) |
 | 4. Retry & failure policy | [x] | 3 retry unit + 3 engine tests |
-| 5. Token & cost accounting | [ ] | wires real ContextUsage/CostEstimate |
-| 6. Secrets & configuration | [~] | env config done; keys.toml/config.toml/redaction remain |
+| 5. Token & cost accounting | [x] | authoritative usage + cost; 2 tests |
+| 6. Secrets & configuration | [x] | config.toml + keys.toml (0600) + env; 4 tests |
 | 7. Binary wiring & provider selection | [x] | pure-Rust TLS; replaces placeholder |
 | 8. Tests & live smoke (exit criterion) | [ ] | unit+mock done; live keyed remains |
 
-**Overall Phase 3: groups 0–4 + 7 done, 6 partial (2026-07-06); 67 tests green.**
+**Overall Phase 3: groups 0–7 done (2026-07-06); 73 tests green. Only group 8
+(live keyed smoke — needs your API key) remains.**
 **TLS decision RESOLVED (owner): pure-Rust `rustls` + `rustls-rustcrypto`**
 (alpha, tracked for v1). Verified the actual build graph is C-crypto-free (no
 `ring`/`aws-lc`); a CI step guards HC-2. `emberly` now selects a live provider
@@ -121,27 +122,27 @@ unit- or mock-tested with no API key and runs in CI:
 
 ## 5. Token & cost accounting  *(P-6; Tech Spec §4.4; Design §3.1)*
 
-- [ ] Prefer authoritative `Usage` from responses; between responses estimate
-      with `count_tokens` (chars/4). Accumulate per session.
-- [ ] Per-model **pricing table** in config (`[pricing."model-id"] input=…,
-      output=…` per MTok); `Pricing::estimate_usd` (added Phase 1) drives the
-      estimate.
-- [ ] Emit real `ContextUsage` (against the true model window) and
-      `CostEstimate` events; the line frontend can show them (still quiet by
-      default — the rich display is Phase 4). Cost always labeled **"est."**
+- [x] Engine accumulates `session_usage` + `session_cost_usd`; the authoritative
+      prompt-token count from `Usage` becomes the current context size, with the
+      chars/4 estimate as fallback before the first `Usage`.
+- [x] Per-model **pricing table** in `config.toml` (`[pricing."model-id"]`);
+      `Pricing::estimate_usd` drives the running cost.
+- [x] Emits `ContextUsage` (true window) always and `CostEstimate` when pricing
+      is configured (cost is "est."; not shown until Phase 4's status line).
+      → 2 engine tests (authoritative cost/context; no cost without pricing).
 
 ## 6. Secrets & configuration  *(Tech Spec §8)*
 
-- [ ] API keys: **env vars first** (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
-      etc.), else `~/.config/emberly/keys.toml` with **`0600` enforced**
-      (warn + refuse on group/world-readable).
-- [ ] Provider/model/base-URL config: global `~/.config/emberly/config.toml`
-      + project `.agents/config.toml` (project wins per key); `EMBERLY_*`
-      env overrides. (Full config/provenance system is Phase 5; Phase 3 reads
-      only what it needs.)
-- [ ] Keys **never** in project config, never logged; requests logged with
-      auth headers **redacted** (matters once transcripts land in Phase 5 —
-      keep the redaction seam now).
+- [x] `config.rs` `api_key`: **env first** (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`),
+      else `~/.config/emberly/keys.toml` with **`0600` enforced** (Unix perms
+      check refuses group/world-accessible files).
+- [x] `config.rs` `load`: built-in defaults → global `~/.config/emberly/
+      config.toml` → project `.agents/config.toml` → `EMBERLY_*` env; per-model
+      pricing resolved from the table. Feeds `provider_setup::build`.
+- [x] Keys **never** in project config and **never printed** (the header shows
+      `provider/model`, not the key) — that is the redaction seam; actual
+      request-header redaction lands with transcript logging (Phase 5).
+      → 4 config unit tests (parse/pricing/merge/0600).
 
 ## 7. Binary wiring & provider selection  *(P-2, P-3)* — DONE
 

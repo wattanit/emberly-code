@@ -20,6 +20,7 @@ use emberly_providers::Provider;
 use emberly_tools::{default_registry, TruncateConfig};
 use emberly_tui::line;
 
+mod config;
 mod placeholder;
 mod provider_setup;
 use placeholder::PlaceholderProvider;
@@ -66,9 +67,10 @@ async fn run() -> anyhow::Result<()> {
 
     let project_root = std::env::current_dir()?;
 
-    // Select a live provider from the environment, or fall back to the offline
-    // placeholder when none is configured.
-    let (provider, model, label) = match provider_setup::select_provider()? {
+    // Resolve config (files + env + keys), then select a live provider or fall
+    // back to the offline placeholder when none is configured.
+    let resolved = config::load(&project_root)?;
+    let (provider, model, label) = match provider_setup::build(&resolved)? {
         Some(selection) => (selection.provider, selection.model, selection.label),
         None => (
             Arc::new(PlaceholderProvider::new()) as Arc<dyn Provider>,

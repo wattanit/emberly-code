@@ -80,7 +80,15 @@ pub struct Engine {
     gate: Arc<ChannelGate>,
     events_tx: mpsc::Sender<UiEvent>,
     conversation: Vec<Message>,
-    usage: TokenUsage,
+    /// Cumulative billed tokens this session (summed per request — each
+    /// request's input is billed, so this is the cost basis, not the context
+    /// size).
+    session_usage: TokenUsage,
+    /// Running session cost estimate in USD (only when pricing is configured).
+    session_cost_usd: f64,
+    /// Most recent authoritative prompt-token count = current context size.
+    /// `None` until the first provider `Usage`; then it drives the context %.
+    context_tokens_authoritative: Option<u64>,
     next_permission_id: u64,
 }
 
@@ -105,7 +113,9 @@ impl Engine {
             gate: Arc::new(ChannelGate { asks: asks_tx }),
             events_tx,
             conversation: Vec::new(),
-            usage: TokenUsage::default(),
+            session_usage: TokenUsage::default(),
+            session_cost_usd: 0.0,
+            context_tokens_authoritative: None,
             next_permission_id: 0,
         };
         (engine, asks_rx)
@@ -312,7 +322,14 @@ impl Engine {
             }
             StreamEvent::ToolCallEnd { .. } => {}
             StreamEvent::Usage { usage } => {
-                self.usage = usage;
+                // Accumulate billed tokens and cost (each request's input is
+                // billed), and record the prompt size as the current context.
+                self.session_usage.input = self.session_usage.input.saturating_add(usage.input);
+                self.session_usage.output = self.session_usage.output.saturating_add(usage.output);
+                self.context_tokens_authoritative = Some(usage.input);
+                if let Some(pricing) = self.provider.model_info().pricing {
+                    self.session_cost_usd += pricing.estimate_usd(usage);
+                }
             }
             StreamEvent::Done { stop_reason: _ } => {
                 *saw_done = true;
@@ -547,21 +564,34 @@ impl Engine {
         .await;
     }
 
-    /// Estimate current context usage and emit it (Requirements §8.4). Rough by
-    /// design in Phase 1 (chars/4); exact provider usage refines it in Phase 3.
+    /// Emit context usage and, when pricing is configured, the running cost
+    /// estimate (Requirements §8.4, P-6; Design §3.1). Uses the provider's
+    /// authoritative prompt-token count once available, falling back to a
+    /// chars/4 estimate before the first `Usage`.
     async fn emit_context_usage(&self) {
         let info = self.provider.model_info();
         let reserve = OUTPUT_RESERVE.min(u64::from(info.max_output_tokens));
         let budget = u64::from(info.context_window)
             .saturating_sub(reserve)
             .max(1);
-        let tokens = self.context_tokens();
+        let tokens = self
+            .context_tokens_authoritative
+            .unwrap_or_else(|| self.context_tokens());
         let pct = ((tokens.saturating_mul(100)) / budget).min(100);
         self.emit(UiEvent::ContextUsage {
             pct: u8::try_from(pct).unwrap_or(100),
             tokens,
         })
         .await;
+
+        // Cost is only knowable with a pricing table (always labeled "est.").
+        if info.pricing.is_some() {
+            self.emit(UiEvent::CostEstimate {
+                usage: self.session_usage,
+                usd: self.session_cost_usd,
+            })
+            .await;
+        }
     }
 
     fn context_tokens(&self) -> u64 {

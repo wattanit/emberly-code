@@ -29,3 +29,5 @@ futures.workspace = true
 # HTTPS-capable client and installs the RustCrypto crypto provider (HC-2).
 reqwest.workspace = true
 rustls-rustcrypto.workspace = true
+serde.workspace = true
+toml.workspace = true
