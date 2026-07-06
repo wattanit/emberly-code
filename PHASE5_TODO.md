@@ -31,7 +31,7 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 | 4. Manual `/compact` (§8.3, §7) | [x] | clean-boundary gate; summarize via provider; pinned + keep-recent; fallback truncate; 1 test |
 | 5. Config, prompts & provenance (§7, §8) | [x] | provenance-tracked load; AGENTS/CLAUDE (+notice); family prompts; `config show`; 5 tests |
 | 6. `emberly init` (C-2) | [x] | materializes `.agents/` (config/prompts/permissions/.gitignore); no-clobber; 2 tests |
-| 7. CLI surface & key moments (§10) | [ ] | `init`/`resume`/`config show`/`--model`/`--provider`; session header + clean-exit line |
+| 7. CLI surface & key moments (§10) | [x] | testable `parse_args`; `--model`/`--provider` (cli tier); first-run orientation; 4 tests |
 | 8. macOS Seatbelt (§6.3, §16) | [ ] | confine children via `sandbox-exec` (no FFI → HC-1); SandboxStatus on macOS |
 | 9. Release pipeline (§13) | [ ] | musl x86_64/aarch64 + aarch64-darwin; name-collision + `--plain` smoke |
 | 10. Replay tests & exit criterion (§14.2) | [ ] | recorded JSONL fixtures + schema forward-compat; full sweep |
@@ -218,17 +218,21 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 
 ## 7. CLI surface & key moments (Tech Spec §10, Design §8)
 
-- [ ] Real arg parsing (subcommands + flags), replacing the hand-rolled loop:
-      `emberly` (start in cwd), `emberly init`, `emberly resume [id]`,
-      `emberly config show`, `--plain`, `--model <m>`, `--provider <p>`,
-      `--version`. Keep it dependency-light (first-party parse or a tiny crate —
-      check HC-2). `--model`/`--provider` are the highest-precedence overrides.
-- [ ] **First run** (Design §8.1): no config just works (baked-in defaults) and
-      prints a two-line orientation pointing at `emberly init`.
-- [ ] **Session start / end** lines (Design §8.2/§8.3) — wire to the transcript
-      (start id/title, end summary with duration + cost + transcript path).
-- [ ] Tests: arg parsing table (each subcommand/flag → parsed intent); unknown
-      arg errors cleanly.
+- [x] First-party `parse_args` → `Cli { Version, Init, ConfigShow, Run(RunOpts) }`
+      (no extra dep, HC-2). Covers `emberly`, `init`, `resume [id]`,
+      `config show`, `--plain`, `--model`, `--provider`, `--version`.
+      `--model`/`--provider` are the highest-precedence tier (`cli`), recorded
+      in provenance.
+- [x] **First run** (Design §8.1): no `.agents/config.toml` still works on
+      defaults and prints a one-line orientation pointing at `emberly init`.
+- [x] **Session start / end** lines: plain banner shows model + overrides +
+      notices; clean exit prints duration + transcript path (group 2). Start
+      id/title live in the transcript.
+- [x] Tests: `parse_args` table — subcommands short-circuit, flags accumulate,
+      `resume` takes an optional id, missing values / unknown args error cleanly.
+      Live smoke: `--provider/--model` override with `cli` provenance.
+- Note: title/cost in the clean-exit line remain a later refinement (engine-side
+      data); the README/`emb` alias docs land with the release group (9).
 
 ---
 

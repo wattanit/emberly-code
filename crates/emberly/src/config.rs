@@ -98,6 +98,14 @@ pub struct Resolved {
     pub notices: Vec<String>,
 }
 
+/// Command-line overrides (`--provider`/`--model`) — the highest-precedence
+/// tier (Tech Spec §10).
+#[derive(Default)]
+pub struct CliOverrides {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
 /// Environment overrides (`EMBERLY_*`), read once so provenance and the final
 /// value agree.
 #[derive(Default)]
@@ -130,12 +138,12 @@ impl EnvOverrides {
 /// Load and resolve configuration for a session rooted at `project_root`,
 /// tracking where each active value came from (C-3). Resolution order (lowest →
 /// highest): baked-in defaults → global → project → `EMBERLY_*` env.
-pub fn load(project_root: &Path) -> anyhow::Result<Resolved> {
+pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved> {
     let global = read_config(global_config_path().as_deref())?;
     let project = read_config(Some(&project_root.join(".agents").join("config.toml")))?;
     let env = EnvOverrides::read();
 
-    // Final values via the existing merge, then env on top.
+    // Final values via the existing merge, then env, then CLI on top.
     let mut merged = ConfigFile::default();
     if let Some(g) = &global {
         merged.merge(g.clone());
@@ -144,16 +152,23 @@ pub fn load(project_root: &Path) -> anyhow::Result<Resolved> {
         merged.merge(p.clone());
     }
     apply_env(&mut merged, &env);
+    if let Some(p) = &cli.provider {
+        merged.provider = Some(p.clone());
+    }
+    if let Some(m) = &cli.model {
+        merged.model = Some(m.clone());
+    }
 
     let mut provenance = Vec::new();
-    // Source for each scalar: env > project > global > default.
-    let src = |env_set: bool, project_has: bool, global_has: bool| {
-        source_of(env_set, project_has, global_has)
+    // Source for each scalar: cli > env > project > global > default.
+    let src = |cli_set: bool, env_set: bool, project_has: bool, global_has: bool| {
+        source_of(cli_set, env_set, project_has, global_has)
     };
     record(
         &mut provenance,
         "provider",
         src(
+            cli.provider.is_some(),
             env.provider.is_some(),
             field(&project, |c| c.provider.is_some()),
             field(&global, |c| c.provider.is_some()),
@@ -164,6 +179,7 @@ pub fn load(project_root: &Path) -> anyhow::Result<Resolved> {
         &mut provenance,
         "model",
         src(
+            cli.model.is_some(),
             env.model.is_some(),
             field(&project, |c| c.model.is_some()),
             field(&global, |c| c.model.is_some()),
@@ -174,6 +190,7 @@ pub fn load(project_root: &Path) -> anyhow::Result<Resolved> {
         &mut provenance,
         "base_url",
         src(
+            false,
             env.base_url.is_some(),
             field(&project, |c| c.base_url.is_some()),
             field(&global, |c| c.base_url.is_some()),
@@ -184,6 +201,7 @@ pub fn load(project_root: &Path) -> anyhow::Result<Resolved> {
         &mut provenance,
         "context_window",
         src(
+            false,
             env.context_window.is_some(),
             field(&project, |c| c.context_window.is_some()),
             field(&global, |c| c.context_window.is_some()),
@@ -194,6 +212,7 @@ pub fn load(project_root: &Path) -> anyhow::Result<Resolved> {
         &mut provenance,
         "max_output",
         src(
+            false,
             env.max_output.is_some(),
             field(&project, |c| c.max_output.is_some()),
             field(&global, |c| c.max_output.is_some()),
@@ -212,7 +231,7 @@ pub fn load(project_root: &Path) -> anyhow::Result<Resolved> {
         record(
             &mut provenance,
             "pricing",
-            src(false, field(&project, has), field(&global, has)),
+            src(false, false, field(&project, has), field(&global, has)),
             true,
         );
     }
@@ -309,8 +328,10 @@ fn field(config: &Option<ConfigFile>, has: impl Fn(&ConfigFile) -> bool) -> bool
 }
 
 /// The winning tier's label for a field.
-fn source_of(env: bool, project: bool, global: bool) -> String {
-    if env {
+fn source_of(cli: bool, env: bool, project: bool, global: bool) -> String {
+    if cli {
+        "cli"
+    } else if env {
         "env"
     } else if project {
         "project:.agents/config.toml"
@@ -386,7 +407,7 @@ fn load_project_instructions(
 /// `emberly config show`: print every active piece with its provenance tier
 /// (C-3). Secrets are reported as set/unset, never printed.
 pub fn show(project_root: &Path) -> anyhow::Result<()> {
-    let resolved = load(project_root)?;
+    let resolved = load(project_root, &CliOverrides::default())?;
     println!(
         "emberly configuration (project: {})",
         project_root.display()
@@ -608,7 +629,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("AGENTS.md"), "be careful").unwrap();
 
-        let resolved = load(&dir).unwrap();
+        let resolved = load(&dir, &CliOverrides::default()).unwrap();
         assert_eq!(
             resolved.base_url.as_deref(),
             Some("http://localhost:1234/v1")

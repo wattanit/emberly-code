@@ -121,58 +121,99 @@ fn offer_resume(sessions_dir: &Path) -> Option<PathBuf> {
     line.trim().eq_ignore_ascii_case("y").then_some(path)
 }
 
-async fn run() -> anyhow::Result<()> {
-    let started = Instant::now();
-    let mut force_plain = false;
-    let mut resume_requested = false;
-    let mut resume_id: Option<String> = None;
-    let mut args = std::env::args().skip(1).peekable();
+/// The parsed command line (Tech Spec §10).
+#[derive(Debug, PartialEq, Eq)]
+enum Cli {
+    Version,
+    Init,
+    ConfigShow,
+    Run(RunOpts),
+}
+
+/// Options for a session run.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RunOpts {
+    force_plain: bool,
+    resume: bool,
+    resume_id: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+}
+
+/// Parse argv (without the program name). Subcommands (`init`, `config show`,
+/// `--version`) short-circuit; flags accumulate into a [`RunOpts`].
+fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
+    let mut args = args.peekable();
+    let mut opts = RunOpts::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--version" => {
-                println!("emberly {}", env!("CARGO_PKG_VERSION"));
-                return Ok(());
-            }
-            // Force degraded/line mode (Design §7). Also implied by `NO_COLOR`,
-            // `TERM=dumb`, and a non-tty stdout — see `frontend::detect`.
-            "--plain" => force_plain = true,
-            // `emberly resume [id]` (Tech Spec §3.3). An id may follow.
-            "resume" => {
-                resume_requested = true;
-                if let Some(next) = args.peek() {
-                    if !next.starts_with('-') {
-                        resume_id = args.next();
-                    }
-                }
-            }
-            // `emberly init` — materialize `.agents/` defaults (C-2).
-            "init" => {
-                init::init(&std::env::current_dir()?)?;
-                return Ok(());
-            }
-            // `emberly config show` (C-3).
+            "--version" => return Ok(Cli::Version),
+            "init" => return Ok(Cli::Init),
             "config" => match args.next().as_deref() {
-                Some("show") => {
-                    config::show(&std::env::current_dir()?)?;
-                    return Ok(());
-                }
+                Some("show") => return Ok(Cli::ConfigShow),
                 other => anyhow::bail!(
                     "unknown config subcommand: {} (try `config show`)",
                     other.unwrap_or("(none)")
                 ),
             },
-            other => {
-                anyhow::bail!("unknown argument: {other}");
+            // Force degraded/line mode (Design §7); also implied by `NO_COLOR`,
+            // `TERM=dumb`, and a non-tty stdout — see `frontend::detect`.
+            "--plain" => opts.force_plain = true,
+            // `resume [id]` — an id may follow (Tech Spec §3.3).
+            "resume" => {
+                opts.resume = true;
+                if let Some(next) = args.peek() {
+                    if !next.starts_with('-') {
+                        opts.resume_id = args.next();
+                    }
+                }
             }
+            "--provider" => {
+                opts.provider = Some(args.next().context("--provider needs a value")?);
+            }
+            "--model" => {
+                opts.model = Some(args.next().context("--model needs a value")?);
+            }
+            other => anyhow::bail!("unknown argument: {other}"),
         }
     }
+    Ok(Cli::Run(opts))
+}
+
+async fn run() -> anyhow::Result<()> {
+    let started = Instant::now();
+    let opts = match parse_args(std::env::args().skip(1))? {
+        Cli::Version => {
+            println!("emberly {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Cli::Init => {
+            init::init(&std::env::current_dir()?)?;
+            return Ok(());
+        }
+        Cli::ConfigShow => {
+            config::show(&std::env::current_dir()?)?;
+            return Ok(());
+        }
+        Cli::Run(opts) => opts,
+    };
+    let force_plain = opts.force_plain;
+    let resume_requested = opts.resume;
+    let resume_id = opts.resume_id;
+    let cli_overrides = config::CliOverrides {
+        provider: opts.provider,
+        model: opts.model,
+    };
 
     let project_root = std::env::current_dir()?;
     let sessions_dir = project_root.join(".agents").join("sessions");
+    // First run without any project config still just works on defaults; point
+    // at `emberly init` (Design §8.1).
+    let initialized = project_root.join(".agents").join("config.toml").exists();
 
-    // Resolve config (files + env + keys), then select a live provider or fall
-    // back to the offline placeholder when none is configured.
-    let resolved = config::load(&project_root)?;
+    // Resolve config (files + env + CLI + keys), then select a live provider or
+    // fall back to the offline placeholder when none is configured.
+    let resolved = config::load(&project_root, &cli_overrides)?;
     let (provider, model, label) = match provider_setup::build(&resolved)? {
         Some(selection) => (selection.provider, selection.model, selection.label),
         None => (
@@ -249,6 +290,9 @@ async fn run() -> anyhow::Result<()> {
         if resuming {
             println!("resumed session ({} earlier events)", history.len());
         }
+        if !initialized {
+            println!("no project config yet — running on defaults; `emberly init` materializes it");
+        }
         // Silence about defaults; speech about deviations (Design §8.2).
         for notice in &resolved.notices {
             println!("note: {notice}");
@@ -313,4 +357,61 @@ async fn run() -> anyhow::Result<()> {
         session_path.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(argv: &[&str]) -> anyhow::Result<Cli> {
+        parse_args(argv.iter().map(|s| (*s).to_string()))
+    }
+
+    #[test]
+    fn subcommands_short_circuit() {
+        assert_eq!(parse(&["--version"]).unwrap(), Cli::Version);
+        assert_eq!(parse(&["init"]).unwrap(), Cli::Init);
+        assert_eq!(parse(&["config", "show"]).unwrap(), Cli::ConfigShow);
+    }
+
+    #[test]
+    fn flags_accumulate_into_run_opts() {
+        let cli = parse(&["--plain", "--model", "gpt-5.2", "--provider", "openai"]).unwrap();
+        assert_eq!(
+            cli,
+            Cli::Run(RunOpts {
+                force_plain: true,
+                resume: false,
+                resume_id: None,
+                provider: Some("openai".into()),
+                model: Some("gpt-5.2".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn resume_takes_an_optional_id() {
+        assert_eq!(
+            parse(&["resume"]).unwrap(),
+            Cli::Run(RunOpts {
+                resume: true,
+                ..RunOpts::default()
+            })
+        );
+        assert_eq!(
+            parse(&["resume", "abc123"]).unwrap(),
+            Cli::Run(RunOpts {
+                resume: true,
+                resume_id: Some("abc123".into()),
+                ..RunOpts::default()
+            })
+        );
+    }
+
+    #[test]
+    fn errors_are_clean() {
+        assert!(parse(&["--model"]).is_err(), "missing value");
+        assert!(parse(&["bogus"]).is_err(), "unknown argument");
+        assert!(parse(&["config", "nope"]).is_err(), "unknown subcommand");
+    }
 }
