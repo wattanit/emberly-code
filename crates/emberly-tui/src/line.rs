@@ -88,21 +88,32 @@ impl LineRenderer {
         rendering: &PermissionRendering,
         out: &mut impl Write,
     ) -> io::Result<()> {
+        use crate::strings::permission as p;
         writeln!(out)?;
         if rendering.outside_root {
-            writeln!(out, "!! THIS ACTION AFFECTS FILES OUTSIDE YOUR PROJECT !!")?;
+            // Capitalised banner carries the meaning colour would in rich mode
+            // (Design §7); shared verbatim with the TUI for parity.
+            writeln!(out, "!! {} !!", p::OUTSIDE_ROOT_BANNER)?;
         }
-        writeln!(out, "PERMISSION REQUIRED: {}", rendering.summary)?;
-        writeln!(out, "  why: {}", rendering.reason)?;
+        writeln!(out, "{}: {}", p::HEADING, rendering.summary)?;
+        writeln!(out, "  {}: {}", p::WHY_LABEL, rendering.reason)?;
         if !rendering.affected_paths.is_empty() {
-            writeln!(out, "  paths: {}", rendering.affected_paths.join(", "))?;
+            writeln!(
+                out,
+                "  {}: {}",
+                p::PATHS_LABEL,
+                rendering.affected_paths.join(", ")
+            )?;
         }
         writeln!(out, "--- details ---")?;
         writeln!(out, "{}", rendering.detail.trim_end())?;
         writeln!(out, "---------------")?;
         writeln!(
             out,
-            "Allow?  [y] allow once   [s] allow this session   [Enter] DENY"
+            "Allow?  [y] {}   [s] {}   [Enter] {}",
+            p::ALLOW_ONCE,
+            p::ALLOW_SESSION,
+            p::DENY
         )?;
         Ok(())
     }

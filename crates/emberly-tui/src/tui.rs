@@ -18,14 +18,14 @@ use std::io;
 
 use crossterm::event::Event;
 use emberly_core::FrontendPorts;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use tokio::sync::mpsc;
 
 use crate::app::{Action, App, ConvItem, SessionInfo};
+use crate::strings;
 use crate::terminal::TerminalGuard;
 
 /// Run the rich TUI until the user quits or the engine closes its event stream.
@@ -117,43 +117,69 @@ fn render(frame: &mut Frame, app: &App) {
     render_status(frame, app, chunks[2]);
 }
 
-fn render_conversation(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn render_conversation(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
     let title = if app.session.model.is_empty() {
-        " emberly ".to_string()
+        format!(" {} ", strings::brand::NAME)
     } else {
-        format!(" emberly — {} ", app.session.model)
+        format!(" {} — {} ", strings::brand::NAME, app.session.model)
     };
 
-    // A pending permission prompt owns the pane (full content, Design §5).
+    // A pending permission prompt owns the pane (full content, Design §5). The
+    // real scrollable prompt is group 7; this shares the strings and the
+    // reserved safety styling from now.
     if let Some((_, rendering)) = &app.pending_permission {
         let mut lines = Vec::new();
         if rendering.outside_root {
             lines.push(Line::from(Span::styled(
-                "!! THIS ACTION AFFECTS FILES OUTSIDE YOUR PROJECT !!",
-                Style::default().add_modifier(Modifier::BOLD),
+                strings::permission::OUTSIDE_ROOT_BANNER,
+                theme.safety_band(),
             )));
         }
-        lines.push(Line::from(format!(
-            "PERMISSION REQUIRED: {}",
-            rendering.summary
+        lines.push(Line::from(vec![
+            Span::styled(strings::permission::HEADING, theme.warning()),
+            Span::styled(format!(": {}", rendering.summary), theme.primary()),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!("{}: {}", strings::permission::WHY_LABEL, rendering.reason),
+            theme.chrome(),
         )));
-        lines.push(Line::from(format!("why: {}", rendering.reason)));
         if !rendering.affected_paths.is_empty() {
-            lines.push(Line::from(format!(
-                "paths: {}",
-                rendering.affected_paths.join(", ")
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{}: {}",
+                    strings::permission::PATHS_LABEL,
+                    rendering.affected_paths.join(", ")
+                ),
+                theme.chrome(),
             )));
         }
         lines.push(Line::from(""));
         for line in rendering.detail.lines() {
-            lines.push(Line::from(line.to_string()));
+            lines.push(Line::from(Span::styled(line.to_string(), theme.primary())));
         }
         lines.push(Line::from(""));
-        lines.push(Line::from(
-            "[y] allow once   [s] allow this session   [Enter] DENY",
-        ));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("[y] {}   ", strings::permission::ALLOW_ONCE),
+                theme.success(),
+            ),
+            Span::styled(
+                format!("[s] {}   ", strings::permission::ALLOW_SESSION),
+                theme.success(),
+            ),
+            Span::styled(
+                format!("[Enter] {}", strings::permission::DENY),
+                theme.error(),
+            ),
+        ]));
         let prompt = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" permission "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme.dim_accent())
+                    .title(format!(" {} ", strings::permission::TITLE)),
+            )
             .wrap(Wrap { trim: false });
         frame.render_widget(prompt, area);
         return;
@@ -162,10 +188,16 @@ fn render_conversation(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
     let mut lines: Vec<Line> = Vec::new();
     for item in &app.conversation {
         match item {
-            ConvItem::User(text) => lines.push(Line::from(format!("› {text}"))),
+            ConvItem::User(text) => lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} ", strings::markers::USER_PROMPT),
+                    theme.accent(),
+                ),
+                Span::styled(text.clone(), theme.primary()),
+            ])),
             ConvItem::Assistant(text) => {
                 for l in text.split('\n') {
-                    lines.push(Line::from(l.to_string()));
+                    lines.push(Line::from(Span::styled(l.to_string(), theme.primary())));
                 }
             }
             ConvItem::Tool {
@@ -174,40 +206,73 @@ fn render_conversation(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
                 done,
                 ..
             } => {
-                let mark = match done {
-                    None => "…",
-                    Some(true) => "ok",
-                    Some(false) => "FAILED",
+                let (mark, style) = match done {
+                    None => (strings::markers::RUNNING, theme.chrome()),
+                    Some(true) => (strings::markers::OK, theme.success()),
+                    Some(false) => (strings::markers::FAILED, theme.error()),
                 };
-                lines.push(Line::from(format!("  [{mark}] {tool}: {summary}")));
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  [{mark}] "), style),
+                    Span::styled(format!("{tool}: {summary}"), theme.chrome()),
+                ]));
             }
-            ConvItem::Notice(text) => lines.push(Line::from(format!("· {text}"))),
+            ConvItem::Notice(text) => lines.push(Line::from(Span::styled(
+                format!("{} {text}", strings::markers::NOTICE),
+                theme.chrome(),
+            ))),
         }
     }
 
     let convo = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.chrome())
+                .title(Span::styled(title, theme.accent())),
+        )
         .wrap(Wrap { trim: false });
     frame.render_widget(convo, area);
 }
 
-fn render_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let input = Paragraph::new(format!("› {}", app.input))
-        .block(Block::default().borders(Borders::ALL).title(" message "));
+fn render_input(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
+    let input = Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!("{} ", strings::markers::USER_PROMPT),
+            theme.accent(),
+        ),
+        Span::styled(app.input.clone(), theme.primary()),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.chrome()),
+    );
     frame.render_widget(input, area);
 }
 
-fn render_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn render_status(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
     let hints = if app.pending_permission.is_some() {
-        "y allow · s session · Enter deny"
+        strings::hints::PERMISSION
     } else {
-        "Enter send · Ctrl-B sidebar · Ctrl-D quit"
+        strings::hints::NORMAL
     };
     let status = format!(
-        " {mode:?}  ctx {pct}%  {hints}",
-        mode = app.mode,
+        " {mode}  {ctx} {pct}%  {hints}",
+        mode = mode_name(app.mode),
+        ctx = strings::status::CONTEXT_ABBR,
         pct = app.context_pct,
     );
-    let bar = Paragraph::new(status).style(Style::default().add_modifier(Modifier::DIM));
+    let bar = Paragraph::new(status).style(theme.chrome());
     frame.render_widget(bar, area);
+}
+
+/// Terse, lower-case mode name for the status bar (Design §6.2).
+fn mode_name(mode: emberly_core::Mode) -> &'static str {
+    match mode {
+        emberly_core::Mode::Normal => strings::mode::NORMAL,
+        emberly_core::Mode::AutoAcceptEdits => strings::mode::AUTO_ACCEPT_EDITS,
+        emberly_core::Mode::Auto => strings::mode::AUTO,
+    }
 }

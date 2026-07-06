@@ -13,10 +13,13 @@
 pub mod app;
 pub mod frontend;
 pub mod line;
+pub mod strings;
 pub mod terminal;
+pub mod theme;
 pub mod tui;
 
 pub use app::{App, SessionInfo};
 pub use frontend::{detect, FrontendKind};
 pub use line::{parse_permission_answer, LineRenderer};
 pub use terminal::restore_terminal;
+pub use theme::{Palette, Theme};

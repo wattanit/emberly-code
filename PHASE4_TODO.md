@@ -25,7 +25,7 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 |---|---|---|
 | 0. Prerequisites & dependencies | [x] | ratatui 0.29 / syntect 5.3 (fancy-regex) / unicode-*; HC-2 verified C-free |
 | 1. Frontend abstraction & terminal lifecycle | [x] | seam + RAII guard + panic-safe restore (HC-3); loop + view-model; PTY-verified |
-| 2. Centralized theme & string table | [ ] | one theme file, one strings module (Design §2, §6.2) |
+| 2. Centralized theme & string table | [x] | theme.rs (named roles + reserved safety band) + strings.rs; 3 theme tests |
 | 3. Grapheme-aware text engine + line editor | [ ] | Thai width/wrap/cursor; the input box (Tech Spec §9) |
 | 4. Layout: main pane + sidebar + status bar | [ ] | auto-collapse <100 cols (Design §3) |
 | 5. Markdown subset + syntax highlighting | [ ] | first-party md; syntect fancy-regex (Design §4.1) |
@@ -124,18 +124,25 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 
 ## 2. Centralized theme & string table  *(Design §2, §6.2)*
 
-- [ ] One `theme` module: named **roles**, not scattered colors — background/
-      raised-surface, ember accent + dim accent, primary text, secondary/chrome,
-      semantic allow/deny/warning, diff add/del. Candidate values from Design
-      §2 (tune by eye later). Theming later = swapping values into roles.
-- [ ] **Reserved safety styling** as its own role, used *only* by the
-      outside-root permission band (group 7). A lint/comment so it is never
-      reused decoratively (Design §2, §5).
-- [ ] Light-terminal legibility fallback path (Design §2).
-- [ ] One `strings` module/table: every interface string (English, v1). No
-      scattered literals — cheap discipline, leaves localization open (Design
-      §6.2). Voice rules (§6.1–§6.2): second person, present tense, terse
-      chrome (2–5 words), no exclamation marks; error shape *what → why → next*.
+- [x] `theme.rs`: a `Palette` of named colour roles (background/raised, accent/
+      dim-accent, primary, chrome, success/error/warning, safety fg+bg) with
+      Design §2 candidate values, and a `Theme { palette, color }` whose role
+      methods build ratatui `Style`s. Theming later = a different `Palette`
+      behind the same roles — the values are the only thing that changes.
+- [x] **Reserved safety styling** as its own role, `Theme::safety_band()` —
+      loud fg-on-deep-red bold band, documented as outside-root-only, never
+      decorative (Design §2, §5). A test asserts it is a distinct bg band.
+- [x] Light-terminal legibility fallback: `Palette::light()` / `Theme::light()`
+      (same roles, dark-on-light values). Selection hook is present; auto
+      light/dark detection is out of scope for v1.
+- [x] `strings.rs`: every chrome string (brand, permission, status/sidebar,
+      mode names, keybinding hints, markers) in one table — no scattered
+      literals. Voice rules applied (terse, lower-case chrome, no exclamation
+      marks). The **permission-critical strings are shared** by the TUI and the
+      line frontend, so degraded-mode parity is structural, not accidental.
+- [x] `tui.rs` render + `line.rs` permission prompt refactored onto theme +
+      strings; `App` carries the active `Theme` as the single source. `plain()`
+      theme (colour off) exists for tests / future headless reuse.
 
 ---
 

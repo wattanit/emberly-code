@@ -14,6 +14,8 @@ use emberly_core::{
     UiEvent,
 };
 
+use crate::theme::Theme;
+
 /// One rendered item in the conversation flow. Group 5 enriches assistant text
 /// with the markdown pass; group 6 adds diffs.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +86,9 @@ pub struct App {
     /// the prompt owns the screen and normal input is suspended (Design §5).
     pub pending_permission: Option<(PermissionId, PermissionRendering)>,
     pub sidebar_visible: bool,
+    /// The active theme (Design §2). One source the renderer reads; swapping it
+    /// (mode/light-fallback later) is a value change, not a refactor.
+    pub theme: Theme,
 }
 
 impl App {
@@ -103,6 +108,7 @@ impl App {
             modified_files: Vec::new(),
             pending_permission: None,
             sidebar_visible: true,
+            theme: Theme::rich(),
         }
     }
 
