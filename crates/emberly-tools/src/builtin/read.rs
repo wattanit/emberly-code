@@ -40,6 +40,12 @@ impl Tool for ReadFileTool {
         }
     }
 
+    fn describe(&self, args: &Value) -> Option<String> {
+        serde_json::from_value::<ReadArgs>(args.clone())
+            .ok()
+            .map(|a| format!("read {}", a.path))
+    }
+
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: ReadArgs = match serde_json::from_value(args) {
             Ok(a) => a,

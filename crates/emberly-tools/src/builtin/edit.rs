@@ -46,6 +46,12 @@ impl Tool for EditFileTool {
         }
     }
 
+    fn describe(&self, args: &Value) -> Option<String> {
+        serde_json::from_value::<EditArgs>(args.clone())
+            .ok()
+            .map(|a| format!("edit {}", a.path))
+    }
+
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: EditArgs = match serde_json::from_value(args) {
             Ok(a) => a,

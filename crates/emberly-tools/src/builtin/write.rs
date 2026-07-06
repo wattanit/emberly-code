@@ -41,6 +41,12 @@ impl Tool for WriteFileTool {
         }
     }
 
+    fn describe(&self, args: &Value) -> Option<String> {
+        serde_json::from_value::<WriteArgs>(args.clone())
+            .ok()
+            .map(|a| format!("write {}", a.path))
+    }
+
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: WriteArgs = match serde_json::from_value(args) {
             Ok(a) => a,

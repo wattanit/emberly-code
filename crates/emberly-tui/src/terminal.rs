@@ -14,7 +14,9 @@
 
 use std::io::{self, Stdout};
 
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -39,6 +41,7 @@ impl TerminalGuard {
             stdout,
             EnterAlternateScreen,
             EnableBracketedPaste,
+            EnableMouseCapture,
             cursor::Hide
         )?;
         install_panic_hook();
@@ -66,6 +69,7 @@ pub fn restore_terminal() -> io::Result<()> {
     let mut stdout = io::stdout();
     let _ = execute!(
         stdout,
+        DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen,
         cursor::Show

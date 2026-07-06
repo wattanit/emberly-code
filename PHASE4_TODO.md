@@ -36,7 +36,31 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 | 10. Degraded mode parity | [ ] | `--plain`/`NO_COLOR`/`TERM=dumb` (Design §7) |
 | 11. Tests, fixtures & exit criterion | [ ] | Thai + degraded + permission-prompt guarantees |
 
-**Overall Phase 4: NOT STARTED.** Branch `phase-4-tui` off `main`.
+**Overall Phase 4: groups 0–7 done (branch `phase-4-tui`); groups 8–11 remain.**
+
+### Post-group-7 UI adjustments (owner feedback, 2026-07-06)
+
+All four touch already-planned areas, so the plan text stands — these are
+implementation fixes:
+
+- **Context % no longer duplicated on the status bar.** It shows on the bar
+  *only* when the sidebar is collapsed (Design §3.2); otherwise the sidebar is
+  its home. (§4 fix.)
+- **Multi-line input works everywhere.** Shift+Enter is indistinguishable from
+  Enter on many terminals, so **Ctrl+J** (a literal LF) and **Alt+Enter** also
+  insert a newline; the input box grows and scrolls. Hint updated. (§3 feature,
+  now reliable.)
+- **Conversation scrollback via the mouse wheel.** Mouse capture enabled;
+  wheel routes to the overlay / permission prompt / conversation as focused
+  (PgUp/PgDn already worked). This was the planned §4 "wheel". (Trade-off:
+  native terminal selection now needs the terminal's modifier — standard for
+  mouse-capture TUIs.)
+- **Tool calls show what ran and what came back.** The engine now emits an
+  informative start label via a new `Tool::describe(args)` (e.g. `run: cargo
+  test`, `read src/main.rs`) instead of the bare tool name, and `ToolFinished`
+  carries an output `preview`. The conversation shows `[✓] run: … — exit 0`
+  plus a few indented result lines; the line frontend shows the preview too
+  (Design §6.1). (§4/§6.1 fix.)
 
 ---
 

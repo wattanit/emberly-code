@@ -35,9 +35,19 @@ impl LineRenderer {
             UiEvent::ToolStarted { tool, summary, .. } => {
                 writeln!(out, "\n> {tool}: {summary}")?;
             }
-            UiEvent::ToolFinished { ok, summary, .. } => {
+            UiEvent::ToolFinished {
+                ok,
+                summary,
+                preview,
+                ..
+            } => {
                 let tag = if *ok { "ok" } else { "FAILED" };
                 writeln!(out, "  [{tag}] {summary}")?;
+                // Show the result excerpt, indented, so the plain frontend also
+                // says what the tool produced (Design §6.1).
+                for line in preview.lines() {
+                    writeln!(out, "    {line}")?;
+                }
             }
             UiEvent::FileModified { path, adds, dels } => {
                 writeln!(out, "  ~ {path} (+{adds} -{dels})")?;
@@ -224,12 +234,15 @@ mod tests {
             call_id: ToolCallId::new("c1"),
             ok: true,
             summary: "wrote a.txt".into(),
+            preview: "done".into(),
         });
         assert!(ok.contains("[ok]"));
+        assert!(ok.contains("done"), "preview shown in degraded mode");
         let failed = render_to_string(&UiEvent::ToolFinished {
             call_id: ToolCallId::new("c1"),
             ok: false,
             summary: "denied".into(),
+            preview: String::new(),
         });
         assert!(failed.contains("[FAILED]"));
     }

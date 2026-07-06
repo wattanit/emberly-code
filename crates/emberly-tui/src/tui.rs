@@ -58,10 +58,19 @@ pub async fn run(ports: FrontendPorts, session: SessionInfo) -> io::Result<()> {
                     app.on_paste(&text);
                     guard.terminal().draw(|f| render::frame(f, &app))?;
                 }
+                Some(Event::Mouse(mouse)) => {
+                    use crossterm::event::MouseEventKind;
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => app.on_scroll(true),
+                        MouseEventKind::ScrollDown => app.on_scroll(false),
+                        _ => continue,
+                    }
+                    guard.terminal().draw(|f| render::frame(f, &app))?;
+                }
                 Some(Event::Resize(_, _)) => {
                     guard.terminal().draw(|f| render::frame(f, &app))?;
                 }
-                Some(_) => {} // mouse / focus — handled in later groups
+                Some(_) => {} // focus events — ignored
                 None => break, // input thread ended (stdin closed)
             },
         }

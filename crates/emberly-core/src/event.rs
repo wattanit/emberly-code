@@ -35,11 +35,14 @@ pub enum UiEvent {
     },
     /// A tool finished. `ok` distinguishes a success payload from a structured
     /// failure payload — both are normal data to the model (HC-6), never a
-    /// harness error.
+    /// harness error. `preview` is a short, already-truncated excerpt of the
+    /// result for the conversation, so the user sees what the tool produced
+    /// (Design §6.1) without the frontend holding the full output.
     ToolFinished {
         call_id: ToolCallId,
         ok: bool,
         summary: String,
+        preview: String,
     },
 
     /// The engine needs a permission decision before proceeding. The frontend

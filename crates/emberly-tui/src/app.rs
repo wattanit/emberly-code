@@ -34,9 +34,15 @@ pub enum ConvItem {
     Tool {
         call_id: ToolCallId,
         tool: String,
+        /// What the call is doing (from `describe`) — e.g. `run: cargo test`.
+        /// Set at start and kept; the result status is separate.
         summary: String,
         /// `None` while running; `Some(ok)` once finished.
         done: Option<bool>,
+        /// The finished one-line status (e.g. `exit 0`, `read foo.rs (12 lines)`).
+        result: Option<String>,
+        /// A short excerpt of the tool's output (Design §6.1).
+        preview: Option<String>,
     },
     /// A harness-world line (error, retry) — rendered out-of-band from the
     /// conversation voice (Design §6.1).
@@ -186,21 +192,28 @@ impl App {
                     tool,
                     summary,
                     done: None,
+                    result: None,
+                    preview: None,
                 });
             }
             UiEvent::ToolFinished {
                 call_id,
                 ok,
                 summary,
+                preview,
             } => {
                 if let Some(ConvItem::Tool {
-                    done, summary: s, ..
+                    done,
+                    result,
+                    preview: p,
+                    ..
                 }) = self.find_tool_mut(&call_id)
                 {
                     *done = Some(ok);
-                    if !summary.is_empty() {
-                        *s = summary;
-                    }
+                    // Keep the descriptive label; record the result status and
+                    // a preview of the output separately.
+                    *result = (!summary.is_empty()).then_some(summary);
+                    *p = (!preview.is_empty()).then_some(preview);
                 }
             }
             UiEvent::PermissionRequest { id, rendering } => {
@@ -300,7 +313,12 @@ impl App {
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
+            // Newline (multi-line input) via Ctrl+J — a plain LF that every
+            // terminal delivers, so multi-line entry works even where Shift+
+            // Enter is indistinguishable from Enter.
+            KeyCode::Char('j') if ctrl => self.edit(|e| e.newline()),
             // Ctrl-D on an empty line quits; on a non-empty line it deletes
             // forward (readline convention).
             KeyCode::Char('d') if ctrl => {
@@ -333,9 +351,9 @@ impl App {
             KeyCode::Char('e') if ctrl => self.edit(|e| e.end()),
             KeyCode::Char('k') if ctrl => self.edit(|e| e.kill_to_end()),
             KeyCode::Char('w') if ctrl => self.edit(|e| e.delete_word_back()),
-            // Shift+Enter (where the terminal reports it) inserts a newline;
-            // plain Enter submits.
-            KeyCode::Enter if shift => self.edit(|e| e.newline()),
+            // Shift+Enter and Alt+Enter insert a newline where the terminal
+            // reports the modifier; plain Enter submits.
+            KeyCode::Enter if shift || alt => self.edit(|e| e.newline()),
             KeyCode::Enter => match self.editor.submit() {
                 Some(text) => {
                     self.scroll = 0; // jump back to the latest output
@@ -383,6 +401,34 @@ impl App {
     fn edit(&mut self, f: impl FnOnce(&mut LineEditor)) -> Action {
         f(&mut self.editor);
         Action::None
+    }
+
+    /// Handle a mouse-wheel scroll, routed to whatever is focused: an open
+    /// overlay, the permission prompt, or the conversation history. `up` means
+    /// scrolling toward older content.
+    pub fn on_scroll(&mut self, up: bool) {
+        let step = 3;
+        if let Some(o) = self.overlays.last_mut() {
+            o.scroll = if up {
+                o.scroll.saturating_sub(step)
+            } else {
+                o.scroll.saturating_add(step)
+            };
+        } else if self.pending_permission.is_some() {
+            self.permission_scroll = if up {
+                self.permission_scroll.saturating_sub(step)
+            } else {
+                self.permission_scroll.saturating_add(step)
+            };
+        } else {
+            // Conversation scroll is measured from the bottom: wheel-up moves
+            // back into history (larger offset).
+            self.scroll = if up {
+                self.scroll.saturating_add(step)
+            } else {
+                self.scroll.saturating_sub(step)
+            };
+        }
     }
 
     /// Insert pasted text (bracketed paste) into the input, unless a permission
@@ -536,11 +582,21 @@ mod tests {
             call_id: id.clone(),
             ok: true,
             summary: "exit 0".into(),
+            preview: "hello\nworld".into(),
         });
         match &a.conversation[0] {
-            ConvItem::Tool { done, summary, .. } => {
+            ConvItem::Tool {
+                done,
+                summary,
+                result,
+                preview,
+                ..
+            } => {
                 assert_eq!(*done, Some(true));
-                assert_eq!(summary, "exit 0");
+                // The descriptive label is kept; result + preview are separate.
+                assert_eq!(summary, "run: ls");
+                assert_eq!(result.as_deref(), Some("exit 0"));
+                assert_eq!(preview.as_deref(), Some("hello\nworld"));
             }
             other => panic!("expected a tool item, got {other:?}"),
         }
@@ -568,6 +624,30 @@ mod tests {
             a.active_overlay().map(|o| &o.content),
             Some(OverlayContent::Diff(_))
         ));
+    }
+
+    #[test]
+    fn ctrl_j_inserts_a_newline() {
+        let mut a = app();
+        a.on_key(KeyEvent::from(KeyCode::Char('a')));
+        a.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        a.on_key(KeyEvent::from(KeyCode::Char('b')));
+        assert_eq!(a.editor.text(), "a\nb");
+        assert_eq!(a.editor.line_count(), 2);
+    }
+
+    #[test]
+    fn wheel_scrolls_conversation_and_routes_to_overlay() {
+        let mut a = app();
+        a.on_scroll(true); // wheel up → into history
+        assert!(a.scroll > 0);
+        a.on_scroll(false);
+        assert_eq!(a.scroll, 0);
+        // With an overlay open, the wheel scrolls the overlay, not the history.
+        a.open_text_overlay("t", "x");
+        a.on_scroll(false);
+        assert_eq!(a.scroll, 0, "conversation untouched while overlay is up");
+        assert!(a.active_overlay().is_some_and(|o| o.scroll > 0));
     }
 
     #[test]

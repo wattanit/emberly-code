@@ -385,10 +385,14 @@ impl Engine {
             ));
         };
 
+        // Describe the invocation from its arguments (e.g. `run: cargo test`,
+        // `read src/main.rs`) so the activity line says what is happening, not
+        // just the tool name (Design §6.3).
+        let summary = tool.describe(&args).unwrap_or_else(|| call.name.clone());
         self.emit(UiEvent::ToolStarted {
             call_id: call.id.clone(),
             tool: call.name.clone(),
-            summary: call.name.clone(),
+            summary,
         })
         .await;
 
@@ -467,6 +471,7 @@ impl Engine {
             call_id: call.id.clone(),
             ok: outcome.ok,
             summary: outcome.summary,
+            preview: result_preview(&outcome.content),
         })
         .await;
 
@@ -498,6 +503,7 @@ impl Engine {
             call_id: call.id.clone(),
             ok: false,
             summary: "canceled".into(),
+            preview: String::new(),
         })
         .await;
     }
@@ -623,6 +629,27 @@ impl ToolCallResult {
     fn is_canceled(&self) -> bool {
         matches!(self, ToolCallResult::Canceled)
     }
+}
+
+/// Number of result lines shown inline under a finished tool call.
+const PREVIEW_LINES: usize = 8;
+/// Character ceiling for the inline preview, so a single very long line cannot
+/// flood the conversation.
+const PREVIEW_CHARS: usize = 600;
+
+/// A short excerpt of a tool's output for the conversation (Design §6.1): the
+/// first few lines, char-capped. The full output goes to the model; this is
+/// just what the user glances at.
+fn result_preview(content: &str) -> String {
+    let mut preview: String = content
+        .lines()
+        .take(PREVIEW_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if preview.chars().count() > PREVIEW_CHARS {
+        preview = preview.chars().take(PREVIEW_CHARS).collect();
+    }
+    preview
 }
 
 /// Enrich a tool's [`PermissionRequest`] into a UI [`PermissionRendering`],

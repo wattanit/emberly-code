@@ -205,23 +205,47 @@ fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 // inline code, lists, headings; everything else plain (§4.1).
                 out.extend(crate::markdown::render_message(text, theme, w));
             }
-            ConvItem::Tool { summary, done, .. } => {
-                // No "tool:" prefix — the summary is already a verb phrase
-                // ("run: cargo test", "read src/main.rs"), so a "bash: bash"
-                // style redundancy can't occur.
+            ConvItem::Tool {
+                summary,
+                done,
+                result,
+                preview,
+                ..
+            } => {
+                // Header line: mark + the descriptive summary (a verb phrase
+                // like "run: cargo test"), then the result status when done.
                 let (mark, style) = match done {
                     None => (markers::RUNNING, theme.chrome()),
                     Some(true) => (markers::OK, theme.success()),
                     Some(false) => (markers::FAILED, theme.error()),
                 };
-                push_wrapped(
-                    &mut out,
-                    summary,
-                    w.saturating_sub(mark.len() + 3),
+                let mut spans = vec![
                     Span::styled(format!("[{mark}] "), style),
-                    "    ",
-                    theme.chrome(),
-                );
+                    Span::styled(summary.clone(), theme.primary()),
+                ];
+                if let Some(result) = result {
+                    spans.push(Span::styled(format!(" — {result}"), theme.chrome()));
+                }
+                out.push(Line::from(spans));
+
+                // Result preview: a few indented, dimmed lines of the output so
+                // the user sees what the tool produced (Design §6.1).
+                if let Some(preview) = preview {
+                    let style = if *done == Some(false) {
+                        theme.error()
+                    } else {
+                        theme.chrome()
+                    };
+                    for row in preview
+                        .split('\n')
+                        .flat_map(|l| text::wrap(l, w.saturating_sub(4)))
+                    {
+                        out.push(Line::from(vec![
+                            Span::raw("    "),
+                            Span::styled(row, style),
+                        ]));
+                    }
+                }
             }
             ConvItem::Notice(text) => {
                 push_wrapped(
@@ -465,15 +489,15 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
     } else {
         strings::hints::NORMAL
     };
-    // Context % and mode always appear here; when the sidebar is collapsed this
-    // is their only home (Design §3.2).
-    let _ = sidebar_shown;
-    let status = format!(
-        " {mode}  {ctx} {pct}%  {hints}",
-        mode = mode_name(app.mode),
-        ctx = strings::status::CONTEXT_ABBR,
-        pct = app.context_pct,
-    );
+    // Context % lives in the sidebar; show it on the status bar only when the
+    // sidebar is collapsed, so it is never duplicated (Design §3.2). Mode is
+    // status-bar-only, so it always appears here.
+    let ctx = if sidebar_shown {
+        String::new()
+    } else {
+        format!("{} {}%  ", strings::status::CONTEXT_ABBR, app.context_pct)
+    };
+    let status = format!(" {}  {ctx}{hints}", mode_name(app.mode));
     f.render_widget(Paragraph::new(status).style(theme.chrome()), area);
 }
 
@@ -670,16 +694,23 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    /// Render a full frame to an off-screen buffer and flatten it to text, for
-    /// asserting what actually appears on screen.
+    /// Render a full frame to an off-screen buffer and flatten it to text (one
+    /// screen row per line), for asserting what actually appears on screen.
     fn draw(app: &App, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).expect("backend");
         term.draw(|f| frame(f, app)).expect("draw");
         let buf = term.backend().buffer();
+        let width = usize::from(buf.area.width);
         buf.content
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
-            .collect()
+            .chunks(width)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn pending(app: &mut App, outside_root: bool, detail: &str) {
@@ -731,6 +762,50 @@ mod tests {
             screen.contains("more"),
             "approve hint indicates content below the fold (Design §5)"
         );
+    }
+
+    #[test]
+    fn tool_call_shows_what_and_result_and_output() {
+        let mut app = App::new(SessionInfo::default());
+        let id = emberly_core::ToolCallId::new("c1");
+        app.apply_event(UiEvent::ToolStarted {
+            call_id: id.clone(),
+            tool: "bash".into(),
+            summary: "run: ls -la".into(),
+        });
+        app.apply_event(UiEvent::ToolFinished {
+            call_id: id,
+            ok: true,
+            summary: "exit 0".into(),
+            preview: "total 8\nsrc\nCargo.toml".into(),
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(screen.contains("run: ls -la"), "shows what the tool did");
+        assert!(screen.contains("exit 0"), "shows the result status");
+        assert!(
+            screen.contains("Cargo.toml"),
+            "shows a preview of the output"
+        );
+    }
+
+    #[test]
+    fn context_percent_only_on_status_bar_when_sidebar_hidden() {
+        let mut app = App::new(SessionInfo::default());
+        app.apply_event(UiEvent::ContextUsage {
+            pct: 42,
+            tokens: 100,
+        });
+        // Wide: sidebar shown → ctx% is in the sidebar, not duplicated on the bar.
+        let wide = draw(&app, 120, 20);
+        let bar_wide = wide.lines().last().unwrap_or_default();
+        assert!(
+            !bar_wide.contains("ctx 42%"),
+            "no ctx on bar when sidebar up"
+        );
+        assert!(wide.contains("42%"), "but present in the sidebar");
+        // Narrow: sidebar collapsed → ctx% migrates to the status bar.
+        let narrow = draw(&app, 80, 20);
+        assert!(narrow.contains("ctx 42%"), "ctx on bar when collapsed");
     }
 
     #[test]
