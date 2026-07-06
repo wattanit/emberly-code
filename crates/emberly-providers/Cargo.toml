@@ -13,7 +13,15 @@ serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+reqwest.workspace = true
+bytes.workspace = true
+fastrand.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
 futures.workspace = true
+wiremock = "0.6"
+# When built under `--workspace`, reqwest's rustls feature is unified on, so
+# constructing a Client needs a crypto provider installed — use the same
+# pure-Rust one the binary uses.
+rustls-rustcrypto.workspace = true

@@ -34,6 +34,16 @@ uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1"
 futures = "0.3"
 similar = "2"
+# HTTP client for provider backends. Pure-Rust TLS only (HC-2): the
+# `*-no-provider` rustls feature pulls rustls WITHOUT `ring`/`aws-lc-rs`; the
+# binary installs a RustCrypto crypto provider (see `rustls-rustcrypto`). Client
+# libraries take an injected `reqwest::Client` and test over plain HTTP.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-webpki-roots-no-provider"] }
+bytes = "1"
+fastrand = "2"
+# Pure-Rust rustls crypto provider (owner decision — see memory/tls-pure-rust
+# -decision). Currently alpha; track for maturity/audit before v1.
+rustls-rustcrypto = "=0.0.2-alpha"
 
 [profile.release]
 # Fully static musl builds (HC-2) prefer small, predictable binaries.

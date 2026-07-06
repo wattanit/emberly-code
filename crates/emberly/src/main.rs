@@ -20,7 +20,9 @@ use emberly_providers::Provider;
 use emberly_tools::{default_registry, TruncateConfig};
 use emberly_tui::line;
 
+mod config;
 mod placeholder;
+mod provider_setup;
 use placeholder::PlaceholderProvider;
 
 #[tokio::main]
@@ -64,21 +66,32 @@ async fn run() -> anyhow::Result<()> {
     }
 
     let project_root = std::env::current_dir()?;
+
+    // Resolve config (files + env + keys), then select a live provider or fall
+    // back to the offline placeholder when none is configured.
+    let resolved = config::load(&project_root)?;
+    let (provider, model, label) = match provider_setup::build(&resolved)? {
+        Some(selection) => (selection.provider, selection.model, selection.label),
+        None => (
+            Arc::new(PlaceholderProvider::new()) as Arc<dyn Provider>,
+            "placeholder".to_string(),
+            "placeholder (offline — set EMBERLY_PROVIDER + EMBERLY_MODEL + API key)".to_string(),
+        ),
+    };
+
     println!("emberly code — running in {}", project_root.display());
-    println!(
-        "Phase 1 scaffold: a placeholder model replies; live providers arrive in Phase 3. \
-         Ctrl-D to exit."
-    );
+    println!("model: {label}");
+    println!("Ctrl-D to exit.");
     println!();
 
-    let provider: Arc<dyn Provider> = Arc::new(PlaceholderProvider::new());
     let config = EngineConfig {
         provider,
         tools: default_registry(),
         project_root,
-        model: "placeholder".into(),
+        model,
         system: None,
         truncate: TruncateConfig::default(),
+        retry: emberly_core::RetryPolicy::default(),
     };
 
     let (engine_ports, frontend) = channel();

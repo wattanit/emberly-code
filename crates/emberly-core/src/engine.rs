@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use emberly_providers::{
-    CompletionRequest, ContentBlock, Message, Provider, ProviderError, Role, StreamEvent,
-    ToolCallId, ToolSchema,
+    CompletionRequest, CompletionStream, ContentBlock, Message, Provider, ProviderError,
+    RetryPolicy, Role, StreamEvent, ToolCallId, ToolSchema,
 };
 use emberly_tools::{
     truncate_output, PermissionOutcome, PermissionRequest, ToolCtx, ToolRegistry, TruncateConfig,
@@ -39,6 +39,8 @@ pub struct EngineConfig {
     pub model: String,
     pub system: Option<String>,
     pub truncate: TruncateConfig,
+    /// Retry policy for retryable provider failures and mid-stream drops.
+    pub retry: RetryPolicy,
 }
 
 /// A tool call accumulated from the provider stream.
@@ -74,10 +76,19 @@ pub struct Engine {
     model: String,
     system: Option<String>,
     truncate: TruncateConfig,
+    retry: RetryPolicy,
     gate: Arc<ChannelGate>,
     events_tx: mpsc::Sender<UiEvent>,
     conversation: Vec<Message>,
-    usage: TokenUsage,
+    /// Cumulative billed tokens this session (summed per request — each
+    /// request's input is billed, so this is the cost basis, not the context
+    /// size).
+    session_usage: TokenUsage,
+    /// Running session cost estimate in USD (only when pricing is configured).
+    session_cost_usd: f64,
+    /// Most recent authoritative prompt-token count = current context size.
+    /// `None` until the first provider `Usage`; then it drives the context %.
+    context_tokens_authoritative: Option<u64>,
     next_permission_id: u64,
 }
 
@@ -98,10 +109,13 @@ impl Engine {
             model: config.model,
             system: config.system,
             truncate: config.truncate,
+            retry: config.retry,
             gate: Arc::new(ChannelGate { asks: asks_tx }),
             events_tx,
             conversation: Vec::new(),
-            usage: TokenUsage::default(),
+            session_usage: TokenUsage::default(),
+            session_cost_usd: 0.0,
+            context_tokens_authoritative: None,
             next_permission_id: 0,
         };
         (engine, asks_rx)
@@ -138,9 +152,9 @@ impl Engine {
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
     ) {
+        let mut drop_attempts = 0u32;
         loop {
-            let request = self.build_request();
-            let stream = match self.provider.stream_completion(request).await {
+            let stream = match self.open_stream_with_retry().await {
                 Ok(stream) => stream,
                 Err(error) => {
                     self.emit_provider_error(&error).await;
@@ -148,8 +162,11 @@ impl Engine {
                 }
             };
 
-            match self.consume_stream(stream, commands_rx).await {
+            let (end, text) = self.consume_stream(stream, commands_rx).await;
+            match end {
                 StreamEnd::Done { tool_calls } => {
+                    self.push_assistant_message(&text, &tool_calls);
+                    self.emit_context_usage().await;
                     self.emit(UiEvent::AssistantDone).await;
                     if tool_calls.is_empty() {
                         return; // model finished its turn
@@ -164,17 +181,38 @@ impl Engine {
                     // Loop: send the tool results back for another completion.
                 }
                 StreamEnd::Interrupted => {
+                    // Keep the partial text visible in the conversation.
+                    self.push_assistant_message(&text, &[]);
+                    self.emit_context_usage().await;
                     self.emit(UiEvent::AssistantDone).await;
                     return;
                 }
                 StreamEnd::Errored(error) => {
+                    self.emit(UiEvent::AssistantDone).await;
                     self.emit_provider_error(&error).await;
                     return;
                 }
                 StreamEnd::Dropped => {
+                    // The partial text was shown live; it is NOT stitched into
+                    // the retry (partial turns are not stitched — Tech Spec
+                    // §4.3). Retry the whole turn from the unchanged history.
+                    drop_attempts += 1;
+                    if self.retry.may_retry(drop_attempts) {
+                        let delay = self.retry.delay_for(drop_attempts);
+                        self.emit_retrying(
+                            drop_attempts,
+                            delay,
+                            "the model response ended unexpectedly",
+                        )
+                        .await;
+                        self.emit(UiEvent::AssistantDone).await;
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    self.emit(UiEvent::AssistantDone).await;
                     self.emit(UiEvent::HarnessError {
-                        what: "the model response ended unexpectedly".into(),
-                        why: "the provider stream closed before completing".into(),
+                        what: "the model response kept ending unexpectedly".into(),
+                        why: "the provider stream closed before completing, repeatedly".into(),
                         next: "send your message again to retry".into(),
                     })
                     .await;
@@ -184,13 +222,47 @@ impl Engine {
         }
     }
 
+    /// Open a completion stream, retrying retryable pre-stream failures with
+    /// backoff (Tech Spec §4.3). Every retry is surfaced (Design §6.1).
+    async fn open_stream_with_retry(&mut self) -> Result<CompletionStream, ProviderError> {
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            let request = self.build_request();
+            match self.provider.stream_completion(request).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) => {
+                    if !error.is_retryable() || !self.retry.may_retry(attempts) {
+                        return Err(error);
+                    }
+                    let delay = error
+                        .retry_after()
+                        .unwrap_or_else(|| self.retry.delay_for(attempts));
+                    self.emit_retrying(attempts, delay, &error.to_string())
+                        .await;
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    async fn emit_retrying(&self, attempt: u32, delay: std::time::Duration, reason: &str) {
+        self.emit(UiEvent::Retrying {
+            attempt,
+            max_attempts: self.retry.max_attempts,
+            delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            reason: reason.to_string(),
+        })
+        .await;
+    }
+
     /// Read one completion stream to its end, emitting text deltas and
     /// accumulating tool calls. Cancellable at each await point.
     async fn consume_stream(
         &mut self,
-        mut stream: emberly_providers::CompletionStream,
+        mut stream: CompletionStream,
         commands_rx: &mut mpsc::Receiver<Command>,
-    ) -> StreamEnd {
+    ) -> (StreamEnd, String) {
         let mut text = String::new();
         let mut tool_calls: Vec<PendingToolCall> = Vec::new();
         let mut saw_done = false;
@@ -218,10 +290,9 @@ impl Engine {
             }
         };
 
-        // Record the assistant's turn (partial text is kept on interruption).
-        self.push_assistant_message(&text, &tool_calls);
-        self.emit_context_usage().await;
-        end
+        // The caller commits the assistant message: on Done/Interrupted it is
+        // kept; on a retryable Dropped it is discarded (not stitched, §4.3).
+        (end, text)
     }
 
     /// Apply one stream event. Returns `Some(end)` when the stream is done.
@@ -251,7 +322,14 @@ impl Engine {
             }
             StreamEvent::ToolCallEnd { .. } => {}
             StreamEvent::Usage { usage } => {
-                self.usage = usage;
+                // Accumulate billed tokens and cost (each request's input is
+                // billed), and record the prompt size as the current context.
+                self.session_usage.input = self.session_usage.input.saturating_add(usage.input);
+                self.session_usage.output = self.session_usage.output.saturating_add(usage.output);
+                self.context_tokens_authoritative = Some(usage.input);
+                if let Some(pricing) = self.provider.model_info().pricing {
+                    self.session_cost_usd += pricing.estimate_usd(usage);
+                }
             }
             StreamEvent::Done { stop_reason: _ } => {
                 *saw_done = true;
@@ -486,21 +564,34 @@ impl Engine {
         .await;
     }
 
-    /// Estimate current context usage and emit it (Requirements §8.4). Rough by
-    /// design in Phase 1 (chars/4); exact provider usage refines it in Phase 3.
+    /// Emit context usage and, when pricing is configured, the running cost
+    /// estimate (Requirements §8.4, P-6; Design §3.1). Uses the provider's
+    /// authoritative prompt-token count once available, falling back to a
+    /// chars/4 estimate before the first `Usage`.
     async fn emit_context_usage(&self) {
         let info = self.provider.model_info();
         let reserve = OUTPUT_RESERVE.min(u64::from(info.max_output_tokens));
         let budget = u64::from(info.context_window)
             .saturating_sub(reserve)
             .max(1);
-        let tokens = self.context_tokens();
+        let tokens = self
+            .context_tokens_authoritative
+            .unwrap_or_else(|| self.context_tokens());
         let pct = ((tokens.saturating_mul(100)) / budget).min(100);
         self.emit(UiEvent::ContextUsage {
             pct: u8::try_from(pct).unwrap_or(100),
             tokens,
         })
         .await;
+
+        // Cost is only knowable with a pricing table (always labeled "est.").
+        if info.pricing.is_some() {
+            self.emit(UiEvent::CostEstimate {
+                usage: self.session_usage,
+                usd: self.session_cost_usd,
+            })
+            .await;
+        }
     }
 
     fn context_tokens(&self) -> u64 {

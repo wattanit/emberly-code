@@ -75,6 +75,15 @@ pub enum UiEvent {
         next: String,
     },
 
+    /// A retryable failure is being retried (Tech Spec §4.3, S-3). Surfaced as
+    /// a dimmed harness-voice line so retries are never silent (Design §6.1).
+    Retrying {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        reason: String,
+    },
+
     /// Session metadata for the sidebar/header (Design §3.1): id, title,
     /// provider, model, project root. Title is auto-generated and renamable.
     SessionMeta {

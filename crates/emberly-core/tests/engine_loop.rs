@@ -12,8 +12,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use emberly_core::{channel, Command, Engine, EngineConfig, PermissionDecision, UiEvent};
-use emberly_providers::{FakeProvider, Provider, ScriptedResponse};
+use emberly_core::{
+    channel, Command, Engine, EngineConfig, PermissionDecision, RetryPolicy, UiEvent,
+};
+use emberly_providers::{
+    FakeProvider, ModelInfo, Pricing, Provider, ProviderError, ScriptOutcome, ScriptedResponse,
+    StopReason, StreamEvent, TokenUsage,
+};
 use emberly_tools::{default_registry, TruncateConfig};
 use tokio::sync::mpsc;
 
@@ -34,7 +39,10 @@ struct Harness {
 }
 
 fn start(scripts: Vec<ScriptedResponse>, root: PathBuf) -> Harness {
-    let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(scripts));
+    start_with_provider(Arc::new(FakeProvider::new(scripts)), root)
+}
+
+fn start_with_provider(provider: Arc<dyn Provider>, root: PathBuf) -> Harness {
     let config = EngineConfig {
         provider,
         tools: default_registry(),
@@ -42,6 +50,12 @@ fn start(scripts: Vec<ScriptedResponse>, root: PathBuf) -> Harness {
         model: "fake-1".into(),
         system: None,
         truncate: TruncateConfig::default(),
+        // Fast retries so retry tests don't wait on real backoff.
+        retry: RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+        },
     };
     let (engine_ports, frontend) = channel();
     let (engine, asks_rx) = Engine::new(config, engine_ports.events_tx);
@@ -231,6 +245,122 @@ async fn full_workflow_read_edit_permission_bash() {
         e,
         UiEvent::FileModified { path, .. } if path == "f.txt"
     )));
+}
+
+#[tokio::test]
+async fn retries_retryable_pre_stream_failure_then_succeeds() {
+    // First completion fails to start with a retryable connect error; the
+    // engine retries and the second attempt streams a reply (S-3).
+    let scripts = vec![
+        ScriptedResponse::connect_error(ProviderError::Connect("reset".into())),
+        ScriptedResponse::text("recovered after retry"),
+    ];
+    let mut h = start(scripts, temp_project());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e, UiEvent::Retrying { .. })),
+        "the retry must be surfaced, never silent"
+    );
+    assert_eq!(deltas(&events), "recovered after retry");
+}
+
+#[tokio::test]
+async fn non_retryable_failure_is_not_retried() {
+    let scripts = vec![ScriptedResponse::connect_error(ProviderError::Auth)];
+    let mut h = start(scripts, temp_project());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = h.collect(None).await;
+
+    assert!(!events.iter().any(|e| matches!(e, UiEvent::Retrying { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::HarnessError { .. })));
+}
+
+#[tokio::test]
+async fn mid_stream_drop_retries_the_whole_turn() {
+    // The first turn streams partial text then the connection drops; the
+    // engine retries the whole turn (partial not stitched, Tech Spec §4.3).
+    let scripts = vec![
+        ScriptedResponse::drop_after(vec![StreamEvent::TextDelta {
+            text: "partial…".into(),
+        }]),
+        ScriptedResponse::text("recovered"),
+    ];
+    let mut h = start(scripts, temp_project());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = h.collect(None).await;
+
+    assert!(events.iter().any(|e| matches!(e, UiEvent::Retrying { .. })));
+    // The partial was shown live; the recovered turn also streamed.
+    assert!(deltas(&events).contains("recovered"));
+}
+
+#[tokio::test]
+async fn cost_and_context_use_authoritative_usage() {
+    // A priced model + a scripted Usage event → the engine reports the exact
+    // context size and a cost estimate (P-6).
+    let info = ModelInfo {
+        model: "m".into(),
+        context_window: 1_000,
+        max_output_tokens: 100,
+        pricing: Some(Pricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+        }),
+    };
+    let response = ScriptedResponse {
+        events: vec![
+            StreamEvent::TextDelta { text: "hi".into() },
+            StreamEvent::Usage {
+                usage: TokenUsage {
+                    input: 400,
+                    output: 500,
+                },
+            },
+        ],
+        outcome: ScriptOutcome::Done(StopReason::EndTurn),
+    };
+    let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new([response]).with_model_info(info));
+
+    let mut h = start_with_provider(provider, temp_project());
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let events = h.collect(None).await;
+
+    // Context uses the authoritative prompt-token count (400), not an estimate.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::ContextUsage { tokens: 400, .. })));
+    // Cost = 400/1e6*3 + 500/1e6*15 = 0.0012 + 0.0075 = 0.0087.
+    let cost = events.iter().find_map(|e| match e {
+        UiEvent::CostEstimate { usd, usage } if usage.input == 400 && usage.output == 500 => {
+            Some(*usd)
+        }
+        _ => None,
+    });
+    match cost {
+        Some(usd) => assert!(
+            (usd - 0.0087).abs() < 1e-9,
+            "unexpected cost estimate: {usd}"
+        ),
+        None => panic!("expected a CostEstimate event with the accumulated usage"),
+    }
+}
+
+#[tokio::test]
+async fn no_cost_estimate_without_pricing() {
+    // The default fake model has no pricing → no CostEstimate emitted.
+    let mut h = start(vec![ScriptedResponse::text("hello")], temp_project());
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let events = h.collect(None).await;
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, UiEvent::CostEstimate { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::ContextUsage { .. })));
 }
 
 #[tokio::test]

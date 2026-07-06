@@ -50,6 +50,17 @@ impl LineRenderer {
                 writeln!(out, "  why:  {why}")?;
                 writeln!(out, "  next: {next}")?;
             }
+            UiEvent::Retrying {
+                attempt,
+                max_attempts,
+                delay_ms,
+                reason,
+            } => {
+                writeln!(
+                    out,
+                    "  … retrying ({attempt}/{max_attempts}) in {delay_ms}ms — {reason}"
+                )?;
+            }
             UiEvent::SessionMeta {
                 title,
                 provider,
