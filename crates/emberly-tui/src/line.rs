@@ -52,6 +52,12 @@ impl LineRenderer {
             UiEvent::FileModified { path, adds, dels } => {
                 writeln!(out, "  ~ {path} (+{adds} -{dels})")?;
             }
+            UiEvent::FileDiff { unified, .. } => {
+                // The +/- prefixes carry the change without colour (Design §7).
+                for line in unified.lines() {
+                    writeln!(out, "  {line}")?;
+                }
+            }
             UiEvent::PermissionRequest { rendering, .. } => {
                 self.render_permission(rendering, out)?
             }
@@ -68,7 +74,7 @@ impl LineRenderer {
             } => {
                 writeln!(
                     out,
-                    "  … retrying ({attempt}/{max_attempts}) in {delay_ms}ms — {reason}"
+                    "  ... retrying ({attempt}/{max_attempts}) in {delay_ms}ms - {reason}"
                 )?;
             }
             UiEvent::SessionMeta {
@@ -226,6 +232,52 @@ mod tests {
             "hi"
         );
         assert_eq!(render_to_string(&UiEvent::AssistantDone), "\n");
+    }
+
+    #[test]
+    fn file_diff_shows_plus_minus_prefixes() {
+        let out = render_to_string(&UiEvent::FileDiff {
+            path: "a.rs".into(),
+            unified: "--- a/a.rs\n+++ b/a.rs\n-old\n+new".into(),
+        });
+        assert!(out.contains("-old"), "deletions carry a - prefix");
+        assert!(out.contains("+new"), "additions carry a + prefix");
+    }
+
+    #[test]
+    fn degraded_output_has_no_ansi_escapes() {
+        // Degraded mode is colourless and append-only: no ANSI/cursor control
+        // ever reaches the stream (Design §7).
+        let events = [
+            UiEvent::AssistantDelta {
+                text: "สวัสดี".into(),
+            },
+            UiEvent::ToolStarted {
+                call_id: ToolCallId::new("c"),
+                tool: "bash".into(),
+                summary: "run: ls".into(),
+            },
+            UiEvent::ToolFinished {
+                call_id: ToolCallId::new("c"),
+                ok: true,
+                summary: "exit 0".into(),
+                preview: "total 0".into(),
+            },
+            UiEvent::FileDiff {
+                path: "a".into(),
+                unified: "-x\n+y".into(),
+            },
+            UiEvent::Retrying {
+                attempt: 1,
+                max_attempts: 3,
+                delay_ms: 500,
+                reason: "429".into(),
+            },
+        ];
+        for e in events {
+            let s = render_to_string(&e);
+            assert!(!s.contains('\u{1b}'), "no ANSI escape in {s:?}");
+        }
     }
 
     #[test]

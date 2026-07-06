@@ -93,7 +93,8 @@ async fn run() -> anyhow::Result<()> {
     // same information in-pane (and the alternate screen would wipe stdout
     // anyway), so print it only in degraded mode.
     if kind == frontend::FrontendKind::Plain {
-        println!("emberly code — running in {}", project_root.display());
+        // ASCII-only chrome in degraded mode (Design §7).
+        println!("emberly code - running in {}", project_root.display());
         println!("model: {label}");
         println!("Ctrl-D to exit.");
         println!();

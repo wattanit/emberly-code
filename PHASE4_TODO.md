@@ -33,7 +33,7 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 | 7. The permission prompt | [x] | scrollable full-content, loud outside-root, deny-default, diff-rendered; 5 render/behavior tests |
 | 8. Command palette + command registry | [x] | commands.rs registry; Ctrl+P fuzzy palette + /slash + /help; PTY-verified; /view=in-TUI |
 | 9. Motion | [x] | single ~12fps ticker; ember-pulse spinner + verb + elapsed; gated off (prompt/motion=false); 2 tests |
-| 10. Degraded mode parity | [ ] | `--plain`/`NO_COLOR`/`TERM=dumb` (Design §7) |
+| 10. Degraded mode parity | [x] | pure `decide()` predicate; line-mode diffs + ASCII; no-ANSI + prompt-guarantee tests; --plain verified |
 | 11. Tests, fixtures & exit criterion | [ ] | Thai + degraded + permission-prompt guarantees |
 
 **Overall Phase 4: groups 0–7 done (branch `phase-4-tui`); groups 8–11 remain.**
@@ -356,19 +356,23 @@ implementation fixes:
 
 ## 10. Degraded mode parity  *(Design §7; Tech Spec §9)*
 
-- [ ] Degraded predicate (finalize group 1): `--plain` flag OR `NO_COLOR` OR
-      `TERM=dumb` OR non-tty stdout → line-mode frontend. Rich TUI otherwise.
-- [ ] Degraded rendering (extend the existing `LineRenderer`): no color, no
-      box-drawing, no spinner (plain "working…" lines), ASCII-only markers,
-      append-only, **no cursor repositioning**. Diff `+`/`-` and the words
-      ALLOW/DENY carry meaning without color — color/unicode are enhancement,
-      never sole carrier, everywhere.
-- [ ] Permission prompt keeps every guarantee in degraded mode: full content,
-      **OUTSIDE-PROJECT-ROOT banner in capitals**, deliberate approve key
-      (already true in line-mode — assert it stays true).
-- [ ] `--plain` promoted from Phase 1's no-op to the real forcing flag; the
-      line-oriented path is the de facto headless-frontend contract (A-1).
-- [ ] Degraded mode is a **supported, tested** configuration, not best-effort.
+- [x] Degraded predicate split into a **pure `decide(force_plain, no_color,
+      term_dumb, is_tty)`** + `detect()` (gathers env). `--plain`/`NO_COLOR`/
+      `TERM=dumb`/non-tty → line mode. 2 unit tests on `decide`.
+- [x] Degraded rendering: `LineRenderer` is colourless, append-only, no cursor
+      repositioning. Added **`FileDiff` rendering** (`+`/`-`/`@@` prefixes carry
+      the change without colour) and ASCII-ified markers (Retrying `...`/`-`).
+      A test asserts **no ANSI escape** (`\x1b`) is ever emitted, over a mix of
+      events incl. Thai content and a diff. Banner in `main.rs` ASCII-ified too.
+- [x] Permission prompt keeps every guarantee in degraded mode — full content,
+      **OUTSIDE YOUR PROJECT** capitals banner, `[Enter] DENY` default, shared
+      strings with the TUI. Asserted by existing line-mode tests.
+- [x] `--plain` is the real forcing flag (since group 1); the line path is the
+      de facto headless contract (A-1). `--plain` verified end-to-end (clean
+      line output, no escapes).
+- [x] Degraded mode is a **supported, tested** configuration. (No spinner in
+      line mode — the plain "working…" line is unnecessary since streaming text
+      itself shows progress and line mode has no turn-start signal; noted.)
 
 ---
 
