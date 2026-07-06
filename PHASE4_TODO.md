@@ -23,7 +23,7 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 
 | Group | Status | Notes |
 |---|---|---|
-| 0. Prerequisites & dependencies | [ ] | ratatui/crossterm/syntect(fancy-regex)/unicode-*; HC-2 recheck |
+| 0. Prerequisites & dependencies | [x] | ratatui 0.29 / syntect 5.3 (fancy-regex) / unicode-*; HC-2 verified C-free |
 | 1. Frontend abstraction & terminal lifecycle | [ ] | `Frontend` trait, raw-mode/alt-screen guard, panic-safe restore (HC-3) |
 | 2. Centralized theme & string table | [ ] | one theme file, one strings module (Design §2, §6.2) |
 | 3. Grapheme-aware text engine + line editor | [ ] | Thai width/wrap/cursor; the input box (Tech Spec §9) |
@@ -65,25 +65,28 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 
 ## 0. Prerequisites & dependencies  *(§10 policy; HC-1/HC-2; Tech Spec §9, §12)*
 
-- [ ] Add to `[workspace.dependencies]`, pinned:
-      - `ratatui` (crossterm backend).
-      - `crossterm` (matching ratatui's expected version).
-      - `syntect` with **`default-features = false`**, features selecting the
-        **fancy-regex** engine + default syntaxes/themes (no `onig`). Confirm
-        the exact feature set builds C-free.
-      - `unicode-segmentation` (grapheme clusters).
-      - `unicode-width` (column width per cluster).
-      - A small fuzzy-matcher for the palette — prefer pure-Rust
-        `nucleo-matcher` or `fuzzy-matcher`; verify C-free, else first-party a
-        simple subsequence scorer.
-- [ ] `emberly-tui/Cargo.toml`: add the above; keep `emberly-tui -> core` only.
-- [ ] **HC-2 recheck:** `cargo tree` shows no `onig`/`onig_sys`/openssl/ring/
-      aws-lc in the build graph. Extend the CI guard's forbidden list with
-      `onig`/`onig_sys`.
-- [ ] `cargo build`/`clippy`/`fmt` green with the new deps before writing UI.
-- [ ] **Decision to record:** ratatui immediate-mode redraw model vs. our
-      event-driven engine — the TUI keeps a local view-model updated by
-      `UiEvent`s and redraws on event/tick/input, never blocks the engine.
+- [x] Added to `[workspace.dependencies]`, pinned: `ratatui = "0.29"`
+      (`default-features = false`, `["crossterm"]`); `syntect = "5.2"`
+      (`default-features = false`, `["default-fancy"]` → pure-Rust fancy-regex,
+      resolved 5.3.0 + fancy-regex 0.16); `unicode-segmentation = "1"`;
+      `unicode-width = "0.2"`; `nucleo-matcher = "0.3"` (registered, wired in at
+      group 8). **`crossterm` NOT declared separately** — used via
+      `ratatui::crossterm` so there is one crossterm version (0.28.1) in the
+      graph, no duplicate-version split.
+- [x] `emberly-tui/Cargo.toml`: added ratatui/syntect/unicode-*; still
+      `emberly-tui -> core` only (no new internal edges). Added tokio `time`
+      feature for the group-9 animation ticker.
+- [x] **HC-2 verified:** `cargo tree --workspace -e normal` is C-free — no
+      onig/openssl/ring/aws-lc; `fancy-regex 0.16.2` confirmed as syntect's
+      engine; `ring` remains dormant (not in the normal graph). CI guard grep
+      extended with `onig`/`onig-sys`/`onig_sys`; `deny.toml` bans `onig` +
+      `onig_sys`.
+- [x] `cargo build`/`clippy`/`fmt` green; full suite still 74 tests passing.
+- [x] **Decision recorded:** the TUI is event-driven, not immediate-mode-first —
+      it keeps a local view-model updated by `UiEvent`s and redraws on
+      event/tick/input; it never blocks the engine (redraw and input handling
+      are independent of streaming). ratatui's immediate-mode draw call is just
+      the render step over that view-model each frame.
 
 ---
 

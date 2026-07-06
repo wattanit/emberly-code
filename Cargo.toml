@@ -44,6 +44,23 @@ fastrand = "2"
 # Pure-Rust rustls crypto provider (owner decision — see memory/tls-pure-rust
 # -decision). Currently alpha; track for maturity/audit before v1.
 rustls-rustcrypto = "=0.0.2-alpha"
+# --- Phase 4 (full TUI) ---
+# ratatui with ONLY the crossterm backend (default features off drops the
+# optional `palette`/`underline-color` extras we don't need). We use ratatui's
+# re-exported `crossterm` rather than declaring it separately, so there is one
+# crossterm version in the graph — no duplicate-version split (cargo-deny).
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+# syntect for fenced-code highlighting. HC-2: `default-features = false` +
+# `default-fancy` selects the pure-Rust `fancy-regex` engine; the default
+# `default-onig` backend is Oniguruma (C) and is forbidden.
+syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
+# Grapheme-cluster + column-width handling for Thai/CJK text (Tech Spec §9):
+# never str::len, never chars-as-columns.
+unicode-segmentation = "1"
+unicode-width = "0.2"
+# Pure-Rust fuzzy matcher for the command palette (Design §3.3). Wired in at
+# group 8; registered here so the version is centralized.
+nucleo-matcher = "0.3"
 
 [profile.release]
 # Fully static musl builds (HC-2) prefer small, predictable binaries.

@@ -39,6 +39,10 @@ deny = [
     { name = "native-tls" },
     { name = "libgit2-sys" },
     { name = "git2" },
+    # Oniguruma (C regex) — syntect must stay on the pure-Rust fancy-regex
+    # backend (HC-2). Ban both the crate and its -sys shim.
+    { name = "onig" },
+    { name = "onig_sys" },
 ]
 
 [sources]

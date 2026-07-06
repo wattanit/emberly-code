@@ -44,19 +44,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build (static musl)
         run: cargo build --workspace --target x86_64-unknown-linux-musl
-      # HC-2: no C crypto/TLS in the actual build graph. Checks the resolved
-      # graph (not Cargo.lock, which records dormant optional deps like the
-      # `ring` feature of rustls-webpki that we never enable). TLS is pure-Rust
-      # rustls + rustls-rustcrypto.
-      - name: No C crypto in the build graph (HC-2)
+      # HC-2: no C crypto/TLS AND no C regex in the actual build graph. Checks
+      # the resolved graph (not Cargo.lock, which records dormant optional deps
+      # like the `ring` feature of rustls-webpki that we never enable). TLS is
+      # pure-Rust rustls + rustls-rustcrypto; syntax highlighting is syntect on
+      # the pure-Rust fancy-regex backend (onig/onig-sys is Oniguruma = C).
+      - name: No C crypto or C regex in the build graph (HC-2)
         run: |
           if cargo tree --workspace -e normal --target all --prefix none \
               | awk '{print $1}' | sort -u \
-              | grep -iqxE '(ring|openssl|openssl-sys|native-tls|aws-lc-rs|aws-lc-sys)'; then
-            echo "HC-2 violation: a C crypto/TLS crate is in the build graph"
+              | grep -iqxE '(ring|openssl|openssl-sys|native-tls|aws-lc-rs|aws-lc-sys|onig|onig-sys|onig_sys)'; then
+            echo "HC-2 violation: a C crypto/TLS/regex crate is in the build graph"
             exit 1
           fi
-          echo "ok — build graph is C-crypto-free"
+          echo "ok — build graph is C-free (crypto + regex)"
 
   # Dependency policy (Requirements §10, Tech Spec §12): advisories, licenses,
   # duplicate/source checks, and the C-dependency ban in deny.toml.
