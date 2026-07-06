@@ -30,7 +30,7 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 | 4. Layout: main pane + sidebar + status bar | [x] | render.rs: two-pane + sidebar + status; auto-collapse <100; scrollback; bash:bash fixed |
 | 5. Markdown subset + syntax highlighting | [x] | markdown.rs: first-party md + syntect (fancy-regex); span-preserving wrap; 8 tests |
 | 6. Diffs first-class (inline + overlay) | [x] | diffview.rs + FileDiff plumbing; inline (capped) + Ctrl+O overlay; /view → group 8 |
-| 7. The permission prompt | [ ] | **the most important screen** (Design §5) |
+| 7. The permission prompt | [x] | scrollable full-content, loud outside-root, deny-default, diff-rendered; 5 render/behavior tests |
 | 8. Command palette + command registry | [ ] | Ctrl+P fuzzy; single registry (Design §3.3) |
 | 9. Motion | [ ] | single ~12fps ticker; spinner/glow (Design §6.4) |
 | 10. Degraded mode parity | [ ] | `--plain`/`NO_COLOR`/`TERM=dumb` (Design §7) |
@@ -255,27 +255,31 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 > Built with the most care in the phase. Saying yes must require having seen
 > what you are saying yes to. Rich and degraded modes carry identical guarantees.
 
-- [ ] **Full content, always.** Complete command / complete diff / all affected
-      paths. Never truncated to fit — long content **scrolls within the
-      prompt**. If unscrolled to the end, the approve hint indicates there is
-      more below.
-- [ ] **Escalation is visually loud.** Outside-project-root (HC-4) uses the
-      **reserved safety styling** (group 2) — distinct color band + explicit
-      plain-language line: "This affects files OUTSIDE your project." Impossible
-      to mistake for a routine prompt at a glance.
-- [ ] **Choices:** Deny (safe default) · Allow once · Allow for this session
-      (where the rule layer permits — session-grant persistence itself is
-      Phase 2's rule engine; wire the choice, note the dependency). Default
-      keypress (Enter/Esc) → **Deny**. Approval is a distinct, deliberate key.
-- [ ] **Forbidden patterns** (enforce + test): no timeout-to-approve; no "Enter
-      approves whatever is focused"; no batching distinct actions under one
-      approval; **no auto-scroll** moving content out from under the user while
-      the prompt is open (motion is off here — group 9).
-- [ ] **Why line:** one dimmed line stating which rule matched or "outside
-      project root" — teaches the model in situ.
-- [ ] Reuse the line-mode prompt's guarantees as the degraded rendering (group
-      10) — capitals banner, deny-default, deliberate key — so both modes are
-      provably equivalent.
+- [x] **Full content, always.** The prompt takes over the whole main area (no
+      input box while deciding); header (banner/heading/why/paths) is pinned,
+      and the full command or diff **scrolls within the prompt** (↑↓ / PgUp /
+      PgDn / Space / Home). Never truncated to fit; the footer shows "↓ N more —
+      scroll to review" until the end is reached.
+- [x] **Escalation is visually loud.** Outside-root uses the reserved
+      `safety_band` banner *and* an error-coloured prompt border — unmistakable
+      at a glance. Verified by a render test.
+- [x] **Choices:** Deny (default) · Allow once (`y`) · Allow this session (`s`).
+      Enter/Esc/`d`/`n` → **Deny**; allow is deliberate. Session-grant
+      *persistence* is Phase 2's rule engine — the choice is wired, decision
+      returns to the engine as today.
+- [x] **Forbidden patterns** enforced: no timeout-to-approve (input-driven
+      only); Enter maps to *deny*, never "approve focused"; one prompt = one
+      action; **no auto-scroll** (scrolling is user-driven; the animation ticker
+      is off during prompts — group 9). A stray key is *ignored*, so there is no
+      accidental decision in either direction. Covered by behavior + render tests.
+- [x] **Why line:** the dimmed `reason` from the engine (which rule / "outside
+      project root") shown in the header.
+- [x] Degraded rendering already shares the prompt's strings and guarantees via
+      `line.rs` (group 2/10) — capitals banner, deny-default, deliberate key.
+- [x] Edit/write prompts render their `detail` (a unified diff) through
+      `diffview` with diff colours; commands render as wrapped plain text. 5
+      tests (full-content+deny-default, loud outside-root, more-below indicator,
+      diff rendering, scroll-doesn't-decide) via ratatui `TestBackend`.
 
 ---
 

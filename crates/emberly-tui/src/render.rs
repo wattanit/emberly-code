@@ -52,16 +52,21 @@ pub fn frame(f: &mut Frame, app: &App) {
         (body, None)
     };
 
-    // Within the main column: conversation over the input box.
-    let input_rows = app.editor.line_count().clamp(1, MAX_INPUT_ROWS);
-    let input_height = u16::try_from(input_rows).unwrap_or(1).saturating_add(2);
-    let main_rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(input_height)])
-        .split(main);
-
-    render_conversation(f, app, main_rows[0]);
-    render_input(f, app, main_rows[1]);
+    // A pending permission prompt takes over the whole main area — no input box
+    // is shown, so nothing can be typed into a decision (Design §5).
+    if app.pending_permission.is_some() {
+        render_permission(f, app, main);
+    } else {
+        // Conversation over the input box.
+        let input_rows = app.editor.line_count().clamp(1, MAX_INPUT_ROWS);
+        let input_height = u16::try_from(input_rows).unwrap_or(1).saturating_add(2);
+        let main_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(input_height)])
+            .split(main);
+        render_conversation(f, app, main_rows[0]);
+        render_input(f, app, main_rows[1]);
+    }
     if let Some(area) = sidebar {
         render_sidebar(f, app, area);
     }
@@ -145,11 +150,6 @@ fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
 
 fn render_conversation(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
-
-    if app.pending_permission.is_some() {
-        render_permission(f, app, area);
-        return;
-    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -477,44 +477,134 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
     f.render_widget(Paragraph::new(status).style(theme.chrome()), area);
 }
 
-// ---- permission prompt (interim; full screen is group 7) -----------------
+// ---- permission prompt — the most important screen (Design §5) -----------
 
+/// Render the permission prompt: a pinned header (loud safety band for
+/// outside-root, heading, why line, affected paths) over the **full,
+/// scrollable content** (the command, or the diff rendered with diff colours),
+/// over a pinned footer of choices. Deny is the default and the meaning of
+/// Enter/Esc; allow (`y`/`s`) is deliberate. Nothing auto-scrolls, nothing is
+/// truncated to fit, and no timer approves — see `App::on_permission_key`.
 fn render_permission(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
-    let Some((_, rendering)) = &app.pending_permission else {
+    let Some((_, r)) = &app.pending_permission else {
         return;
     };
-    let mut lines = Vec::new();
-    if rendering.outside_root {
-        lines.push(Line::from(Span::styled(
-            strings::permission::OUTSIDE_ROOT_BANNER,
+
+    // Outside-root escalation uses the reserved safety styling on the border
+    // and a loud banner — impossible to mistake for a routine prompt (§5).
+    let border = if r.outside_root {
+        theme.error()
+    } else {
+        theme.dim_accent()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border)
+        .title(Span::styled(
+            format!(" {} ", strings::permission::TITLE),
+            theme.accent(),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 3 || inner.width == 0 {
+        return;
+    }
+    let width = usize::from(inner.width);
+
+    // Pinned header.
+    let mut header: Vec<Line> = Vec::new();
+    if r.outside_root {
+        header.push(Line::from(Span::styled(
+            format!(" {} ", strings::permission::OUTSIDE_ROOT_BANNER),
             theme.safety_band(),
         )));
     }
-    lines.push(Line::from(vec![
+    header.push(Line::from(vec![
         Span::styled(strings::permission::HEADING, theme.warning()),
-        Span::styled(format!(": {}", rendering.summary), theme.primary()),
+        Span::styled(format!(": {}", r.summary), theme.strong()),
     ]));
-    lines.push(Line::from(Span::styled(
-        format!("{}: {}", strings::permission::WHY_LABEL, rendering.reason),
+    header.push(Line::from(Span::styled(
+        format!("{}: {}", strings::permission::WHY_LABEL, r.reason),
         theme.chrome(),
     )));
-    if !rendering.affected_paths.is_empty() {
-        lines.push(Line::from(Span::styled(
+    if !r.affected_paths.is_empty() {
+        header.push(Line::from(Span::styled(
             format!(
                 "{}: {}",
                 strings::permission::PATHS_LABEL,
-                rendering.affected_paths.join(", ")
+                r.affected_paths.join(", ")
             ),
             theme.chrome(),
         )));
     }
-    lines.push(Line::from(""));
-    for line in rendering.detail.lines() {
-        lines.push(Line::from(Span::styled(line.to_string(), theme.primary())));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
+    header.push(Line::from("")); // divider blank
+
+    // Body: the full content. Edit/write details are unified diffs; render them
+    // with diff colours. Anything else (a command) is plain, wrapped text.
+    let body: Vec<Line> = if is_unified_diff(&r.detail) {
+        crate::diffview::render_unified(&r.detail, theme)
+    } else {
+        r.detail
+            .split('\n')
+            .flat_map(|l| text::wrap(l, width))
+            .map(|row| Line::from(Span::styled(row, theme.primary())))
+            .collect()
+    };
+
+    // Layout: header (fixed), body (scrollable, fills the middle), footer
+    // (fixed, 2 rows). The footer's approve hint notes any content below the
+    // fold, so approving always acknowledges there is more to see (§5).
+    let header_h = u16::try_from(header.len()).unwrap_or(0);
+    let footer_h = 2u16;
+    let body_h = inner.height.saturating_sub(header_h + footer_h).max(1);
+    let body_rows = usize::from(body_h);
+
+    let total = body.len();
+    let max_scroll = total.saturating_sub(body_rows);
+    let scroll = app.permission_scroll.min(max_scroll);
+    let end = (scroll + body_rows).min(total);
+    let visible: Vec<Line> = body.get(scroll..end).unwrap_or(&[]).to_vec();
+    let hidden_below = max_scroll - scroll;
+
+    let header_area = Rect {
+        height: header_h,
+        ..inner
+    };
+    let body_area = Rect {
+        y: inner.y + header_h,
+        height: body_h,
+        ..inner
+    };
+    let footer_area = Rect {
+        y: inner.y + inner.height - footer_h,
+        height: footer_h,
+        ..inner
+    };
+
+    f.render_widget(Paragraph::new(header), header_area);
+    f.render_widget(Paragraph::new(visible), body_area);
+    f.render_widget(
+        Paragraph::new(footer_lines(theme, hidden_below)),
+        footer_area,
+    );
+}
+
+/// The pinned footer: a scroll notice (when content remains below) and the
+/// choice line with deny as the default.
+fn footer_lines(theme: &Theme, hidden_below: usize) -> Vec<Line<'static>> {
+    let notice = if hidden_below > 0 {
+        Line::from(Span::styled(
+            format!(
+                "↓ {hidden_below} more — {}",
+                strings::permission::MORE_BELOW
+            ),
+            theme.warning(),
+        ))
+    } else {
+        Line::from(Span::styled("— end of content —", theme.chrome()))
+    };
+    let choices = Line::from(vec![
         Span::styled(
             format!("[y] {}   ", strings::permission::ALLOW_ONCE),
             theme.success(),
@@ -527,16 +617,13 @@ fn render_permission(f: &mut Frame, app: &App, area: Rect) {
             format!("[Enter] {}", strings::permission::DENY),
             theme.error(),
         ),
-    ]));
-    let prompt = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(theme.dim_accent())
-                .title(format!(" {} ", strings::permission::TITLE)),
-        )
-        .wrap(Wrap { trim: false });
-    f.render_widget(prompt, area);
+    ]);
+    vec![notice, choices]
+}
+
+/// Heuristic: a unified diff begins with a `--- ` file header.
+fn is_unified_diff(detail: &str) -> bool {
+    detail.starts_with("--- ") || detail.starts_with("---\n")
 }
 
 // ---- small helpers -------------------------------------------------------
@@ -579,6 +666,85 @@ fn fit(s: &str, width: usize) -> String {
 mod tests {
     use super::*;
     use crate::app::SessionInfo;
+    use emberly_core::{PermissionId, PermissionRendering, UiEvent};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Render a full frame to an off-screen buffer and flatten it to text, for
+    /// asserting what actually appears on screen.
+    fn draw(app: &App, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("backend");
+        term.draw(|f| frame(f, app)).expect("draw");
+        let buf = term.backend().buffer();
+        buf.content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    fn pending(app: &mut App, outside_root: bool, detail: &str) {
+        app.apply_event(UiEvent::PermissionRequest {
+            id: PermissionId(1),
+            rendering: PermissionRendering {
+                tool: "bash".into(),
+                summary: "run: rm -rf build".into(),
+                detail: detail.into(),
+                affected_paths: vec!["/etc/x".into()],
+                outside_root,
+                reason: "bash requires approval".into(),
+            },
+        });
+    }
+
+    #[test]
+    fn permission_prompt_shows_full_content_and_deny_default() {
+        let mut app = App::new(SessionInfo::default());
+        pending(&mut app, false, "rm -rf build");
+        let screen = draw(&app, 100, 24);
+        assert!(screen.contains("PERMISSION REQUIRED"));
+        assert!(screen.contains("rm -rf build"), "full command shown");
+        assert!(screen.contains("DENY"), "deny is offered as the default");
+        assert!(screen.contains("allow once"));
+        // No input box while deciding — nothing can be typed into the choice.
+        assert!(!screen.contains("Enter send"));
+    }
+
+    #[test]
+    fn outside_root_prompt_is_loud() {
+        let mut app = App::new(SessionInfo::default());
+        pending(&mut app, true, "rm -rf /etc/x");
+        let screen = draw(&app, 100, 24);
+        assert!(
+            screen.contains("OUTSIDE YOUR PROJECT"),
+            "loud banner for outside-root escalation"
+        );
+    }
+
+    #[test]
+    fn long_content_reports_more_below() {
+        let mut app = App::new(SessionInfo::default());
+        let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
+        pending(&mut app, false, &long);
+        // A short screen forces the content to overflow the prompt body.
+        let screen = draw(&app, 100, 12);
+        assert!(
+            screen.contains("more"),
+            "approve hint indicates content below the fold (Design §5)"
+        );
+    }
+
+    #[test]
+    fn edit_prompt_renders_its_diff() {
+        let mut app = App::new(SessionInfo::default());
+        pending(
+            &mut app,
+            false,
+            "--- a/foo.rs\n+++ b/foo.rs\n@@ -1 +1 @@\n-old\n+new",
+        );
+        let screen = draw(&app, 100, 24);
+        assert!(screen.contains("-old"));
+        assert!(screen.contains("+new"));
+    }
 
     #[test]
     fn fit_truncates_with_ellipsis() {

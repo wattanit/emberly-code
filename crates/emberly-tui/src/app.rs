@@ -113,6 +113,9 @@ pub struct App {
     /// The permission prompt currently awaiting an answer, if any. While set,
     /// the prompt owns the screen and normal input is suspended (Design §5).
     pub pending_permission: Option<(PermissionId, PermissionRendering)>,
+    /// Scroll offset (rows from top) into the current permission prompt's
+    /// content, so long commands/diffs can be reviewed in full (Design §5).
+    pub permission_scroll: usize,
     pub sidebar_visible: bool,
     /// Conversation scrollback offset in rows *from the bottom*: 0 follows the
     /// latest output; larger values scroll up into history. Clamped to content
@@ -147,6 +150,7 @@ impl App {
             mode: emberly_core::Mode::default(),
             modified_files: Vec::new(),
             pending_permission: None,
+            permission_scroll: 0,
             sidebar_visible: true,
             scroll: 0,
             latest_diffs: HashMap::new(),
@@ -201,6 +205,7 @@ impl App {
             }
             UiEvent::PermissionRequest { id, rendering } => {
                 self.pending_permission = Some((id, rendering));
+                self.permission_scroll = 0; // start every prompt at the top
             }
             UiEvent::ContextUsage { pct, tokens } => {
                 self.context_pct = pct;
@@ -289,8 +294,8 @@ impl App {
         if !self.overlays.is_empty() {
             return self.on_overlay_key(key);
         }
-        if let Some((id, _)) = self.pending_permission.as_ref().map(|(i, r)| (*i, r)) {
-            return self.answer_permission(id, key);
+        if let Some(id) = self.pending_permission.as_ref().map(|(i, _)| *i) {
+            return self.on_permission_key(id, key);
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -389,14 +394,52 @@ impl App {
         }
     }
 
-    fn answer_permission(&mut self, id: PermissionId, key: KeyEvent) -> Action {
-        let decision = match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => PermissionDecision::AllowOnce,
-            KeyCode::Char('s') | KeyCode::Char('S') => PermissionDecision::AllowForSession,
-            // Enter, Esc, and anything else deny (Design §5 — deny is default).
-            _ => PermissionDecision::Deny,
-        };
+    /// Keys while a permission prompt is open (Design §5). Scrolling reviews the
+    /// full content; only `y`/`s` allow (deliberate); Enter/Esc/`d`/`n` deny
+    /// (the safe default). Any other key is ignored — no accidental decision in
+    /// either direction, and nothing auto-scrolls under the user.
+    fn on_permission_key(&mut self, id: PermissionId, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Up => {
+                self.permission_scroll = self.permission_scroll.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                self.permission_scroll = self.permission_scroll.saturating_add(1);
+                Action::None
+            }
+            KeyCode::PageUp => {
+                self.permission_scroll = self.permission_scroll.saturating_sub(SCROLL_STEP);
+                Action::None
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                self.permission_scroll = self.permission_scroll.saturating_add(SCROLL_STEP);
+                Action::None
+            }
+            KeyCode::Home => {
+                self.permission_scroll = 0;
+                Action::None
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.decide(id, PermissionDecision::AllowOnce)
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                self.decide(id, PermissionDecision::AllowForSession)
+            }
+            KeyCode::Enter
+            | KeyCode::Esc
+            | KeyCode::Char('d')
+            | KeyCode::Char('D')
+            | KeyCode::Char('n')
+            | KeyCode::Char('N') => self.decide(id, PermissionDecision::Deny),
+            // Everything else: ignored. Decisions are deliberate.
+            _ => Action::None,
+        }
+    }
+
+    fn decide(&mut self, id: PermissionId, decision: PermissionDecision) -> Action {
         self.pending_permission = None;
+        self.permission_scroll = 0;
         Action::Command(Command::PermissionAnswer { id, decision })
     }
 
@@ -581,6 +624,34 @@ mod tests {
             })
         );
         assert!(a.pending_permission.is_none());
+    }
+
+    #[test]
+    fn permission_scroll_keys_review_without_deciding() {
+        let mut a = app();
+        a.apply_event(UiEvent::PermissionRequest {
+            id: PermissionId(9),
+            rendering: PermissionRendering {
+                tool: "bash".into(),
+                summary: "run: x".into(),
+                detail: "long\ncommand".into(),
+                affected_paths: vec![],
+                outside_root: false,
+                reason: "bash asks".into(),
+            },
+        });
+        // Scrolling and Space page-down must NOT decide.
+        a.on_key(KeyEvent::from(KeyCode::Down));
+        assert!(a.permission_scroll > 0);
+        assert!(a.pending_permission.is_some(), "scroll must not decide");
+        a.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(a.pending_permission.is_some());
+        // A stray letter is ignored — no accidental decision either way.
+        a.on_key(KeyEvent::from(KeyCode::Char('k')));
+        assert!(a.pending_permission.is_some());
+        // Home returns to the top.
+        a.on_key(KeyEvent::from(KeyCode::Home));
+        assert_eq!(a.permission_scroll, 0);
     }
 
     #[test]
