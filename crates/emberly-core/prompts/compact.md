@@ -1,0 +1,1 @@
+You are compacting a coding session's context. Summarize the conversation so work can continue with less context, covering, concisely and factually: the original task, key decisions made, files created or modified and how, the current state, and the next steps. No preamble.

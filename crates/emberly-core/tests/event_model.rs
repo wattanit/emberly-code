@@ -141,6 +141,7 @@ fn transcript_event_variants_roundtrip() -> serde_json::Result<()> {
                 reason: "no landlock".into(),
             },
             config_provenance: vec![],
+            prompts_version: 1,
         },
         TranscriptEvent::UserMessage {
             text: "task".into(),
@@ -188,7 +189,7 @@ fn transcript_event_variants_roundtrip() -> serde_json::Result<()> {
     Ok(())
 }
 
-/// The transcript wire shape is `{"v":1,"ts":"…","type":"…", …}` — the schema
+/// The transcript wire shape is `{"v":N,"ts":"…","type":"…", …}` — the schema
 /// version and timestamp sit alongside the flattened event tag (Tech Spec
 /// §3.2).
 #[test]
@@ -198,7 +199,7 @@ fn transcript_record_wire_shape() -> serde_json::Result<()> {
         TranscriptEvent::AssistantMessage { text: "hi".into() },
     );
     let value: serde_json::Value = serde_json::to_value(&rec)?;
-    assert_eq!(value["v"], serde_json::json!(1));
+    assert_eq!(value["v"], serde_json::json!(emberly_core::SCHEMA_VERSION));
     assert_eq!(value["type"], serde_json::json!("assistant_message"));
     assert_eq!(value["text"], serde_json::json!("hi"));
     assert_eq!(value["ts"], serde_json::json!("1970-01-01T00:00:00Z"));

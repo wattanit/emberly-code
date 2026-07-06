@@ -36,7 +36,25 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 | 9. Release pipeline (§13) | [ ] | musl x86_64/aarch64 + aarch64-darwin; name-collision + `--plain` smoke |
 | 10. Replay tests & exit criterion (§14.2) | [ ] | recorded JSONL fixtures + schema forward-compat; full sweep |
 
-**Overall Phase 5: NOT STARTED.** Branch `phase-5-sessions` off `main`.
+**Overall Phase 5: groups 0–7 done; 8–10 remain.** Branch `phase-5-sessions`.
+
+### Prompt refactor (owner request, 2026-07-07)
+
+Default prompts extracted from inline Rust consts to files, per two decisions
+(core home + include_str!; version const + CHANGELOG + transcript stamp):
+
+- `crates/emberly-core/prompts/{system.md, compact.md}` — authored as prose,
+  embedded at build via `include_str!` (zero runtime dep; HC-2 safe). One home
+  (core) instead of split across binary+engine.
+- `emberly_core::prompts` module: `SYSTEM`/`COMPACT` (+ trimmed `system()`/
+  `compact()`), and `VERSION` (independent of the crate version).
+- `prompts/CHANGELOG.md` tracks prompt changes; `VERSION` is stamped into
+  `session_start` as `prompts_version` (transcript **SCHEMA_VERSION → 2**, added
+  as a `#[serde(default)]` field — old v1 transcripts still read).
+- `config.rs` default + `init` materialization now read the core prompts; the
+  `.agents/prompts/<name>.<family>.md` override path is unchanged.
+- Content is a faithful port (no behavior change); improving the prose is now a
+  file edit + `VERSION` bump, reviewable independently of code.
 
 ---
 

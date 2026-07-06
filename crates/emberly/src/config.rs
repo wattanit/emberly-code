@@ -16,13 +16,6 @@ use emberly_core::ConfigProvenance;
 use emberly_providers::Pricing;
 use serde::Deserialize;
 
-/// The baked-in system prompt (Requirements C-1) — overridable at
-/// `.agents/prompts/system.md` (or a per-family `system.<family>.md`, P-7).
-pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Emberly Code, a careful terminal coding agent. \
-Use the provided tools to read, write, and edit files and to run commands, all within the project \
-root. Prefer small, verifiable steps. Explain what you are about to do before risky actions, and \
-never work outside the project without the user's approval. Keep replies concise.";
-
 /// A parsed `config.toml`. All fields optional so files can be partial.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct ConfigFile {
@@ -241,10 +234,10 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
     let prompts_dir = project_root.join(".agents").join("prompts");
     let family = family_of(merged.model.as_deref().unwrap_or_default());
 
-    let (system_base, system_src) = load_prompt(&prompts_dir, "system", family)
-        .map_or((DEFAULT_SYSTEM_PROMPT.to_string(), "default"), |text| {
-            (text, "project")
-        });
+    let (system_base, system_src) = load_prompt(&prompts_dir, "system", family).map_or_else(
+        || (emberly_core::prompts::system().to_string(), "default"),
+        |text| (text, "project"),
+    );
     record(
         &mut provenance,
         "system_prompt",

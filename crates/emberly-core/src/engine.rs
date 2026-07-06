@@ -39,14 +39,6 @@ const TITLE_CLIP: usize = 60;
 /// keep_recent_turns`, default 6 — Tech Spec §7; config wiring is group 5).
 const KEEP_RECENT: usize = 6;
 
-/// The purpose-built summarization prompt for `/compact` (Tech Spec §7).
-/// Overridable from the prompts directory (P-7); `emberly init` materializes
-/// this text as the editable default.
-pub const SUMMARY_PROMPT: &str = "You are compacting a coding session's context. \
-Summarize the conversation so work can continue with less context, covering, \
-concisely and factually: the original task, key decisions made, files created \
-or modified and how, the current state, and the next steps. No preamble.";
-
 /// Reserve this many tokens for model output when computing context usage,
 /// or the model's max output, whichever is smaller (Tech Spec §7).
 const OUTPUT_RESERVE: u64 = 8_000;
@@ -217,6 +209,7 @@ impl Engine {
                 project_root: self.project_root.display().to_string(),
                 sandbox: self.sandbox.clone(),
                 config_provenance: self.config_provenance.clone(),
+                prompts_version: crate::prompts::VERSION,
             });
         }
 
@@ -335,7 +328,10 @@ impl Engine {
     /// purpose-built prompt (Tech Spec §7). Drains the stream collecting text;
     /// tool calls are not offered.
     async fn summarize(&self, messages: &[Message]) -> Result<String, ProviderError> {
-        let prompt = self.summary_prompt.as_deref().unwrap_or(SUMMARY_PROMPT);
+        let prompt = self
+            .summary_prompt
+            .as_deref()
+            .unwrap_or_else(|| crate::prompts::compact());
         let request = CompletionRequest {
             model: self.model.clone(),
             system: Some(prompt.to_string()),

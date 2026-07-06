@@ -21,8 +21,8 @@ use crate::types::{Mode, PermissionDecision, PermissionRendering, SandboxStatus}
 
 /// Current transcript schema version. Present on every record from day one so
 /// a reader can detect and warn on newer schemas rather than crash (Tech Spec
-/// §3.3).
-pub const SCHEMA_VERSION: u32 = 1;
+/// §3.3). v2 added `session_start.prompts_version`.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// One line of the transcript: the schema version, a timestamp, and the event
 /// itself flattened alongside them, producing
@@ -71,6 +71,10 @@ pub enum TranscriptEvent {
         /// default (Requirements C-3). Empty when everything is default.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         config_provenance: Vec<ConfigProvenance>,
+        /// The default prompt-set version this session ran under
+        /// ([`crate::prompts::VERSION`]). `default`s to 0 for pre-v2 transcripts.
+        #[serde(default)]
+        prompts_version: u32,
     },
 
     /// A user message. The first user message of a session is the original

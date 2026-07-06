@@ -9,8 +9,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
-use crate::config::DEFAULT_SYSTEM_PROMPT;
-
 /// A commented `config.toml` — everything works without it, so the template is
 /// mostly guidance (Requirements C-1).
 const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/config.toml)
@@ -54,12 +52,12 @@ pub fn init(project_root: &Path) -> anyhow::Result<()> {
     write_if_absent(&agents.join("config.toml"), CONFIG_TEMPLATE, &mut created)?;
     write_if_absent(
         &agents.join("prompts").join("system.md"),
-        &format!("{DEFAULT_SYSTEM_PROMPT}\n"),
+        &format!("{}\n", emberly_core::prompts::system()),
         &mut created,
     )?;
     write_if_absent(
         &agents.join("prompts").join("compact.md"),
-        &format!("{}\n", emberly_core::SUMMARY_PROMPT),
+        &format!("{}\n", emberly_core::prompts::compact()),
         &mut created,
     )?;
     write_if_absent(
