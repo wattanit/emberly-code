@@ -126,11 +126,9 @@ fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 );
             }
             ConvItem::Assistant(text) => {
-                for logical in text.split('\n') {
-                    for row in text::wrap(logical, w) {
-                        out.push(Line::from(Span::styled(row, theme.primary())));
-                    }
-                }
+                // First-party markdown pass: fenced code (highlighted), bold,
+                // inline code, lists, headings; everything else plain (§4.1).
+                out.extend(crate::markdown::render_message(text, theme, w));
             }
             ConvItem::Tool { summary, done, .. } => {
                 // No "tool:" prefix — the summary is already a verb phrase

@@ -137,6 +137,14 @@ impl Theme {
         self.palette
     }
 
+    /// Whether colour is applied (false under [`Theme::plain`]). Callers that
+    /// map external colours (syntax highlighting) check this to stay colourless
+    /// in degraded/test contexts.
+    #[must_use]
+    pub const fn has_color(&self) -> bool {
+        self.color
+    }
+
     fn fg(&self, color: Color) -> Style {
         if self.color {
             Style::default().fg(color)
@@ -155,6 +163,26 @@ impl Theme {
     #[must_use]
     pub fn chrome(&self) -> Style {
         self.fg(self.palette.chrome).add_modifier(Modifier::DIM)
+    }
+
+    /// Bold primary text — markdown **strong** and headings (hierarchy through
+    /// weight, not colour; Design §2, §4.1).
+    #[must_use]
+    pub fn strong(&self) -> Style {
+        self.fg(self.palette.primary).add_modifier(Modifier::BOLD)
+    }
+
+    /// Inline `code`: primary text on the raised surface, a subtle chip that
+    /// reads as code without competing with the accent (Design §4.1).
+    #[must_use]
+    pub fn code_inline(&self) -> Style {
+        if self.color {
+            Style::default()
+                .fg(self.palette.primary)
+                .bg(self.palette.raised)
+        } else {
+            Style::default()
+        }
     }
 
     /// The scarce ember accent (wordmark, focus, spinner, key highlights).

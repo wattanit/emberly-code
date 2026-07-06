@@ -28,7 +28,7 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 | 2. Centralized theme & string table | [x] | theme.rs (named roles + reserved safety band) + strings.rs; 3 theme tests |
 | 3. Grapheme-aware text engine + line editor | [x] | text.rs + editor.rs; Thai stacked-mark fixtures; 16 tests; expect-verified |
 | 4. Layout: main pane + sidebar + status bar | [x] | render.rs: two-pane + sidebar + status; auto-collapse <100; scrollback; bash:bash fixed |
-| 5. Markdown subset + syntax highlighting | [ ] | first-party md; syntect fancy-regex (Design §4.1) |
+| 5. Markdown subset + syntax highlighting | [x] | markdown.rs: first-party md + syntect (fancy-regex); span-preserving wrap; 8 tests |
 | 6. Diffs first-class (inline + overlay) | [ ] | own both sides; `/view` `$EDITOR` hatch (Design §4.2–§4.3) |
 | 7. The permission prompt | [ ] | **the most important screen** (Design §5) |
 | 8. Command palette + command registry | [ ] | Ctrl+P fuzzy; single registry (Design §3.3) |
@@ -200,18 +200,24 @@ Phase 2 (Landlock) remains deferred until a Linux machine.
 
 ## 5. Markdown subset + syntax highlighting  *(Design §4.1; Tech Spec §9)*
 
-- [ ] **First-party** minimal markdown pass (no full md parser for chat flow):
-      fenced code blocks, bold, inline code, bulleted/numbered lists, headings
-      as bold + spacing. Everything else (tables, images, links, nested exotica)
-      passes through as **plain unmangled text**.
-- [ ] Syntax highlighting via `syntect` (**fancy-regex** backend) for fenced
-      blocks. Accent-free scheme — highlighting uses neutral/semantic range so
-      code never competes with the ember accent (Design §4.1).
-- [ ] Streaming-aware: assistant text arrives as deltas; render incrementally
-      without re-highlighting the whole buffer per delta (perf + no flicker).
-      Highlight closed code fences; show open/streaming fences as plain until
-      closed.
-- [ ] Wrapping via the group-3 text engine (Thai-safe inside prose and code).
+- [x] `markdown.rs`: first-party pass — fenced code, `**bold**`, `` `inline
+      code` ``, `-`/`*`/`+`/`1.` lists (→ `•`/`n.`), `#`..`######` headings as
+      bold. Tables/links/images/nested exotica pass through as plain text.
+- [x] Syntax highlighting via `syntect` (fancy-regex, loaded once via
+      `OnceLock`) for fenced blocks; syntect colours mapped onto ratatui while
+      keeping our background. Neutral base16 theme (blues/greens/greys, no
+      orange) so code never competes with the ember accent (Design §4.1).
+- [x] Streaming-aware: only **closed** fences are highlighted; an unclosed
+      (still-streaming) fence renders as plain text (Design §4.1 note). Assets
+      load lazily on first closed fence, so startup is unaffected. (Per-frame
+      re-highlight of closed blocks is acceptable at typical sizes; caching is
+      a noted future optimization.)
+- [x] Prose wraps via a **span-preserving** wrap over the group-3 text engine
+      (flatten to graphemes+style, word-break, coalesce) so **bold** survives a
+      line break; Thai-/CJK-correct. Code lines are not reflowed (clip at the
+      pane edge — reflowed code is unreadable). 8 markdown tests (bold split,
+      literal inline code, heading, list, plain passthrough, cross-style wrap,
+      closed-fence highlight, open-fence-plain).
 
 ---
 
