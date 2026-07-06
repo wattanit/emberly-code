@@ -185,6 +185,63 @@ pub fn session_title(records: &[TranscriptRecord]) -> Option<String> {
     })
 }
 
+/// A one-line summary of a session on disk, for `emberly sessions` and the
+/// in-app session picker (Design §8.2, §8.3). Derived entirely from the
+/// transcript — no separate index to drift out of sync.
+pub struct SessionSummary {
+    pub id: SessionId,
+    pub path: PathBuf,
+    /// The session title (from the first user message), or `None` if untitled.
+    pub title: Option<String>,
+    pub provider: String,
+    pub model: String,
+    /// File modification time, for recency sorting and display.
+    pub modified: std::time::SystemTime,
+    /// True if the session ended without a clean `session_end` (resumable).
+    pub interrupted: bool,
+    /// Number of records read (a rough sense of session size).
+    pub events: usize,
+}
+
+/// Summarize every `<id>.jsonl` in `dir`, most-recently-modified first. Files
+/// that cannot be read at all are skipped (never a crash); malformed *lines*
+/// within a file are already tolerated by [`read_records`].
+#[must_use]
+pub fn list_sessions(dir: &Path) -> Vec<SessionSummary> {
+    let mut sessions = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return sessions,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let modified = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(modified) => modified,
+            Err(_) => continue,
+        };
+        let Ok(loaded) = read_records(&path) else {
+            continue;
+        };
+        let (provider, model) =
+            session_meta(&loaded.records).unwrap_or_else(|| ("unknown".into(), "unknown".into()));
+        sessions.push(SessionSummary {
+            id: session_id(&loaded.records).unwrap_or_default(),
+            title: session_title(&loaded.records),
+            provider,
+            model,
+            modified,
+            interrupted: interrupted(&loaded.records),
+            events: loaded.records.len(),
+            path,
+        });
+    }
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
+    sessions
+}
+
 /// The most recently modified `<id>.jsonl` in `dir`, for `resume` with no id
 /// and the offer-on-launch flow.
 #[must_use]
@@ -314,6 +371,56 @@ mod tests {
             .iter()
             .any(|w| w.contains("newer transcript schema")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_sessions_summarizes_newest_first() {
+        let dir = std::env::temp_dir().join(format!("emberly-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        // A clean session and an interrupted one; write the clean one first so
+        // the interrupted one is newer (list is newest-first).
+        let clean = concat!(
+            r#"{"v":2,"ts":"1970-01-01T00:00:00Z","type":"session_start","session_id":"00000000-0000-0000-0000-000000000001","provider":"anthropic","model":"claude","project_root":"/p","sandbox":{"state":"unavailable","reason":"x"},"config_provenance":[],"prompts_version":1}"#,
+            "\n",
+            r#"{"v":2,"ts":"1970-01-01T00:00:01Z","type":"session_title","title":"clean one"}"#,
+            "\n",
+            r#"{"v":2,"ts":"1970-01-01T00:00:02Z","type":"session_end"}"#,
+        );
+        let crashed = concat!(
+            r#"{"v":2,"ts":"1970-01-01T00:00:00Z","type":"session_start","session_id":"00000000-0000-0000-0000-000000000002","provider":"openai","model":"gpt","project_root":"/p","sandbox":{"state":"unavailable","reason":"x"},"config_provenance":[],"prompts_version":1}"#,
+            "\n",
+            r#"{"v":2,"ts":"1970-01-01T00:00:01Z","type":"session_title","title":"crashed one"}"#,
+        );
+        if let Err(e) = std::fs::write(dir.join("a.jsonl"), clean) {
+            panic!("write clean: {e}");
+        }
+        if let Err(e) = std::fs::write(dir.join("b.jsonl"), crashed) {
+            panic!("write crashed: {e}");
+        }
+        let sessions = list_sessions(&dir);
+        assert_eq!(sessions.len(), 2);
+        // Both parsed their metadata.
+        assert!(sessions
+            .iter()
+            .any(|s| s.title.as_deref() == Some("clean one") && !s.interrupted));
+        let crashed = sessions
+            .iter()
+            .find(|s| s.title.as_deref() == Some("crashed one"));
+        match crashed {
+            Some(s) => {
+                assert!(s.interrupted, "no session_end → interrupted");
+                assert_eq!(s.provider, "openai");
+            }
+            None => panic!("crashed session missing from list"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_sessions_on_missing_dir_is_empty_not_error() {
+        let missing = std::env::temp_dir().join("emberly-nope-does-not-exist-xyz");
+        assert!(list_sessions(&missing).is_empty());
     }
 
     #[test]

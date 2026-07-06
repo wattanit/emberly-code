@@ -87,6 +87,49 @@ fn format_duration(elapsed: Duration) -> String {
     format!("{}m{:02}s", secs / 60, secs % 60)
 }
 
+/// Coarse "how long ago" for the session list — the exact minute rarely matters,
+/// the day and hour do.
+fn format_ago(modified: std::time::SystemTime) -> String {
+    let Ok(elapsed) = modified.elapsed() else {
+        return "just now".into();
+    };
+    let secs = elapsed.as_secs();
+    match secs {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86_399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86_400),
+    }
+}
+
+/// `emberly sessions` — list this project's saved sessions, newest first, with
+/// the id needed to resume each (Design §8.3, items 1–2).
+fn list_sessions(sessions_dir: &Path) {
+    let sessions = resume::list_sessions(sessions_dir);
+    if sessions.is_empty() {
+        println!("No sessions yet in {}.", sessions_dir.display());
+        println!("Start one with `emberly`; it is saved automatically.");
+        return;
+    }
+    println!("Sessions in {} (newest first):", sessions_dir.display());
+    println!();
+    for s in &sessions {
+        let title = s.title.as_deref().unwrap_or("(untitled)");
+        let flag = if s.interrupted { " · interrupted" } else { "" };
+        println!("  {title}");
+        println!(
+            "    {} · {}/{} · {} · {} events{flag}",
+            s.id,
+            s.provider,
+            s.model,
+            format_ago(s.modified),
+            s.events,
+        );
+        println!("    resume: emberly resume {}", s.id);
+        println!();
+    }
+}
+
 /// Box a transcript result, degrading to a no-op sink (with a notice) on error
 /// so a transcript problem never stops the agent (HC-7).
 fn open_transcript(result: std::io::Result<FileTranscript>) -> Box<dyn TranscriptSink> {
@@ -127,6 +170,7 @@ enum Cli {
     Version,
     Init,
     ConfigShow,
+    Sessions,
     Run(RunOpts),
 }
 
@@ -149,6 +193,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
         match arg.as_str() {
             "--version" => return Ok(Cli::Version),
             "init" => return Ok(Cli::Init),
+            "sessions" => return Ok(Cli::Sessions),
             "config" => match args.next().as_deref() {
                 Some("show") => return Ok(Cli::ConfigShow),
                 other => anyhow::bail!(
@@ -193,6 +238,11 @@ async fn run() -> anyhow::Result<()> {
         }
         Cli::ConfigShow => {
             config::show(&std::env::current_dir()?)?;
+            return Ok(());
+        }
+        Cli::Sessions => {
+            let sessions_dir = std::env::current_dir()?.join(".agents").join("sessions");
+            list_sessions(&sessions_dir);
             return Ok(());
         }
         Cli::Run(opts) => opts,
@@ -352,10 +402,11 @@ async fn run() -> anyhow::Result<()> {
     // duration and where the transcript lives. (Title/cost live engine-side;
     // surfacing them here is a later refinement.)
     println!(
-        "session ended · {} · transcript: {}",
+        "session ended · {} · session {session_id}",
         format_duration(started.elapsed()),
-        session_path.display()
     );
+    println!("  transcript: {}", session_path.display());
+    println!("  to resume:  emberly resume {session_id}");
     Ok(())
 }
 
@@ -372,6 +423,7 @@ mod tests {
         assert_eq!(parse(&["--version"]).unwrap(), Cli::Version);
         assert_eq!(parse(&["init"]).unwrap(), Cli::Init);
         assert_eq!(parse(&["config", "show"]).unwrap(), Cli::ConfigShow);
+        assert_eq!(parse(&["sessions"]).unwrap(), Cli::Sessions);
     }
 
     #[test]
