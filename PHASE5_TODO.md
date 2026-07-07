@@ -56,6 +56,30 @@ Default prompts extracted from inline Rust consts to files, per two decisions
 - Content is a faithful port (no behavior change); improving the prose is now a
   file edit + `VERSION` bump, reviewable independently of code.
 
+### Session navigation (owner request, 2026-07-07)
+
+Make sessions navigable, not just persisted. Four asks, three commits:
+
+- **CLI list + resume hint** (`55f8811`): `resume::list_sessions` summarizes
+  every transcript (id, title, provider/model, age, events, interrupted);
+  `emberly sessions` prints them newest-first with a per-session resume line.
+  The clean-exit summary now prints the session id, path, and the exact
+  `emberly resume <id>` command.
+- **Engine in-session switching** (`832d442`): `Command::NewSession` /
+  `Command::ResumeSession`, handled at idle. The engine ends the current
+  transcript cleanly, rolls a fresh (or reopens the target) `FileTranscript`,
+  resets/replaces the conversation, and writes the new `session_start` (fresh
+  only). Target files are created/read *before* the old session ends, so IO
+  failure leaves the running session intact (HC-7). A shared
+  `Arc<RwLock<PathBuf>>` (`active_session_path`) keeps the host's panic/exit
+  path pointed at the current session across switches.
+- **TUI session menu** (`39fd1bd`): `/session` opens an interactive picker
+  (selectable rows, Enter resumes; current session marked, can't resume itself)
+  instead of a details dump. `/new` (alias `/clear`) starts a fresh session in
+  place. Both switches are gated to idle in the frontend (refused mid-turn with
+  a notice). The frontend orchestrates the switch and clears + reseeds the
+  timeline; resume restores the prior conversation so the pane isn't blank.
+
 ---
 
 ## Platform & constraint notes (read first)
