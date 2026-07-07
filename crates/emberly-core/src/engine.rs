@@ -591,12 +591,8 @@ impl Engine {
             tokio::select! {
                 item = stream.next() => match item {
                     Some(Ok(event)) => {
-                        if let Some(end) = self
-                            .handle_stream_event(event, &mut text, &mut tool_calls, &mut saw_done)
-                            .await
-                        {
-                            break end;
-                        }
+                        self.handle_stream_event(event, &mut text, &mut tool_calls, &mut saw_done)
+                            .await;
                     }
                     Some(Err(error)) => break StreamEnd::Errored(error),
                     None => break if saw_done { StreamEnd::Done { tool_calls: std::mem::take(&mut tool_calls) } } else { StreamEnd::Dropped },
@@ -618,14 +614,17 @@ impl Engine {
         (end, text)
     }
 
-    /// Apply one stream event. Returns `Some(end)` when the stream is done.
+    /// Apply one stream event. Terminal events (`Done`) only set `saw_done`;
+    /// the stream loop keeps draining until EOF so trailing chunks — notably
+    /// the OpenAI-compatible `usage` chunk, which arrives after finish_reason —
+    /// are still processed. The loop finalizes via its `None` (EOF) arm.
     async fn handle_stream_event(
         &mut self,
         event: StreamEvent,
         text: &mut String,
         tool_calls: &mut Vec<PendingToolCall>,
         saw_done: &mut bool,
-    ) -> Option<StreamEnd> {
+    ) {
         match event {
             StreamEvent::TextDelta { text: delta } => {
                 text.push_str(&delta);
@@ -655,15 +654,16 @@ impl Engine {
                 }
             }
             StreamEvent::Done { stop_reason: _ } => {
+                // Mark done but keep draining the stream: OpenAI-compatible
+                // servers send the `usage` chunk *after* the finish_reason
+                // chunk (real OpenAI does too). Breaking here would drop it and
+                // leave session token counts at 0. The stream's `None` arm
+                // finalizes with `StreamEnd::Done` once `saw_done` is set.
                 *saw_done = true;
-                return Some(StreamEnd::Done {
-                    tool_calls: std::mem::take(tool_calls),
-                });
             }
             // `StreamEvent` is non-exhaustive; ignore variants added later.
             _ => {}
         }
-        None
     }
 
     /// Execute tool calls sequentially, appending each result to the

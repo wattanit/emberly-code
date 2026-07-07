@@ -482,6 +482,59 @@ async fn cost_and_context_use_authoritative_usage() {
 }
 
 #[tokio::test]
+async fn usage_chunk_after_done_still_counts() {
+    // Regression: OpenAI-compatible servers (Ollama, real OpenAI with
+    // include_usage) send the `usage` chunk *after* the finish_reason chunk —
+    // i.e. `Usage` arrives after `Done`. The loop must keep draining past
+    // `Done` or the session token counter (and cost) stay stuck at 0.
+    let info = ModelInfo {
+        model: "m".into(),
+        context_window: 1_000,
+        max_output_tokens: 100,
+        pricing: Some(Pricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+        }),
+    };
+    // `drop_after` appends no terminal event, so this is exactly the wire
+    // order: content delta → finish_reason (Done) → usage chunk → EOF.
+    let response = ScriptedResponse::drop_after(vec![
+        StreamEvent::TextDelta { text: "hi".into() },
+        StreamEvent::Done {
+            stop_reason: StopReason::EndTurn,
+        },
+        StreamEvent::Usage {
+            usage: TokenUsage {
+                input: 400,
+                output: 500,
+            },
+        },
+    ]);
+    let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new([response]).with_model_info(info));
+
+    let mut h = start_with_provider(provider, temp_project());
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let events = h.collect(None).await;
+
+    // The pricing-independent token counter must reflect the post-Done usage.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            UiEvent::SessionUsage { usage } if usage.input == 400 && usage.output == 500
+        )),
+        "a usage chunk arriving after Done must still update the session token counter"
+    );
+    // And the cost estimate, which is derived from the same usage.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            UiEvent::CostEstimate { usage, .. } if usage.input == 400 && usage.output == 500
+        )),
+        "cost must reflect usage that arrived after Done"
+    );
+}
+
+#[tokio::test]
 async fn no_cost_estimate_without_pricing() {
     // The default fake model has no pricing → no CostEstimate emitted.
     let mut h = start(vec![ScriptedResponse::text("hello")], temp_project());
