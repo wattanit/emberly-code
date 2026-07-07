@@ -857,19 +857,20 @@ fn compact_count(n: u64) -> String {
     }
 }
 
-/// A brightness percentage that rises and falls in a slow triangle wave — the
-/// ember "breathing" while the model works (Design §6.4). One full cycle takes
-/// `PERIOD` frames (~1.3s at 12fps); brightness swings 55%..=100% so the pulse
-/// is perceptible but never flashes.
+/// A brightness percentage that rises and falls as the ember "breathes" while
+/// the model works (Design §6.4). One full cycle takes `PERIOD` frames (~3s at
+/// 12fps) — an unhurried breath. Brightness follows a raised-cosine ease
+/// (smooth and slow at both the dim and bright turning points, unlike a
+/// triangle wave's abrupt apex) and swings 55%..=100% so the pulse is
+/// perceptible but never flashes.
 fn glow_pct(frame: usize) -> u16 {
-    const PERIOD: usize = 16;
-    let phase = frame % PERIOD; // 0..15
-    let up = if phase <= PERIOD / 2 {
-        phase
-    } else {
-        PERIOD - phase
-    }; // 0..8
-    (55 + u16::try_from(up).unwrap_or(0) * 6).min(100) // 55..=100
+    const PERIOD: usize = 36; // ~3s at 12fps
+    const MIN: f32 = 55.0;
+    const MAX: f32 = 100.0;
+    let t = (frame % PERIOD) as f32 / PERIOD as f32; // 0.0..1.0
+    // (1 - cos) / 2 eases 0 → 1 → 0 across the cycle, flattening at both ends.
+    let eased = (1.0 - (t * std::f32::consts::TAU).cos()) / 2.0;
+    (MIN + (MAX - MIN) * eased).round() as u16
 }
 
 /// Scale an RGB colour's brightness by `pct` percent (non-RGB colours pass
@@ -926,6 +927,21 @@ mod tests {
     use emberly_core::{PermissionId, PermissionRendering, UiEvent};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    #[test]
+    fn glow_breathes_between_dim_and_full_over_a_smooth_cycle() {
+        // Dimmest at the start of the cycle, brightest at the midpoint (~1.5s in).
+        assert_eq!(glow_pct(0), 55);
+        assert_eq!(glow_pct(18), 100);
+        // Every frame stays inside the perceptible-but-never-flashing band.
+        for frame in 0..200 {
+            let pct = glow_pct(frame);
+            assert!((55..=100).contains(&pct), "frame {frame} → {pct}%");
+        }
+        // The ease is gentle near the trough: the first step barely moves,
+        // where a linear triangle would have jumped ~6%.
+        assert!(glow_pct(1) - glow_pct(0) <= 1, "eased start, not a linear ramp");
+    }
 
     /// Render a full frame to an off-screen buffer and flatten it to text (one
     /// screen row per line), for asserting what actually appears on screen.
