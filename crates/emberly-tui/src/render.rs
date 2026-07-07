@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, ConvItem, Overlay, OverlayContent};
+use crate::app::{App, ConvItem, Overlay, OverlayContent, SessionRow};
 use crate::text;
 use crate::theme::Theme;
 use crate::{strings, strings::markers};
@@ -174,18 +174,36 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
     let body_h = usize::from(inner.height - 1);
     let body_w = usize::from(inner.width);
 
-    let lines: Vec<Line> = match &overlay.content {
-        OverlayContent::Diff(unified) => crate::diffview::render_unified(unified, theme),
-        OverlayContent::Text(body) => body
-            .split('\n')
-            .flat_map(|l| text::wrap(l, body_w))
-            .map(|row| Line::from(Span::styled(row, theme.primary())))
-            .collect(),
+    // The picker keeps its selection in view (forced_scroll); read-only panes
+    // scroll freely, so their forced_scroll is None.
+    let (lines, forced_scroll, hint_base): (Vec<Line>, Option<usize>, &str) = match &overlay.content
+    {
+        OverlayContent::Diff(unified) => (
+            crate::diffview::render_unified(unified, theme),
+            None,
+            " Esc close · ↑↓ PgUp/PgDn scroll",
+        ),
+        OverlayContent::Text(body) => (
+            body.split('\n')
+                .flat_map(|l| text::wrap(l, body_w))
+                .map(|row| Line::from(Span::styled(row, theme.primary())))
+                .collect(),
+            None,
+            " Esc close · ↑↓ PgUp/PgDn scroll",
+        ),
+        OverlayContent::Sessions { rows, selected } => {
+            let (lines, sel_line) = session_picker_lines(rows, *selected, theme);
+            (lines, Some(sel_line), " Enter resume · ↑↓ move · Esc close")
+        }
     };
 
     let total = lines.len();
     let max_scroll = total.saturating_sub(body_h);
-    let scroll = overlay.scroll.min(max_scroll);
+    // A picker scroll keeps the selected row a couple of lines below the top;
+    // everything else uses the overlay's own scroll offset.
+    let scroll = forced_scroll
+        .map_or(overlay.scroll, |sel| sel.saturating_sub(2))
+        .min(max_scroll);
     let end = (scroll + body_h).min(total);
     let visible: Vec<Line> = lines[scroll..end].to_vec();
 
@@ -200,13 +218,60 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
     } else {
         ""
     };
-    let hint = format!(" Esc close · ↑↓ PgUp/PgDn scroll{more}");
+    let hint = format!("{hint_base}{more}");
     let hint_area = Rect {
         y: inner.y + inner.height - 1,
         height: 1,
         ..inner
     };
     f.render_widget(Paragraph::new(hint).style(theme.chrome()), hint_area);
+}
+
+/// Render the session picker as selectable rows (title + metadata), returning
+/// the lines and the line index of the selected row (so the pane can scroll it
+/// into view). The selected row is marked and accented.
+fn session_picker_lines(
+    rows: &[SessionRow],
+    selected: usize,
+    theme: &crate::theme::Theme,
+) -> (Vec<Line<'static>>, usize) {
+    let mut lines: Vec<Line> = Vec::new();
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No saved sessions yet.".to_string(),
+            theme.chrome(),
+        )));
+        return (lines, 0);
+    }
+    let mut sel_line = 0;
+    for (i, row) in rows.iter().enumerate() {
+        if i == selected {
+            sel_line = lines.len();
+        }
+        let marker = if i == selected { "▶ " } else { "  " };
+        let title_style = if i == selected {
+            theme.strong()
+        } else {
+            theme.primary()
+        };
+        let mut title_spans = vec![
+            Span::styled(marker.to_string(), theme.accent()),
+            Span::styled(row.title.clone(), title_style),
+        ];
+        if row.current {
+            title_spans.push(Span::styled("  (current)".to_string(), theme.success()));
+        }
+        lines.push(Line::from(title_spans));
+        // A short id prefix — enough to recognise, matching `emberly resume`.
+        let short = row.id.to_string();
+        let short = short.get(..8).unwrap_or(&short);
+        lines.push(Line::from(Span::styled(
+            format!("    {short} · {}", row.subtitle),
+            theme.chrome(),
+        )));
+        lines.push(Line::from(String::new()));
+    }
+    (lines, sel_line)
 }
 
 /// A rectangle centered in `area` at the given width/height percentages.
@@ -897,7 +962,7 @@ mod tests {
 
     #[test]
     fn permission_prompt_shows_full_content_and_deny_default() {
-        let mut app = App::new(SessionInfo::default());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
         pending(&mut app, false, "rm -rf build");
         let screen = draw(&app, 100, 24);
         assert!(screen.contains("PERMISSION REQUIRED"));
@@ -910,7 +975,7 @@ mod tests {
 
     #[test]
     fn outside_root_prompt_is_loud() {
-        let mut app = App::new(SessionInfo::default());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
         pending(&mut app, true, "rm -rf /etc/x");
         let screen = draw(&app, 100, 24);
         assert!(
@@ -921,7 +986,7 @@ mod tests {
 
     #[test]
     fn long_content_reports_more_below() {
-        let mut app = App::new(SessionInfo::default());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
         let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
         pending(&mut app, false, &long);
         // A short screen forces the content to overflow the prompt body.
@@ -934,7 +999,7 @@ mod tests {
 
     #[test]
     fn tool_call_shows_what_and_result_and_output() {
-        let mut app = App::new(SessionInfo::default());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
         let id = emberly_core::ToolCallId::new("c1");
         app.apply_event(UiEvent::ToolStarted {
             call_id: id.clone(),
@@ -960,7 +1025,7 @@ mod tests {
     fn thai_content_renders_in_the_conversation() {
         // A stacked-mark Thai word must survive into the rendered buffer intact
         // (grapheme-correct wrap, §2.1).
-        let mut app = App::new(SessionInfo::default());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
         app.apply_event(UiEvent::AssistantDelta {
             text: "สวัสดี ที่".into(),
         });
@@ -972,7 +1037,7 @@ mod tests {
 
     #[test]
     fn sidebar_hides_below_the_collapse_threshold() {
-        let app = App::new(SessionInfo::default());
+        let app = App::new(SessionInfo::default(), std::env::temp_dir());
         // Sidebar-only chrome present when wide, absent when narrow.
         assert!(draw(&app, 120, 20).contains("modified files"));
         assert!(!draw(&app, 80, 20).contains("modified files"));
@@ -980,7 +1045,7 @@ mod tests {
 
     #[test]
     fn sidebar_shows_session_token_total() {
-        let mut app = App::new(SessionInfo::default());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
         app.apply_event(UiEvent::SessionUsage {
             usage: emberly_core::TokenUsage {
                 input: 12_000,
@@ -1001,7 +1066,7 @@ mod tests {
 
     #[test]
     fn context_percent_only_on_status_bar_when_sidebar_hidden() {
-        let mut app = App::new(SessionInfo::default());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
         app.apply_event(UiEvent::ContextUsage {
             pct: 42,
             tokens: 100,
@@ -1021,7 +1086,7 @@ mod tests {
 
     #[test]
     fn edit_prompt_renders_its_diff() {
-        let mut app = App::new(SessionInfo::default());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
         pending(
             &mut app,
             false,
@@ -1057,7 +1122,7 @@ mod tests {
 
     #[test]
     fn conversation_wraps_and_counts_rows() {
-        let mut app = App::new(SessionInfo::default());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
         app.apply_event(emberly_core::UiEvent::AssistantDelta {
             text: "aaaa bbbb cccc".into(),
         });

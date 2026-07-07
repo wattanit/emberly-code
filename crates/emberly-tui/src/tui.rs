@@ -10,9 +10,10 @@
 //! mirroring the line-mode stdin reader.
 
 use std::io;
+use std::path::PathBuf;
 
 use crossterm::event::Event;
-use emberly_core::{FrontendPorts, TranscriptRecord};
+use emberly_core::{resume, Command, FrontendPorts, SessionId, TranscriptRecord};
 use tokio::sync::mpsc;
 
 use crate::app::{Action, App, SessionInfo};
@@ -26,9 +27,10 @@ pub async fn run(
     ports: FrontendPorts,
     session: SessionInfo,
     history: Vec<TranscriptRecord>,
+    sessions_dir: PathBuf,
 ) -> io::Result<()> {
     let mut guard = TerminalGuard::enter()?;
-    let mut app = App::new(session);
+    let mut app = App::new(session, sessions_dir);
     app.seed_history(&history);
     app.motion = motion_enabled();
 
@@ -70,6 +72,18 @@ pub async fn run(
                         Action::Command(cmd) => {
                             let _ = commands_tx.send(cmd).await;
                         }
+                        Action::NewSession => {
+                            // Mint the id here so the view can update without a
+                            // round trip; the engine adopts the same id.
+                            let id = SessionId::new();
+                            let _ = commands_tx
+                                .send(Command::NewSession { session_id: id })
+                                .await;
+                            app.begin_new_session(id);
+                        }
+                        Action::ResumeSession(id) => {
+                            switch_session(&mut app, &commands_tx, id).await;
+                        }
                         Action::None => {}
                     }
                     guard.terminal().draw(|f| render::frame(f, &app))?;
@@ -97,6 +111,23 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Resume the saved session `id` from the picker: read its transcript, tell the
+/// engine to switch, and reseed the view. A read failure leaves the current
+/// session untouched and surfaces a calm notice (the engine is not told).
+async fn switch_session(app: &mut App, commands_tx: &mpsc::Sender<Command>, id: SessionId) {
+    let path = app.sessions_dir.join(format!("{id}.jsonl"));
+    match resume::read_records(&path) {
+        Ok(loaded) => {
+            let title = resume::session_title(&loaded.records).unwrap_or_default();
+            let _ = commands_tx
+                .send(Command::ResumeSession { session_id: id })
+                .await;
+            app.begin_resumed_session(id, title, &loaded.records);
+        }
+        Err(_) => app.notice("could not read that session"),
+    }
 }
 
 /// Only act on key *presses*. On terminals that report key-release events
