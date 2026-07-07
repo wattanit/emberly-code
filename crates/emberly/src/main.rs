@@ -15,7 +15,7 @@
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -33,10 +33,17 @@ mod placeholder;
 mod provider_setup;
 use placeholder::PlaceholderProvider;
 
-/// The active session's transcript path, set once the file is opened. Global so
-/// the panic hook — which cannot reach the engine's live sink — can append an
-/// `abnormal_exit` line and point the user at resume (HC-3, S-2).
-static SESSION_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// The active session's transcript path — a shared handle the engine updates on
+/// every in-session switch (`/new`, `/resume`), so the panic hook and error
+/// path (which cannot reach the engine's live sink) always append the
+/// `abnormal_exit` line to the *current* session (HC-3, S-2).
+static SESSION_PATH: OnceLock<Arc<RwLock<PathBuf>>> = OnceLock::new();
+
+/// The current session transcript path, if a session file has been opened.
+fn current_session_path() -> Option<PathBuf> {
+    let handle = SESSION_PATH.get()?;
+    handle.read().ok().map(|path| path.clone())
+}
 
 #[tokio::main]
 async fn main() {
@@ -44,8 +51,8 @@ async fn main() {
     if let Err(error) = run().await {
         // A harness-world failure that may have interrupted a live session:
         // record it and point at resume (Design §6.1, §8.3).
-        if let Some(path) = SESSION_PATH.get() {
-            emberly_core::append_abnormal_exit(path, &error.to_string());
+        if let Some(path) = current_session_path() {
+            emberly_core::append_abnormal_exit(&path, &error.to_string());
         }
         eprintln!("\nemberly: {error}");
         print_resume_hint();
@@ -61,8 +68,11 @@ async fn main() {
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if let Some(path) = SESSION_PATH.get() {
-            emberly_core::append_abnormal_exit(path, "an internal error (panic) ended the session");
+        if let Some(path) = current_session_path() {
+            emberly_core::append_abnormal_exit(
+                &path,
+                "an internal error (panic) ended the session",
+            );
         }
         eprintln!("\nemberly: an unexpected internal error occurred (this is a bug).");
         print_resume_hint();
@@ -73,7 +83,7 @@ fn install_panic_hook() {
 /// Tell the user their session is recoverable (Design §8.3). No-op before a
 /// session file exists.
 fn print_resume_hint() {
-    if let Some(path) = SESSION_PATH.get() {
+    if let Some(path) = current_session_path() {
         eprintln!(
             "your session was saved — run `emberly resume` to continue ({}).",
             path.display()
@@ -320,9 +330,11 @@ async fn run() -> anyhow::Result<()> {
         transcript = open_transcript(FileTranscript::create(&sessions_dir, session_id));
         resuming = false;
     }
-    // Publish the path so the panic hook / error path can record an abnormal
-    // exit and print the resume hint.
-    let _ = SESSION_PATH.set(session_path.clone());
+    // Publish the path through a shared handle so the panic hook / error path
+    // record the abnormal exit against the current session — and so the engine
+    // can keep it current across in-session switches (`/new`, `/resume`).
+    let active_session_path = Arc::new(RwLock::new(session_path.clone()));
+    let _ = SESSION_PATH.set(active_session_path.clone());
 
     let session = SessionInfo {
         title,
@@ -363,6 +375,8 @@ async fn run() -> anyhow::Result<()> {
         truncate: TruncateConfig::default(),
         retry: emberly_core::RetryPolicy::default(),
         session_id,
+        sessions_dir: sessions_dir.clone(),
+        active_session_path: active_session_path.clone(),
         provider_label: resolved
             .provider
             .clone()
@@ -399,14 +413,20 @@ async fn run() -> anyhow::Result<()> {
 
     // Clean exit (Design §8.3): the engine has recorded `session_end`; the
     // terminal is back to normal (guard dropped). One closing line with the
-    // duration and where the transcript lives. (Title/cost live engine-side;
-    // surfacing them here is a later refinement.)
+    // duration and where the transcript lives. The current session may differ
+    // from the one we launched (an in-session `/new` or `/resume`), so read the
+    // final path from the shared handle rather than the launch-time local.
+    let final_path = current_session_path().unwrap_or(session_path);
+    let final_id = final_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("session");
     println!(
-        "session ended · {} · session {session_id}",
+        "session ended · {} · session {final_id}",
         format_duration(started.elapsed()),
     );
-    println!("  transcript: {}", session_path.display());
-    println!("  to resume:  emberly resume {session_id}");
+    println!("  transcript: {}", final_path.display());
+    println!("  to resume:  emberly resume {final_id}");
     Ok(())
 }
 

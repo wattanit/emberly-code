@@ -62,6 +62,8 @@ fn make_config(
             max_delay: Duration::from_millis(2),
         },
         session_id: SessionId::new(),
+        sessions_dir: std::env::temp_dir(),
+        active_session_path: std::sync::Arc::new(std::sync::RwLock::new(std::path::PathBuf::new())),
         provider_label: "fake".into(),
         sandbox: SandboxStatus::Unavailable {
             reason: "test".into(),
@@ -532,4 +534,85 @@ async fn cancel_during_bash_stops_promptly() {
         has_tool_finished(&events, false),
         "canceled tool finishes as failure"
     );
+}
+
+/// `/new` mid-session: the current transcript is closed cleanly and a fresh one
+/// begins, with the shared session-path handle following the switch (HC-3).
+#[tokio::test]
+async fn new_session_ends_current_and_starts_fresh() {
+    use std::sync::RwLock;
+
+    let root = temp_project();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let sessions_dir =
+        std::env::temp_dir().join(format!("emberly-switch-{}-{n}", std::process::id()));
+    let _ = std::fs::create_dir_all(&sessions_dir);
+
+    let first_id = SessionId::new();
+    let first_path = sessions_dir.join(format!("{first_id}.jsonl"));
+    let shared = Arc::new(RwLock::new(first_path.clone()));
+    let transcript = match emberly_core::FileTranscript::create(&sessions_dir, first_id) {
+        Ok(file) => Box::new(file) as Box<dyn TranscriptSink>,
+        Err(e) => panic!("create first transcript: {e}"),
+    };
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(vec![ScriptedResponse::text(
+            "first-turn",
+        )])),
+        root,
+        transcript,
+    );
+    config.session_id = first_id;
+    config.sessions_dir = sessions_dir.clone();
+    config.active_session_path = shared.clone();
+
+    let mut h = spawn(config);
+    h.send(Command::UserInput {
+        text: "hello".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    // Switch to a brand-new session.
+    let second_id = SessionId::new();
+    h.send(Command::NewSession {
+        session_id: second_id,
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    // Close the engine so the new session's session_end is written.
+    drop(h);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The shared handle now names the new session (panic/exit path follows it).
+    let current = match shared.read() {
+        Ok(guard) => guard.clone(),
+        Err(e) => panic!("read shared path: {e}"),
+    };
+    let second_path = sessions_dir.join(format!("{second_id}.jsonl"));
+    assert_eq!(current, second_path, "shared path follows the switch");
+
+    // The first transcript ended cleanly (its last record is session_end).
+    let first = match emberly_core::resume::read_records(&first_path) {
+        Ok(loaded) => loaded.records,
+        Err(e) => panic!("read first: {e}"),
+    };
+    assert!(
+        matches!(
+            first.last().map(|r| &r.event),
+            Some(TranscriptEvent::SessionEnd { .. })
+        ),
+        "first session ended cleanly on switch"
+    );
+    assert!(!emberly_core::resume::interrupted(&first));
+
+    // The second transcript is its own session: a session_start with the new id.
+    let second = match emberly_core::resume::read_records(&second_path) {
+        Ok(loaded) => loaded.records,
+        Err(e) => panic!("read second: {e}"),
+    };
+    assert_eq!(emberly_core::resume::session_id(&second), Some(second_id));
+    let _ = std::fs::remove_dir_all(&sessions_dir);
 }

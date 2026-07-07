@@ -121,6 +121,12 @@ fn command_variants_roundtrip() -> serde_json::Result<()> {
         Command::SetMode { mode: Mode::Auto },
         Command::Compact,
         Command::Cancel,
+        Command::NewSession {
+            session_id: SessionId::new(),
+        },
+        Command::ResumeSession {
+            session_id: SessionId::new(),
+        },
     ];
     for c in &commands {
         assert_roundtrip(c)?;

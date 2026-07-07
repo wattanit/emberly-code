@@ -9,7 +9,7 @@
 //! (Phase 3), and transcript persistence (Phase 5) layer on later.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use emberly_providers::{
     CompletionRequest, CompletionStream, ContentBlock, Message, Provider, ProviderError,
@@ -27,7 +27,7 @@ use crate::event::UiEvent;
 use crate::gate::{ChannelGate, PermissionAsk};
 use crate::id::{PermissionId, SessionId};
 use crate::transcript::{
-    ConfigProvenance, NoopSink, TranscriptEvent, TranscriptRecord, TranscriptSink,
+    ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord, TranscriptSink,
 };
 use crate::types::{PermissionRendering, SandboxStatus, TokenUsage};
 
@@ -55,6 +55,14 @@ pub struct EngineConfig {
     pub retry: RetryPolicy,
     /// Session identity — backs the transcript filename (Tech Spec §3.2).
     pub session_id: SessionId,
+    /// Directory holding session transcripts, so the engine can roll a new (or
+    /// resumed) transcript on an in-session switch (`/new`, `/resume`).
+    pub sessions_dir: PathBuf,
+    /// Shared handle to the active transcript path, updated on every session
+    /// switch so the host's panic/exit path always names the *current* session
+    /// (HC-3). The host reads it for the abnormal-exit record and the closing
+    /// summary.
+    pub active_session_path: Arc<RwLock<PathBuf>>,
     /// Provider label for the transcript `session_start` (e.g. `anthropic`).
     pub provider_label: String,
     /// OS confinement status at startup (Requirements §6.7).
@@ -135,6 +143,10 @@ pub struct Engine {
     /// session file is configured.
     transcript: Box<dyn TranscriptSink>,
     session_id: SessionId,
+    /// Where to create a new/resumed transcript on an in-session switch.
+    sessions_dir: PathBuf,
+    /// Shared with the host so the panic/exit path tracks the current session.
+    active_session_path: Arc<RwLock<PathBuf>>,
     provider_label: String,
     sandbox: SandboxStatus,
     config_provenance: Vec<ConfigProvenance>,
@@ -177,6 +189,8 @@ impl Engine {
             next_permission_id: 0,
             transcript: config.transcript,
             session_id: config.session_id,
+            sessions_dir: config.sessions_dir,
+            active_session_path: config.active_session_path,
             provider_label: config.provider_label,
             sandbox: config.sandbox,
             config_provenance: config.config_provenance,
@@ -233,6 +247,10 @@ impl Engine {
                 Command::Cancel | Command::PermissionAnswer { .. } => {}
                 // Idle is already a clean boundary — compact immediately.
                 Command::Compact => self.compact().await,
+                // Session switches are only issued at idle (the frontend gates
+                // them while a turn runs), so a clean boundary is guaranteed.
+                Command::NewSession { session_id } => self.start_new_session(session_id).await,
+                Command::ResumeSession { session_id } => self.resume_session(session_id).await,
                 Command::SetMode { .. } => {
                     // Auto-accept modes are Phase 2 (gated on the sandbox).
                 }
@@ -241,6 +259,103 @@ impl Engine {
 
         // Command channel closed: the frontend is gone. Clean end of session.
         self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+    }
+
+    /// Start a fresh session in place (`/new`): end the current transcript
+    /// cleanly and roll a new one under `session_id`, resetting the conversation
+    /// and per-session accounting. The new transcript is created *before* the
+    /// old one is ended, so a creation failure leaves the current session intact
+    /// (transcript failures are never fatal — HC-7).
+    async fn start_new_session(&mut self, session_id: SessionId) {
+        let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
+        let sink = match FileTranscript::create(&self.sessions_dir, session_id) {
+            Ok(file) => file,
+            Err(error) => {
+                self.emit(UiEvent::HarnessError {
+                    what: "could not start a new session".into(),
+                    why: error.to_string(),
+                    next: "staying on the current session".into(),
+                })
+                .await;
+                return;
+            }
+        };
+        self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+        self.transcript = Box::new(sink);
+        self.adopt_session(session_id, path, Vec::new(), false);
+        self.write_transcript(TranscriptEvent::SessionStart {
+            session_id,
+            provider: self.provider_label.clone(),
+            model: self.model.clone(),
+            project_root: self.project_root.display().to_string(),
+            sandbox: self.sandbox.clone(),
+            config_provenance: self.config_provenance.clone(),
+            prompts_version: crate::prompts::VERSION,
+        });
+        self.emit_context_usage().await;
+    }
+
+    /// Resume a saved session by id (`/resume` from the picker): end the current
+    /// transcript, reopen the target for append, and replace the live
+    /// conversation with the one rebuilt from it. Reading the target *before*
+    /// ending the current session keeps the current one intact on any failure.
+    async fn resume_session(&mut self, session_id: SessionId) {
+        let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
+        let loaded = match crate::resume::read_records(&path) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.emit(UiEvent::HarnessError {
+                    what: "could not read that session".into(),
+                    why: error.to_string(),
+                    next: "staying on the current session".into(),
+                })
+                .await;
+                return;
+            }
+        };
+        let conversation = crate::resume::rebuild_conversation(&loaded.records);
+        let sink = match FileTranscript::open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                self.emit(UiEvent::HarnessError {
+                    what: "could not open that session for writing".into(),
+                    why: error.to_string(),
+                    next: "staying on the current session".into(),
+                })
+                .await;
+                return;
+            }
+        };
+        self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+        self.transcript = Box::new(sink);
+        // Resuming: the original task lives in the restored history, so no fresh
+        // session_start is written (matches launch-time resume — Tech Spec §3.3).
+        self.adopt_session(session_id, path, conversation, true);
+        self.emit_context_usage().await;
+    }
+
+    /// Reset session-scoped state to a freshly adopted session and publish the
+    /// new transcript path to the shared handle so the host's panic/exit path
+    /// names the current session (HC-3).
+    fn adopt_session(
+        &mut self,
+        session_id: SessionId,
+        path: PathBuf,
+        conversation: Vec<Message>,
+        resuming: bool,
+    ) {
+        self.session_id = session_id;
+        self.conversation = conversation;
+        self.original_task_recorded = resuming;
+        self.resuming = resuming;
+        self.compact_requested = false;
+        self.session_usage = TokenUsage::default();
+        self.session_cost_usd = 0.0;
+        self.context_tokens_authoritative = None;
+        self.next_permission_id = 0;
+        if let Ok(mut guard) = self.active_session_path.write() {
+            *guard = path;
+        }
     }
 
     /// Record a user message durably, tagging the first one as the pinned
