@@ -9,7 +9,7 @@
 //! (Phase 3), and transcript persistence (Phase 5) layer on later.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use emberly_providers::{
     CompletionRequest, CompletionStream, ContentBlock, Message, Provider, ProviderError,
@@ -19,13 +19,25 @@ use emberly_tools::{
     truncate_output, PermissionOutcome, PermissionRequest, ToolCtx, ToolRegistry, TruncateConfig,
 };
 use futures::StreamExt;
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 
 use crate::command::Command;
 use crate::event::UiEvent;
 use crate::gate::{ChannelGate, PermissionAsk};
-use crate::id::PermissionId;
-use crate::types::{PermissionRendering, TokenUsage};
+use crate::id::{PermissionId, SessionId};
+use crate::transcript::{
+    ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord, TranscriptSink,
+};
+use crate::types::{PermissionRendering, SandboxStatus, TokenUsage};
+
+/// The session title is the first user message, clipped to this many chars
+/// (Tech Spec §16 — the heuristic v1 title).
+const TITLE_CLIP: usize = 60;
+
+/// How many trailing messages `/compact` keeps verbatim (`context.
+/// keep_recent_turns`, default 6 — Tech Spec §7; config wiring is group 5).
+const KEEP_RECENT: usize = 6;
 
 /// Reserve this many tokens for model output when computing context usage,
 /// or the model's max output, whichever is smaller (Tech Spec §7).
@@ -41,6 +53,43 @@ pub struct EngineConfig {
     pub truncate: TruncateConfig,
     /// Retry policy for retryable provider failures and mid-stream drops.
     pub retry: RetryPolicy,
+    /// Session identity — backs the transcript filename (Tech Spec §3.2).
+    pub session_id: SessionId,
+    /// Directory holding session transcripts, so the engine can roll a new (or
+    /// resumed) transcript on an in-session switch (`/new`, `/resume`).
+    pub sessions_dir: PathBuf,
+    /// Shared handle to the active transcript path, updated on every session
+    /// switch so the host's panic/exit path always names the *current* session
+    /// (HC-3). The host reads it for the abnormal-exit record and the closing
+    /// summary.
+    pub active_session_path: Arc<RwLock<PathBuf>>,
+    /// Provider label for the transcript `session_start` (e.g. `anthropic`).
+    pub provider_label: String,
+    /// OS confinement status at startup (Requirements §6.7).
+    pub sandbox: SandboxStatus,
+    /// Non-default configuration pieces, for `session_start` provenance (C-3).
+    pub config_provenance: Vec<ConfigProvenance>,
+    /// Where durable events go. Defaults to [`NoopSink`] via
+    /// [`EngineConfig::no_transcript`] for tests that don't assert on it.
+    pub transcript: Box<dyn TranscriptSink>,
+    /// Conversation to start from when resuming a session (Tech Spec §3.3);
+    /// empty for a fresh session.
+    pub initial_conversation: Vec<Message>,
+    /// True when resuming an existing transcript: no fresh `session_start` is
+    /// written and the original task is treated as already recorded.
+    pub resuming: bool,
+    /// A `/compact` summarization-prompt override (P-7); `None` uses the
+    /// built-in default.
+    pub summary_prompt: Option<String>,
+}
+
+impl EngineConfig {
+    /// A [`NoopSink`] for the `transcript` field — the convenient default for
+    /// callers (and tests) that don't persist a transcript.
+    #[must_use]
+    pub fn no_transcript() -> Box<dyn TranscriptSink> {
+        Box::new(NoopSink)
+    }
 }
 
 /// A tool call accumulated from the provider stream.
@@ -90,6 +139,27 @@ pub struct Engine {
     /// `None` until the first provider `Usage`; then it drives the context %.
     context_tokens_authoritative: Option<u64>,
     next_permission_id: u64,
+    /// Durable transcript sink (HC-7). Written per event; a `NoopSink` when no
+    /// session file is configured.
+    transcript: Box<dyn TranscriptSink>,
+    session_id: SessionId,
+    /// Where to create a new/resumed transcript on an in-session switch.
+    sessions_dir: PathBuf,
+    /// Shared with the host so the panic/exit path tracks the current session.
+    active_session_path: Arc<RwLock<PathBuf>>,
+    provider_label: String,
+    sandbox: SandboxStatus,
+    config_provenance: Vec<ConfigProvenance>,
+    /// Whether the first (pinned, `original_task`) user message has been
+    /// recorded — also gates the one-time `session_title`.
+    original_task_recorded: bool,
+    /// True when this run resumed an existing transcript (skips `session_start`).
+    resuming: bool,
+    /// Set when `/compact` arrives mid-turn; performed at the next clean
+    /// boundary (Tech Spec §7).
+    compact_requested: bool,
+    /// Optional `/compact` prompt override (P-7).
+    summary_prompt: Option<String>,
 }
 
 impl Engine {
@@ -112,11 +182,23 @@ impl Engine {
             retry: config.retry,
             gate: Arc::new(ChannelGate { asks: asks_tx }),
             events_tx,
-            conversation: Vec::new(),
+            conversation: config.initial_conversation,
             session_usage: TokenUsage::default(),
             session_cost_usd: 0.0,
             context_tokens_authoritative: None,
             next_permission_id: 0,
+            transcript: config.transcript,
+            session_id: config.session_id,
+            sessions_dir: config.sessions_dir,
+            active_session_path: config.active_session_path,
+            provider_label: config.provider_label,
+            sandbox: config.sandbox,
+            config_provenance: config.config_provenance,
+            // On resume the original task already lives in the restored history.
+            original_task_recorded: config.resuming,
+            resuming: config.resuming,
+            compact_requested: false,
+            summary_prompt: config.summary_prompt,
         };
         (engine, asks_rx)
     }
@@ -129,23 +211,258 @@ impl Engine {
         mut commands_rx: mpsc::Receiver<Command>,
         mut asks_rx: mpsc::Receiver<PermissionAsk>,
     ) {
+        if self.resuming {
+            // Continuing an existing transcript: no fresh session_start, but
+            // surface the restored context size right away (Design §8.4).
+            self.emit_context_usage().await;
+        } else {
+            self.write_transcript(TranscriptEvent::SessionStart {
+                session_id: self.session_id,
+                provider: self.provider_label.clone(),
+                model: self.model.clone(),
+                project_root: self.project_root.display().to_string(),
+                sandbox: self.sandbox.clone(),
+                config_provenance: self.config_provenance.clone(),
+                prompts_version: crate::prompts::VERSION,
+            });
+        }
+
         while let Some(command) = commands_rx.recv().await {
             match command {
                 Command::UserInput { text } => {
+                    self.record_user_message(&text);
                     self.conversation.push(Message::user_text(text));
                     self.emit_context_usage().await;
                     self.run_turn(&mut commands_rx, &mut asks_rx).await;
                     // The engine is idle again; let the frontend stop its
                     // "working" affordance (Design §6.3).
                     self.emit(UiEvent::TurnEnded).await;
+                    // A `/compact` sent mid-turn runs now, at the clean boundary
+                    // (every tool_use has its tool_result — Tech Spec §7).
+                    if std::mem::take(&mut self.compact_requested) {
+                        self.compact().await;
+                    }
                 }
                 // No turn is running while idle; these are strays or no-ops here.
                 Command::Cancel | Command::PermissionAnswer { .. } => {}
-                Command::SetMode { .. } | Command::Compact => {
-                    // Handled in Phase 2 / Phase 5.
+                // Idle is already a clean boundary — compact immediately.
+                Command::Compact => self.compact().await,
+                // Session switches are only issued at idle (the frontend gates
+                // them while a turn runs), so a clean boundary is guaranteed.
+                Command::NewSession { session_id } => self.start_new_session(session_id).await,
+                Command::ResumeSession { session_id } => self.resume_session(session_id).await,
+                Command::SetMode { .. } => {
+                    // Auto-accept modes are Phase 2 (gated on the sandbox).
                 }
             }
         }
+
+        // Command channel closed: the frontend is gone. Clean end of session.
+        self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+    }
+
+    /// Start a fresh session in place (`/new`): end the current transcript
+    /// cleanly and roll a new one under `session_id`, resetting the conversation
+    /// and per-session accounting. The new transcript is created *before* the
+    /// old one is ended, so a creation failure leaves the current session intact
+    /// (transcript failures are never fatal — HC-7).
+    async fn start_new_session(&mut self, session_id: SessionId) {
+        let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
+        let sink = match FileTranscript::create(&self.sessions_dir, session_id) {
+            Ok(file) => file,
+            Err(error) => {
+                self.emit(UiEvent::HarnessError {
+                    what: "could not start a new session".into(),
+                    why: error.to_string(),
+                    next: "staying on the current session".into(),
+                })
+                .await;
+                return;
+            }
+        };
+        self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+        self.transcript = Box::new(sink);
+        self.adopt_session(session_id, path, Vec::new(), false);
+        self.write_transcript(TranscriptEvent::SessionStart {
+            session_id,
+            provider: self.provider_label.clone(),
+            model: self.model.clone(),
+            project_root: self.project_root.display().to_string(),
+            sandbox: self.sandbox.clone(),
+            config_provenance: self.config_provenance.clone(),
+            prompts_version: crate::prompts::VERSION,
+        });
+        self.emit_context_usage().await;
+    }
+
+    /// Resume a saved session by id (`/resume` from the picker): end the current
+    /// transcript, reopen the target for append, and replace the live
+    /// conversation with the one rebuilt from it. Reading the target *before*
+    /// ending the current session keeps the current one intact on any failure.
+    async fn resume_session(&mut self, session_id: SessionId) {
+        let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
+        let loaded = match crate::resume::read_records(&path) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.emit(UiEvent::HarnessError {
+                    what: "could not read that session".into(),
+                    why: error.to_string(),
+                    next: "staying on the current session".into(),
+                })
+                .await;
+                return;
+            }
+        };
+        let conversation = crate::resume::rebuild_conversation(&loaded.records);
+        let sink = match FileTranscript::open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                self.emit(UiEvent::HarnessError {
+                    what: "could not open that session for writing".into(),
+                    why: error.to_string(),
+                    next: "staying on the current session".into(),
+                })
+                .await;
+                return;
+            }
+        };
+        self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+        self.transcript = Box::new(sink);
+        // Resuming: the original task lives in the restored history, so no fresh
+        // session_start is written (matches launch-time resume — Tech Spec §3.3).
+        self.adopt_session(session_id, path, conversation, true);
+        self.emit_context_usage().await;
+    }
+
+    /// Reset session-scoped state to a freshly adopted session and publish the
+    /// new transcript path to the shared handle so the host's panic/exit path
+    /// names the current session (HC-3).
+    fn adopt_session(
+        &mut self,
+        session_id: SessionId,
+        path: PathBuf,
+        conversation: Vec<Message>,
+        resuming: bool,
+    ) {
+        self.session_id = session_id;
+        self.conversation = conversation;
+        self.original_task_recorded = resuming;
+        self.resuming = resuming;
+        self.compact_requested = false;
+        self.session_usage = TokenUsage::default();
+        self.session_cost_usd = 0.0;
+        self.context_tokens_authoritative = None;
+        self.next_permission_id = 0;
+        if let Ok(mut guard) = self.active_session_path.write() {
+            *guard = path;
+        }
+    }
+
+    /// Record a user message durably, tagging the first one as the pinned
+    /// `original_task` and deriving the session title from it (Tech Spec §7,
+    /// §16).
+    fn record_user_message(&mut self, text: &str) {
+        let original_task = !self.original_task_recorded;
+        self.write_transcript(TranscriptEvent::UserMessage {
+            text: text.to_string(),
+            original_task,
+        });
+        if original_task {
+            self.original_task_recorded = true;
+            self.write_transcript(TranscriptEvent::SessionTitle {
+                title: clip_title(text),
+            });
+        }
+    }
+
+    /// Manual `/compact` at a clean boundary (Tech Spec §7). Replaces the middle
+    /// of the conversation — everything after the pinned original task and
+    /// before the last [`KEEP_RECENT`] messages — with a model-written summary,
+    /// keeping the session usable when context grows. The pinned content
+    /// (system prompt, original task) is never compacted; the JSONL log is
+    /// untouched (the compaction is recorded as one event, replayed on resume).
+    async fn compact(&mut self) {
+        // Pinned = the original task (the system prompt lives outside the
+        // conversation). Keep the tail verbatim; summarize the middle.
+        let pinned = usize::from(!self.conversation.is_empty());
+        let len = self.conversation.len();
+        let keep = KEEP_RECENT.min(len.saturating_sub(pinned));
+        let from = pinned;
+        let to = len.saturating_sub(keep);
+        if to <= from {
+            self.emit(UiEvent::CompactionStatus {
+                message: "nothing to compact yet".into(),
+            })
+            .await;
+            return;
+        }
+
+        self.emit(UiEvent::CompactionStatus {
+            message: "compacting the conversation…".into(),
+        })
+        .await;
+
+        let summary = match self.summarize(&self.conversation[from..to]).await {
+            Ok(text) if !text.is_empty() => text,
+            // Failure fallback (Tech Spec §7): drop the middle behind a
+            // placeholder with a visible warning — a full context never yields a
+            // stuck session. Recorded as a compaction so resume stays consistent.
+            other => {
+                let why = match other {
+                    Ok(_) => "the summary came back empty".to_string(),
+                    Err(error) => error.to_string(),
+                };
+                self.emit(UiEvent::CompactionStatus {
+                    message: format!("summarization failed ({why}); truncated older context"),
+                })
+                .await;
+                format!("[older context was truncated — summarization failed: {why}]")
+            }
+        };
+
+        // Rebuild: [original task][summary as user message][recent verbatim].
+        let mut rebuilt = Vec::with_capacity(2 + keep);
+        rebuilt.extend(self.conversation[..from].iter().cloned());
+        rebuilt.push(Message::user_text(summary.clone()));
+        rebuilt.extend(self.conversation[to..].iter().cloned());
+        self.conversation = rebuilt;
+
+        self.write_transcript(TranscriptEvent::Compaction {
+            summary,
+            replaced_from: u32::try_from(from).unwrap_or(u32::MAX),
+            replaced_to: u32::try_from(to).unwrap_or(u32::MAX),
+        });
+        self.emit(UiEvent::CompactionStatus {
+            message: format!("compacted — kept the task, a summary, and the last {keep} messages"),
+        })
+        .await;
+        self.emit_context_usage().await;
+    }
+
+    /// Summarize a slice of the conversation with the current provider using the
+    /// purpose-built prompt (Tech Spec §7). Drains the stream collecting text;
+    /// tool calls are not offered.
+    async fn summarize(&self, messages: &[Message]) -> Result<String, ProviderError> {
+        let prompt = self
+            .summary_prompt
+            .as_deref()
+            .unwrap_or_else(|| crate::prompts::compact());
+        let request = CompletionRequest {
+            model: self.model.clone(),
+            system: Some(prompt.to_string()),
+            messages: vec![Message::user_text(render_for_summary(messages))],
+            tools: Vec::new(),
+            max_output_tokens: Some(self.provider.model_info().max_output_tokens),
+            temperature: None,
+        };
+        let mut stream = self.provider.stream_completion(request).await?;
+        let mut text = String::new();
+        while let Some(item) = stream.next().await {
+            if let StreamEvent::TextDelta { text: delta } = item? {
+                text.push_str(&delta);
+            }
+        }
+        Ok(text.trim().to_string())
     }
 
     /// Drive completions until the model stops without requesting tools, an
@@ -285,10 +602,13 @@ impl Engine {
                     None => break if saw_done { StreamEnd::Done { tool_calls: std::mem::take(&mut tool_calls) } } else { StreamEnd::Dropped },
                 },
                 Some(command) = commands_rx.recv() => {
-                    if matches!(command, Command::Cancel) {
-                        break StreamEnd::Interrupted;
+                    match command {
+                        Command::Cancel => break StreamEnd::Interrupted,
+                        // Queue a compaction for the clean boundary (Tech Spec §7).
+                        Command::Compact => self.compact_requested = true,
+                        // Ignore permission answers / other commands mid-stream.
+                        _ => {}
                     }
-                    // Ignore permission answers / other commands mid-stream.
                 }
             }
         };
@@ -415,6 +735,11 @@ impl Engine {
                     Some(Command::PermissionAnswer { id, decision }) => {
                         if let Some(pos) = pending.iter().position(|(pid, _)| *pid == id) {
                             let (_, reply) = pending.swap_remove(pos);
+                            self.write_transcript(TranscriptEvent::PermissionDecision {
+                                id,
+                                decision,
+                                executed: None,
+                            });
                             let outcome = if decision.is_allow() {
                                 PermissionOutcome::Allow
                             } else {
@@ -424,6 +749,8 @@ impl Engine {
                         }
                     }
                     Some(Command::Cancel) => return ToolCallResult::Canceled,
+                    // Queue a compaction for the clean boundary (Tech Spec §7).
+                    Some(Command::Compact) => self.compact_requested = true,
                     Some(_) => {}
                     None => {
                         // No more input (frontend gone): deny anything pending
@@ -451,6 +778,10 @@ impl Engine {
     ) {
         let id = self.take_permission_id();
         let rendering = build_rendering(&ask.request);
+        self.write_transcript(TranscriptEvent::PermissionRequest {
+            id,
+            rendering: rendering.clone(),
+        });
         self.emit(UiEvent::PermissionRequest { id, rendering })
             .await;
         pending.push((id, ask.reply));
@@ -464,6 +795,22 @@ impl Engine {
         outcome: emberly_tools::ToolOutcome,
     ) {
         let truncation = truncate_output(&outcome.content, &self.truncate);
+
+        // Durable record: the model-visible (possibly truncated) output, plus a
+        // sidecar holding the full output when truncated (Requirements §8.1).
+        let full_output_ref = if truncation.truncated {
+            self.transcript.sidecar(&call.id, &outcome.content)
+        } else {
+            None
+        };
+        self.write_transcript(TranscriptEvent::ToolResult {
+            call_id: call.id.clone(),
+            ok: outcome.ok,
+            output: truncation.content.clone(),
+            truncated: truncation.truncated,
+            full_output_ref,
+        });
+
         self.conversation.push(Message::tool_result(
             call.id.clone(),
             truncation.content,
@@ -497,11 +844,17 @@ impl Engine {
     }
 
     async fn push_canceled_result(&mut self, call: &PendingToolCall) {
-        self.conversation.push(Message::tool_result(
-            call.id.clone(),
-            "The user canceled before this tool ran.".to_string(),
-            true,
-        ));
+        let canceled = "The user canceled before this tool ran.".to_string();
+        // Keep the transcript well-formed: every tool_call has a tool_result.
+        self.write_transcript(TranscriptEvent::ToolResult {
+            call_id: call.id.clone(),
+            ok: false,
+            output: canceled.clone(),
+            truncated: false,
+            full_output_ref: None,
+        });
+        self.conversation
+            .push(Message::tool_result(call.id.clone(), canceled, true));
         self.emit(UiEvent::ToolFinished {
             call_id: call.id.clone(),
             ok: false,
@@ -512,9 +865,16 @@ impl Engine {
     }
 
     /// Build the assistant message for the turn: text plus any tool-use blocks.
+    /// Records the complete assistant message and each requested tool call to
+    /// the transcript (Tech Spec §3.2).
     fn push_assistant_message(&mut self, text: &str, tool_calls: &[PendingToolCall]) {
         if text.is_empty() && tool_calls.is_empty() {
             return;
+        }
+        if !text.is_empty() {
+            self.write_transcript(TranscriptEvent::AssistantMessage {
+                text: text.to_string(),
+            });
         }
         let mut content = Vec::new();
         if !text.is_empty() {
@@ -524,6 +884,11 @@ impl Engine {
         }
         for call in tool_calls {
             let input = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
+            self.write_transcript(TranscriptEvent::ToolCall {
+                call_id: call.id.clone(),
+                tool: call.name.clone(),
+                args: input.clone(),
+            });
             content.push(ContentBlock::ToolUse {
                 id: call.id.clone(),
                 name: call.name.clone(),
@@ -569,6 +934,13 @@ impl Engine {
 
     async fn emit(&self, event: UiEvent) {
         let _ = self.events_tx.send(event).await;
+    }
+
+    /// Append one durable event to the transcript (HC-7). Best-effort: the sink
+    /// swallows I/O errors. Stamped with the current time at the write edge.
+    fn write_transcript(&mut self, event: TranscriptEvent) {
+        let record = TranscriptRecord::new(OffsetDateTime::now_utc(), event);
+        self.transcript.record(&record);
     }
 
     async fn emit_provider_error(&self, error: &ProviderError) {
@@ -638,6 +1010,45 @@ impl ToolCallResult {
     fn is_canceled(&self) -> bool {
         matches!(self, ToolCallResult::Canceled)
     }
+}
+
+/// The heuristic session title: the first user message, trimmed and clipped
+/// to [`TITLE_CLIP`] characters with an ellipsis when cut (Tech Spec §16).
+fn clip_title(text: &str) -> String {
+    let trimmed = text.trim();
+    let mut title: String = trimmed.chars().take(TITLE_CLIP).collect();
+    if trimmed.chars().count() > TITLE_CLIP {
+        title.push('…');
+    }
+    title
+}
+
+/// Render conversation messages as plain text for the summarization prompt: one
+/// `role: …` block per message, tool calls and results flattened to text.
+fn render_for_summary(messages: &[Message]) -> String {
+    let mut out = String::new();
+    for message in messages {
+        let role = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+            Role::System => "system",
+        };
+        for block in &message.content {
+            let piece = match block {
+                ContentBlock::Text { text } => text.clone(),
+                ContentBlock::ToolUse { name, input, .. } => format!("[tool call: {name} {input}]"),
+                ContentBlock::ToolResult { content, .. } => format!("[tool result: {content}]"),
+            };
+            if !piece.is_empty() {
+                out.push_str(role);
+                out.push_str(": ");
+                out.push_str(&piece);
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 /// Number of result lines shown inline under a finished tool call.

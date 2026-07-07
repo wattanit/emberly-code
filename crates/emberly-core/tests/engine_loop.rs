@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use emberly_core::{
-    channel, Command, Engine, EngineConfig, PermissionDecision, RetryPolicy, UiEvent,
+    channel, CaptureSink, Command, Engine, EngineConfig, PermissionDecision, RetryPolicy,
+    SandboxStatus, SessionId, TranscriptEvent, TranscriptSink, UiEvent,
 };
 use emberly_providers::{
     FakeProvider, ModelInfo, Pricing, Provider, ProviderError, ScriptOutcome, ScriptedResponse,
@@ -42,8 +43,12 @@ fn start(scripts: Vec<ScriptedResponse>, root: PathBuf) -> Harness {
     start_with_provider(Arc::new(FakeProvider::new(scripts)), root)
 }
 
-fn start_with_provider(provider: Arc<dyn Provider>, root: PathBuf) -> Harness {
-    let config = EngineConfig {
+fn make_config(
+    provider: Arc<dyn Provider>,
+    root: PathBuf,
+    transcript: Box<dyn TranscriptSink>,
+) -> EngineConfig {
+    EngineConfig {
         provider,
         tools: default_registry(),
         project_root: root,
@@ -56,7 +61,37 @@ fn start_with_provider(provider: Arc<dyn Provider>, root: PathBuf) -> Harness {
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(2),
         },
-    };
+        session_id: SessionId::new(),
+        sessions_dir: std::env::temp_dir(),
+        active_session_path: std::sync::Arc::new(std::sync::RwLock::new(std::path::PathBuf::new())),
+        provider_label: "fake".into(),
+        sandbox: SandboxStatus::Unavailable {
+            reason: "test".into(),
+        },
+        config_provenance: Vec::new(),
+        transcript,
+        initial_conversation: Vec::new(),
+        resuming: false,
+        summary_prompt: None,
+    }
+}
+
+fn start_with_provider(provider: Arc<dyn Provider>, root: PathBuf) -> Harness {
+    spawn(make_config(provider, root, EngineConfig::no_transcript()))
+}
+
+/// Start a session with an in-memory transcript sink the test can inspect.
+fn start_capturing(scripts: Vec<ScriptedResponse>, root: PathBuf) -> (Harness, CaptureSink) {
+    let sink = CaptureSink::new();
+    let config = make_config(
+        Arc::new(FakeProvider::new(scripts)),
+        root,
+        Box::new(sink.clone()),
+    );
+    (spawn(config), sink)
+}
+
+fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
     let (engine, asks_rx) = Engine::new(config, engine_ports.events_tx);
     tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx));
@@ -153,6 +188,103 @@ async fn tool_call_allowed_runs_and_feeds_result_back() {
     )));
     // The model got the tool result and produced a closing message.
     assert_eq!(deltas(&events), "done");
+}
+
+#[tokio::test]
+async fn transcript_records_the_durable_session() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "write_file", r#"{"path":"out.txt","content":"hi\n"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, root);
+    h.send(Command::UserInput {
+        text: "write it".into(),
+    })
+    .await;
+    let _ = h.collect(Some(PermissionDecision::AllowOnce)).await;
+
+    let events: Vec<TranscriptEvent> = sink.records().into_iter().map(|r| r.event).collect();
+    // Opens with session_start.
+    assert!(matches!(
+        events.first(),
+        Some(TranscriptEvent::SessionStart { .. })
+    ));
+    // First user message is pinned as the original task, and titles the session.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        TranscriptEvent::UserMessage {
+            original_task: true,
+            ..
+        }
+    )));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, TranscriptEvent::SessionTitle { .. })));
+    // The tool call, its permission round trip, and its result are all recorded.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, TranscriptEvent::ToolCall { tool, .. } if tool == "write_file")));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, TranscriptEvent::PermissionRequest { .. })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        TranscriptEvent::PermissionDecision {
+            decision: PermissionDecision::AllowOnce,
+            ..
+        }
+    )));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, TranscriptEvent::ToolResult { ok: true, .. })));
+    // The closing assistant message is stored complete, not as deltas.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, TranscriptEvent::AssistantMessage { text } if text == "done")));
+
+    // Closing the command channel ends the session cleanly.
+    drop(h);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(matches!(
+        sink.records().last().map(|r| r.event.clone()),
+        Some(TranscriptEvent::SessionEnd { .. })
+    ));
+}
+
+#[tokio::test]
+async fn compact_summarizes_the_middle_and_records_the_event() {
+    // Four text turns build 8 messages; the fifth scripted response is consumed
+    // by the summarization call that `/compact` makes.
+    let scripts = vec![
+        ScriptedResponse::text("r1"),
+        ScriptedResponse::text("r2"),
+        ScriptedResponse::text("r3"),
+        ScriptedResponse::text("r4"),
+        ScriptedResponse::text("SUMMARY OF THE MIDDLE"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, temp_project());
+    for i in 0..4 {
+        h.send(Command::UserInput {
+            text: format!("msg {i}"),
+        })
+        .await;
+        let _ = h.collect(None).await;
+    }
+
+    h.send(Command::Compact).await;
+    let events = h.collect(None).await;
+
+    // The UI is told compaction happened.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        UiEvent::CompactionStatus { message } if message.contains("compacted")
+    )));
+    // The transcript records the compaction with the model's summary.
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::Compaction { summary, .. } if summary == "SUMMARY OF THE MIDDLE"
+    )));
 }
 
 #[tokio::test]
@@ -402,4 +534,85 @@ async fn cancel_during_bash_stops_promptly() {
         has_tool_finished(&events, false),
         "canceled tool finishes as failure"
     );
+}
+
+/// `/new` mid-session: the current transcript is closed cleanly and a fresh one
+/// begins, with the shared session-path handle following the switch (HC-3).
+#[tokio::test]
+async fn new_session_ends_current_and_starts_fresh() {
+    use std::sync::RwLock;
+
+    let root = temp_project();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let sessions_dir =
+        std::env::temp_dir().join(format!("emberly-switch-{}-{n}", std::process::id()));
+    let _ = std::fs::create_dir_all(&sessions_dir);
+
+    let first_id = SessionId::new();
+    let first_path = sessions_dir.join(format!("{first_id}.jsonl"));
+    let shared = Arc::new(RwLock::new(first_path.clone()));
+    let transcript = match emberly_core::FileTranscript::create(&sessions_dir, first_id) {
+        Ok(file) => Box::new(file) as Box<dyn TranscriptSink>,
+        Err(e) => panic!("create first transcript: {e}"),
+    };
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(vec![ScriptedResponse::text(
+            "first-turn",
+        )])),
+        root,
+        transcript,
+    );
+    config.session_id = first_id;
+    config.sessions_dir = sessions_dir.clone();
+    config.active_session_path = shared.clone();
+
+    let mut h = spawn(config);
+    h.send(Command::UserInput {
+        text: "hello".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    // Switch to a brand-new session.
+    let second_id = SessionId::new();
+    h.send(Command::NewSession {
+        session_id: second_id,
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    // Close the engine so the new session's session_end is written.
+    drop(h);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The shared handle now names the new session (panic/exit path follows it).
+    let current = match shared.read() {
+        Ok(guard) => guard.clone(),
+        Err(e) => panic!("read shared path: {e}"),
+    };
+    let second_path = sessions_dir.join(format!("{second_id}.jsonl"));
+    assert_eq!(current, second_path, "shared path follows the switch");
+
+    // The first transcript ended cleanly (its last record is session_end).
+    let first = match emberly_core::resume::read_records(&first_path) {
+        Ok(loaded) => loaded.records,
+        Err(e) => panic!("read first: {e}"),
+    };
+    assert!(
+        matches!(
+            first.last().map(|r| &r.event),
+            Some(TranscriptEvent::SessionEnd { .. })
+        ),
+        "first session ended cleanly on switch"
+    );
+    assert!(!emberly_core::resume::interrupted(&first));
+
+    // The second transcript is its own session: a session_start with the new id.
+    let second = match emberly_core::resume::read_records(&second_path) {
+        Ok(loaded) => loaded.records,
+        Err(e) => panic!("read second: {e}"),
+    };
+    assert_eq!(emberly_core::resume::session_id(&second), Some(second_id));
+    let _ = std::fs::remove_dir_all(&sessions_dir);
 }

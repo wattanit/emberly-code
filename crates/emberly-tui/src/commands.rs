@@ -18,8 +18,10 @@ pub enum AppCommand {
     Diff,
     /// List files changed this session.
     Files,
-    /// Show session details.
+    /// List saved sessions and switch to one.
     Session,
+    /// Start a fresh session in place, saving the current one.
+    NewSession,
     /// Toggle the sidebar.
     ToggleSidebar,
     /// Cancel the in-flight turn.
@@ -67,8 +69,14 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "session",
         key: None,
-        desc: "Show session details",
+        desc: "List saved sessions and switch to one",
         cmd: AppCommand::Session,
+    },
+    CommandSpec {
+        name: "new",
+        key: None,
+        desc: "Start a fresh session (saves the current one)",
+        cmd: AppCommand::NewSession,
     },
     CommandSpec {
         name: "sidebar",
@@ -90,9 +98,13 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
 ];
 
-/// Look up a command by exact `/name` (the slash already stripped).
+/// Look up a command by exact `/name` (the slash already stripped). `/clear` is
+/// an alias for `/new` — both start a fresh session (the user's "New or Clear").
 #[must_use]
 pub fn by_name(name: &str) -> Option<AppCommand> {
+    if name == "clear" {
+        return Some(AppCommand::NewSession);
+    }
     COMMANDS.iter().find(|c| c.name == name).map(|c| c.cmd)
 }
 

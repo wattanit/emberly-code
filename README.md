@@ -1,43 +1,228 @@
 # Emberly Code
 
-An interactive AI coding agent for the terminal — the coding-agent sibling of
-Emberly. The user states tasks in natural language; the agent reads, edits,
-and creates files, runs commands, and iterates until the task is done or the
-user intervenes.
+An interactive AI coding agent for the terminal. You describe a task in plain
+language; the agent reads your code, proposes and makes edits, runs commands,
+and iterates — asking permission before it touches anything — until the task is
+done or you step in.
 
-Emberly Code exists for three reasons, in priority order: **full source
-control** (the entire harness is owned, auditable, and modifiable in-house),
-**safety and transparency** (every action is bounded by an enforceable
-permission and sandbox model and recorded in a complete audit trail), and
-**stability** (reliable on standard and non-standard stacks, including
-musl/static deployments). It is provider-agnostic by design.
+It is **provider-agnostic** (works with Anthropic and any OpenAI-compatible
+endpoint, including local models), keeps a **complete, resumable transcript** of
+every session, and is built to run reliably on standard and static (musl)
+deployments.
 
-> **Status:** pre-v1, under active development. Not yet interactive.
+> **Status:** pre-v1, under active development. The interactive TUI, live
+> providers, and session persistence work today. The permission *rule engine*
+> and OS *sandbox* are in progress — until they land, **every tool action is
+> confirmed with you individually** (see [Safety](#safety--transparency)).
 
-## Documents
+---
 
-- [`docs/emberly-code-requirements-v0.3.md`](docs/emberly-code-requirements-v0.3.md) — WHAT and WHY
-- [`docs/emberly-code-design-guideline-v0.3.md`](docs/emberly-code-design-guideline-v0.3.md) — how it looks, feels, speaks
-- [`docs/emberly-code-tech-spec-v0.1.md`](docs/emberly-code-tech-spec-v0.1.md) — HOW it is built
-- [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) — phased build plan
-- [`PHASE1_TODO.md`](PHASE1_TODO.md) — current phase breakdown and progress
+## Contents
 
-## Workspace layout
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Using a session](#using-a-session)
+- [Command-line reference](#command-line-reference)
+- [Safety & transparency](#safety--transparency)
+- [For developers](#for-developers)
+
+---
+
+## Install
+
+No prebuilt binaries yet — build from source (needs a recent stable Rust
+toolchain; no C toolchain required):
+
+```sh
+git clone <this-repo> && cd emberly-code
+cargo build --release
+# the binary is target/release/emberly — put it on your PATH, e.g.:
+install -m 0755 target/release/emberly ~/.local/bin/emberly
+```
+
+## Quick start
+
+1. **Pick a provider and give it a key.** Anthropic, for example:
+
+   ```sh
+   export EMBERLY_PROVIDER=anthropic
+   export EMBERLY_MODEL=claude-sonnet-5
+   export ANTHROPIC_API_KEY=sk-...
+   ```
+
+   Or point at any OpenAI-compatible endpoint (OpenAI, Ollama, vLLM,
+   OpenRouter, …):
+
+   ```sh
+   export EMBERLY_PROVIDER=openai
+   export EMBERLY_MODEL=gpt-5.2
+   export EMBERLY_BASE_URL=http://localhost:11434/v1   # e.g. Ollama
+   export OPENAI_API_KEY=...                            # if the endpoint needs one
+   ```
+
+2. **Run it in your project directory:**
+
+   ```sh
+   cd ~/my-project
+   emberly
+   ```
+
+3. Type your task and press **Enter**. Emberly asks before running commands or
+   editing files; you approve or deny each action.
+
+Without a provider configured, Emberly still starts in an **offline placeholder
+mode** so you can explore the interface — it just can't call a model.
+
+To keep settings with a project instead of in your shell, run `emberly init`
+(see below).
+
+## Configuration
+
+Everything is optional — Emberly runs on built-in defaults. Settings resolve in
+this order, later winning over earlier:
+
+1. Built-in defaults
+2. Global config — `~/.config/emberly/config.toml` (or `$XDG_CONFIG_HOME/emberly/`)
+3. Project config — `.agents/config.toml` in your project
+4. `EMBERLY_*` environment variables
+5. `--provider` / `--model` command-line flags
+
+Run **`emberly init`** to scaffold `.agents/` in the current project with a
+commented `config.toml`, the default prompts (editable, under
+`.agents/prompts/`), a `permissions.toml` template, and a `.gitignore` that
+keeps session transcripts out of version control. Existing files are never
+overwritten.
+
+**`.agents/config.toml`:**
+
+```toml
+provider = "anthropic"          # or "openai" (covers Ollama/vLLM/OpenRouter)
+model    = "claude-sonnet-5"
+# base_url = "http://localhost:11434/v1"   # for openai-compatible endpoints
+# context_window = 200000
+# max_output     = 8192
+
+# Optional per-model pricing → live session cost estimate.
+# [pricing."claude-sonnet-5"]
+# input  = 3.0     # USD per million input tokens
+# output = 15.0
+```
+
+**API keys** are read from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, or from
+`~/.config/emberly/keys.toml` (which must be mode `0600`). Keys are never read
+from project files, so they don't get committed.
+
+**Project instructions:** an `AGENTS.md` (or `CLAUDE.md`) at your project root
+is picked up automatically and given to the agent as standing context.
+
+**Environment variables:** `EMBERLY_PROVIDER`, `EMBERLY_MODEL`,
+`EMBERLY_BASE_URL`, `EMBERLY_CONTEXT_WINDOW`, `EMBERLY_MAX_OUTPUT`. For display,
+`NO_COLOR` or `TERM=dumb` force plain mode and `EMBERLY_MOTION=0` disables
+animation.
+
+Run **`emberly config show`** to see the resolved settings and where each value
+came from.
+
+## Using a session
+
+The screen is a conversation timeline — your messages and the agent's, tool
+calls, and diffs, top to bottom — with a sidebar showing the model, context
+usage, cost, and changed files.
+
+**Input**
+
+| Key | Action |
+|---|---|
+| `Enter` | Send your message |
+| `Shift+Enter` / `Alt+Enter` | Newline (compose a multi-line message) |
+| `Esc` | Cancel the current turn / dismiss an overlay |
+| `↑` `↓` `PgUp` `PgDn` / mouse wheel | Scroll the conversation or an overlay |
+
+**Commands** — open the palette with **`Ctrl-P`**, or type any `/name`:
+
+| Command | Key | What it does |
+|---|---|---|
+| `/help` | `Ctrl-P` | List commands and keybindings |
+| `/view` | | View the last assistant message in full |
+| `/diff` | `Ctrl-O` | Open the latest file's diff |
+| `/files` | | List files changed this session |
+| `/session` | | List saved sessions and switch to one |
+| `/new` (`/clear`) | | Start a fresh session (the current one is saved) |
+| `/sidebar` | `Ctrl-B` | Toggle the sidebar |
+| `/cancel` | | Cancel the in-flight turn |
+| `/quit` | `Ctrl-D` | Exit |
+
+**Permission prompts.** When the agent wants to run a command or change a file,
+it shows exactly what it will do and asks you to allow or deny. A denial is fed
+back to the agent as information, not treated as an error — it adapts and keeps
+going.
+
+**Sessions never disappear.** Every session is written to
+`.agents/sessions/<id>.jsonl` as it happens (durably, line by line). If Emberly
+crashes or is killed, the next launch offers to resume. You can also:
+
+- `emberly resume` — continue the most recent session
+- `emberly resume <id>` — continue a specific one
+- `emberly sessions` — list them, newest first, each with its resume command
+- `/session` (in-app) — pick one from a menu and switch without leaving
+
+**Long sessions.** Use `/compact` to summarize the older part of the
+conversation when the context fills up; recent messages are kept verbatim and
+the summary is recorded in the transcript, so resuming still works.
+
+## Command-line reference
+
+```
+emberly                     Start (or offer to resume) an interactive session
+emberly --plain             Run in plain line mode (no full-screen TUI)
+emberly resume [id]         Resume the latest session, or one by id
+emberly sessions            List saved sessions in this project
+emberly init                Scaffold .agents/ (config, prompts, permissions)
+emberly config show         Show the resolved configuration and its sources
+emberly --version           Print the version
+
+  --provider <name>         Override the provider for this run (anthropic|openai)
+  --model <name>            Override the model for this run
+```
+
+Plain mode is also selected automatically when output isn't a terminal or
+`NO_COLOR`/`TERM=dumb` are set — so Emberly degrades gracefully over pipes and
+minimal terminals.
+
+## Safety & transparency
+
+Emberly is built around auditability and bounded action:
+
+- **You approve every action.** Today, each tool call (running a command,
+  editing a file) is confirmed with you individually. A configurable permission
+  *rule engine* and auto-accept modes are in progress and will be gated behind
+  active OS confinement.
+- **OS sandbox.** Kernel-level confinement (Linux Landlock, macOS Seatbelt via
+  `sandbox-exec`) is in progress. Until it's active for your platform, Emberly
+  runs in an honest, clearly-labeled degraded mode and reports its sandbox
+  status in the UI. Actions stay within the project root, and `.git` is
+  protected.
+- **Complete audit trail.** The append-only JSONL transcript is the ground
+  truth — never rewritten — recording prompts, model output, every tool call
+  and result, and every permission decision.
+
+## For developers
 
 Cargo workspace, six crates, strictly one-way dependency flow
-(`emberly` → {`tui`, `core`}; `tui` → `core`; `core` → {`providers`,
-`tools`, `sandbox`}):
+(`emberly` → {`tui`, `core`}; `tui` → `core`; `core` → {`providers`, `tools`,
+`sandbox`}):
 
 | Crate | Responsibility |
 |---|---|
-| `emberly-core` | Engine: agent loop, event model, session, context management |
+| `emberly-core` | Engine: agent loop, event model, sessions, context management |
 | `emberly-providers` | `Provider` trait + Anthropic and OpenAI-compatible clients |
 | `emberly-tools` | `Tool` trait + built-in tool suite |
 | `emberly-sandbox` | Permission rule engine + OS confinement (security-critical) |
 | `emberly-tui` | `ratatui` terminal frontend |
 | `emberly` | Thin binary: CLI, wiring, supervisor |
 
-## Guarantees enforced in code and CI
+**Guarantees enforced in code and CI**
 
 - **Safe Rust in first-party code** (HC-1): every crate carries
   `#![forbid(unsafe_code)]`.
@@ -47,17 +232,25 @@ Cargo workspace, six crates, strictly one-way dependency flow
   over OpenSSL, git CLI over `libgit2`; fully static musl targets.
   `cargo deny` bans the canonical C offenders.
 
-## Building
+**Working on it**
 
 ```sh
-cargo build            # debug build of the whole workspace
+cargo build                                # whole workspace
+cargo test                                 # test suite
 cargo clippy --all-targets --all-features  # lint gate (HC-1/HC-3)
-cargo test             # test suite
+cargo fmt --all                            # formatting
 ```
 
 Release targets (v1): `x86_64-unknown-linux-musl`,
 `aarch64-unknown-linux-musl`, `aarch64-apple-darwin` (best-effort
 `x86_64-apple-darwin`). Windows is deferred (no Landlock/Seatbelt equivalent).
+
+**Documents**
+
+- [`docs/emberly-code-requirements-v0.3.md`](docs/emberly-code-requirements-v0.3.md) — WHAT and WHY
+- [`docs/emberly-code-design-guideline-v0.3.md`](docs/emberly-code-design-guideline-v0.3.md) — how it looks, feels, speaks
+- [`docs/emberly-code-tech-spec-v0.1.md`](docs/emberly-code-tech-spec-v0.1.md) — HOW it is built
+- [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) — phased build plan
 
 ## License
 

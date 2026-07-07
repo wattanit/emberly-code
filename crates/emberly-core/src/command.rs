@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::PermissionId;
+use crate::id::{PermissionId, SessionId};
 use crate::types::{Mode, PermissionDecision};
 
 /// A command issued to the engine. `#[non_exhaustive]` so new commands are not
@@ -37,4 +37,14 @@ pub enum Command {
     /// Cancel the in-flight turn (Esc / Ctrl+C). Handled at the next await
     /// point; a running child process is killed by process group (S-4).
     Cancel,
+
+    /// Start a fresh session in place, saving the current one first (`/new`).
+    /// The frontend mints the new id so it can update its own view without a
+    /// round trip; the engine ends the current transcript and rolls a new one.
+    NewSession { session_id: SessionId },
+
+    /// Resume a saved session by id, replacing the live conversation with the
+    /// one rebuilt from that transcript (`/resume` from the picker). The engine
+    /// ends the current session and continues appending to the target file.
+    ResumeSession { session_id: SessionId },
 }

@@ -4,8 +4,14 @@
 //! the in-context conversation is a derived view over it and never rewrites a
 //! line.
 //!
-//! Group 1 defines the schema (types serializable from day one, A-3). The
-//! writer, sidecar files, and resume/replay land in Phase 5.
+//! Phase 1 defined the schema (types serializable from day one, A-3); Phase 5
+//! adds the [`TranscriptSink`] writer ([`FileTranscript`], per-event fsync) and
+//! sidecar files. Resume/replay over these records is Phase 5 group 3.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -15,8 +21,8 @@ use crate::types::{Mode, PermissionDecision, PermissionRendering, SandboxStatus}
 
 /// Current transcript schema version. Present on every record from day one so
 /// a reader can detect and warn on newer schemas rather than crash (Tech Spec
-/// §3.3).
-pub const SCHEMA_VERSION: u32 = 1;
+/// §3.3). v2 added `session_start.prompts_version`.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// One line of the transcript: the schema version, a timestamp, and the event
 /// itself flattened alongside them, producing
@@ -65,6 +71,10 @@ pub enum TranscriptEvent {
         /// default (Requirements C-3). Empty when everything is default.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         config_provenance: Vec<ConfigProvenance>,
+        /// The default prompt-set version this session ran under
+        /// ([`crate::prompts::VERSION`]). `default`s to 0 for pre-v2 transcripts.
+        #[serde(default)]
+        prompts_version: u32,
     },
 
     /// A user message. The first user message of a session is the original
@@ -154,4 +164,251 @@ pub struct ConfigProvenance {
 #[allow(clippy::trivially_copy_pass_by_ref)] // signature required by serde's skip_serializing_if
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// A destination for durable transcript records (HC-7). Implementations append
+/// one record per call and own durability. Write failures are **swallowed** —
+/// transcript I/O is a harness-world concern that must never crash the agent
+/// (they are surfaced to the user by the supervisor path, Phase 5 group 2).
+pub trait TranscriptSink: Send + Sync {
+    /// Append one record, flushing it to durable storage before returning
+    /// (per-event fsync so a crash loses almost nothing — Tech Spec §10, S-2).
+    fn record(&mut self, record: &TranscriptRecord);
+
+    /// Persist a tool's full, untruncated output to a sidecar and return the
+    /// reference to store in `full_output_ref` (Requirements §8.1); `None` if
+    /// unsupported or the write failed.
+    fn sidecar(&mut self, call_id: &ToolCallId, content: &str) -> Option<String> {
+        let _ = (call_id, content);
+        None
+    }
+}
+
+/// Discards everything — the default when no session file is configured, and
+/// the sink used by tests that don't assert on the transcript.
+pub struct NoopSink;
+
+impl TranscriptSink for NoopSink {
+    fn record(&mut self, _record: &TranscriptRecord) {}
+}
+
+/// Captures records in memory so tests can assert the exact durable sequence.
+#[derive(Clone, Default)]
+pub struct CaptureSink {
+    records: Arc<Mutex<Vec<TranscriptRecord>>>,
+}
+
+impl CaptureSink {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A snapshot of the records captured so far.
+    #[must_use]
+    pub fn records(&self) -> Vec<TranscriptRecord> {
+        self.records.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+}
+
+impl TranscriptSink for CaptureSink {
+    fn record(&mut self, record: &TranscriptRecord) {
+        if let Ok(mut v) = self.records.lock() {
+            v.push(record.clone());
+        }
+    }
+}
+
+/// Append-only, per-event-fsynced JSONL transcript on disk (HC-7, Tech Spec
+/// §3.2). One `TranscriptRecord` per line in `<dir>/<session>.jsonl`; truncated
+/// tool outputs spill to `<dir>/<session>-outputs/`.
+pub struct FileTranscript {
+    file: File,
+    outputs_dir: PathBuf,
+    /// Once a write fails the file is marked unhealthy so we stop retrying every
+    /// event (the failure is reported once by the supervisor path).
+    healthy: bool,
+}
+
+impl FileTranscript {
+    /// Create or open `<dir>/<session>.jsonl` for append, creating `<dir>` if
+    /// needed. Nothing is written until the first [`record`](Self::record).
+    pub fn create(dir: &Path, session: SessionId) -> std::io::Result<Self> {
+        Self::open(&dir.join(format!("{session}.jsonl")))
+    }
+
+    /// Open an existing (or new) transcript file for append — the resume path
+    /// (Tech Spec §3.3), which continues writing to the same session file.
+    pub fn open(path: &Path) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("session");
+        let outputs_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{stem}-outputs"));
+        Ok(Self {
+            file,
+            outputs_dir,
+            healthy: true,
+        })
+    }
+
+    fn append_line(&mut self, record: &TranscriptRecord) -> std::io::Result<()> {
+        let line = serde_json::to_string(record).map_err(std::io::Error::other)?;
+        self.file.write_all(line.as_bytes())?;
+        self.file.write_all(b"\n")?;
+        self.file.flush()?;
+        self.file.sync_data()?; // per-event durability (S-2)
+        Ok(())
+    }
+}
+
+impl TranscriptSink for FileTranscript {
+    fn record(&mut self, record: &TranscriptRecord) {
+        if !self.healthy {
+            return;
+        }
+        if self.append_line(record).is_err() {
+            self.healthy = false;
+        }
+    }
+
+    fn sidecar(&mut self, call_id: &ToolCallId, content: &str) -> Option<String> {
+        if fs::create_dir_all(&self.outputs_dir).is_err() {
+            return None;
+        }
+        let path = self
+            .outputs_dir
+            .join(format!("{}.txt", sanitize(&call_id.0)));
+        if fs::write(&path, content).is_err() {
+            return None;
+        }
+        Some(path.display().to_string())
+    }
+}
+
+/// Append a single record to an existing transcript file by reopening it —
+/// the crash-path counterpart to [`FileTranscript`], used by the supervisor's
+/// panic hook where the engine (and its live sink) is unreachable. Best-effort
+/// and standalone: it needs only the path. Safe because every prior event was
+/// already fsynced, so we only ever add one trailing line.
+pub fn append_abnormal_exit(path: &Path, reason: &str) {
+    let record = TranscriptRecord::new(
+        OffsetDateTime::now_utc(),
+        TranscriptEvent::AbnormalExit {
+            reason: reason.to_string(),
+        },
+    );
+    let _ = append_record(path, &record);
+}
+
+fn append_record(path: &Path, record: &TranscriptRecord) -> std::io::Result<()> {
+    let line = serde_json::to_string(record).map_err(std::io::Error::other)?;
+    let mut file = OpenOptions::new().append(true).open(path)?;
+    file.write_all(line.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    file.sync_data()?;
+    Ok(())
+}
+
+/// Keep sidecar filenames to a safe alphabet (tool-call ids are provider-issued
+/// strings like `toolu_1` / `call_1`, but never trust them as path fragments).
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_transcript_round_trips() {
+        let dir = std::env::temp_dir().join(format!("emberly-tx-{}", std::process::id()));
+        let session = SessionId::new();
+        let mut sink = match FileTranscript::create(&dir, session) {
+            Ok(s) => s,
+            Err(e) => panic!("create: {e}"),
+        };
+        let rec = TranscriptRecord::new(
+            OffsetDateTime::UNIX_EPOCH,
+            TranscriptEvent::UserMessage {
+                text: "hello".into(),
+                original_task: true,
+            },
+        );
+        sink.record(&rec);
+
+        let path = dir.join(format!("{session}.jsonl"));
+        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        let parsed: TranscriptRecord = match serde_json::from_str(contents.trim()) {
+            Ok(r) => r,
+            Err(e) => panic!("parse: {e}"),
+        };
+        assert_eq!(parsed, rec);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_abnormal_exit_adds_a_trailing_line() {
+        let dir = std::env::temp_dir().join(format!("emberly-tx-ax-{}", std::process::id()));
+        let session = SessionId::new();
+        {
+            let mut sink = match FileTranscript::create(&dir, session) {
+                Ok(s) => s,
+                Err(e) => panic!("create: {e}"),
+            };
+            sink.record(&TranscriptRecord::new(
+                OffsetDateTime::UNIX_EPOCH,
+                TranscriptEvent::SessionEnd { reason: None },
+            ));
+        } // drop the live sink; the panic-path append reopens the file
+
+        let path = dir.join(format!("{session}.jsonl"));
+        append_abnormal_exit(&path, "boom");
+
+        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        let last = contents.lines().last().unwrap_or_default();
+        let record: TranscriptRecord = match serde_json::from_str(last) {
+            Ok(r) => r,
+            Err(e) => panic!("parse: {e}"),
+        };
+        assert!(matches!(
+            record.event,
+            TranscriptEvent::AbnormalExit { reason } if reason == "boom"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sidecar_writes_full_output_and_returns_ref() {
+        let dir = std::env::temp_dir().join(format!("emberly-tx-sc-{}", std::process::id()));
+        let session = SessionId::new();
+        let mut sink = match FileTranscript::create(&dir, session) {
+            Ok(s) => s,
+            Err(e) => panic!("create: {e}"),
+        };
+        let reference = sink.sidecar(&ToolCallId::new("call_1"), "full output");
+        let reference = reference.unwrap_or_default();
+        assert!(reference.ends_with("call_1.txt"));
+        assert_eq!(
+            std::fs::read_to_string(&reference).unwrap_or_default(),
+            "full output"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

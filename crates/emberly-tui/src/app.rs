@@ -10,11 +10,12 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use emberly_core::{
-    Command, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus, TokenUsage,
-    ToolCallId, UiEvent,
+    resume, Command, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus,
+    SessionId, TokenUsage, ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
 };
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::commands::{self, AppCommand};
 use crate::editor::LineEditor;
@@ -83,6 +84,12 @@ pub enum OverlayContent {
     Diff(String),
     /// Plain text (help, untruncated output).
     Text(String),
+    /// The interactive session picker (`/session`): a selectable list of saved
+    /// sessions, newest first. Enter resumes the highlighted one.
+    Sessions {
+        rows: Vec<SessionRow>,
+        selected: usize,
+    },
 }
 
 /// The command palette's state (Design §3.3): the fuzzy query and which match
@@ -105,10 +112,26 @@ pub struct ModifiedFile {
 /// Session identity for the sidebar/header (Design §3.1).
 #[derive(Debug, Clone, Default)]
 pub struct SessionInfo {
+    /// The current session id, so the picker can mark and skip it, and the
+    /// header can name it. Updated in place on an in-session switch.
+    pub session_id: SessionId,
     pub title: String,
     pub provider: String,
     pub model: String,
     pub project_root: String,
+}
+
+/// One row in the session picker overlay (`/session`). A display projection of
+/// [`emberly_core::resume::SessionSummary`] — cheap to clone and compare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRow {
+    pub id: SessionId,
+    /// The session title, or a stand-in for an untitled one.
+    pub title: String,
+    /// One-line metadata (provider/model · age · events · interrupted).
+    pub subtitle: String,
+    /// True for the session the app is currently in (cannot resume itself).
+    pub current: bool,
 }
 
 /// What a key press asked the frontend loop to do.
@@ -120,11 +143,20 @@ pub enum Action {
     Command(Command),
     /// Begin a clean shutdown.
     Quit,
+    /// Start a fresh session in place (`/new`). The frontend mints a new id,
+    /// tells the engine, and resets the view.
+    NewSession,
+    /// Resume the saved session with this id (picker selection). The frontend
+    /// reads its transcript, tells the engine, and reseeds the view.
+    ResumeSession(SessionId),
 }
 
 /// The complete view-model the renderer reads.
 pub struct App {
     pub session: SessionInfo,
+    /// Where session transcripts live, so the picker can list them and a
+    /// resume can read one (`/session`, `/resume`).
+    pub sessions_dir: PathBuf,
     pub conversation: Vec<ConvItem>,
     /// True between the first `AssistantDelta` and `AssistantDone` of a turn.
     pub streaming: bool,
@@ -183,9 +215,10 @@ pub struct App {
 
 impl App {
     #[must_use]
-    pub fn new(session: SessionInfo) -> Self {
+    pub fn new(session: SessionInfo, sessions_dir: PathBuf) -> Self {
         Self {
             session,
+            sessions_dir,
             conversation: Vec::new(),
             streaming: false,
             editor: LineEditor::new(),
@@ -212,6 +245,67 @@ impl App {
             sidebar_settle: 0,
             theme: Theme::rich(),
         }
+    }
+
+    /// Seed the conversation timeline from a resumed transcript (Tech Spec
+    /// §3.3), so the restored session shows its history rather than a blank
+    /// pane. Maps durable records to display items; non-conversation records
+    /// (session_start/title/permission/end) are skipped.
+    pub fn seed_history(&mut self, records: &[TranscriptRecord]) {
+        for record in records {
+            match &record.event {
+                TranscriptEvent::UserMessage { text, .. } => {
+                    self.conversation.push(ConvItem::User(text.clone()));
+                }
+                TranscriptEvent::AssistantMessage { text } => {
+                    self.conversation.push(ConvItem::Assistant(text.clone()));
+                }
+                TranscriptEvent::ToolCall {
+                    call_id,
+                    tool,
+                    args,
+                } => {
+                    // Reconstruct a readable label from the recorded args.
+                    let summary = args
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .map(|c| format!("run: {c}"))
+                        .or_else(|| {
+                            args.get("path")
+                                .and_then(|v| v.as_str())
+                                .map(|p| format!("{tool} {p}"))
+                        })
+                        .unwrap_or_else(|| tool.clone());
+                    self.conversation.push(ConvItem::Tool {
+                        call_id: call_id.clone(),
+                        tool: tool.clone(),
+                        summary,
+                        done: None,
+                        result: None,
+                        preview: None,
+                    });
+                }
+                TranscriptEvent::ToolResult {
+                    call_id,
+                    ok,
+                    output,
+                    ..
+                } => {
+                    if let Some(ConvItem::Tool { done, preview, .. }) = self.find_tool_mut(call_id)
+                    {
+                        *done = Some(*ok);
+                        *preview = Some(output.clone());
+                    }
+                }
+                TranscriptEvent::Compaction { summary, .. } => {
+                    self.conversation
+                        .push(ConvItem::Notice(format!("compacted — {summary}")));
+                }
+                _ => {}
+            }
+        }
+        // Resumed content scrolls off the top; start pinned to the latest.
+        self.scroll = 0;
     }
 
     /// Fold one engine event into the view-model. Pure over `self` — no I/O — so
@@ -298,13 +392,14 @@ impl App {
                 )));
             }
             UiEvent::SessionMeta {
+                session_id,
                 title,
                 provider,
                 model,
                 project_root,
-                ..
             } => {
                 self.session = SessionInfo {
+                    session_id,
                     title,
                     provider,
                     model,
@@ -732,8 +827,25 @@ impl App {
                 Action::None
             }
             AppCommand::Session => {
-                self.open_text_overlay("session", self.session_text());
+                let rows = self.session_rows();
+                self.push_overlay(Overlay {
+                    title: "sessions".into(),
+                    content: OverlayContent::Sessions { rows, selected: 0 },
+                    scroll: 0,
+                });
                 Action::None
+            }
+            AppCommand::NewSession => {
+                // A switch resets the conversation, so refuse mid-turn — the
+                // frontend gates it here rather than dropping it in the engine.
+                if self.busy {
+                    self.conversation.push(ConvItem::Notice(
+                        "finish or cancel the current turn before starting a new session".into(),
+                    ));
+                    Action::None
+                } else {
+                    Action::NewSession
+                }
             }
             AppCommand::ToggleSidebar => {
                 self.sidebar_visible = !self.sidebar_visible;
@@ -762,22 +874,69 @@ impl App {
             .join("\n")
     }
 
-    fn session_text(&self) -> String {
-        let s = &self.session;
-        let title = if s.title.is_empty() {
-            "untitled session"
-        } else {
-            &s.title
-        };
-        let cost = if self.cost_known {
-            format!("${:.4} (est.)", self.cost_usd)
-        } else {
-            "—".to_string()
-        };
-        format!(
-            "title:   {title}\nprovider: {}\nmodel:    {}\nroot:     {}\ncontext:  {}%\ncost:     {cost}",
-            s.provider, s.model, s.project_root, self.context_pct
-        )
+    /// Build the session-picker rows from the transcripts on disk, newest
+    /// first, marking the one we are currently in.
+    fn session_rows(&self) -> Vec<SessionRow> {
+        resume::list_sessions(&self.sessions_dir)
+            .into_iter()
+            .map(|s| {
+                let flag = if s.interrupted { " · interrupted" } else { "" };
+                SessionRow {
+                    current: s.id == self.session.session_id,
+                    title: s.title.unwrap_or_else(|| "(untitled)".into()),
+                    subtitle: format!("{}/{} · {} events{flag}", s.provider, s.model, s.events),
+                    id: s.id,
+                }
+            })
+            .collect()
+    }
+
+    /// Reset the timeline and identity for a brand-new session started in place
+    /// (`/new`). Driven by the frontend once the engine has been told; the
+    /// engine's follow-up context-usage event refines the counters.
+    pub fn begin_new_session(&mut self, id: SessionId) {
+        self.reset_for_switch(id, String::new());
+        self.conversation
+            .push(ConvItem::Notice("started a new session".into()));
+    }
+
+    /// Reset and reseed the timeline for a resumed session (`/resume` from the
+    /// picker), restoring its history so it is not a blank pane.
+    pub fn begin_resumed_session(
+        &mut self,
+        id: SessionId,
+        title: String,
+        records: &[TranscriptRecord],
+    ) {
+        self.reset_for_switch(id, title);
+        self.seed_history(records);
+        self.conversation
+            .push(ConvItem::Notice("resumed session".into()));
+    }
+
+    /// Push a harness-voice notice into the timeline (used by the frontend for
+    /// out-of-band feedback such as a failed session switch).
+    pub fn notice(&mut self, message: impl Into<String>) {
+        self.conversation.push(ConvItem::Notice(message.into()));
+    }
+
+    /// Shared reset for both switch paths: clear the conversation and per-session
+    /// view state, adopt the new identity.
+    fn reset_for_switch(&mut self, id: SessionId, title: String) {
+        self.session.session_id = id;
+        self.session.title = title;
+        self.conversation.clear();
+        self.modified_files.clear();
+        self.latest_diffs.clear();
+        self.last_modified = None;
+        self.scroll = 0;
+        self.streaming = false;
+        self.context_pct = 0;
+        self.context_tokens = 0;
+        self.session_usage = TokenUsage::default();
+        self.cost_usd = 0.0;
+        self.cost_known = false;
+        self.overlays.clear();
     }
 
     /// Keys while the palette is open: type to filter, ↑/↓ to move, Enter to
@@ -840,8 +999,16 @@ impl App {
         self.palette.as_ref().map_or("", |p| p.query.as_str())
     }
 
-    /// Keys while an overlay is open: Esc/q dismiss; the rest scroll.
+    /// Keys while an overlay is open. The session picker is interactive (↑/↓
+    /// move, Enter resumes); every other overlay is a scrollable, read-only
+    /// pane (Esc/q dismiss; the rest scroll).
     fn on_overlay_key(&mut self, key: KeyEvent) -> Action {
+        if matches!(
+            self.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::Sessions { .. })
+        ) {
+            return self.on_session_picker_key(key);
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
@@ -862,6 +1029,65 @@ impl App {
             _ => {}
         }
         Action::None
+    }
+
+    /// Keys for the session picker: ↑/↓ move the selection, Enter resumes the
+    /// highlighted session (a no-op on the current one), Esc/q dismiss.
+    fn on_session_picker_key(&mut self, key: KeyEvent) -> Action {
+        // Read the selection and the chosen row without holding a borrow across
+        // the mutation the arms perform.
+        let (len, selected, chosen) = match self.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::Sessions { rows, selected }) => {
+                (rows.len(), *selected, rows.get(*selected).cloned())
+            }
+            _ => return Action::None,
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+                Action::None
+            }
+            KeyCode::Up => {
+                self.set_picker_selection(selected.saturating_sub(1));
+                Action::None
+            }
+            KeyCode::Down => {
+                self.set_picker_selection((selected + 1).min(len.saturating_sub(1)));
+                Action::None
+            }
+            KeyCode::Enter => match chosen {
+                Some(row) if row.current => {
+                    self.overlays.pop();
+                    self.conversation
+                        .push(ConvItem::Notice("already in this session".into()));
+                    Action::None
+                }
+                Some(row) if self.busy => {
+                    self.overlays.pop();
+                    self.conversation.push(ConvItem::Notice(
+                        "finish or cancel the current turn before switching sessions".into(),
+                    ));
+                    let _ = row;
+                    Action::None
+                }
+                Some(row) => {
+                    self.overlays.pop();
+                    Action::ResumeSession(row.id)
+                }
+                None => Action::None,
+            },
+            _ => Action::None,
+        }
+    }
+
+    fn set_picker_selection(&mut self, next: usize) {
+        if let Some(Overlay {
+            content: OverlayContent::Sessions { selected, .. },
+            ..
+        }) = self.overlays.last_mut()
+        {
+            *selected = next;
+        }
     }
 
     fn scroll_overlay(&mut self, delta: isize) {
@@ -888,7 +1114,7 @@ mod tests {
     use emberly_core::ToolCallId;
 
     fn app() -> App {
-        App::new(SessionInfo::default())
+        App::new(SessionInfo::default(), std::env::temp_dir())
     }
 
     #[test]
@@ -1239,5 +1465,112 @@ mod tests {
             .conversation
             .iter()
             .any(|i| matches!(i, ConvItem::User(_))));
+    }
+
+    fn picker(a: &mut App, rows: Vec<SessionRow>) {
+        a.push_overlay(Overlay {
+            title: "sessions".into(),
+            content: OverlayContent::Sessions { rows, selected: 0 },
+            scroll: 0,
+        });
+    }
+
+    fn row(id: SessionId, current: bool) -> SessionRow {
+        SessionRow {
+            id,
+            title: "t".into(),
+            subtitle: "s".into(),
+            current,
+        }
+    }
+
+    #[test]
+    fn new_command_returns_action_when_idle_and_is_refused_while_busy() {
+        let mut a = app();
+        assert_eq!(a.run_command(AppCommand::NewSession), Action::NewSession);
+        a.busy = true;
+        assert_eq!(a.run_command(AppCommand::NewSession), Action::None);
+        assert!(matches!(a.conversation.last(), Some(ConvItem::Notice(_))));
+    }
+
+    #[test]
+    fn clear_is_an_alias_for_new_session() {
+        assert_eq!(commands::by_name("clear"), Some(AppCommand::NewSession));
+    }
+
+    #[test]
+    fn session_command_opens_the_picker() {
+        let mut a = app();
+        let _ = a.run_command(AppCommand::Session);
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::Sessions { .. })
+        ));
+    }
+
+    #[test]
+    fn picker_enter_on_the_current_session_does_not_resume() {
+        let mut a = app();
+        let id = a.session.session_id;
+        picker(&mut a, vec![row(id, true)]);
+        let action = a.on_session_picker_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(action, Action::None, "cannot resume the current session");
+        assert!(a.overlays.is_empty(), "picker dismissed");
+    }
+
+    #[test]
+    fn picker_enter_on_another_session_resumes_it() {
+        let mut a = app();
+        let other = SessionId::new();
+        picker(&mut a, vec![row(other, false)]);
+        let action = a.on_session_picker_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(action, Action::ResumeSession(other));
+        assert!(a.overlays.is_empty());
+    }
+
+    #[test]
+    fn picker_enter_while_busy_defers_instead_of_switching() {
+        let mut a = app();
+        a.busy = true;
+        picker(&mut a, vec![row(SessionId::new(), false)]);
+        assert_eq!(
+            a.on_session_picker_key(KeyEvent::from(KeyCode::Enter)),
+            Action::None
+        );
+        assert!(matches!(a.conversation.last(), Some(ConvItem::Notice(_))));
+    }
+
+    #[test]
+    fn begin_new_session_resets_the_timeline_and_identity() {
+        let mut a = app();
+        a.conversation.push(ConvItem::User("old".into()));
+        a.modified_files.push(ModifiedFile {
+            path: "x".into(),
+            adds: 1,
+            dels: 0,
+        });
+        let id = SessionId::new();
+        a.begin_new_session(id);
+        assert_eq!(a.session.session_id, id);
+        assert!(a.session.title.is_empty());
+        assert!(a.modified_files.is_empty());
+        assert!(!a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::User(t) if t == "old")));
+    }
+
+    #[test]
+    fn begin_resumed_session_adopts_title_and_clears_prior_timeline() {
+        let mut a = app();
+        a.conversation.push(ConvItem::User("old".into()));
+        let id = SessionId::new();
+        a.begin_resumed_session(id, "resumed".into(), &[]);
+        assert_eq!(a.session.session_id, id);
+        assert_eq!(a.session.title, "resumed");
+        assert!(!a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::User(t) if t == "old")));
     }
 }
