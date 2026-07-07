@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use emberly_core::{
-    channel, resume, Engine, EngineConfig, FileTranscript, Message, SandboxStatus, SessionId,
+    channel, resume, Engine, EngineConfig, FileTranscript, Message, RuleEngine, SessionId,
     TranscriptRecord, TranscriptSink,
 };
 use emberly_providers::Provider;
@@ -274,6 +274,24 @@ async fn run() -> anyhow::Result<()> {
     // Resolve config (files + env + CLI + keys), then select a live provider or
     // fall back to the offline placeholder when none is configured.
     let resolved = config::load(&project_root, &cli_overrides)?;
+
+    // Probe OS confinement (Requirements §6.7) and honor `sandbox.require`
+    // *before* any session is opened, so a refusal doesn't leave a stray
+    // transcript. On this build the Linux Landlock child-confinement path is
+    // Phase 2 group 3, so the probe reports an honest `unavailable` and the
+    // harness runs the degraded path.
+    let sandbox = emberly_core::probe();
+    if resolved.sandbox_require && !sandbox.is_confined() {
+        anyhow::bail!(
+            "sandbox.require is set but OS confinement is not active ({}). \
+             Refusing to start (Requirements §6.7). Unset sandbox.require to run degraded.",
+            match &sandbox {
+                emberly_core::SandboxStatus::Unavailable { reason } => reason.as_str(),
+                _ => "partial",
+            }
+        );
+    }
+
     let (provider, model, label) = match provider_setup::build(&resolved)? {
         Some(selection) => (selection.provider, selection.model, selection.label),
         None => (
@@ -367,6 +385,14 @@ async fn run() -> anyhow::Result<()> {
         println!();
     }
 
+    // Build the permission rule engine: built-in defaults + config rules, with
+    // the bash allowlist suspended when confinement is unavailable (§6.7).
+    let (rule_specs, rule_warnings) = config::load_permission_rules(&project_root);
+    for warning in &rule_warnings {
+        eprintln!("emberly: {warning}");
+    }
+    let rules = RuleEngine::new(rule_specs, sandbox.bash_allowlist_active());
+
     let config = EngineConfig {
         provider,
         tools: default_registry(),
@@ -382,11 +408,8 @@ async fn run() -> anyhow::Result<()> {
             .provider
             .clone()
             .unwrap_or_else(|| "placeholder".into()),
-        // Real OS confinement arrives with Seatbelt (Phase 5 group 8) / Landlock
-        // (Phase 2); until then the session records an honest "unavailable".
-        sandbox: SandboxStatus::Unavailable {
-            reason: "no OS sandbox configured yet".into(),
-        },
+        sandbox,
+        rules,
         config_provenance: resolved.provenance.clone(),
         transcript,
         initial_conversation,

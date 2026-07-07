@@ -11,7 +11,8 @@
 use std::io::{self, Write};
 
 use emberly_core::{
-    Command, FrontendPorts, PermissionDecision, PermissionId, PermissionRendering, UiEvent,
+    Command, FrontendPorts, Mode, PermissionDecision, PermissionId, PermissionRendering,
+    SandboxStatus, UiEvent,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -89,8 +90,33 @@ impl LineRenderer {
                     "session: {title}  [{provider}/{model}]  {project_root}"
                 )?;
             }
-            // Context %, cost, sandbox, mode, compaction belong to the rich
-            // TUI's status line (Phase 4); the plain frontend stays quiet.
+            UiEvent::SandboxStatus { status } => {
+                let summary = match status {
+                    SandboxStatus::Confined { backend } => backend.clone(),
+                    SandboxStatus::Partial { backend, missing } => {
+                        format!("{backend} (partial: {missing})")
+                    }
+                    SandboxStatus::Unavailable { reason } => format!("unavailable ({reason})"),
+                };
+                writeln!(out, "sandbox: {summary}")?;
+            }
+            UiEvent::ModeChanged { mode } => {
+                let word = match mode {
+                    Mode::Normal => "normal",
+                    Mode::AutoAcceptEdits => "auto-accept edits",
+                    Mode::Auto => "auto",
+                };
+                writeln!(out, "mode: {word}")?;
+            }
+            UiEvent::Notice { message } => {
+                // Harness-voice notice: the degraded-sandbox explanation, a
+                // saved permission grant, a refused mode switch (Design §8.2).
+                for line in message.lines() {
+                    writeln!(out, "note: {line}")?;
+                }
+            }
+            // Context % and cost belong to the rich TUI's status line (Phase 4);
+            // the plain frontend stays quiet on those.
             _ => {}
         }
         Ok(())

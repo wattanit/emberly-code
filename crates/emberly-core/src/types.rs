@@ -4,50 +4,13 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Auto-accept escalation tier (Requirements §6.4, Tech Spec §6.6).
-///
-/// The auto tiers are only *reachable* while OS confinement is active; that
-/// invariant is enforced by the engine at transition time (Phase 2), not by
-/// this type. Defined in full here so the event model is stable from day one
-/// (A-3), even though only [`Mode::Normal`] is exercised in Phase 1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum Mode {
-    /// Prompt per the rule layer (Requirements §6.2). The Phase 1 behavior.
-    #[default]
-    Normal,
-    /// File writes/edits inside the project root auto-allow; bash still asks.
-    AutoAcceptEdits,
-    /// Allowlisted and session-granted bash also auto-runs.
-    Auto,
-}
-
-/// OS-level confinement status, probed at startup and kept as always-visible
-/// state (Requirements §6.7, Tech Spec §6.5). Emitted as a `UiEvent` and
-/// written into the transcript `session_start` record.
-///
-/// Populated for real in Phase 2 (Landlock) / Phase 5 (Seatbelt); defined now
-/// so the event and transcript schemas do not change when it arrives.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum SandboxStatus {
-    /// Full confinement granted by the OS.
-    Confined { backend: String },
-    /// Confinement active but missing a requested capability (e.g. an older
-    /// Landlock ABI); the granted-vs-requested delta is in `missing`.
-    Partial { backend: String, missing: String },
-    /// No kernel confinement available; the harness runs in the honest
-    /// degraded mode (allowlist suspended, auto modes locked).
-    Unavailable { reason: String },
-}
-
-impl SandboxStatus {
-    /// Whether auto-accept modes may be offered (Requirements §6.7).
-    #[must_use]
-    pub fn allows_auto_modes(&self) -> bool {
-        matches!(self, Self::Confined { .. } | Self::Partial { .. })
-    }
-}
+/// Auto-accept escalation tier and OS-level confinement status. Both are
+/// *produced by* the sandbox (mode transitions are confinement-gated; the
+/// status is the probe's output), so they live in `emberly-sandbox` and are
+/// re-exported here — the event/command/transcript schemas reference them
+/// through core unchanged (mirrors the `TokenUsage` re-export from
+/// `emberly-providers`).
+pub use emberly_sandbox::{Mode, SandboxStatus};
 
 /// Everything the frontend needs to render a permission prompt fully, without
 /// reaching back into the engine (Design §5: "saying yes always requires

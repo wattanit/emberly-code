@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
-use emberly_core::ConfigProvenance;
+use emberly_core::{parse_rules, ConfigProvenance, Rule, RuleSource};
 use emberly_providers::Pricing;
 use serde::Deserialize;
 
@@ -27,6 +27,18 @@ pub struct ConfigFile {
     /// Per-model pricing, keyed by model id (USD per million tokens).
     #[serde(default)]
     pub pricing: HashMap<String, PricingEntry>,
+    /// Sandbox policy knobs (Requirements §6.7).
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+}
+
+/// The `[sandbox]` config section (Requirements §6.7).
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct SandboxConfig {
+    /// `require = true` refuses to start a session without kernel confinement
+    /// (default `false` — permissive but honest). Optional so a higher-precedence
+    /// file can override a lower one either way.
+    pub require: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -58,6 +70,9 @@ impl ConfigFile {
             self.max_output = higher.max_output;
         }
         self.pricing.extend(higher.pricing); // higher-precedence entries win
+        if higher.sandbox.require.is_some() {
+            self.sandbox.require = higher.sandbox.require;
+        }
     }
 
     /// Resolve pricing for the configured model, if present.
@@ -89,6 +104,8 @@ pub struct Resolved {
     pub provenance: Vec<ConfigProvenance>,
     /// One-time notices to surface at startup (e.g. AGENTS.md over CLAUDE.md).
     pub notices: Vec<String>,
+    /// `sandbox.require`: refuse to start without kernel confinement (§6.7).
+    pub sandbox_require: bool,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -282,7 +299,37 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         summary_prompt,
         provenance,
         notices,
+        sandbox_require: merged.sandbox.require.unwrap_or(false),
     })
+}
+
+/// Load permission rules from the global and project `permissions.toml` files
+/// (Requirements §6.1, precedence order global → project). A malformed file is
+/// skipped with a warning, never silently applied — a broken rules file must
+/// not quietly widen *or* narrow access.
+pub fn load_permission_rules(project_root: &Path) -> (Vec<Rule>, Vec<String>) {
+    let mut rules = Vec::new();
+    let mut warnings = Vec::new();
+    let mut load = |path: Option<PathBuf>, source: RuleSource| {
+        let Some(path) = path else { return };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        match parse_rules(&text, source) {
+            Ok(mut parsed) => rules.append(&mut parsed),
+            Err(error) => warnings.push(format!("ignoring {}: {error}", path.display())),
+        }
+    };
+    load(global_permissions_path(), RuleSource::Global);
+    load(
+        Some(project_root.join(".agents").join("permissions.toml")),
+        RuleSource::Project,
+    );
+    (rules, warnings)
+}
+
+fn global_permissions_path() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("permissions.toml"))
 }
 
 /// Read a config file if it exists.

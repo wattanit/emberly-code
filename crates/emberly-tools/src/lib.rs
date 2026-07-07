@@ -20,7 +20,9 @@ pub mod registry;
 pub mod tool;
 pub mod truncate;
 
-pub use builtin::{default_registry, BashTool, EditFileTool, ReadFileTool, WriteFileTool};
+pub use builtin::{
+    default_registry, BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool, WriteFileTool,
+};
 pub use ctx::{ToolCtx, TruncateConfig};
 pub use permission::{PermissionGate, PermissionOutcome, PermissionRequest};
 pub use registry::ToolRegistry;

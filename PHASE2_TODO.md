@@ -16,18 +16,44 @@ gives HC-4/HC-5 regression teeth.
 
 | Group | Status | Notes |
 |---|---|---|
-| 0. Prerequisites & dependencies | [ ] | deps + sandbox sign-off + type moves |
-| 1. Rule engine | [ ] | testable on any OS |
-| 2. Sandbox probe, status & degradation | [ ] | degraded path testable on macOS |
-| 3. Landlock child confinement | [ ] | **Linux/CI only**; needs shim spike |
-| 4. Genuine-git resolution & `.git` profile | [ ] | Linux/CI only |
-| 5. Process-group tree-kill (P1 deferral) | [ ] | testable on macOS/Linux |
-| 6. Wire rules + sandbox into gate/engine | [ ] | |
-| 7. Modes | [ ] | type-enforced on sandbox status |
-| 8. Glob + grep tools | [ ] | testable on any OS |
-| 9. Escape-test suite & exit criterion | [ ] | **Linux/CI**; degraded on macOS |
+| 0. Prerequisites & dependencies | [x] | deps signed off + added; `SandboxStatus`/`Mode` moved to sandbox, re-exported from core |
+| 1. Rule engine | [x] | `Decision`/`Rule`/`RuleEngine` in `emberly-sandbox`; 16 unit tests |
+| 2. Sandbox probe, status & degradation | [~] | status type, degradation policy, one-time notice, `sandbox.require` all done + tested; **Linux Landlock ABI detection deferred to group 3** (inseparable from the confinement path per the `landlock` crate's design) |
+| 3. Landlock child confinement | [ ] | **post-checkpoint**; needs shim spike |
+| 4. Genuine-git resolution & `.git` profile | [ ] | post-checkpoint (Linux/CI) |
+| 5. Process-group tree-kill (P1 deferral) | [x] | `rustix` group SIGKILL via drop-guard; `/proc` liveness test |
+| 6. Wire rules + sandbox into gate/engine | [~] | rule half done (gate consults engine; grants; matched-rule reason). Sandbox-handle half is group 3 |
+| 7. Modes | [x] | `Mode::resolve` gates auto tiers on confinement; `SetMode` wired; ModeChanged event+transcript |
+| 8. Glob + grep tools | [x] | `globset`/`ignore`/`grep-searcher`; root-confined, skip `.git/`, honor `.gitignore`; tested |
+| 9. Escape-test suite & exit criterion | [ ] | post-checkpoint (Linux/CI) |
 
-**Overall Phase 2: not started.**
+**Overall Phase 2: foundation complete (groups 0–2, 5, 6-rules, 7, 8).**
+Remaining: the Landlock spike (group 3), genuine-git `.git` profile (group 4),
+and the escape-test suite (group 9) — all gated on the checkpoint review.
+
+### Foundation checkpoint state (this session)
+
+Built on Linux (kernel 6.17, Landlock active in the LSM list), so the real
+confinement path is achievable next — but at this checkpoint the binary still
+runs the **honest degraded path**: `probe()` reports `Unavailable` because
+children are not yet confined (group 3), so the bash allowlist is suspended and
+auto modes are locked. All of that machinery is built and tested; group 3 flips
+the probe to the confined status without touching the degradation policy.
+
+- **Deps added (owner-signed-off, HC-2 clean):** `landlock` (Linux-gated in
+  `emberly-sandbox`), `rustix` (`process` feature, unix-gated in
+  `emberly-tools`), `ignore` + `globset` + `grep-searcher` + `grep-regex`. All
+  transitive additions are pure-Rust; the C-dep ban stays green.
+- **Tests:** +6 sandbox rule/mode/status unit tests, +6 engine integration
+  tests (silent allow, auto-deny, mode gating, session grant), +1 tree-kill
+  test, +5 glob/grep tests. Full workspace suite green; clippy clean.
+- **Mode semantics (owner-decided):** the allowlist is non-destructive bash +
+  read-only tools, so it auto-runs in **Normal** too. **Auto-accept edits** adds
+  the file write/edit tools. **Auto** auto-runs *all* tools inside the project
+  root — safe because Auto requires active confinement, so the kernel enforces
+  root-confinement and the `.git` line the rule layer stops asking about.
+  Outside-root always asks (HC-4) and `Deny` rules always deny, in every mode.
+  The whole tier policy is one function: `rules::mode_auto_allow`.
 
 ---
 

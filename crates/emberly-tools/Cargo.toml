@@ -14,6 +14,16 @@ thiserror.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["process", "fs", "time", "io-util"] }
 similar.workspace = true
+# glob + grep tools (T-5, T-6): pure-Rust ripgrep libraries.
+ignore.workspace = true
+globset.workspace = true
+grep-searcher.workspace = true
+grep-regex.workspace = true
+
+# Process-group tree-kill for bash (S-4). Unix only; the syscall wrapper is not
+# needed (and `process_group`/signals differ) elsewhere.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }

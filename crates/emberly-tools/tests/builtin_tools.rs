@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use emberly_tools::{
-    BashTool, EditFileTool, PermissionGate, PermissionOutcome, PermissionRequest, ReadFileTool,
-    Tool, ToolCtx, TruncateConfig, WriteFileTool,
+    BashTool, EditFileTool, GlobTool, GrepTool, PermissionGate, PermissionOutcome,
+    PermissionRequest, ReadFileTool, Tool, ToolCtx, TruncateConfig, WriteFileTool,
 };
 use serde_json::json;
 
@@ -248,6 +248,36 @@ async fn bash_times_out_and_is_killed() {
     assert!(outcome.summary.contains("timed out"));
 }
 
+/// S-4: a timeout must kill the *whole* process group, not just the `sh` leader.
+/// The command backgrounds a long `sleep` (a grandchild) and waits, so the tool
+/// times out with the sleep alive; after the group kill it must be gone. Uses
+/// `/proc` to check liveness without signaling, so it is Linux-gated.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn bash_timeout_kills_the_whole_process_group() {
+    let root = temp_project();
+    let pidfile = root.join("grandchild.pid");
+    let command = format!("sleep 30 & echo $! > {}; wait", pidfile.display());
+    let outcome = BashTool::default()
+        .execute(
+            json!({ "command": command, "timeout_secs": 1 }),
+            &ctx(&root, true),
+        )
+        .await;
+    assert!(!outcome.ok, "the command timed out");
+
+    // Let the group-kill and reaping settle, then confirm the grandchild is gone.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let pid = std::fs::read_to_string(&pidfile)
+        .unwrap_or_else(|e| panic!("read pidfile: {e}"));
+    let pid = pid.trim();
+    assert!(!pid.is_empty(), "the grandchild recorded its pid");
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "backgrounded grandchild (pid {pid}) must die with the group, not survive the leader"
+    );
+}
+
 #[tokio::test]
 async fn bash_environment_is_scrubbed() {
     // A non-allowlisted secret in the harness env must not reach the child.
@@ -293,4 +323,105 @@ impl<T> ExpectSome<T> for Option<T> {
             None => panic!("expected a file_change, got None"),
         }
     }
+}
+
+// ---- glob (T-5) -----------------------------------------------------------
+
+#[tokio::test]
+async fn glob_finds_matching_files_skipping_git_and_gitignored() {
+    let root = temp_project();
+    write_file(&root, "a.rs", "fn a() {}\n");
+    write_file(&root, "src/b.rs", "fn b() {}\n");
+    write_file(&root, "notes.txt", "hello\n");
+    write_file(&root, "target/gen.rs", "fn gen() {}\n");
+    write_file(&root, ".git/hooks/pre.rs", "fn hook() {}\n");
+    write_file(&root, ".gitignore", "target/\n");
+
+    let outcome = GlobTool
+        .execute(json!({ "pattern": "**/*.rs" }), &ctx(&root, true))
+        .await;
+    assert!(outcome.ok, "glob succeeds: {}", outcome.content);
+    let lines: Vec<&str> = outcome.content.lines().collect();
+    assert!(lines.contains(&"a.rs"), "top-level match: {lines:?}");
+    assert!(lines.contains(&"src/b.rs"), "nested match: {lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.contains(".git/")),
+        ".git/ is skipped: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("target/")),
+        "gitignored target/ is skipped: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn glob_refuses_outside_the_root() {
+    let root = temp_project();
+    let outcome = GlobTool
+        .execute(json!({ "pattern": "*", "path": "../.." }), &ctx(&root, true))
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.summary.contains("outside root"));
+}
+
+#[tokio::test]
+async fn glob_reports_no_matches_cleanly() {
+    let root = temp_project();
+    write_file(&root, "a.txt", "x\n");
+    let outcome = GlobTool
+        .execute(json!({ "pattern": "**/*.rs" }), &ctx(&root, true))
+        .await;
+    assert!(outcome.ok);
+    assert!(outcome.content.contains("no files match"));
+}
+
+// ---- grep (T-6) -----------------------------------------------------------
+
+#[tokio::test]
+async fn grep_finds_matches_with_path_and_line() {
+    let root = temp_project();
+    write_file(&root, "src/lib.rs", "fn one() {}\nlet x = 1;\nfn two() {}\n");
+    write_file(&root, "readme.md", "no functions here\n");
+    write_file(&root, ".git/config.rs", "fn secret() {}\n");
+
+    let outcome = GrepTool
+        .execute(json!({ "pattern": r"fn \w+" }), &ctx(&root, true))
+        .await;
+    assert!(outcome.ok, "grep succeeds: {}", outcome.content);
+    assert!(
+        outcome.content.contains("src/lib.rs:1:fn one() {}"),
+        "path:line:text format: {}",
+        outcome.content
+    );
+    assert!(
+        outcome.content.contains("src/lib.rs:3:fn two() {}"),
+        "second match: {}",
+        outcome.content
+    );
+    assert!(
+        !outcome.content.contains(".git/"),
+        ".git/ is skipped: {}",
+        outcome.content
+    );
+}
+
+#[tokio::test]
+async fn grep_reports_no_matches_cleanly() {
+    let root = temp_project();
+    write_file(&root, "a.txt", "nothing interesting\n");
+    let outcome = GrepTool
+        .execute(json!({ "pattern": "zzz-not-present" }), &ctx(&root, true))
+        .await;
+    assert!(outcome.ok);
+    assert!(outcome.content.contains("no matches"));
+}
+
+#[tokio::test]
+async fn grep_invalid_regex_is_a_failure_not_a_crash() {
+    let root = temp_project();
+    let outcome = GrepTool
+        .execute(json!({ "pattern": "(unclosed" }), &ctx(&root, true))
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.summary.contains("bad pattern"));
 }

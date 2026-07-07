@@ -79,6 +79,12 @@ pub enum UiEvent {
     /// The auto-accept mode changed (Requirements §6.4). Emitted from Phase 2.
     ModeChanged { mode: Mode },
 
+    /// A plain-language, harness-voice notice for the timeline (Design §6.1):
+    /// a persisted permission grant's written line (§6.6), a refused auto-mode
+    /// switch when degraded (§6.7), or the one-time degraded-sandbox
+    /// explanation. Informational — not an error, not a decision.
+    Notice { message: String },
+
     /// A harness-world failure (network, provider, bug) — distinct from an
     /// agent-world tool failure. Answers what happened, why, and what to do
     /// next (Design §6.1). The type makes the "next step" non-optional.

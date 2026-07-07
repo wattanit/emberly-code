@@ -37,3 +37,7 @@ pub use transcript::{
     TranscriptRecord, TranscriptSink, SCHEMA_VERSION,
 };
 pub use types::{Mode, PermissionDecision, PermissionRendering, SandboxStatus, TokenUsage};
+// The rule engine and confinement probe live in the security crate; re-export
+// the pieces the composition root (the binary) wires so it depends only on core.
+pub use emberly_sandbox::probe::probe;
+pub use emberly_sandbox::{parse_rules, ModeUnavailable, Rule, RuleEngine, RuleSource};

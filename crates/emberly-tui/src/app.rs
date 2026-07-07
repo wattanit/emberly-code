@@ -377,6 +377,7 @@ impl App {
             UiEvent::SessionUsage { usage } => self.session_usage = usage,
             UiEvent::SandboxStatus { status } => self.sandbox = Some(status),
             UiEvent::ModeChanged { mode } => self.mode = mode,
+            UiEvent::Notice { message } => self.conversation.push(ConvItem::Notice(message)),
             UiEvent::HarnessError { what, why, next } => {
                 self.conversation
                     .push(ConvItem::Notice(format!("error: {what} — {why}. {next}")));

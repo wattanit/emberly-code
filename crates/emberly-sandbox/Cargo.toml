@@ -13,3 +13,11 @@ authors.workspace = true
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
+# The `permissions.toml` rule format is defined with the engine so it lives in
+# one place; `toml` is already a workspace dep and pure-Rust (HC-2 clean).
+toml.workspace = true
+
+# Landlock confinement (Linux only). Pure-Rust; gated so the crate still builds
+# and the degraded path still runs on every other OS (Phase 2 platform note).
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = { workspace = true }
