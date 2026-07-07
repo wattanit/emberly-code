@@ -868,7 +868,7 @@ fn glow_pct(frame: usize) -> u16 {
     const MIN: f32 = 55.0;
     const MAX: f32 = 100.0;
     let t = (frame % PERIOD) as f32 / PERIOD as f32; // 0.0..1.0
-    // (1 - cos) / 2 eases 0 → 1 → 0 across the cycle, flattening at both ends.
+                                                     // (1 - cos) / 2 eases 0 → 1 → 0 across the cycle, flattening at both ends.
     let eased = (1.0 - (t * std::f32::consts::TAU).cos()) / 2.0;
     (MIN + (MAX - MIN) * eased).round() as u16
 }
@@ -940,7 +940,10 @@ mod tests {
         }
         // The ease is gentle near the trough: the first step barely moves,
         // where a linear triangle would have jumped ~6%.
-        assert!(glow_pct(1) - glow_pct(0) <= 1, "eased start, not a linear ramp");
+        assert!(
+            glow_pct(1) - glow_pct(0) <= 1,
+            "eased start, not a linear ramp"
+        );
     }
 
     /// Render a full frame to an off-screen buffer and flatten it to text (one
