@@ -19,6 +19,9 @@ emberly-core = { path = "../emberly-core" }
 emberly-tui = { path = "../emberly-tui" }
 emberly-providers = { path = "../emberly-providers" }
 emberly-tools = { path = "../emberly-tools" }
+# The composition root also drives the self-exec Landlock shim (Phase 2 group 3),
+# which restricts the child then execs — so it depends on the sandbox directly.
+emberly-sandbox = { path = "../emberly-sandbox" }
 
 # External. anyhow is confined to the binary edge (Tech Spec §1, §11).
 anyhow.workspace = true
@@ -31,3 +34,8 @@ reqwest.workspace = true
 rustls-rustcrypto.workspace = true
 serde.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+# Escape-test suite (Phase 2 group 9) drives the confined-exec shim binary and
+# builds specs with the real type.
+emberly-sandbox = { path = "../emberly-sandbox" }

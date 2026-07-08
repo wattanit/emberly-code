@@ -71,6 +71,9 @@ fn make_config(
         // Degraded (allowlist suspended) → every bash asks, matching the Phase 1
         // gate behavior these tests were written against.
         rules: RuleEngine::new(Vec::new(), false),
+        // Tests run bash plainly even when reporting a confined status, so the
+        // self-exec shim never re-executes the test binary.
+        sandbox_spawn: Some(std::sync::Arc::new(emberly_tools::PlainSandbox)),
         config_provenance: Vec::new(),
         transcript,
         initial_conversation: Vec::new(),
@@ -744,7 +747,10 @@ async fn a_deny_rule_auto_denies_without_prompting() {
         ScriptedResponse::text("understood"),
     ];
     let mut h = spawn_confined(scripts, root, RuleEngine::new(deny, true));
-    h.send(Command::UserInput { text: "clean".into() }).await;
+    h.send(Command::UserInput {
+        text: "clean".into(),
+    })
+    .await;
     let events = h.collect(None).await;
 
     assert_eq!(prompt_count(&events), 0, "a deny rule never prompts");
@@ -798,9 +804,12 @@ async fn auto_accept_edits_skips_the_write_prompt_when_confined() {
     let events = h.collect(None).await;
 
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, UiEvent::ModeChanged { mode: Mode::AutoAcceptEdits })),
+        events.iter().any(|e| matches!(
+            e,
+            UiEvent::ModeChanged {
+                mode: Mode::AutoAcceptEdits
+            }
+        )),
         "the mode change is confirmed"
     );
     assert_eq!(prompt_count(&events), 0, "edits auto-allow in this mode");
@@ -845,7 +854,10 @@ async fn allow_for_session_covers_the_next_identical_command() {
         ScriptedResponse::text("done"),
     ];
     let mut h = spawn_confined(scripts, root, RuleEngine::new(Vec::new(), true));
-    h.send(Command::UserInput { text: "build".into() }).await;
+    h.send(Command::UserInput {
+        text: "build".into(),
+    })
+    .await;
     // Auto-answer any prompt with a session grant; the second call should not
     // raise one because the grant already covers it.
     let events = h.collect(Some(PermissionDecision::AllowForSession)).await;

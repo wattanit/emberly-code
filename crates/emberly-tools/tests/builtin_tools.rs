@@ -11,7 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use emberly_tools::{
     BashTool, EditFileTool, GlobTool, GrepTool, PermissionGate, PermissionOutcome,
-    PermissionRequest, ReadFileTool, Tool, ToolCtx, TruncateConfig, WriteFileTool,
+    PermissionRequest, PlainSandbox, ReadFileTool, Sandbox, Tool, ToolCtx, TruncateConfig,
+    WriteFileTool,
 };
 use serde_json::json;
 
@@ -67,7 +68,8 @@ fn ctx(root: &Path, allow: bool) -> ToolCtx {
     } else {
         Arc::new(DenyGate)
     };
-    ToolCtx::new(root.to_path_buf(), TruncateConfig::default(), gate)
+    let sandbox: Arc<dyn Sandbox> = Arc::new(PlainSandbox);
+    ToolCtx::new(root.to_path_buf(), TruncateConfig::default(), gate, sandbox)
 }
 
 // ---- read ----------------------------------------------------------------
@@ -268,8 +270,7 @@ async fn bash_timeout_kills_the_whole_process_group() {
 
     // Let the group-kill and reaping settle, then confirm the grandchild is gone.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let pid = std::fs::read_to_string(&pidfile)
-        .unwrap_or_else(|e| panic!("read pidfile: {e}"));
+    let pid = std::fs::read_to_string(&pidfile).unwrap_or_else(|e| panic!("read pidfile: {e}"));
     let pid = pid.trim();
     assert!(!pid.is_empty(), "the grandchild recorded its pid");
     assert!(
@@ -358,7 +359,10 @@ async fn glob_finds_matching_files_skipping_git_and_gitignored() {
 async fn glob_refuses_outside_the_root() {
     let root = temp_project();
     let outcome = GlobTool
-        .execute(json!({ "pattern": "*", "path": "../.." }), &ctx(&root, true))
+        .execute(
+            json!({ "pattern": "*", "path": "../.." }),
+            &ctx(&root, true),
+        )
         .await;
     assert!(!outcome.ok);
     assert!(outcome.summary.contains("outside root"));
@@ -380,7 +384,11 @@ async fn glob_reports_no_matches_cleanly() {
 #[tokio::test]
 async fn grep_finds_matches_with_path_and_line() {
     let root = temp_project();
-    write_file(&root, "src/lib.rs", "fn one() {}\nlet x = 1;\nfn two() {}\n");
+    write_file(
+        &root,
+        "src/lib.rs",
+        "fn one() {}\nlet x = 1;\nfn two() {}\n",
+    );
     write_file(&root, "readme.md", "no functions here\n");
     write_file(&root, ".git/config.rs", "fn secret() {}\n");
 

@@ -10,11 +10,14 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+pub mod confine;
+pub mod git;
 pub mod mode;
 pub mod probe;
 pub mod rules;
 pub mod status;
 
+pub use confine::{SandboxSpec, SANDBOX_EXEC_ARG, SPEC_ENV};
 pub use mode::{Mode, ModeUnavailable};
 pub use rules::{
     bash_session_grant, parse_rules, tool_session_grant, Decision, Matcher, Outcome,

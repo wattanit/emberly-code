@@ -17,7 +17,8 @@ use emberly_providers::{
 };
 use emberly_sandbox::{Decision, Mode, Query, RuleEngine};
 use emberly_tools::{
-    truncate_output, PermissionOutcome, PermissionRequest, ToolCtx, ToolRegistry, TruncateConfig,
+    truncate_output, PermissionOutcome, PermissionRequest, Sandbox, ToolCtx, ToolRegistry,
+    TruncateConfig,
 };
 use futures::StreamExt;
 use time::OffsetDateTime;
@@ -72,6 +73,11 @@ pub struct EngineConfig {
     /// global + project rules, with the bash allowlist already toggled for the
     /// sandbox status. Session grants accrue in-memory during the run.
     pub rules: RuleEngine,
+    /// Override for how bash spawns children. `None` (the production path)
+    /// builds the host confined-spawn from `sandbox`. Tests inject a plain
+    /// spawner so they can report a confined *status* (to exercise the rule and
+    /// mode layers) without the self-exec shim re-executing the test binary.
+    pub sandbox_spawn: Option<Arc<dyn Sandbox>>,
     /// Non-default configuration pieces, for `session_start` provenance (C-3).
     pub config_provenance: Vec<ConfigProvenance>,
     /// Where durable events go. Defaults to [`NoopSink`] via
@@ -169,6 +175,9 @@ pub struct Engine {
     /// changed only through [`Engine::set_mode`], which gates auto tiers on the
     /// sandbox status.
     mode: Mode,
+    /// How bash spawns children: confined via the self-exec shim when the OS
+    /// sandbox is active, directly when degraded. Built from `sandbox`.
+    sandbox_spawn: Arc<dyn Sandbox>,
     config_provenance: Vec<ConfigProvenance>,
     /// Whether the first (pinned, `original_task`) user message has been
     /// recorded — also gates the one-time `session_title`.
@@ -192,6 +201,17 @@ impl Engine {
         events_tx: mpsc::Sender<UiEvent>,
     ) -> (Self, mpsc::Receiver<PermissionAsk>) {
         let (asks_tx, asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        // Capture before `config.sandbox` is moved into the struct below.
+        let sandbox_spawn: Arc<dyn Sandbox> = config.sandbox_spawn.unwrap_or_else(|| {
+            // Fallback (no explicit spawner): confine from the status, but with
+            // no recorded git binary — nothing is `.git/`-writable. The binary
+            // supplies a fully-configured spawner; this keeps the default safe.
+            Arc::new(crate::spawn::HostSandbox::new(
+                config.sandbox.is_confined(),
+                None,
+                String::new(),
+            ))
+        });
         let engine = Self {
             provider: config.provider,
             tools: config.tools,
@@ -215,6 +235,7 @@ impl Engine {
             sandbox: config.sandbox,
             rules: config.rules,
             mode: Mode::Normal,
+            sandbox_spawn,
             config_provenance: config.config_provenance,
             // On resume the original task already lives in the restored history.
             original_task_recorded: config.resuming,
@@ -870,18 +891,12 @@ impl Engine {
     /// a write failure degrades to a session-only grant with a notice, never a
     /// crash (HC-7).
     async fn persist_project_grant(&mut self, request: &PermissionRequest) {
-        let path = self
-            .project_root
-            .join(".agents")
-            .join("permissions.toml");
+        let path = self.project_root.join(".agents").join("permissions.toml");
         let block = grant_rule(request).to_toml_block();
         match append_rule_block(&path, &block) {
             Ok(()) => {
                 self.emit(UiEvent::Notice {
-                    message: format!(
-                        "saved to .agents/permissions.toml:\n{}",
-                        block.trim_end()
-                    ),
+                    message: format!("saved to .agents/permissions.toml:\n{}", block.trim_end()),
                 })
                 .await;
             }
@@ -934,7 +949,8 @@ impl Engine {
                     id,
                     rendering: rendering.clone(),
                 });
-                self.emit(UiEvent::PermissionRequest { id, rendering }).await;
+                self.emit(UiEvent::PermissionRequest { id, rendering })
+                    .await;
                 pending.push(PendingAsk {
                     id,
                     reply: ask.reply,
@@ -1080,7 +1096,12 @@ impl Engine {
     }
 
     fn make_ctx(&self) -> ToolCtx {
-        ToolCtx::new(self.project_root.clone(), self.truncate, self.gate.clone())
+        ToolCtx::new(
+            self.project_root.clone(),
+            self.truncate,
+            self.gate.clone(),
+            self.sandbox_spawn.clone(),
+        )
     }
 
     fn take_permission_id(&mut self) -> PermissionId {

@@ -90,7 +90,10 @@ mod tests {
 
     #[test]
     fn normal_always_resolves() {
-        assert_eq!(Mode::resolve(Mode::Normal, &unavailable()), Ok(Mode::Normal));
+        assert_eq!(
+            Mode::resolve(Mode::Normal, &unavailable()),
+            Ok(Mode::Normal)
+        );
         assert_eq!(Mode::resolve(Mode::Normal, &confined()), Ok(Mode::Normal));
     }
 

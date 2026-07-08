@@ -186,14 +186,23 @@ impl Tool for BashTool {
             return ToolOutcome::denied("run this command");
         }
 
-        let mut command = tokio::process::Command::new("/bin/sh");
-        command.arg("-c").arg(&args.command);
+        // Ask the sandbox how to spawn: `/bin/sh -c …` directly when degraded,
+        // or the self-exec confinement shim when the OS sandbox is active
+        // (Tech Spec §6.2). The tool still owns everything else below.
+        let invocation = ctx
+            .sandbox()
+            .bash_invocation(&args.command, ctx.project_root());
+        let mut command = tokio::process::Command::new(&invocation.program);
+        command.args(&invocation.args);
         command.current_dir(ctx.project_root());
         command.env_clear();
         for key in &self.env_allowlist {
             if let Ok(value) = std::env::var(key) {
                 command.env(key, value);
             }
+        }
+        for (key, value) in &invocation.extra_env {
+            command.env(key, value);
         }
         command
             .stdin(Stdio::null())

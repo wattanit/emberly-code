@@ -36,22 +36,28 @@ pub fn probe() -> SandboxStatus {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::SandboxStatus;
-    use landlock::ABI;
-
-    /// The Landlock ABI this build's child ruleset (group 3) targets. Recorded
-    /// here so the status detail and the group-3 ruleset agree on one number.
-    /// Core write/`.git` confinement exists from ABI v1, so a lower kernel ABI
-    /// is only ever a *non-core* capability gap → `Partial`, never a downgrade
-    /// of the hard lines (Tech Spec §6.5).
-    const TARGET_ABI: ABI = ABI::V5;
+    use crate::confine::{detect_abi, TARGET_ABI};
 
     pub(super) fn probe() -> SandboxStatus {
-        // Group 3 replaces this with detection via the confined child's
-        // `RestrictionStatus`. Until then we do not confine children, so
-        // reporting anything but `Unavailable` would be dishonest.
-        let _ = TARGET_ABI;
-        SandboxStatus::Unavailable {
-            reason: "Landlock child confinement not yet wired (Phase 2 group 3)".to_string(),
+        // Detect the highest ABI the kernel enforces without confining the
+        // harness (Requirements §6.7). Core write/`.git` confinement exists from
+        // ABI v1; a kernel ABI below our target only loses newer, non-core knobs
+        // → `Partial`, never a weakening of the hard lines (Tech Spec §6.5).
+        let target = TARGET_ABI as i32;
+        match detect_abi() {
+            None => SandboxStatus::Unavailable {
+                reason: "kernel has no Landlock support (need >= 5.13 with the LSM enabled)"
+                    .to_string(),
+            },
+            Some(abi) if abi >= target => SandboxStatus::Confined {
+                backend: format!("landlock (ABI v{abi})"),
+            },
+            Some(abi) => SandboxStatus::Partial {
+                backend: format!("landlock (ABI v{abi})"),
+                missing: format!(
+                    "kernel ABI v{abi} < target v{target}; core confinement active, newer knobs unavailable"
+                ),
+            },
         }
     }
 }

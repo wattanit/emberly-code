@@ -45,8 +45,28 @@ fn current_session_path() -> Option<PathBuf> {
     handle.read().ok().map(|path| path.clone())
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Self-exec Landlock shim (Phase 2 group 3): if we were re-executed as the
+    // confined-exec subcommand, restrict this process and exec the command —
+    // BEFORE any async runtime or worker threads exist, because Landlock's
+    // `restrict_self` is per-thread and the restricting thread must be the one
+    // that execs. A normal launch falls straight through.
+    maybe_run_sandbox_shim();
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("emberly: could not start the async runtime: {error}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(async_main());
+}
+
+async fn async_main() {
     install_panic_hook();
     if let Err(error) = run().await {
         // A harness-world failure that may have interrupted a live session:
@@ -59,6 +79,33 @@ async fn main() {
         std::process::exit(1);
     }
 }
+
+/// If argv is the confined-exec shim invocation, apply the Landlock ruleset and
+/// `exec` the command — never returning on success (Phase 2 group 3). Fails
+/// closed: any setup problem exits non-zero rather than running unconfined. A
+/// no-op for a normal launch and on non-Linux.
+#[cfg(target_os = "linux")]
+fn maybe_run_sandbox_shim() {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() != Some(emberly_sandbox::SANDBOX_EXEC_ARG) {
+        return;
+    }
+    let Some(command) = args.next() else {
+        eprintln!("emberly: sandbox shim invoked without a command");
+        std::process::exit(127);
+    };
+    let Some(spec) = emberly_sandbox::SandboxSpec::from_env() else {
+        eprintln!("emberly: sandbox shim invoked without a valid confinement spec");
+        std::process::exit(127);
+    };
+    // Never returns on success (the process image is replaced under the fence).
+    let error = emberly_sandbox::confine::exec_confined(&spec, &command);
+    eprintln!("emberly: sandbox shim failed: {error}");
+    std::process::exit(127);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn maybe_run_sandbox_shim() {}
 
 /// Install the top-level panic hook (HC-3, S-2). The rich TUI's guard wraps this
 /// to restore the terminal first (Phase 4); here we record the crash to the
@@ -393,6 +440,19 @@ async fn run() -> anyhow::Result<()> {
     }
     let rules = RuleEngine::new(rule_specs, sandbox.bash_allowlist_active());
 
+    // Build the confined-spawn handle: record the canonical git binary now
+    // (`which git`, canonicalized) so only genuine git earns the `.git/`-writable
+    // profile under confinement (§6.4). Nothing is `.git/`-writable when degraded.
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let git_binary = if sandbox.is_confined() {
+        emberly_sandbox::git::record_git_binary(&path_env)
+    } else {
+        None
+    };
+    let sandbox_spawn: Arc<dyn emberly_tools::Sandbox> = Arc::new(
+        emberly_core::spawn::HostSandbox::new(sandbox.is_confined(), git_binary, path_env),
+    );
+
     let config = EngineConfig {
         provider,
         tools: default_registry(),
@@ -410,6 +470,7 @@ async fn run() -> anyhow::Result<()> {
             .unwrap_or_else(|| "placeholder".into()),
         sandbox,
         rules,
+        sandbox_spawn: Some(sandbox_spawn),
         config_provenance: resolved.provenance.clone(),
         transcript,
         initial_conversation,

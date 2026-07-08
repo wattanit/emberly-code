@@ -12,6 +12,7 @@ authors.workspace = true
 # (Linux) and the macOS confinement path arrive in Phases 2 and 5.
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 # The `permissions.toml` rule format is defined with the engine so it lives in
 # one place; `toml` is already a workspace dep and pure-Rust (HC-2 clean).

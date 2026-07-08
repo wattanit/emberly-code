@@ -17,6 +17,7 @@ pub mod diff;
 pub mod path;
 pub mod permission;
 pub mod registry;
+pub mod sandbox;
 pub mod tool;
 pub mod truncate;
 
@@ -26,5 +27,6 @@ pub use builtin::{
 pub use ctx::{ToolCtx, TruncateConfig};
 pub use permission::{PermissionGate, PermissionOutcome, PermissionRequest};
 pub use registry::ToolRegistry;
+pub use sandbox::{BashInvocation, PlainSandbox, Sandbox};
 pub use tool::{FileChange, Tool, ToolOutcome, ToolSpec};
 pub use truncate::{truncate_output, Truncation};

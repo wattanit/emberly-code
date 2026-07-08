@@ -557,6 +557,7 @@ dependencies = [
  "async-trait",
  "emberly-core",
  "emberly-providers",
+ "emberly-sandbox",
  "emberly-tools",
  "emberly-tui",
  "futures",
@@ -607,6 +608,7 @@ version = "0.1.0"
 dependencies = [
  "landlock",
  "serde",
+ "serde_json",
  "thiserror",
  "toml",
 ]

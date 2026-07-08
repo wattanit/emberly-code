@@ -22,6 +22,7 @@ pub mod gate;
 pub mod id;
 pub mod prompts;
 pub mod resume;
+pub mod spawn;
 pub mod transcript;
 pub mod types;
 

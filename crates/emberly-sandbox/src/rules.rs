@@ -162,7 +162,9 @@ impl Rule {
                 format!("[[rule]]\ntool = \"{tool}\"\naction = \"{action}\"\n")
             }
             Matcher::BashPrefix(prefix) => {
-                format!("[[rule]]\ntool = \"{tool}\"\nmatch = \"{prefix}\"\naction = \"{action}\"\n")
+                format!(
+                    "[[rule]]\ntool = \"{tool}\"\nmatch = \"{prefix}\"\naction = \"{action}\"\n"
+                )
             }
         }
     }
@@ -471,7 +473,8 @@ mod tests {
             Decision::Allow
         );
         assert_eq!(
-            e.evaluate(&file("write_file", false), Mode::Normal).decision,
+            e.evaluate(&file("write_file", false), Mode::Normal)
+                .decision,
             Decision::Ask
         );
         assert_eq!(
@@ -484,7 +487,8 @@ mod tests {
     fn allowlisted_bash_allows_offlist_asks() {
         let e = confined();
         assert_eq!(
-            e.evaluate(&bash("git status --short"), Mode::Normal).decision,
+            e.evaluate(&bash("git status --short"), Mode::Normal)
+                .decision,
             Decision::Allow
         );
         assert_eq!(
@@ -512,7 +516,9 @@ mod tests {
         let degraded = RuleEngine::new(Vec::new(), false);
         // Allowlisted command now asks: the convenience tier is suspended.
         assert_eq!(
-            degraded.evaluate(&bash("git status"), Mode::Normal).decision,
+            degraded
+                .evaluate(&bash("git status"), Mode::Normal)
+                .decision,
             Decision::Ask
         );
         // Reads still allow — that rule never depended on the kernel.
@@ -599,7 +605,8 @@ mod tests {
         }
         // In auto-accept-edits, off-list bash still asks — only edits relax.
         assert_eq!(
-            e.evaluate(&bash("rm -rf x"), Mode::AutoAcceptEdits).decision,
+            e.evaluate(&bash("rm -rf x"), Mode::AutoAcceptEdits)
+                .decision,
             Decision::Ask
         );
     }
@@ -693,7 +700,8 @@ mod tests {
             Decision::Allow
         );
         assert_eq!(
-            e.evaluate(&file("write_file", false), Mode::Normal).decision,
+            e.evaluate(&file("write_file", false), Mode::Normal)
+                .decision,
             Decision::Deny
         );
     }

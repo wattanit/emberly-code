@@ -64,9 +64,7 @@ impl Tool for GrepTool {
 
         let matcher = match RegexMatcher::new(&args.pattern) {
             Ok(m) => m,
-            Err(e) => {
-                return ToolOutcome::failure(format!("invalid regex: {e}"), "bad pattern")
-            }
+            Err(e) => return ToolOutcome::failure(format!("invalid regex: {e}"), "bad pattern"),
         };
 
         let base = match resolve_in_root(ctx.project_root(), args.path.as_deref().unwrap_or(".")) {
