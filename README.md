@@ -10,10 +10,11 @@ endpoint, including local models), keeps a **complete, resumable transcript** of
 every session, and is built to run reliably on standard and static (musl)
 deployments.
 
-> **Status:** pre-v1, under active development. The interactive TUI, live
-> providers, and session persistence work today. The permission *rule engine*
-> and OS *sandbox* are in progress — until they land, **every tool action is
-> confirmed with you individually** (see [Safety](#safety--transparency)).
+> **Status:** v0.1 — feature-complete, install from source. The interactive
+> TUI, live providers, session persistence, the permission *rule engine*, the
+> auto-accept *modes*, and OS *confinement* (Linux Landlock, macOS Seatbelt) all
+> work today. Prebuilt binaries and Windows support are not yet shipped (see
+> [Safety](#safety--transparency)).
 
 ---
 
@@ -149,6 +150,7 @@ usage, cost, and changed files.
 | `/files` | | List files changed this session |
 | `/session` | | List saved sessions and switch to one |
 | `/new` (`/clear`) | | Start a fresh session (the current one is saved) |
+| `/mode` | `Shift-Tab` | Cycle permission mode (normal → auto-accept edits → auto) |
 | `/sidebar` | `Ctrl-B` | Toggle the sidebar |
 | `/cancel` | | Cancel the in-flight turn |
 | `/quit` | `Ctrl-D` | Exit |
@@ -156,7 +158,16 @@ usage, cost, and changed files.
 **Permission prompts.** When the agent wants to run a command or change a file,
 it shows exactly what it will do and asks you to allow or deny. A denial is fed
 back to the agent as information, not treated as an error — it adapts and keeps
-going.
+going. "Allow for this session" grants until you quit; "always allow in this
+project" writes a line to `.agents/permissions.toml` (shown to you) so the rule
+sticks next time.
+
+**Permission modes.** `Shift-Tab` (or `/mode`) cycles how much the agent may do
+without asking: **normal** (ask per the rules), **auto-accept edits** (file
+writes inside the project auto-apply; commands still ask), and **auto** (all
+tools auto-run inside the project root). The two auto tiers require active OS
+confinement — without a kernel fence they simply aren't offered, and the app
+tells you why. The current mode shows in the status bar.
 
 **Sessions never disappear.** Every session is written to
 `.agents/sessions/<id>.jsonl` as it happens (durably, line by line). If Emberly
@@ -192,20 +203,31 @@ minimal terminals.
 
 ## Safety & transparency
 
-Emberly is built around auditability and bounded action:
+Emberly is built around auditability and bounded action, in two layers — a
+**rule engine** (when to ask) beneath an **OS sandbox** (what is possible):
 
-- **You approve every action.** Today, each tool call (running a command,
-  editing a file) is confirmed with you individually. A configurable permission
-  *rule engine* and auto-accept modes are in progress and will be gated behind
-  active OS confinement.
-- **OS sandbox.** Kernel-level confinement (Linux Landlock, macOS Seatbelt via
-  `sandbox-exec`) is in progress. Until it's active for your platform, Emberly
-  runs in an honest, clearly-labeled degraded mode and reports its sandbox
-  status in the UI. Actions stay within the project root, and `.git` is
-  protected.
+- **Permission rule engine.** Every tool call resolves to allow / ask / deny,
+  most-specific rule first, layering built-in defaults → global config →
+  project `.agents/permissions.toml` → in-session grants. A default allowlist
+  lets harmless read-only commands run without nagging; anything that writes, or
+  anything outside the project root, asks. A denial is fed back to the agent as
+  data, not an error.
+- **OS sandbox.** Spawned commands run under kernel-level confinement — **Linux
+  Landlock** (a self-exec shim, no `unsafe`) and **macOS Seatbelt** (via
+  `sandbox-exec`, no C FFI). Writes are confined to the project root, `.git/` is
+  read-only except for genuine `git`, and outside-root access is refused. The
+  harness process itself is never confined — only its children. Where a platform
+  has no backend (or it's disabled), Emberly runs an honest, clearly-labeled
+  **degraded mode**: the allowlist is suspended (every command asks), the auto
+  modes are locked, and the hard lines are enforced at the tool layer instead of
+  the kernel. The active status is always shown in the UI.
+- **`.git` protection.** Belt and braces: the file tools refuse `.git/` writes
+  regardless of the sandbox, and the sandbox enforces it at the kernel when
+  active.
 - **Complete audit trail.** The append-only JSONL transcript is the ground
   truth — never rewritten — recording prompts, model output, every tool call
-  and result, and every permission decision.
+  and result, and every permission decision. A crashed or killed session is
+  offered for resume on next launch.
 
 ## For developers
 

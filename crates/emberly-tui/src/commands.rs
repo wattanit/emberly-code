@@ -24,6 +24,10 @@ pub enum AppCommand {
     NewSession,
     /// Toggle the sidebar.
     ToggleSidebar,
+    /// Cycle the auto-accept mode (normal → auto-accept-edits → auto → …).
+    /// The engine gates the auto tiers on active OS confinement and explains
+    /// when it refuses (Requirements §6.4).
+    CycleMode,
     /// Cancel the in-flight turn.
     Cancel,
     /// Exit emberly.
@@ -77,6 +81,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "Start a fresh session (saves the current one)",
         cmd: AppCommand::NewSession,
+    },
+    CommandSpec {
+        name: "mode",
+        key: Some("Shift-Tab"),
+        desc: "Cycle permission mode (normal / auto-accept edits / auto)",
+        cmd: AppCommand::CycleMode,
     },
     CommandSpec {
         name: "sidebar",

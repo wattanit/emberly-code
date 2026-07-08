@@ -1,8 +1,18 @@
 # Emberly Code — Implementation Plan
 
-**Status:** draft
+**Status:** ✅ **v0.1 complete (2026-07-08)** — install-from-source
 **Date:** 2026-07-06
 **Owner:** Wattanit
+
+> **v0.1 milestone (2026-07-08).** Phases 0–4 complete and merged to `main`;
+> Phase 5 complete except the release pipeline (group 9), **deferred by owner**
+> — v0.1 ships as compile-from-source (`cargo build --release`). Every product
+> requirement for v1 is implemented and tested: the agent loop, both live
+> providers, the full TUI, sessions/resume/`/compact`, config + provenance, the
+> permission rule engine, the auto-accept modes, and OS confinement on both
+> Linux (Landlock) and macOS (Seatbelt). The prebuilt-binary release pipeline
+> and Windows support remain the only deferred items. See `PHASE*_TODO.md` for
+> per-group detail.
 **Source documents:**
 - Requirements Document v0.3 (`docs/emberly-code-requirements-v0.3.md`) — WHAT/WHY
 - Design Guideline v0.3 (`docs/emberly-code-design-guideline-v0.3.md`) — UX/voice

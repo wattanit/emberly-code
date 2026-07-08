@@ -167,6 +167,18 @@ impl Default for LineRenderer {
     }
 }
 
+/// The next auto-accept tier in the cycle (normal → auto-accept-edits → auto →
+/// normal). The engine still gates the auto tiers on confinement (Tech Spec
+/// §6.6); this only proposes the next one.
+#[must_use]
+pub fn next_mode(current: Mode) -> Mode {
+    match current {
+        Mode::Normal => Mode::AutoAcceptEdits,
+        Mode::AutoAcceptEdits => Mode::Auto,
+        Mode::Auto => Mode::Normal,
+    }
+}
+
 /// Interpret a permission answer line. Deny is the safe default: only an
 /// explicit, deliberate key allows (Design §5 — Enter/anything else denies).
 #[must_use]
@@ -202,6 +214,9 @@ pub async fn run(ports: FrontendPorts) -> io::Result<()> {
     });
 
     let mut pending: Option<PermissionId> = None;
+    // Track the current tier so `/mode` can cycle it (the engine gates the auto
+    // tiers on confinement and echoes a ModeChanged / Notice back).
+    let mut mode = Mode::default();
     let mut stdin_open = true;
     loop {
         tokio::select! {
@@ -209,6 +224,9 @@ pub async fn run(ports: FrontendPorts) -> io::Result<()> {
                 Some(event) => {
                     renderer.render(&event, &mut stdout)?;
                     stdout.flush()?;
+                    if let UiEvent::ModeChanged { mode: changed } = &event {
+                        mode = *changed;
+                    }
                     if let UiEvent::PermissionRequest { id, .. } = event {
                         pending = Some(id);
                     }
@@ -221,6 +239,8 @@ pub async fn run(ports: FrontendPorts) -> io::Result<()> {
                         let _ = tx.send(Command::PermissionAnswer { id, decision: parse_permission_answer(&line) }).await;
                     } else if line.trim() == "/cancel" {
                         let _ = tx.send(Command::Cancel).await;
+                    } else if line.trim() == "/mode" {
+                        let _ = tx.send(Command::SetMode { mode: next_mode(mode) }).await;
                     } else if !line.trim().is_empty() {
                         let _ = tx.send(Command::UserInput { text: line }).await;
                     }

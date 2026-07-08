@@ -500,6 +500,9 @@ impl App {
                 self.sidebar_visible = !self.sidebar_visible;
                 Action::None
             }
+            // Shift+Tab cycles the auto-accept mode (crossterm delivers it as
+            // BackTab). The engine gates the auto tiers on confinement.
+            KeyCode::BackTab => self.run_command(AppCommand::CycleMode),
             // Open the command palette (Design §3.3).
             KeyCode::Char('p') if ctrl => {
                 self.palette = Some(PaletteState::default());
@@ -851,6 +854,18 @@ impl App {
             AppCommand::ToggleSidebar => {
                 self.sidebar_visible = !self.sidebar_visible;
                 Action::None
+            }
+            AppCommand::CycleMode => {
+                // Cycle to the next tier; the engine is the single gate that
+                // resolves it against confinement (Tech Spec §6.6) and emits a
+                // ModeChanged on success or an explanatory Notice on refusal, so
+                // the frontend just proposes the next tier.
+                let next = match self.mode {
+                    emberly_core::Mode::Normal => emberly_core::Mode::AutoAcceptEdits,
+                    emberly_core::Mode::AutoAcceptEdits => emberly_core::Mode::Auto,
+                    emberly_core::Mode::Auto => emberly_core::Mode::Normal,
+                };
+                Action::Command(Command::SetMode { mode: next })
             }
             AppCommand::Cancel => Action::Command(Command::Cancel),
             AppCommand::Quit => Action::Quit,
@@ -1288,6 +1303,41 @@ mod tests {
         a.on_key(KeyEvent::from(KeyCode::Char('b')));
         assert_eq!(a.editor.text(), "a\nb");
         assert_eq!(a.editor.line_count(), 2);
+    }
+
+    #[test]
+    fn shift_tab_cycles_the_auto_accept_mode() {
+        let mut a = app();
+        // The view starts in Normal; Shift+Tab (BackTab) proposes the next tier.
+        // The frontend only proposes — the engine gates it against confinement —
+        // so we assert the emitted command, then advance the view as the engine
+        // would (ModeChanged) to check the full cycle.
+        let step = |a: &mut App, from: emberly_core::Mode, to: emberly_core::Mode| {
+            a.mode = from;
+            let action = a.on_key(KeyEvent::from(KeyCode::BackTab));
+            assert_eq!(action, Action::Command(Command::SetMode { mode: to }));
+        };
+        step(
+            &mut a,
+            emberly_core::Mode::Normal,
+            emberly_core::Mode::AutoAcceptEdits,
+        );
+        step(
+            &mut a,
+            emberly_core::Mode::AutoAcceptEdits,
+            emberly_core::Mode::Auto,
+        );
+        step(&mut a, emberly_core::Mode::Auto, emberly_core::Mode::Normal);
+    }
+
+    #[test]
+    fn slash_mode_and_shift_tab_reach_the_same_command() {
+        // The registry wires `/mode` and the Shift-Tab hint to one action, so
+        // the palette, slash parser, and keybinding stay in sync.
+        assert_eq!(
+            crate::commands::by_name("mode"),
+            Some(crate::commands::AppCommand::CycleMode)
+        );
     }
 
     #[test]
