@@ -14,9 +14,9 @@
 > and Windows support remain the only deferred items. See `PHASE*_TODO.md` for
 > per-group detail.
 **Source documents:**
-- Requirements Document v0.3 (`docs/emberly-code-requirements-v0.3.md`) — WHAT/WHY
-- Design Guideline v0.3 (`docs/emberly-code-design-guideline-v0.3.md`) — UX/voice
-- Technical Specification v0.1 (`docs/emberly-code-tech-spec-v0.1.md`) — HOW
+- Requirements Document v0.3 (`../emberly-code-requirements-v0.3.md`) — WHAT/WHY
+- Design Guideline v0.3 (`../emberly-code-design-guideline-v0.3.md`) — UX/voice
+- Technical Specification v0.1 (`../emberly-code-tech-spec-v0.1.md`) — HOW
 
 This document sequences the build into workable phases (milestones). It
 adopts the milestone spine from Tech Spec §15 (M1–M5), prefixed with a
