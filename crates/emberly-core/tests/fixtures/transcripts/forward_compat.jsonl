@@ -1,0 +1,6 @@
+{"v":2,"ts":"2026-07-08T13:00:00Z","type":"session_start","session_id":"44444444-4444-4444-8444-444444444444","provider":"anthropic","model":"claude-opus-4-8","project_root":"/home/dev/proj","sandbox":{"state":"confined","backend":"seatbelt"},"prompts_version":2}
+{"v":2,"ts":"2026-07-08T13:00:01Z","type":"user_message","text":"Hello from an older reader","original_task":true}
+{"v":9999,"ts":"2026-07-08T13:00:02Z","type":"time_travel","note":"a record from a much newer transcript schema; a v0.1 reader must warn and skip, never crash"}
+{"v":2,"ts":"2026-07-08T13:00:03Z","type":"quantum_event","payload":"an unknown event type at the current schema version; also warn-and-skip"}
+{"v":2,"ts":"2026-07-08T13:00:04Z","type":"assistant_message","text":"I skipped what I could not understand and kept going."}
+{"v":2,"ts":"2026-07-08T13:00:05Z","type":"session_end"}

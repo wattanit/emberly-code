@@ -7,18 +7,19 @@
 //! No `.unwrap()`/`.expect()`: setup `panic!`s with context; the frontend
 //! reads events and asserts on them.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use emberly_core::{
-    channel, CaptureSink, Command, Engine, EngineConfig, PermissionDecision, RetryPolicy,
-    SandboxStatus, SessionId, TranscriptEvent, TranscriptSink, UiEvent,
+    channel, CaptureSink, Command, Engine, EngineConfig, FileTranscript, Mode, PermissionDecision,
+    RetryPolicy, RuleEngine, RuleSource, SandboxStatus, SessionId, TranscriptEvent, TranscriptSink,
+    UiEvent,
 };
 use emberly_providers::{
-    FakeProvider, ModelInfo, Pricing, Provider, ProviderError, ScriptOutcome, ScriptedResponse,
-    StopReason, StreamEvent, TokenUsage,
+    ContentBlock, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
+    ScriptOutcome, ScriptedResponse, StopReason, StreamEvent, TokenUsage,
 };
 use emberly_tools::{default_registry, TruncateConfig};
 use tokio::sync::mpsc;
@@ -68,6 +69,12 @@ fn make_config(
         sandbox: SandboxStatus::Unavailable {
             reason: "test".into(),
         },
+        // Degraded (allowlist suspended) → every bash asks, matching the Phase 1
+        // gate behavior these tests were written against.
+        rules: RuleEngine::new(Vec::new(), false),
+        // Tests run bash plainly even when reporting a confined status, so the
+        // self-exec shim never re-executes the test binary.
+        sandbox_spawn: Some(std::sync::Arc::new(emberly_tools::PlainSandbox)),
         config_provenance: Vec::new(),
         transcript,
         initial_conversation: Vec::new(),
@@ -89,6 +96,21 @@ fn start_capturing(scripts: Vec<ScriptedResponse>, root: PathBuf) -> (Harness, C
         Box::new(sink.clone()),
     );
     (spawn(config), sink)
+}
+
+/// Start a session that writes its durable transcript to `path` on disk (the
+/// real [`FileTranscript`] sink, per-event fsync) — the resume round-trip setup.
+fn start_with_file_transcript(
+    scripts: Vec<ScriptedResponse>,
+    root: PathBuf,
+    path: &Path,
+) -> Harness {
+    let sink = match FileTranscript::open(path) {
+        Ok(sink) => sink,
+        Err(error) => panic!("open transcript {}: {error}", path.display()),
+    };
+    let config = make_config(Arc::new(FakeProvider::new(scripts)), root, Box::new(sink));
+    spawn(config)
 }
 
 fn spawn(config: EngineConfig) -> Harness {
@@ -123,6 +145,29 @@ impl Harness {
         }
         events
     }
+}
+
+/// Spawn a session with active confinement and a given rule engine — the setup
+/// for exercising rule-driven allow/deny and the auto modes (which are gated on
+/// confinement).
+fn spawn_confined(scripts: Vec<ScriptedResponse>, root: PathBuf, rules: RuleEngine) -> Harness {
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    config.sandbox = SandboxStatus::Confined {
+        backend: "test".into(),
+    };
+    config.rules = rules;
+    spawn(config)
+}
+
+fn prompt_count(events: &[UiEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, UiEvent::PermissionRequest { .. }))
+        .count()
 }
 
 fn deltas(events: &[UiEvent]) -> String {
@@ -250,6 +295,59 @@ async fn transcript_records_the_durable_session() {
         sink.records().last().map(|r| r.event.clone()),
         Some(TranscriptEvent::SessionEnd { .. })
     ));
+}
+
+#[tokio::test]
+async fn file_sink_session_resumes_to_an_identical_view() {
+    // Group 10 round-trip (A-2, §3.3): run a scripted session through the real
+    // on-disk FileTranscript sink, then resume from the written file and assert
+    // the rebuilt conversation view is exactly what the session produced.
+    let root = temp_project();
+    let path = root.join("session.jsonl");
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "write_file", r#"{"path":"out.txt","content":"hi\n"}"#),
+        ScriptedResponse::text("all done"),
+    ];
+    let mut h = start_with_file_transcript(scripts, root.clone(), &path);
+    h.send(Command::UserInput {
+        text: "write it".into(),
+    })
+    .await;
+    let _ = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    // Closing the command channel makes the engine write a clean session_end.
+    drop(h);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Resume: read the transcript back the way `emberly resume` does.
+    let loaded = match emberly_core::resume::read_records(&path) {
+        Ok(loaded) => loaded,
+        Err(error) => panic!("read transcript: {error}"),
+    };
+    assert!(
+        loaded.warnings.is_empty(),
+        "a freshly-written transcript reads clean: {:?}",
+        loaded.warnings
+    );
+    assert!(
+        !emberly_core::resume::interrupted(&loaded.records),
+        "the session ended cleanly, so resume is not offered"
+    );
+
+    let view = emberly_core::resume::rebuild_conversation(&loaded.records);
+    // user · assistant(tool_use write_file) · tool_result · assistant(closing).
+    assert_eq!(view.len(), 4, "four model-visible turns");
+    assert_eq!(view[0], Message::user_text("write it"));
+    assert_eq!(view[1].role, Role::Assistant);
+    assert!(matches!(
+        view[1].content.last(),
+        Some(ContentBlock::ToolUse { name, .. }) if name == "write_file"
+    ));
+    assert_eq!(view[2].role, Role::Tool);
+    assert!(matches!(
+        view[2].content.first(),
+        Some(ContentBlock::ToolResult { is_error, .. }) if !*is_error
+    ));
+    assert_eq!(view[3], Message::assistant_text("all done"));
 }
 
 #[tokio::test]
@@ -668,4 +766,175 @@ async fn new_session_ends_current_and_starts_fresh() {
     };
     assert_eq!(emberly_core::resume::session_id(&second), Some(second_id));
     let _ = std::fs::remove_dir_all(&sessions_dir);
+}
+
+// ---- Phase 2: rule engine + modes wired through the gate ------------------
+
+#[tokio::test]
+async fn allowlisted_bash_runs_without_a_prompt_when_confined() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "bash", r#"{"command":"echo hi"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = spawn_confined(scripts, root, RuleEngine::new(Vec::new(), true));
+    h.send(Command::UserInput { text: "run".into() }).await;
+    // No answer supplied: an allowlisted command must not raise a prompt.
+    let events = h.collect(None).await;
+
+    assert_eq!(prompt_count(&events), 0, "echo is on the allowlist");
+    assert!(has_tool_finished(&events, true));
+    assert_eq!(deltas(&events), "done");
+}
+
+#[tokio::test]
+async fn offlist_bash_still_prompts_when_confined() {
+    let root = temp_project();
+    // `true` is off the allowlist but always exits 0, so we can assert success.
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "bash", r#"{"command":"true"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = spawn_confined(scripts, root, RuleEngine::new(Vec::new(), true));
+    h.send(Command::UserInput { text: "run".into() }).await;
+    let events = h.collect(Some(PermissionDecision::AllowOnce)).await;
+
+    assert_eq!(prompt_count(&events), 1, "`true` is off the allowlist");
+    assert!(has_tool_finished(&events, true));
+}
+
+#[tokio::test]
+async fn a_deny_rule_auto_denies_without_prompting() {
+    let root = temp_project();
+    let deny = emberly_core::parse_rules(
+        "[[rule]]\ntool = \"bash\"\naction = \"deny\"\n",
+        RuleSource::Project,
+    )
+    .unwrap_or_else(|e| panic!("parse deny rule: {e}"));
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "bash", r#"{"command":"rm -rf /"}"#),
+        ScriptedResponse::text("understood"),
+    ];
+    let mut h = spawn_confined(scripts, root, RuleEngine::new(deny, true));
+    h.send(Command::UserInput {
+        text: "clean".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert_eq!(prompt_count(&events), 0, "a deny rule never prompts");
+    // Denial reaches the model as a structured failure (HC-6), not a crash.
+    assert!(has_tool_finished(&events, false));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        UiEvent::Notice { message } if message.contains("auto-denied")
+    )));
+    assert_eq!(deltas(&events), "understood");
+}
+
+#[tokio::test]
+async fn auto_mode_is_refused_when_sandbox_is_degraded() {
+    // Default harness runs the degraded (Unavailable) path.
+    let mut h = start(vec![ScriptedResponse::text("ok")], temp_project());
+    h.send(Command::SetMode { mode: Mode::Auto }).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            UiEvent::Notice { message } if message.contains("auto-accept modes need OS confinement")
+        )),
+        "the refusal is explained"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ModeChanged { .. })),
+        "the mode never changes while degraded"
+    );
+}
+
+#[tokio::test]
+async fn auto_accept_edits_skips_the_write_prompt_when_confined() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "write_file", r#"{"path":"out.txt","content":"hi\n"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = spawn_confined(scripts, root.clone(), RuleEngine::new(Vec::new(), true));
+    h.send(Command::SetMode {
+        mode: Mode::AutoAcceptEdits,
+    })
+    .await;
+    h.send(Command::UserInput {
+        text: "write it".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            UiEvent::ModeChanged {
+                mode: Mode::AutoAcceptEdits
+            }
+        )),
+        "the mode change is confirmed"
+    );
+    assert_eq!(prompt_count(&events), 0, "edits auto-allow in this mode");
+    assert!(has_tool_finished(&events, true));
+    assert_eq!(
+        std::fs::read_to_string(root.join("out.txt")).unwrap_or_default(),
+        "hi\n"
+    );
+}
+
+#[tokio::test]
+async fn auto_mode_runs_offlist_bash_without_prompting() {
+    let root = temp_project();
+    // `true` is off the allowlist; in Auto it must still run silently, because
+    // the kernel sandbox (required for Auto) enforces the hard lines.
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "bash", r#"{"command":"true"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = spawn_confined(scripts, root, RuleEngine::new(Vec::new(), true));
+    h.send(Command::SetMode { mode: Mode::Auto }).await;
+    h.send(Command::UserInput { text: "run".into() }).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ModeChanged { mode: Mode::Auto })),
+        "Auto is entered (confinement is active)"
+    );
+    assert_eq!(prompt_count(&events), 0, "Auto auto-runs off-list bash");
+    assert!(has_tool_finished(&events, true));
+    assert_eq!(deltas(&events), "done");
+}
+
+#[tokio::test]
+async fn allow_for_session_covers_the_next_identical_command() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "bash", r#"{"command":"make build"}"#),
+        ScriptedResponse::tool_call("c2", "bash", r#"{"command":"make build"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = spawn_confined(scripts, root, RuleEngine::new(Vec::new(), true));
+    h.send(Command::UserInput {
+        text: "build".into(),
+    })
+    .await;
+    // Auto-answer any prompt with a session grant; the second call should not
+    // raise one because the grant already covers it.
+    let events = h.collect(Some(PermissionDecision::AllowForSession)).await;
+
+    assert_eq!(
+        prompt_count(&events),
+        1,
+        "only the first `make build` prompts; the session grant covers the second"
+    );
+    assert_eq!(deltas(&events), "done");
 }

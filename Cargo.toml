@@ -63,6 +63,22 @@ syntect = { version = "5.2", default-features = false, features = ["default-fanc
 # never str::len, never chars-as-columns.
 unicode-segmentation = "1"
 unicode-width = "0.2"
+# --- Phase 2 (safety story) — owner-signed-off additions (Tech Spec §1, §12) ---
+# Landlock LSM confinement on Linux. Pure-Rust syscall wrapper (no libc/C on the
+# sandbox path — HC-2 clean). Declared here; only `emberly-sandbox` pulls it, and
+# only on `cfg(target_os = "linux")`.
+landlock = "0.4"
+# Process-group signaling for bash tree-kill (S-4). Pure-Rust `linux_raw` backend
+# on Linux (no libc → HC-2 clean); preferred over the libc-based `nix`. Only the
+# `process` feature (kill/getpgid) is enabled. Used by `emberly-tools` on unix.
+rustix = { version = "1", features = ["process"] }
+# ripgrep libraries for the glob/grep tools (T-5, T-6) — all pure-Rust. `ignore`
+# walks the tree honoring `.gitignore`; `globset` compiles glob patterns;
+# `grep-searcher` + `grep-regex` are the line-oriented regex search path.
+ignore = "0.4"
+globset = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
 
 [profile.release]
 # Fully static musl builds (HC-2) prefer small, predictable binaries.

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::permission::{PermissionGate, PermissionOutcome, PermissionRequest};
+use crate::sandbox::Sandbox;
 
 /// Truncation-at-ingestion configuration (Requirements §8.1, Tech Spec §5.3).
 /// Carried in [`ToolCtx`]; the truncation function that consumes it lands in
@@ -36,28 +37,32 @@ impl Default for TruncateConfig {
 /// the truncation config, and the permission gate. Cheap to clone (the gate is
 /// an `Arc`).
 ///
-/// The OS sandbox handle (Phase 2) will join this struct; tools already route
-/// permission through [`authorize`](ToolCtx::authorize), so adding kernel
-/// confinement later does not change the tool interface.
+/// Tools route permission through [`authorize`](ToolCtx::authorize) and process
+/// spawning through [`sandbox`](ToolCtx::sandbox), so neither the permission
+/// layer nor OS confinement changes the tool interface.
 #[derive(Clone)]
 pub struct ToolCtx {
     project_root: PathBuf,
     truncate: TruncateConfig,
     gate: Arc<dyn PermissionGate>,
+    sandbox: Arc<dyn Sandbox>,
 }
 
 impl ToolCtx {
-    /// Build a context rooted at `project_root`, gated by `gate`.
+    /// Build a context rooted at `project_root`, gated by `gate`, spawning
+    /// through `sandbox` (confined or plain — the tool does not care which).
     #[must_use]
     pub fn new(
         project_root: impl Into<PathBuf>,
         truncate: TruncateConfig,
         gate: Arc<dyn PermissionGate>,
+        sandbox: Arc<dyn Sandbox>,
     ) -> Self {
         Self {
             project_root: project_root.into(),
             truncate,
             gate,
+            sandbox,
         }
     }
 
@@ -77,5 +82,12 @@ impl ToolCtx {
     /// call this and honor the result; they cannot bypass it.
     pub async fn authorize(&self, request: PermissionRequest) -> PermissionOutcome {
         self.gate.authorize(request).await
+    }
+
+    /// The confined-spawn handle: how to run a subprocess under the active OS
+    /// confinement (or directly, when degraded). Used by the bash tool.
+    #[must_use]
+    pub fn sandbox(&self) -> &dyn Sandbox {
+        self.sandbox.as_ref()
     }
 }

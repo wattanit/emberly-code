@@ -1,5 +1,5 @@
-//! The built-in tool suite. Phase 1 ships read/write/edit/bash; glob and grep
-//! (T-5, T-6) arrive in Phase 2.
+//! The built-in tool suite: read, write, edit, bash (Phase 1) plus glob and
+//! grep (T-5, T-6; Phase 2).
 
 use std::sync::Arc;
 
@@ -7,15 +7,19 @@ use crate::registry::ToolRegistry;
 
 mod bash;
 mod edit;
+mod glob;
+mod grep;
 mod read;
 mod write;
 
 pub use bash::BashTool;
 pub use edit::EditFileTool;
+pub use glob::GlobTool;
+pub use grep::GrepTool;
 pub use read::ReadFileTool;
 pub use write::WriteFileTool;
 
-/// A registry with the Phase 1 built-in tools registered (bash with defaults).
+/// A registry with all built-in tools registered (bash with defaults).
 #[must_use]
 pub fn default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
@@ -23,5 +27,7 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(WriteFileTool));
     registry.register(Arc::new(EditFileTool));
     registry.register(Arc::new(BashTool::default()));
+    registry.register(Arc::new(GlobTool));
+    registry.register(Arc::new(GrepTool));
     registry
 }

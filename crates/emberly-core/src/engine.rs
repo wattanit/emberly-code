@@ -15,8 +15,10 @@ use emberly_providers::{
     CompletionRequest, CompletionStream, ContentBlock, Message, Provider, ProviderError,
     RetryPolicy, Role, StreamEvent, ToolCallId, ToolSchema,
 };
+use emberly_sandbox::{Decision, Mode, Query, RuleEngine};
 use emberly_tools::{
-    truncate_output, PermissionOutcome, PermissionRequest, ToolCtx, ToolRegistry, TruncateConfig,
+    truncate_output, PermissionOutcome, PermissionRequest, Sandbox, ToolCtx, ToolRegistry,
+    TruncateConfig,
 };
 use futures::StreamExt;
 use time::OffsetDateTime;
@@ -67,6 +69,15 @@ pub struct EngineConfig {
     pub provider_label: String,
     /// OS confinement status at startup (Requirements §6.7).
     pub sandbox: SandboxStatus,
+    /// The permission rule engine (Requirements §6.1): built-in defaults plus
+    /// global + project rules, with the bash allowlist already toggled for the
+    /// sandbox status. Session grants accrue in-memory during the run.
+    pub rules: RuleEngine,
+    /// Override for how bash spawns children. `None` (the production path)
+    /// builds the host confined-spawn from `sandbox`. Tests inject a plain
+    /// spawner so they can report a confined *status* (to exercise the rule and
+    /// mode layers) without the self-exec shim re-executing the test binary.
+    pub sandbox_spawn: Option<Arc<dyn Sandbox>>,
     /// Non-default configuration pieces, for `session_start` provenance (C-3).
     pub config_provenance: Vec<ConfigProvenance>,
     /// Where durable events go. Defaults to [`NoopSink`] via
@@ -117,6 +128,15 @@ enum ToolCallResult {
     Canceled,
 }
 
+/// A permission ask awaiting the user's answer: the id shown to the frontend,
+/// the oneshot the blocked tool waits on, and the original request (kept so an
+/// "allow for session"/"always allow" answer can be turned into a grant).
+struct PendingAsk {
+    id: PermissionId,
+    reply: tokio::sync::oneshot::Sender<PermissionOutcome>,
+    request: PermissionRequest,
+}
+
 /// The agent engine.
 pub struct Engine {
     provider: Arc<dyn Provider>,
@@ -149,6 +169,15 @@ pub struct Engine {
     active_session_path: Arc<RwLock<PathBuf>>,
     provider_label: String,
     sandbox: SandboxStatus,
+    /// The permission rule engine consulted by the gate (Requirements §6).
+    rules: RuleEngine,
+    /// The current auto-accept mode (Requirements §6.4). Starts [`Mode::Normal`];
+    /// changed only through [`Engine::set_mode`], which gates auto tiers on the
+    /// sandbox status.
+    mode: Mode,
+    /// How bash spawns children: confined via the self-exec shim when the OS
+    /// sandbox is active, directly when degraded. Built from `sandbox`.
+    sandbox_spawn: Arc<dyn Sandbox>,
     config_provenance: Vec<ConfigProvenance>,
     /// Whether the first (pinned, `original_task`) user message has been
     /// recorded — also gates the one-time `session_title`.
@@ -172,6 +201,17 @@ impl Engine {
         events_tx: mpsc::Sender<UiEvent>,
     ) -> (Self, mpsc::Receiver<PermissionAsk>) {
         let (asks_tx, asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        // Capture before `config.sandbox` is moved into the struct below.
+        let sandbox_spawn: Arc<dyn Sandbox> = config.sandbox_spawn.unwrap_or_else(|| {
+            // Fallback (no explicit spawner): confine from the status, but with
+            // no recorded git binary — nothing is `.git/`-writable. The binary
+            // supplies a fully-configured spawner; this keeps the default safe.
+            Arc::new(crate::spawn::HostSandbox::new(
+                config.sandbox.is_confined(),
+                None,
+                String::new(),
+            ))
+        });
         let engine = Self {
             provider: config.provider,
             tools: config.tools,
@@ -193,6 +233,9 @@ impl Engine {
             active_session_path: config.active_session_path,
             provider_label: config.provider_label,
             sandbox: config.sandbox,
+            rules: config.rules,
+            mode: Mode::Normal,
+            sandbox_spawn,
             config_provenance: config.config_provenance,
             // On resume the original task already lives in the restored history.
             original_task_recorded: config.resuming,
@@ -227,6 +270,20 @@ impl Engine {
             });
         }
 
+        // Sandbox status is always-visible state (Requirements §6.7): surface it
+        // at session start, and — when confinement is unavailable — explain the
+        // degraded path once, in plain language (Design §8.2).
+        self.emit(UiEvent::SandboxStatus {
+            status: self.sandbox.clone(),
+        })
+        .await;
+        if !self.sandbox.is_confined() {
+            self.emit(UiEvent::Notice {
+                message: degraded_notice(&self.sandbox),
+            })
+            .await;
+        }
+
         while let Some(command) = commands_rx.recv().await {
             match command {
                 Command::UserInput { text } => {
@@ -251,9 +308,7 @@ impl Engine {
                 // them while a turn runs), so a clean boundary is guaranteed.
                 Command::NewSession { session_id } => self.start_new_session(session_id).await,
                 Command::ResumeSession { session_id } => self.resume_session(session_id).await,
-                Command::SetMode { .. } => {
-                    // Auto-accept modes are Phase 2 (gated on the sandbox).
-                }
+                Command::SetMode { mode } => self.set_mode(mode).await,
             }
         }
 
@@ -602,6 +657,8 @@ impl Engine {
                         Command::Cancel => break StreamEnd::Interrupted,
                         // Queue a compaction for the clean boundary (Tech Spec §7).
                         Command::Compact => self.compact_requested = true,
+                        // A mode toggle applies immediately, even mid-stream.
+                        Command::SetMode { mode } => self.set_mode(mode).await,
                         // Ignore permission answers / other commands mid-stream.
                         _ => {}
                     }
@@ -721,10 +778,7 @@ impl Engine {
 
         let ctx = self.make_ctx();
         let mut exec = Box::pin(tool.execute(args, &ctx));
-        let mut pending: Vec<(
-            PermissionId,
-            tokio::sync::oneshot::Sender<PermissionOutcome>,
-        )> = Vec::new();
+        let mut pending: Vec<PendingAsk> = Vec::new();
         let mut commands_open = true;
 
         loop {
@@ -733,32 +787,21 @@ impl Engine {
                 Some(ask) = asks_rx.recv() => self.on_permission_ask(ask, &mut pending).await,
                 command = commands_rx.recv(), if commands_open => match command {
                     Some(Command::PermissionAnswer { id, decision }) => {
-                        if let Some(pos) = pending.iter().position(|(pid, _)| *pid == id) {
-                            let (_, reply) = pending.swap_remove(pos);
-                            self.write_transcript(TranscriptEvent::PermissionDecision {
-                                id,
-                                decision,
-                                executed: None,
-                            });
-                            let outcome = if decision.is_allow() {
-                                PermissionOutcome::Allow
-                            } else {
-                                PermissionOutcome::Deny
-                            };
-                            let _ = reply.send(outcome);
-                        }
+                        self.answer_permission(id, decision, &mut pending).await;
                     }
                     Some(Command::Cancel) => return ToolCallResult::Canceled,
                     // Queue a compaction for the clean boundary (Tech Spec §7).
                     Some(Command::Compact) => self.compact_requested = true,
+                    // A mode toggle applies immediately to later asks this turn.
+                    Some(Command::SetMode { mode }) => self.set_mode(mode).await,
                     Some(_) => {}
                     None => {
                         // No more input (frontend gone): deny anything pending
                         // as the safe default and stop watching commands, so we
                         // never hang on an answer that cannot arrive.
                         commands_open = false;
-                        for (_, reply) in pending.drain(..) {
-                            let _ = reply.send(PermissionOutcome::Deny);
+                        for p in pending.drain(..) {
+                            let _ = p.reply.send(PermissionOutcome::Deny);
                         }
                     }
                 },
@@ -766,25 +809,155 @@ impl Engine {
         }
     }
 
-    /// Turn a tool's permission ask into a UI prompt and remember its reply
-    /// channel until the user answers.
-    async fn on_permission_ask(
+    /// Resolve a user's answer to a pending prompt: record it, apply any grant
+    /// (session or persisted), and reply to the blocked tool. Unknown ids are
+    /// ignored (a stray or already-answered prompt).
+    async fn answer_permission(
         &mut self,
-        ask: PermissionAsk,
-        pending: &mut Vec<(
-            PermissionId,
-            tokio::sync::oneshot::Sender<PermissionOutcome>,
-        )>,
+        id: PermissionId,
+        decision: crate::types::PermissionDecision,
+        pending: &mut Vec<PendingAsk>,
     ) {
-        let id = self.take_permission_id();
-        let rendering = build_rendering(&ask.request);
-        self.write_transcript(TranscriptEvent::PermissionRequest {
+        let Some(pos) = pending.iter().position(|p| p.id == id) else {
+            return;
+        };
+        let PendingAsk { request, reply, .. } = pending.swap_remove(pos);
+
+        // A grant widens future asks. HC-4: outside-root actions can never be
+        // turned into a rule (only ever allowed once), so a session/project
+        // grant is applied only for in-root actions.
+        if decision.is_allow() && !request.outside_root {
+            match decision {
+                crate::types::PermissionDecision::AllowForSession => {
+                    self.grant_for_session(&request);
+                }
+                crate::types::PermissionDecision::AlwaysAllowInProject => {
+                    self.grant_for_session(&request);
+                    self.persist_project_grant(&request).await;
+                }
+                _ => {}
+            }
+        }
+
+        let executed = decision.is_allow().then(|| request.summary.clone());
+        self.write_transcript(TranscriptEvent::PermissionDecision {
             id,
-            rendering: rendering.clone(),
+            decision,
+            executed,
         });
-        self.emit(UiEvent::PermissionRequest { id, rendering })
-            .await;
-        pending.push((id, ask.reply));
+        let outcome = if decision.is_allow() {
+            PermissionOutcome::Allow
+        } else {
+            PermissionOutcome::Deny
+        };
+        let _ = reply.send(outcome);
+    }
+
+    /// Change the auto-accept mode (Requirements §6.4, §6.7). Auto tiers are
+    /// gated on active confinement by [`Mode::resolve`]; a refused escalation
+    /// leaves the mode unchanged and explains why (the type system, not this
+    /// method, guarantees an auto mode is never entered while degraded).
+    async fn set_mode(&mut self, requested: Mode) {
+        match Mode::resolve(requested, &self.sandbox) {
+            Ok(mode) => {
+                if mode == self.mode {
+                    return;
+                }
+                self.mode = mode;
+                self.write_transcript(TranscriptEvent::ModeChange { mode });
+                self.emit(UiEvent::ModeChanged { mode }).await;
+            }
+            Err(unavailable) => {
+                self.emit(UiEvent::Notice {
+                    message: format!(
+                        "auto-accept modes need OS confinement — {} (staying in {})",
+                        unavailable.reason,
+                        mode_label(self.mode),
+                    ),
+                })
+                .await;
+            }
+        }
+    }
+
+    /// Add an in-memory session grant from an approved request (Requirements
+    /// §6.6): a bash command prefix, or a per-tool allow for file writes/edits.
+    fn grant_for_session(&mut self, request: &PermissionRequest) {
+        self.rules.add_session_grant(grant_rule(request));
+    }
+
+    /// Persist an approved request as a project rule in `.agents/permissions.toml`
+    /// and show the user the exact line written (Requirements §6.6). Best-effort:
+    /// a write failure degrades to a session-only grant with a notice, never a
+    /// crash (HC-7).
+    async fn persist_project_grant(&mut self, request: &PermissionRequest) {
+        let path = self.project_root.join(".agents").join("permissions.toml");
+        let block = grant_rule(request).to_toml_block();
+        match append_rule_block(&path, &block) {
+            Ok(()) => {
+                self.emit(UiEvent::Notice {
+                    message: format!("saved to .agents/permissions.toml:\n{}", block.trim_end()),
+                })
+                .await;
+            }
+            Err(error) => {
+                self.emit(UiEvent::Notice {
+                    message: format!(
+                        "couldn't write .agents/permissions.toml ({error}); allowed for this session only"
+                    ),
+                })
+                .await;
+            }
+        }
+    }
+
+    /// Consult the rule engine for a tool's ask (Requirements §6): `Allow` runs
+    /// silently (no prompt, no UI churn), `Deny` auto-denies with the reason,
+    /// and `Ask` raises the prompt as before. Every request and decision is
+    /// recorded, including the auto ones (HC-7).
+    async fn on_permission_ask(&mut self, ask: PermissionAsk, pending: &mut Vec<PendingAsk>) {
+        let request = ask.request;
+        let outcome = self.rules.evaluate(&make_query(&request), self.mode);
+        let id = self.take_permission_id();
+        let rendering = build_rendering(&request, outcome.reason.clone());
+
+        match outcome.decision {
+            Decision::Allow => {
+                self.write_transcript(TranscriptEvent::PermissionRequest { id, rendering });
+                self.write_transcript(TranscriptEvent::PermissionDecision {
+                    id,
+                    decision: crate::types::PermissionDecision::AllowOnce,
+                    executed: Some(request.summary.clone()),
+                });
+                let _ = ask.reply.send(PermissionOutcome::Allow);
+            }
+            Decision::Deny => {
+                self.write_transcript(TranscriptEvent::PermissionRequest { id, rendering });
+                self.write_transcript(TranscriptEvent::PermissionDecision {
+                    id,
+                    decision: crate::types::PermissionDecision::Deny,
+                    executed: None,
+                });
+                self.emit(UiEvent::Notice {
+                    message: format!("auto-denied {}: {}", request.tool, outcome.reason),
+                })
+                .await;
+                let _ = ask.reply.send(PermissionOutcome::Deny);
+            }
+            Decision::Ask => {
+                self.write_transcript(TranscriptEvent::PermissionRequest {
+                    id,
+                    rendering: rendering.clone(),
+                });
+                self.emit(UiEvent::PermissionRequest { id, rendering })
+                    .await;
+                pending.push(PendingAsk {
+                    id,
+                    reply: ask.reply,
+                    request,
+                });
+            }
+        }
     }
 
     /// Truncate a tool result at ingestion (§8.1), append it to the
@@ -923,7 +1096,12 @@ impl Engine {
     }
 
     fn make_ctx(&self) -> ToolCtx {
-        ToolCtx::new(self.project_root.clone(), self.truncate, self.gate.clone())
+        ToolCtx::new(
+            self.project_root.clone(),
+            self.truncate,
+            self.gate.clone(),
+            self.sandbox_spawn.clone(),
+        )
     }
 
     fn take_permission_id(&mut self) -> PermissionId {
@@ -1072,15 +1250,10 @@ fn result_preview(content: &str) -> String {
     preview
 }
 
-/// Enrich a tool's [`PermissionRequest`] into a UI [`PermissionRendering`],
-/// adding the reason the prompt appeared (Design §5 — teaches the model in
-/// situ). Phase 1 uses a minimal reason; the rule engine refines it (Phase 2).
-fn build_rendering(request: &PermissionRequest) -> PermissionRendering {
-    let reason = if request.outside_root {
-        "this action affects files OUTSIDE the project root".to_string()
-    } else {
-        format!("{} requires your approval", request.tool)
-    };
+/// Enrich a tool's [`PermissionRequest`] into a UI [`PermissionRendering`] with
+/// the `reason` the rule engine produced — the matched rule or the hard line —
+/// shown as the dimmed "why" that teaches the model in situ (Design §5).
+fn build_rendering(request: &PermissionRequest, reason: String) -> PermissionRendering {
     PermissionRendering {
         tool: request.tool.clone(),
         summary: request.summary.clone(),
@@ -1093,4 +1266,75 @@ fn build_rendering(request: &PermissionRequest) -> PermissionRendering {
         outside_root: request.outside_root,
         reason,
     }
+}
+
+/// Map a tool's [`PermissionRequest`] into the neutral rule-engine [`Query`].
+/// Only bash is prefix-matched, and its `detail` is exactly the command it will
+/// run (set by the bash tool), so it doubles as the match subject.
+fn make_query(request: &PermissionRequest) -> Query<'_> {
+    Query {
+        tool: &request.tool,
+        command: (request.tool == "bash").then_some(request.detail.as_str()),
+        outside_root: request.outside_root,
+    }
+}
+
+/// The rule to grant for an approved request (Requirements §6.6): a bash command
+/// prefix (the exact command, so only it and its argument variations auto-run —
+/// conservative), or a per-tool allow for file writes/edits.
+fn grant_rule(request: &PermissionRequest) -> emberly_sandbox::Rule {
+    if request.tool == "bash" {
+        emberly_sandbox::bash_session_grant(request.detail.trim())
+    } else {
+        emberly_sandbox::tool_session_grant(&request.tool)
+    }
+}
+
+/// The one-time plain-language explanation shown when OS confinement is
+/// unavailable or partial (Requirements §6.7 item 1, Design §8.2): what is off,
+/// what still holds, and that the hard lines are now policy-level.
+fn degraded_notice(sandbox: &SandboxStatus) -> String {
+    match sandbox {
+        SandboxStatus::Partial { missing, .. } => format!(
+            "sandbox partially available ({missing}). Core containment is active; \
+             per-action prompting works as normal."
+        ),
+        _ => {
+            let reason = match sandbox {
+                SandboxStatus::Unavailable { reason } => reason.as_str(),
+                _ => "unknown",
+            };
+            format!(
+                "no OS sandbox ({reason}). Running the honest degraded path: auto-accept \
+                 modes are off and the bash allowlist is suspended (every command asks). \
+                 The project-root and .git protections still hold, but as policy-level, \
+                 not kernel-level, guarantees."
+            )
+        }
+    }
+}
+
+/// A short label for a mode, for user-facing notices.
+fn mode_label(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Normal => "normal",
+        Mode::AutoAcceptEdits => "auto-accept edits",
+        Mode::Auto => "auto",
+    }
+}
+
+/// Append a `[[rule]]` block to a permissions file, creating it (and `.agents/`)
+/// if absent, with a blank line before the block.
+fn append_rule_block(path: &std::path::Path, block: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file)?;
+    write!(file, "{block}")?;
+    Ok(())
 }

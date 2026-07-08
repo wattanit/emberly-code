@@ -32,11 +32,16 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 | 5. Config, prompts & provenance (§7, §8) | [x] | provenance-tracked load; AGENTS/CLAUDE (+notice); family prompts; `config show`; 5 tests |
 | 6. `emberly init` (C-2) | [x] | materializes `.agents/` (config/prompts/permissions/.gitignore); no-clobber; 2 tests |
 | 7. CLI surface & key moments (§10) | [x] | testable `parse_args`; `--model`/`--provider` (cli tier); first-run orientation; 4 tests |
-| 8. macOS Seatbelt (§6.3, §16) | [ ] | confine children via `sandbox-exec` (no FFI → HC-1); SandboxStatus on macOS |
-| 9. Release pipeline (§13) | [ ] | musl x86_64/aarch64 + aarch64-darwin; name-collision + `--plain` smoke |
-| 10. Replay tests & exit criterion (§14.2) | [ ] | recorded JSONL fixtures + schema forward-compat; full sweep |
+| 8. macOS Seatbelt (§6.3, §16) | [x] | `sandbox-exec` profile (no FFI/dep → HC-1/HC-2); same seam as Landlock; `Confined{seatbelt}`; 5 escape + 3 profile tests |
+| 9. Release pipeline (§13) | [~] | **DEFERRED** (owner): compile-from-source for now; pipeline waits for a real release |
+| 10. Replay tests & exit criterion (§14.2) | [x] | 4 committed JSONL fixtures (normal/compacted/abnormal/forward-compat) + replay tests + file-sink round-trip |
 
-**Overall Phase 5: groups 0–7 done; 8–10 remain.** Branch `phase-5-sessions`.
+**Overall Phase 5: groups 0–8 + 10 done; group 9 (release pipeline) DEFERRED
+by owner.** Branch `phase-5-sessions` (current work on `sandbox`). Group 8
+(macOS Seatbelt) landed on darwin 25.3 — `sandbox: seatbelt` confirmed live,
+escape suite green. Group 10 (replay fixtures + round-trip) green. **v0.1 is
+feature-complete as a compile-from-source tool**; prebuilt-binary release
+(group 9) waits for a real release.
 
 ### Prompt refactor (owner request, 2026-07-07)
 
@@ -278,63 +283,112 @@ Make sessions navigable, not just persisted. Four asks, three commits:
 
 ---
 
-## 8. macOS Seatbelt (§6.3, Tech Spec §16) — the spike
+## 8. macOS Seatbelt (§6.3, Tech Spec §16) — the spike  **[x] COMPLETE**
 
-- [ ] **ABI-free approach (HC-1):** confine spawned children by launching them
-      under `/usr/bin/sandbox-exec -p <profile>` rather than the `sandbox_init`
-      C FFI. Profile: read broadly, write only under the project root, deny
-      `.git/` writes, deny network unless configured — mirroring the Phase 2
-      Landlock intent. The harness process itself is never confined.
-- [ ] Wire into `emberly-sandbox` behind the same seam Phase 2 will use for
-      Landlock, so `bash` runs confined on macOS. Report real `SandboxStatus`
-      (`Confined { backend: "seatbelt" }` / `Unavailable { reason }`).
-- [ ] **Degradation (§6.7):** if `sandbox-exec` is unavailable or the profile
-      fails, notify, suspend the bash allowlist, lock auto modes, keep
-      per-action prompting — the honest degraded mode.
-- [ ] `sandbox-exec` is deprecated by Apple but still present and works; note
-      the risk. **If the spike overruns, defer Seatbelt** (like Landlock) and
-      ship v1 macOS with permission-prompt-only guarding, clearly labeled — do
-      not block the rest of Phase 5 on it.
-- [ ] Tests: a macOS-gated escape test (write outside root / `.git` write via
-      bash is blocked when confined); degraded path asserts the labeling.
+- [x] **ABI-free approach (HC-1):** children run under
+      `/usr/bin/sandbox-exec -p <profile>` — no `sandbox_init` FFI, no new
+      dependency (std + system binary), so HC-1/HC-2 stay clean. Profile
+      (`confine::macos::seatbelt_profile`): `(allow default)`, then a blanket
+      write-deny, then re-allow writes under the project root, with `.git/`
+      carved back out (HC-5) unless genuine git (§6.4), plus HC-4 approved paths
+      and `/dev`. The harness process itself is never confined.
+- [x] Wired into `emberly-sandbox` behind the **same seam as Landlock**: the
+      new `confine::confined_invocation` dispatches per platform, so
+      `HostSandbox` and the bash tool are unchanged. Probe reports the real
+      `SandboxStatus` (`Confined { backend: "seatbelt" }` / `Unavailable`); the
+      built binary prints `sandbox: seatbelt` at startup on this host.
+- [x] **Degradation (§6.7):** the probe actually applies a trivial profile to a
+      child (`seatbelt_available`), so a host where `sandbox-exec` is missing or
+      blocked reports `Unavailable` and takes the existing degraded path
+      (allowlist suspended, auto modes locked, per-action prompting, policy-level
+      labeling) — no new degradation code needed.
+- [x] `sandbox-exec` deprecation risk noted in `confine::macos`. The spike did
+      **not** overrun; Seatbelt ships for v1 macOS.
+- [x] Tests: `crates/emberly/tests/seatbelt_escape.rs` (macOS-gated, 5 tests) —
+      in-root write ok, outside-root denied, `.git` write denied, git-writable
+      allows `.git`, genuine `git commit` succeeds under the writable profile and
+      is denied under the default; reads still work. Plus 3 profile unit tests.
+      All green on this host (macOS 15 / darwin 25.3).
+
+### Seatbelt — key findings
+
+- **SBPL is last-match-wins** (specificity by order), so unlike Landlock
+  (additive-only) it can genuinely *subtract* `.git/` from a writable root — the
+  macOS profile is simpler and, unlike the Linux default profile, lets bash
+  create brand-new top-level entries under the root.
+- **Canonicalize the root.** Seatbelt matches rules against the *resolved* path;
+  `/var`, `/tmp`, `$TMPDIR` are symlinks into `/private`, so an unresolved path
+  silently never matches (safe-closed: it over-denies). `seatbelt_profile`
+  resolves the root and every approved path.
+- **Scope is the write lines.** Reads stay broad (`allow default`); the enforced
+  hard lines are no-write-outside-root and no-`.git`-write. Read-confinement is a
+  documented hardening follow-up (Landlock also denies outside-root reads).
+- **No self-exec shim needed** on macOS: `sandbox-exec` *is* the wrapper, so
+  `maybe_run_sandbox_shim` stays a Linux-only no-op.
 
 ---
 
-## 9. Release pipeline (Tech Spec §13)
+## 9. Release pipeline (Tech Spec §13) — **DEFERRED (owner, 2026-07-08)**
 
-- [ ] Release build targets: `x86_64-unknown-linux-musl`,
+Not shipping v0.1 as prebuilt binaries yet; users compile from source
+(`cargo build --release`) in the meantime. The release pipeline (multi-target
+static builds, tag-triggered workflow, name-collision check, install docs, the
+`emb` alias) is deferred until an actual release is planned. None of it blocks
+finishing v0.1 as a compile-from-source tool.
+
+- [~] Release build targets: `x86_64-unknown-linux-musl`,
       `aarch64-unknown-linux-musl` (fully static, HC-2), `aarch64-apple-darwin`;
       best-effort `x86_64-apple-darwin`. Windows deferred (documented).
-- [ ] Release workflow (tag-triggered): build all targets, strip, produce
+- [~] Release workflow (tag-triggered): build all targets, strip, produce
       archives + checksums. Reuse the existing CI gates.
-- [ ] **Release checklist:** name-collision check (crates.io/Homebrew/distro/
+- [~] **Release checklist:** name-collision check (crates.io/Homebrew/distro/
       PATH — Design §1.1), a `--plain` smoke run, and the HC-2 C-free guard on
       each artifact.
-- [ ] Version/`--version` output finalized; `README` install docs (incl. the
+- [~] Version/`--version` output finalized; `README` install docs (incl. the
       suggested `emb` alias, not created by the tool).
 
 ---
 
-## 10. Replay tests, fixtures & exit criterion (§14.2, A-2)
+## 10. Replay tests, fixtures & exit criterion (§14.2, A-2)  **[x] COMPLETE**
 
-- [ ] **Recorded JSONL fixtures** committed under a test fixtures dir: a normal
-      session, a compacted session, an abnormally-exited session, and a
-      **schema-forward-compat** fixture (a record with `v = SCHEMA_VERSION + 1`
-      / unknown `type`) that must warn-not-crash.
-- [ ] Replay tests assert the rebuilt conversation view for each fixture.
-- [ ] Round-trip test: run a scripted `FakeProvider` session with the file sink,
-      then resume from the written file → identical view.
-- [ ] fmt + clippy clean; HC-2 guard passes; full suite green.
-- [ ] **Manual smoke (owner):** real session → quit → `emberly resume` restores
-      it; kill mid-session (`kill -9`) → next launch offers resume; `/compact` on
-      a long session round-trips; `emberly init` + `config show` report correct
-      provenance; (macOS) a bash write outside root is blocked when confined.
+- [x] **Recorded JSONL fixtures** committed under
+      `crates/emberly-core/tests/fixtures/transcripts/`: `normal.jsonl`,
+      `compacted.jsonl`, `abnormal_exit.jsonl`, and `forward_compat.jsonl` (a
+      newer-schema `v:9999` line + an unknown-`type` line that must
+      warn-not-crash). `v:9999` is a deliberate over-approximation of
+      `SCHEMA_VERSION + 1` so the fixture never rots as the schema bumps.
+- [x] Replay tests (`crates/emberly-core/tests/replay.rs`, 4) assert the rebuilt
+      conversation view for each fixture, the interrupted/clean classification,
+      and (forward-compat) that both bad lines warn while the good records around
+      them survive and rebuild.
+- [x] Round-trip test (`engine_loop.rs::file_sink_session_resumes_to_an_identical_view`):
+      a scripted `FakeProvider` session runs through the real on-disk
+      `FileTranscript` sink, then `read_records` + `rebuild_conversation` off the
+      written file reproduce the exact conversation view.
+- [x] fmt + clippy clean; no new deps (HC-2 guard trivially holds); full suite
+      green (20 test binaries).
+- [~] **Manual smoke (owner):** the macOS "bash write outside root blocked when
+      confined" clause is covered automatically by the group-8 Seatbelt escape
+      suite. The remaining interactive checks (real session → quit → `resume`;
+      `kill -9` → offer-on-launch; `/compact` on a long live session;
+      `init`/`config show` provenance) are owner-run against a live provider —
+      each has automated coverage (resume e2e in group 3, config tests in group
+      5), so this is a confirmation pass, not new capability.
 
 **Exit criterion (plan §Phase 5 "Done when"):** a session survives an abnormal
 exit and resumes cleanly; `/compact` round-trips through the transcript;
 `init`/`config show` report correct provenance; macOS confinement passes an
 escape-test analogue (or is explicitly, visibly degraded); all release targets
 build.
+
+- [x] **Met for v0.1 (compile-from-source), modulo the deferred release.**
+  Abnormal-exit + resume: `abnormal_exit.jsonl` replay + resume e2e (group 3).
+  `/compact` round-trip: transcript records it and rebuild reproduces the view
+  (compaction test + `compacted.jsonl` replay). Provenance: `config show` +
+  tests (group 5). macOS confinement passes the Seatbelt escape suite (group 8).
+  The one open clause — *"all release targets build"* — is the **deferred group
+  9** (owner decision): v0.1 ships as source, so multi-target release builds are
+  not gating. When a release is planned, group 9 closes this last clause.
 
 ---
 
@@ -347,9 +401,9 @@ build.
 - **Writer lives in the engine behind a `TranscriptSink` trait** (fs impl behind
   it; no-op default) so core stays unit-testable and there's one write site per
   durable event. (Confirm in group 0.)
-- **Seatbelt via `sandbox-exec`, not FFI** (HC-1). It is the phase's spike and
-  may defer to keep v1 moving — macOS then ships permission-prompt-only,
-  labeled, exactly like the current Landlock deferral.
+- **Seatbelt via `sandbox-exec`, not FFI** (HC-1) — **done** (group 8). No
+  deferral needed; the spike was short (SBPL profile + one dispatch fn, no new
+  dep). macOS ships kernel-level child confinement for v1, same seam as Landlock.
 - **Phase 2 (Landlock) remains deferred** until a Linux machine; Seatbelt gives
   macOS its safety tier in the meantime.
 - **Deferred beyond v1** (designed-for, not built): auto-compaction (one

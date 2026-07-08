@@ -1,0 +1,8 @@
+{"v":2,"ts":"2026-07-08T12:00:00Z","type":"session_start","session_id":"33333333-3333-4333-8333-333333333333","provider":"anthropic","model":"claude-opus-4-8","project_root":"/home/dev/proj","sandbox":{"state":"confined","backend":"seatbelt"},"prompts_version":2}
+{"v":2,"ts":"2026-07-08T12:00:01Z","type":"user_message","text":"Run the build","original_task":true}
+{"v":2,"ts":"2026-07-08T12:00:02Z","type":"session_title","title":"Run the build"}
+{"v":2,"ts":"2026-07-08T12:00:03Z","type":"assistant_message","text":"Building now."}
+{"v":2,"ts":"2026-07-08T12:00:04Z","type":"tool_call","call_id":"toolu_09","tool":"bash","args":{"command":"cargo build"}}
+{"v":2,"ts":"2026-07-08T12:00:05Z","type":"tool_result","call_id":"toolu_09","ok":false,"output":"error[E0433]: failed to resolve","truncated":false}
+{"v":2,"ts":"2026-07-08T12:00:06Z","type":"assistant_message","text":"The build failed; investigating the unresolved import."}
+{"v":2,"ts":"2026-07-08T12:00:07Z","type":"abnormal_exit","reason":"process terminated (SIGKILL) before a clean session end"}

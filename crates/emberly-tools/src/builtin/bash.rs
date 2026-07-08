@@ -2,11 +2,12 @@
 //! environment, always asking for permission in Phase 1 (the default
 //! allowlist arrives with the rule engine in Phase 2).
 //!
-//! Safety (S-4): the child runs in its own process group and is killed if it
-//! exceeds the timeout (via `kill_on_drop` when the wait future is dropped).
-//! Killing the *entire* descendant tree needs a group signal, which requires a
-//! syscall dependency vetted alongside the sandbox — that lands in Phase 2.
-//! The timeout alone already guarantees the harness never hangs on a child.
+//! Safety (S-4): the child runs in its own process group. On a timeout or a
+//! cancel (the engine drops this future) a [`GroupKillGuard`] SIGKILLs the whole
+//! process group — leader *and* the grandchildren an `sh -c` spawns — via
+//! `rustix` (pure-Rust `linux_raw`, no libc). `kill_on_drop` remains as a
+//! belt-and-braces leader kill and the non-unix fallback. The timeout alone
+//! already guarantees the harness never hangs on a child.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -56,6 +57,44 @@ impl BashTool {
             .map(Duration::from_secs)
             .unwrap_or(self.timeout_default)
             .min(self.timeout_ceiling)
+    }
+}
+
+/// SIGKILLs a child's entire process group on drop — leader plus the
+/// grandchildren an `sh -c` spawns — reaping the descendants that
+/// `kill_on_drop` (leader-only) would leave behind (S-4). It fires on both a
+/// timeout (the wait future is dropped, then this is) and a cancel (the engine
+/// drops the whole tool future). Disarmed after a clean wait so a since-reused
+/// pgid is never signaled.
+struct GroupKillGuard {
+    /// The child's process-group id (equal to the leader pid, since the child
+    /// leads a fresh group). `None` once disarmed. Only read on unix; kept
+    /// cross-platform so the call sites need no `cfg`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pgid: Option<i32>,
+}
+
+impl GroupKillGuard {
+    fn arm(child_pid: Option<u32>) -> Self {
+        Self {
+            pgid: child_pid.and_then(|p| i32::try_from(p).ok()),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.pgid = None;
+    }
+}
+
+impl Drop for GroupKillGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid {
+            if let Some(pid) = rustix::process::Pid::from_raw(pgid) {
+                // Best-effort: an already-exited group yields ESRCH, ignored.
+                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+            }
+        }
     }
 }
 
@@ -147,14 +186,23 @@ impl Tool for BashTool {
             return ToolOutcome::denied("run this command");
         }
 
-        let mut command = tokio::process::Command::new("/bin/sh");
-        command.arg("-c").arg(&args.command);
+        // Ask the sandbox how to spawn: `/bin/sh -c …` directly when degraded,
+        // or the self-exec confinement shim when the OS sandbox is active
+        // (Tech Spec §6.2). The tool still owns everything else below.
+        let invocation = ctx
+            .sandbox()
+            .bash_invocation(&args.command, ctx.project_root());
+        let mut command = tokio::process::Command::new(&invocation.program);
+        command.args(&invocation.args);
         command.current_dir(ctx.project_root());
         command.env_clear();
         for key in &self.env_allowlist {
             if let Ok(value) = std::env::var(key) {
                 command.env(key, value);
             }
+        }
+        for (key, value) in &invocation.extra_env {
+            command.env(key, value);
         }
         command
             .stdin(Stdio::null())
@@ -174,11 +222,23 @@ impl Tool for BashTool {
             }
         };
 
+        // Arm the group-kill guard with the child's pid (== its pgid). It fires
+        // on drop — on timeout below, or on cancel when the engine drops this
+        // whole future — unless a clean wait disarms it.
+        let mut group_kill = GroupKillGuard::arm(child.id());
+
         match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => render_output(&output),
-            Ok(Err(e)) => ToolOutcome::failure(format!("command error: {e}"), "run failed"),
-            // Timeout: the wait future (owning the child) is dropped here, and
-            // kill_on_drop terminates the child leader.
+            Ok(Ok(output)) => {
+                group_kill.disarm();
+                render_output(&output)
+            }
+            Ok(Err(e)) => {
+                group_kill.disarm();
+                ToolOutcome::failure(format!("command error: {e}"), "run failed")
+            }
+            // Timeout: leaving the guard armed, its drop SIGKILLs the entire
+            // process group (leader + any `sh -c` grandchildren), not just the
+            // leader that `kill_on_drop` reaches.
             Err(_elapsed) => ToolOutcome::failure(
                 format!(
                     "command timed out after {}s and was killed",

@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use emberly_tools::{
-    PermissionGate, PermissionOutcome, PermissionRequest, Tool, ToolCtx, ToolOutcome, ToolRegistry,
-    ToolSpec, TruncateConfig,
+    PermissionGate, PermissionOutcome, PermissionRequest, PlainSandbox, Sandbox, Tool, ToolCtx,
+    ToolOutcome, ToolRegistry, ToolSpec, TruncateConfig,
 };
 use serde_json::{json, Value};
 
@@ -65,7 +65,8 @@ impl PermissionGate for DenyGate {
 }
 
 fn ctx_with(gate: Arc<dyn PermissionGate>) -> ToolCtx {
-    ToolCtx::new("/proj", TruncateConfig::default(), gate)
+    let sandbox: Arc<dyn Sandbox> = Arc::new(PlainSandbox);
+    ToolCtx::new("/proj", TruncateConfig::default(), gate, sandbox)
 }
 
 #[tokio::test]
