@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 /// OS-level confinement status.
 ///
-/// Populated for real by [`crate::probe::probe`] (Landlock on Linux; Seatbelt
-/// on macOS is Phase 5). The event and transcript schemas depend on this shape.
+/// Populated for real by [`crate::probe::probe`] (Landlock on Linux, Seatbelt
+/// on macOS). The event and transcript schemas depend on this shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum SandboxStatus {

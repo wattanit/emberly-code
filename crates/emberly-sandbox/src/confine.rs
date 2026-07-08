@@ -1,17 +1,26 @@
-//! OS-level child confinement (Requirements §6.2, HC-4/HC-5; Tech Spec §6.2).
+//! OS-level child confinement (Requirements §6.2/§6.3, HC-4/HC-5; Tech Spec §6.2/§6.3).
 //!
 //! The **security boundary**: while the rule engine ([`crate::rules`]) decides
-//! *when to ask*, this decides *what is possible*. On Linux it applies a
-//! Landlock ruleset to spawned children via a **self-exec shim** — the harness
-//! re-execs itself under a hidden subcommand that calls `restrict_self()` (safe)
-//! and then `exec()`s the real command (safe; Landlock is inherited across
-//! `execve`). No `unsafe`, no `pre_exec` (HC-1). The harness process itself is
-//! never confined — only children (Requirements §6.7).
+//! *when to ask*, this decides *what is possible*. Two backends, one policy
+//! shape (Tech Spec §6.3 — "same policy shape as §6.2"):
 //!
-//! The ruleset (best-effort ABI): project root read+write; `.git/` under it
-//! read+execute only (no write) unless the invocation is genuine git (§6.4);
-//! system paths read+execute; explicitly-approved outside-root paths read+write
-//! for that one invocation (HC-4); everything else no access.
+//! - **Linux (Landlock).** A Landlock ruleset applied to children via a
+//!   **self-exec shim** — the harness re-execs itself under a hidden subcommand
+//!   that calls `restrict_self()` (safe) and then `exec()`s the real command
+//!   (safe; Landlock is inherited across `execve`). No `unsafe`, no `pre_exec`
+//!   (HC-1). The ruleset (best-effort ABI): project root read+write; `.git/`
+//!   under it read+execute only unless the invocation is genuine git (§6.4);
+//!   system paths read+execute; approved outside-root paths read+write for that
+//!   one invocation (HC-4); everything else no access.
+//! - **macOS (Seatbelt).** Children run under `/usr/bin/sandbox-exec -p <profile>`
+//!   — Apple's supported road to the kernel sandbox with no C FFI (HC-1). The
+//!   SBPL profile enforces the same *write* lines: reads broad, writes confined
+//!   to the project root, `.git/` carved back out (HC-5) unless genuine git,
+//!   plus the approved outside-root paths (HC-4). See [`macos::seatbelt_profile`].
+//!
+//! In both cases the harness process itself is **never** confined — only
+//! spawned children (Requirements §6.7). [`confined_invocation`] is the single
+//! entry point the spawn bridge calls; it dispatches to the platform backend.
 
 use std::path::PathBuf;
 
@@ -81,8 +90,38 @@ pub fn shim_invocation(
     ))
 }
 
+/// A confined-spawn invocation as the spawn bridge needs it: the `program` to
+/// exec, its `args`, and any `extra_env` to set on the child. Built by
+/// [`confined_invocation`] per platform.
+pub type ConfinedInvocation = (PathBuf, Vec<String>, Vec<(String, String)>);
+
+/// The platform's confined-spawn invocation for `command` under `spec`:
+/// `(program, args, extra_env)`. On Linux this is the self-exec Landlock shim
+/// (the spec rides in one env var); on macOS it is
+/// `/usr/bin/sandbox-exec -p <profile> /bin/sh -c <command>` (the policy rides
+/// in the profile arg — no extra env). `None` when confinement cannot be
+/// expressed on this platform or `sandbox-exec` is missing — the caller then
+/// falls back to a direct, honestly-unconfined shell (the degraded behavior).
+#[must_use]
+pub fn confined_invocation(command: &str, spec: &SandboxSpec) -> Option<ConfinedInvocation> {
+    #[cfg(target_os = "linux")]
+    {
+        shim_invocation(command, spec).map(|(program, args, env)| (program, args, vec![env]))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::seatbelt_invocation(command, spec)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (command, spec);
+        None
+    }
+}
+
 /// System paths children may read + execute (dynamic linker, shell, toolchain).
 /// Non-existent entries are silently skipped when the ruleset is built.
+#[cfg(target_os = "linux")]
 fn system_read_exec_paths() -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = [
         "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/opt",
@@ -100,6 +139,7 @@ fn system_read_exec_paths() -> Vec<PathBuf> {
 }
 
 /// Character devices children commonly need (read + write).
+#[cfg(target_os = "linux")]
 const DEVICE_PATHS: &[&str] = &[
     "/dev/null",
     "/dev/zero",
@@ -110,6 +150,9 @@ const DEVICE_PATHS: &[&str] = &[
 
 #[cfg(target_os = "linux")]
 pub use linux::{detect_abi, exec_confined, restrict, TARGET_ABI};
+
+#[cfg(target_os = "macos")]
+pub use macos::{seatbelt_available, seatbelt_profile, SANDBOX_EXEC};
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -226,5 +269,180 @@ mod linux {
             }
         }
         None
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::SandboxSpec;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    /// The system Seatbelt front-end. Present on every supported macOS and the
+    /// only supported road to the kernel sandbox without C FFI (HC-1, Tech Spec
+    /// §6.3). Apple has deprecated it, but it is still shipped and functional;
+    /// the risk is noted in `PHASE5_TODO.md` group 8.
+    pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+
+    /// Resolve `p` to its real path (following symlinks), falling back to the
+    /// input. Seatbelt matches rules against the **resolved** path — on macOS
+    /// `/var`, `/tmp`, and `$TMPDIR` are symlinks into `/private`, so a profile
+    /// written with the unresolved path would silently never match. Falling back
+    /// to the raw path is safe-closed: a wrong path over-denies, never
+    /// over-allows.
+    fn real(p: &Path) -> PathBuf {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    }
+
+    /// Escape a path for embedding inside an SBPL double-quoted string literal
+    /// (`\` and `"`). Paths are passed as a single argv element, never through a
+    /// shell, so this is only about SBPL's own string syntax.
+    fn quote(p: &Path) -> String {
+        let raw = p.to_string_lossy();
+        let mut out = String::with_capacity(raw.len() + 2);
+        for ch in raw.chars() {
+            if ch == '\\' || ch == '"' {
+                out.push('\\');
+            }
+            out.push(ch);
+        }
+        out
+    }
+
+    /// Build the Seatbelt profile (SBPL) enforcing the §6.2 policy shape:
+    /// **reads broad, writes confined to the project root**, with `.git/` carved
+    /// back out (HC-5) unless this invocation is genuine git (§6.4), plus the
+    /// approved outside-root paths for this one invocation (HC-4) and the
+    /// character devices commands need.
+    ///
+    /// SBPL is **last-match-wins**, so order encodes specificity: `(allow
+    /// default)` opens everything, a blanket write-deny closes all writes, then
+    /// narrower allows re-open the root and devices, and the `.git` deny closes
+    /// it again. Unlike Landlock (additive-only, so it needs a per-top-level-entry
+    /// workaround), Seatbelt can genuinely *subtract* `.git/` from a writable
+    /// root — so the macOS profile is both simpler and lets bash create new
+    /// top-level entries under the root.
+    ///
+    /// Scope note: the hard lines enforced here are the **write** lines (no write
+    /// outside root, no `.git/` write). Reads stay broad — read-confinement is a
+    /// documented hardening follow-up; Landlock, by contrast, also denies reads
+    /// outside its grants.
+    #[must_use]
+    pub fn seatbelt_profile(spec: &SandboxSpec) -> String {
+        let root = real(&spec.root);
+        let mut p = String::new();
+        p.push_str("(version 1)\n");
+        p.push_str("(allow default)\n");
+        // Close every write, then re-open under the project root.
+        p.push_str("(deny file-write* (subpath \"/\"))\n");
+        p.push_str(&format!(
+            "(allow file-write* (subpath \"{}\"))\n",
+            quote(&root)
+        ));
+        if !spec.git_writable {
+            // Genuine subtraction: `.git/` stays read-only inside a writable root.
+            p.push_str(&format!(
+                "(deny file-write* (subpath \"{}\"))\n",
+                quote(&root.join(".git"))
+            ));
+        }
+        // Approved outside-root paths, this invocation only (HC-4).
+        for extra in &spec.extra_writable {
+            p.push_str(&format!(
+                "(allow file-write* (subpath \"{}\"))\n",
+                quote(&real(extra))
+            ));
+        }
+        // Character devices commands commonly write (/dev/null, /dev/tty, …).
+        // Raw disk devices under /dev are root-owned, so this cannot escalate.
+        p.push_str("(allow file-write* (subpath \"/dev\"))\n");
+        p
+    }
+
+    /// The confined-spawn invocation on macOS:
+    /// `/usr/bin/sandbox-exec -p <profile> /bin/sh -c <command>`. `None` when
+    /// `sandbox-exec` is absent (the caller falls back to an unconfined shell).
+    #[must_use]
+    pub fn seatbelt_invocation(
+        command: &str,
+        spec: &SandboxSpec,
+    ) -> Option<super::ConfinedInvocation> {
+        if !Path::new(SANDBOX_EXEC).exists() {
+            return None;
+        }
+        Some((
+            PathBuf::from(SANDBOX_EXEC),
+            vec![
+                "-p".to_string(),
+                seatbelt_profile(spec),
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                command.to_string(),
+            ],
+            Vec::new(),
+        ))
+    }
+
+    /// Whether Seatbelt confinement actually works on this host: `sandbox-exec`
+    /// is present **and** successfully applies a trivial profile to a child.
+    /// Running the real front-end (not a mere existence check) is the honest
+    /// probe (Requirements §6.7) — it catches a host where the binary exists but
+    /// the sandbox is disabled or blocked. Cheap: one short-lived `/usr/bin/true`.
+    #[must_use]
+    pub fn seatbelt_available() -> bool {
+        if !Path::new(SANDBOX_EXEC).exists() {
+            return false;
+        }
+        Command::new(SANDBOX_EXEC)
+            .arg("-p")
+            .arg("(version 1)(allow default)")
+            .arg("/usr/bin/true")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn default_profile_confines_writes_and_denies_git() {
+            let spec = SandboxSpec::confined_to("/private/tmp/proj");
+            let profile = seatbelt_profile(&spec);
+            assert!(profile.contains("(allow default)"));
+            assert!(profile.contains("(deny file-write* (subpath \"/\"))"));
+            assert!(profile.contains("(allow file-write* (subpath \"/private/tmp/proj\"))"));
+            assert!(
+                profile.contains("(deny file-write* (subpath \"/private/tmp/proj/.git\"))"),
+                "default profile must deny .git writes: {profile}"
+            );
+        }
+
+        #[test]
+        fn git_writable_profile_omits_the_git_deny() {
+            let spec = SandboxSpec {
+                git_writable: true,
+                ..SandboxSpec::confined_to("/private/tmp/proj")
+            };
+            let profile = seatbelt_profile(&spec);
+            assert!(
+                !profile.contains("/.git\""),
+                "genuine-git profile must not deny .git: {profile}"
+            );
+        }
+
+        #[test]
+        fn approved_outside_paths_are_granted() {
+            let spec = SandboxSpec {
+                extra_writable: vec![PathBuf::from("/private/tmp/allowed")],
+                ..SandboxSpec::confined_to("/private/tmp/proj")
+            };
+            let profile = seatbelt_profile(&spec);
+            assert!(profile.contains("(allow file-write* (subpath \"/private/tmp/allowed\"))"));
+        }
     }
 }

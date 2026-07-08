@@ -324,9 +324,10 @@ async fn run() -> anyhow::Result<()> {
 
     // Probe OS confinement (Requirements §6.7) and honor `sandbox.require`
     // *before* any session is opened, so a refusal doesn't leave a stray
-    // transcript. On this build the Linux Landlock child-confinement path is
-    // Phase 2 group 3, so the probe reports an honest `unavailable` and the
-    // harness runs the degraded path.
+    // transcript. Landlock confines children on Linux and Seatbelt
+    // (`sandbox-exec`) on macOS; on any other platform (or when the backend is
+    // blocked) the probe reports an honest `unavailable` and the harness runs
+    // the degraded path.
     let sandbox = emberly_core::probe();
     if resolved.sandbox_require && !sandbox.is_confined() {
         anyhow::bail!(

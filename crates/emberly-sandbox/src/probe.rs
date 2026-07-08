@@ -4,15 +4,13 @@
 //! It never restricts the calling (harness) process — confinement applies only
 //! to spawned children (Requirements §6.7).
 //!
-//! Platform state (Phase 2, foundation checkpoint): the non-Linux branch
-//! reports `Unavailable` honestly (Seatbelt is Phase 5). On Linux the
-//! `landlock` crate deliberately does not expose runtime ABI detection — it
-//! steers callers toward building a best-effort ruleset and reading the
-//! `RestrictionStatus` produced by `restrict_self()` in the confined **child**
-//! (the self-exec shim). That child path is Phase 2 group 3; until it lands the
-//! Linux branch reports `Unavailable` with a reason, so the harness runs the
-//! honest degraded path everywhere. Wiring group 3 flips this to the real
-//! granted-vs-requested status without touching the degradation policy below.
+//! Platform backends: **Linux** detects the enforced Landlock ABI
+//! ([`crate::confine::detect_abi`]) and reports `Confined`/`Partial`;
+//! **macOS** confirms Seatbelt works by applying a trivial profile via
+//! `/usr/bin/sandbox-exec` (Phase 5 group 8). Any other OS reports
+//! `Unavailable` honestly. On every platform the probe never restricts the
+//! harness and never crashes — an absent or blocked sandbox is reported, so the
+//! harness runs the honest degraded path.
 
 use crate::status::SandboxStatus;
 
@@ -25,10 +23,37 @@ pub fn probe() -> SandboxStatus {
     {
         linux::probe()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::probe()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         SandboxStatus::Unavailable {
             reason: format!("no OS sandbox backend on {}", std::env::consts::OS),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::SandboxStatus;
+    use crate::confine::seatbelt_available;
+
+    /// macOS confinement via Seatbelt (`/usr/bin/sandbox-exec`, Tech Spec §6.3).
+    /// The probe actually applies a trivial profile to a child, so a host where
+    /// the binary is present but the sandbox is disabled/blocked reports
+    /// `Unavailable` honestly and the harness runs the degraded path — never a
+    /// false `Confined` (Requirements §6.7).
+    pub(super) fn probe() -> SandboxStatus {
+        if seatbelt_available() {
+            SandboxStatus::Confined {
+                backend: "seatbelt".to_string(),
+            }
+        } else {
+            SandboxStatus::Unavailable {
+                reason: "macOS sandbox-exec unavailable or blocked".to_string(),
+            }
         }
     }
 }

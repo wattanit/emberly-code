@@ -1,12 +1,13 @@
 //! `emberly-sandbox` — the two-layer safety model: the **rule engine**
 //! ([`rules`], convenience-tier allow/ask/deny) and **OS-level confinement**
-//! ([`probe`] + Landlock on Linux; Seatbelt on macOS is Phase 5) enforcing HC-4
-//! and HC-5 (Requirements §6, Tech Spec §6).
+//! ([`probe`] + Landlock on Linux, Seatbelt on macOS) enforcing HC-4 and HC-5
+//! (Requirements §6, Tech Spec §6).
 //!
 //! This is the security-critical crate: kept small, dependency-minimal, and
-//! separately auditable (Tech Spec §1). Phase 2 lands the rule engine, the
-//! startup probe + [`SandboxStatus`], the confinement-gated [`Mode`], and (on
-//! Linux) the Landlock child-confinement path.
+//! separately auditable (Tech Spec §1). It holds the rule engine, the startup
+//! probe + [`SandboxStatus`], the confinement-gated [`Mode`], and the child
+//! confinement backends ([`confine`]): the Landlock self-exec shim on Linux
+//! (Phase 2) and the `sandbox-exec` Seatbelt profile on macOS (Phase 5).
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 

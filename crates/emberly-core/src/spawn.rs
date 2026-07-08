@@ -5,16 +5,17 @@
 
 use std::path::{Path, PathBuf};
 
-use emberly_sandbox::confine::shim_invocation;
+use emberly_sandbox::confine::confined_invocation;
 use emberly_sandbox::git::is_genuine_git;
 use emberly_sandbox::SandboxSpec;
 use emberly_tools::{BashInvocation, PlainSandbox, Sandbox};
 
-/// Spawns bash commands through the self-exec Landlock shim when confinement is
-/// active, and directly (the degraded path) otherwise. `confined` comes from
-/// the startup [`SandboxStatus`](emberly_sandbox::SandboxStatus): it is only
-/// ever true where the shim actually enforces (Linux with Landlock), so the
-/// confined branch never runs where the shim would be a no-op.
+/// Spawns bash commands through the platform's OS confinement when it is active
+/// (the self-exec Landlock shim on Linux; `sandbox-exec` on macOS), and directly
+/// (the degraded path) otherwise. `confined` comes from the startup
+/// [`SandboxStatus`](emberly_sandbox::SandboxStatus): it is only ever true where
+/// a backend actually enforces, so the confined branch never runs where
+/// confinement would be a no-op.
 ///
 /// Genuine-git resolution (§6.4): a command earns the `.git/`-writable profile
 /// only when it is a simple invocation of the recorded canonical git binary
@@ -49,11 +50,11 @@ impl Sandbox for HostSandbox {
                 git_writable,
                 extra_writable: Vec::new(),
             };
-            if let Some((program, args, env)) = shim_invocation(command, &spec) {
+            if let Some((program, args, extra_env)) = confined_invocation(command, &spec) {
                 return BashInvocation {
                     program,
                     args,
-                    extra_env: vec![env],
+                    extra_env,
                 };
             }
         }
@@ -67,14 +68,23 @@ impl Sandbox for HostSandbox {
 mod tests {
     use super::*;
 
-    /// The confinement spec JSON carried in the invocation's env.
-    fn spec_json(inv: &BashInvocation) -> &str {
+    /// Whether the confined invocation grants `.git/` write access, read from
+    /// whichever encoding the platform uses: on Linux the `SandboxSpec` JSON in
+    /// [`SPEC_ENV`](emberly_sandbox::SPEC_ENV); on macOS the Seatbelt profile arg
+    /// (git-writable ⟺ the profile carries no `.git` write-deny). Panics if the
+    /// invocation is neither — i.e. it was not actually confined.
+    fn git_writable_in(inv: &BashInvocation) -> bool {
         for (key, value) in &inv.extra_env {
             if key == emberly_sandbox::SPEC_ENV {
-                return value;
+                return value.contains("\"git_writable\":true");
             }
         }
-        panic!("confined invocation is missing the spec env var");
+        // macOS: the SBPL profile rides in the args; the non-git profile is the
+        // only one that emits a `.git` write-deny line.
+        if inv.args.iter().any(|a| a.contains("(version 1)")) {
+            return !inv.args.iter().any(|a| a.contains("/.git\""));
+        }
+        panic!("invocation is not confined (no spec env var, no seatbelt profile)");
     }
 
     #[test]
@@ -90,17 +100,15 @@ mod tests {
 
         let genuine = host.bash_invocation("git commit -m hi", &root);
         assert!(
-            spec_json(&genuine).contains("\"git_writable\":true"),
-            "genuine git → writable .git profile: {}",
-            spec_json(&genuine)
+            git_writable_in(&genuine),
+            "genuine git → writable .git profile"
         );
 
         for command in ["rm -rf build", "git commit && rm -rf .git", "./git commit"] {
             let inv = host.bash_invocation(command, &root);
             assert!(
-                spec_json(&inv).contains("\"git_writable\":false"),
-                "`{command}` must NOT earn the writable .git profile: {}",
-                spec_json(&inv)
+                !git_writable_in(&inv),
+                "`{command}` must NOT earn the writable .git profile"
             );
         }
     }
