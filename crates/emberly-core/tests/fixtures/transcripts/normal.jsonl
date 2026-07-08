@@ -1,0 +1,11 @@
+{"v":2,"ts":"2026-07-08T10:00:00Z","type":"session_start","session_id":"11111111-1111-4111-8111-111111111111","provider":"anthropic","model":"claude-opus-4-8","project_root":"/home/dev/proj","sandbox":{"state":"confined","backend":"landlock (ABI v5)"},"config_provenance":[{"piece":"system_prompt","source":"default"}],"prompts_version":2}
+{"v":2,"ts":"2026-07-08T10:00:01Z","type":"user_message","text":"List the files and read Cargo.toml","original_task":true}
+{"v":2,"ts":"2026-07-08T10:00:02Z","type":"session_title","title":"List the files and read Cargo.toml"}
+{"v":2,"ts":"2026-07-08T10:00:03Z","type":"assistant_message","text":"I'll list the directory first."}
+{"v":2,"ts":"2026-07-08T10:00:04Z","type":"tool_call","call_id":"toolu_01","tool":"bash","args":{"command":"ls"}}
+{"v":2,"ts":"2026-07-08T10:00:05Z","type":"tool_result","call_id":"toolu_01","ok":true,"output":"Cargo.toml\nsrc\n","truncated":false}
+{"v":2,"ts":"2026-07-08T10:00:06Z","type":"assistant_message","text":"Now reading Cargo.toml."}
+{"v":2,"ts":"2026-07-08T10:00:07Z","type":"tool_call","call_id":"toolu_02","tool":"read_file","args":{"path":"Cargo.toml"}}
+{"v":2,"ts":"2026-07-08T10:00:08Z","type":"tool_result","call_id":"toolu_02","ok":true,"output":"[package]\nname = \"proj\"\n","truncated":false}
+{"v":2,"ts":"2026-07-08T10:00:09Z","type":"assistant_message","text":"Done — it's a package named proj."}
+{"v":2,"ts":"2026-07-08T10:00:10Z","type":"session_end"}

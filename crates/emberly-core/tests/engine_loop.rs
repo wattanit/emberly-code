@@ -7,18 +7,19 @@
 //! No `.unwrap()`/`.expect()`: setup `panic!`s with context; the frontend
 //! reads events and asserts on them.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use emberly_core::{
-    channel, CaptureSink, Command, Engine, EngineConfig, Mode, PermissionDecision, RetryPolicy,
-    RuleEngine, RuleSource, SandboxStatus, SessionId, TranscriptEvent, TranscriptSink, UiEvent,
+    channel, CaptureSink, Command, Engine, EngineConfig, FileTranscript, Mode, PermissionDecision,
+    RetryPolicy, RuleEngine, RuleSource, SandboxStatus, SessionId, TranscriptEvent, TranscriptSink,
+    UiEvent,
 };
 use emberly_providers::{
-    FakeProvider, ModelInfo, Pricing, Provider, ProviderError, ScriptOutcome, ScriptedResponse,
-    StopReason, StreamEvent, TokenUsage,
+    ContentBlock, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
+    ScriptOutcome, ScriptedResponse, StopReason, StreamEvent, TokenUsage,
 };
 use emberly_tools::{default_registry, TruncateConfig};
 use tokio::sync::mpsc;
@@ -95,6 +96,21 @@ fn start_capturing(scripts: Vec<ScriptedResponse>, root: PathBuf) -> (Harness, C
         Box::new(sink.clone()),
     );
     (spawn(config), sink)
+}
+
+/// Start a session that writes its durable transcript to `path` on disk (the
+/// real [`FileTranscript`] sink, per-event fsync) — the resume round-trip setup.
+fn start_with_file_transcript(
+    scripts: Vec<ScriptedResponse>,
+    root: PathBuf,
+    path: &Path,
+) -> Harness {
+    let sink = match FileTranscript::open(path) {
+        Ok(sink) => sink,
+        Err(error) => panic!("open transcript {}: {error}", path.display()),
+    };
+    let config = make_config(Arc::new(FakeProvider::new(scripts)), root, Box::new(sink));
+    spawn(config)
 }
 
 fn spawn(config: EngineConfig) -> Harness {
@@ -279,6 +295,59 @@ async fn transcript_records_the_durable_session() {
         sink.records().last().map(|r| r.event.clone()),
         Some(TranscriptEvent::SessionEnd { .. })
     ));
+}
+
+#[tokio::test]
+async fn file_sink_session_resumes_to_an_identical_view() {
+    // Group 10 round-trip (A-2, §3.3): run a scripted session through the real
+    // on-disk FileTranscript sink, then resume from the written file and assert
+    // the rebuilt conversation view is exactly what the session produced.
+    let root = temp_project();
+    let path = root.join("session.jsonl");
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "write_file", r#"{"path":"out.txt","content":"hi\n"}"#),
+        ScriptedResponse::text("all done"),
+    ];
+    let mut h = start_with_file_transcript(scripts, root.clone(), &path);
+    h.send(Command::UserInput {
+        text: "write it".into(),
+    })
+    .await;
+    let _ = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    // Closing the command channel makes the engine write a clean session_end.
+    drop(h);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Resume: read the transcript back the way `emberly resume` does.
+    let loaded = match emberly_core::resume::read_records(&path) {
+        Ok(loaded) => loaded,
+        Err(error) => panic!("read transcript: {error}"),
+    };
+    assert!(
+        loaded.warnings.is_empty(),
+        "a freshly-written transcript reads clean: {:?}",
+        loaded.warnings
+    );
+    assert!(
+        !emberly_core::resume::interrupted(&loaded.records),
+        "the session ended cleanly, so resume is not offered"
+    );
+
+    let view = emberly_core::resume::rebuild_conversation(&loaded.records);
+    // user · assistant(tool_use write_file) · tool_result · assistant(closing).
+    assert_eq!(view.len(), 4, "four model-visible turns");
+    assert_eq!(view[0], Message::user_text("write it"));
+    assert_eq!(view[1].role, Role::Assistant);
+    assert!(matches!(
+        view[1].content.last(),
+        Some(ContentBlock::ToolUse { name, .. }) if name == "write_file"
+    ));
+    assert_eq!(view[2].role, Role::Tool);
+    assert!(matches!(
+        view[2].content.first(),
+        Some(ContentBlock::ToolResult { is_error, .. }) if !*is_error
+    ));
+    assert_eq!(view[3], Message::assistant_text("all done"));
 }
 
 #[tokio::test]

@@ -33,12 +33,15 @@ Phase 3); this phase completes the two-tier + provenance + prompts story.
 | 6. `emberly init` (C-2) | [x] | materializes `.agents/` (config/prompts/permissions/.gitignore); no-clobber; 2 tests |
 | 7. CLI surface & key moments (§10) | [x] | testable `parse_args`; `--model`/`--provider` (cli tier); first-run orientation; 4 tests |
 | 8. macOS Seatbelt (§6.3, §16) | [x] | `sandbox-exec` profile (no FFI/dep → HC-1/HC-2); same seam as Landlock; `Confined{seatbelt}`; 5 escape + 3 profile tests |
-| 9. Release pipeline (§13) | [ ] | musl x86_64/aarch64 + aarch64-darwin; name-collision + `--plain` smoke |
-| 10. Replay tests & exit criterion (§14.2) | [ ] | recorded JSONL fixtures + schema forward-compat; full sweep |
+| 9. Release pipeline (§13) | [~] | **DEFERRED** (owner): compile-from-source for now; pipeline waits for a real release |
+| 10. Replay tests & exit criterion (§14.2) | [x] | 4 committed JSONL fixtures (normal/compacted/abnormal/forward-compat) + replay tests + file-sink round-trip |
 
-**Overall Phase 5: groups 0–8 done; 9–10 remain.** Branch `phase-5-sessions`
-(current work on `sandbox`). Group 8 (macOS Seatbelt) landed on darwin 25.3 —
-`sandbox: seatbelt` confirmed live; escape suite green.
+**Overall Phase 5: groups 0–8 + 10 done; group 9 (release pipeline) DEFERRED
+by owner.** Branch `phase-5-sessions` (current work on `sandbox`). Group 8
+(macOS Seatbelt) landed on darwin 25.3 — `sandbox: seatbelt` confirmed live,
+escape suite green. Group 10 (replay fixtures + round-trip) green. **v0.1 is
+feature-complete as a compile-from-source tool**; prebuilt-binary release
+(group 9) waits for a real release.
 
 ### Prompt refactor (owner request, 2026-07-07)
 
@@ -325,41 +328,67 @@ Make sessions navigable, not just persisted. Four asks, three commits:
 
 ---
 
-## 9. Release pipeline (Tech Spec §13)
+## 9. Release pipeline (Tech Spec §13) — **DEFERRED (owner, 2026-07-08)**
 
-- [ ] Release build targets: `x86_64-unknown-linux-musl`,
+Not shipping v0.1 as prebuilt binaries yet; users compile from source
+(`cargo build --release`) in the meantime. The release pipeline (multi-target
+static builds, tag-triggered workflow, name-collision check, install docs, the
+`emb` alias) is deferred until an actual release is planned. None of it blocks
+finishing v0.1 as a compile-from-source tool.
+
+- [~] Release build targets: `x86_64-unknown-linux-musl`,
       `aarch64-unknown-linux-musl` (fully static, HC-2), `aarch64-apple-darwin`;
       best-effort `x86_64-apple-darwin`. Windows deferred (documented).
-- [ ] Release workflow (tag-triggered): build all targets, strip, produce
+- [~] Release workflow (tag-triggered): build all targets, strip, produce
       archives + checksums. Reuse the existing CI gates.
-- [ ] **Release checklist:** name-collision check (crates.io/Homebrew/distro/
+- [~] **Release checklist:** name-collision check (crates.io/Homebrew/distro/
       PATH — Design §1.1), a `--plain` smoke run, and the HC-2 C-free guard on
       each artifact.
-- [ ] Version/`--version` output finalized; `README` install docs (incl. the
+- [~] Version/`--version` output finalized; `README` install docs (incl. the
       suggested `emb` alias, not created by the tool).
 
 ---
 
-## 10. Replay tests, fixtures & exit criterion (§14.2, A-2)
+## 10. Replay tests, fixtures & exit criterion (§14.2, A-2)  **[x] COMPLETE**
 
-- [ ] **Recorded JSONL fixtures** committed under a test fixtures dir: a normal
-      session, a compacted session, an abnormally-exited session, and a
-      **schema-forward-compat** fixture (a record with `v = SCHEMA_VERSION + 1`
-      / unknown `type`) that must warn-not-crash.
-- [ ] Replay tests assert the rebuilt conversation view for each fixture.
-- [ ] Round-trip test: run a scripted `FakeProvider` session with the file sink,
-      then resume from the written file → identical view.
-- [ ] fmt + clippy clean; HC-2 guard passes; full suite green.
-- [ ] **Manual smoke (owner):** real session → quit → `emberly resume` restores
-      it; kill mid-session (`kill -9`) → next launch offers resume; `/compact` on
-      a long session round-trips; `emberly init` + `config show` report correct
-      provenance; (macOS) a bash write outside root is blocked when confined.
+- [x] **Recorded JSONL fixtures** committed under
+      `crates/emberly-core/tests/fixtures/transcripts/`: `normal.jsonl`,
+      `compacted.jsonl`, `abnormal_exit.jsonl`, and `forward_compat.jsonl` (a
+      newer-schema `v:9999` line + an unknown-`type` line that must
+      warn-not-crash). `v:9999` is a deliberate over-approximation of
+      `SCHEMA_VERSION + 1` so the fixture never rots as the schema bumps.
+- [x] Replay tests (`crates/emberly-core/tests/replay.rs`, 4) assert the rebuilt
+      conversation view for each fixture, the interrupted/clean classification,
+      and (forward-compat) that both bad lines warn while the good records around
+      them survive and rebuild.
+- [x] Round-trip test (`engine_loop.rs::file_sink_session_resumes_to_an_identical_view`):
+      a scripted `FakeProvider` session runs through the real on-disk
+      `FileTranscript` sink, then `read_records` + `rebuild_conversation` off the
+      written file reproduce the exact conversation view.
+- [x] fmt + clippy clean; no new deps (HC-2 guard trivially holds); full suite
+      green (20 test binaries).
+- [~] **Manual smoke (owner):** the macOS "bash write outside root blocked when
+      confined" clause is covered automatically by the group-8 Seatbelt escape
+      suite. The remaining interactive checks (real session → quit → `resume`;
+      `kill -9` → offer-on-launch; `/compact` on a long live session;
+      `init`/`config show` provenance) are owner-run against a live provider —
+      each has automated coverage (resume e2e in group 3, config tests in group
+      5), so this is a confirmation pass, not new capability.
 
 **Exit criterion (plan §Phase 5 "Done when"):** a session survives an abnormal
 exit and resumes cleanly; `/compact` round-trips through the transcript;
 `init`/`config show` report correct provenance; macOS confinement passes an
 escape-test analogue (or is explicitly, visibly degraded); all release targets
 build.
+
+- [x] **Met for v0.1 (compile-from-source), modulo the deferred release.**
+  Abnormal-exit + resume: `abnormal_exit.jsonl` replay + resume e2e (group 3).
+  `/compact` round-trip: transcript records it and rebuild reproduces the view
+  (compaction test + `compacted.jsonl` replay). Provenance: `config show` +
+  tests (group 5). macOS confinement passes the Seatbelt escape suite (group 8).
+  The one open clause — *"all release targets build"* — is the **deferred group
+  9** (owner decision): v0.1 ships as source, so multi-target release builds are
+  not gating. When a release is planned, group 9 closes this last clause.
 
 ---
 

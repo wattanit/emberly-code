@@ -1,0 +1,10 @@
+{"v":2,"ts":"2026-07-08T11:00:00Z","type":"session_start","session_id":"22222222-2222-4222-8222-222222222222","provider":"openai","model":"gpt-4o","project_root":"/home/dev/proj","sandbox":{"state":"unavailable","reason":"no OS sandbox backend on windows"},"prompts_version":2}
+{"v":2,"ts":"2026-07-08T11:00:01Z","type":"user_message","text":"Refactor the parser module","original_task":true}
+{"v":2,"ts":"2026-07-08T11:00:02Z","type":"session_title","title":"Refactor the parser module"}
+{"v":2,"ts":"2026-07-08T11:00:03Z","type":"assistant_message","text":"First pass: surveyed the parser."}
+{"v":2,"ts":"2026-07-08T11:00:04Z","type":"assistant_message","text":"Second pass: extracted the tokenizer."}
+{"v":2,"ts":"2026-07-08T11:00:05Z","type":"assistant_message","text":"Third pass: the most recent change."}
+{"v":2,"ts":"2026-07-08T11:00:06Z","type":"compaction","summary":"Summary so far: surveyed the parser and extracted the tokenizer.","replaced_from":1,"replaced_to":3}
+{"v":2,"ts":"2026-07-08T11:00:07Z","type":"user_message","text":"Continue with the error types"}
+{"v":2,"ts":"2026-07-08T11:00:08Z","type":"assistant_message","text":"Continuing with the error types."}
+{"v":2,"ts":"2026-07-08T11:00:09Z","type":"session_end","reason":"user quit"}
