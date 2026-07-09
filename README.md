@@ -269,9 +269,9 @@ Release targets (v1): `x86_64-unknown-linux-musl`,
 
 **Documents**
 
-- [`docs/emberly-code-requirements-v0.3.md`](docs/emberly-code-requirements-v0.3.md) — WHAT and WHY
-- [`docs/emberly-code-design-guideline-v0.3.md`](docs/emberly-code-design-guideline-v0.3.md) — how it looks, feels, speaks
-- [`docs/emberly-code-tech-spec-v0.1.md`](docs/emberly-code-tech-spec-v0.1.md) — HOW it is built
+- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY
+- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks
+- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built
 - [`docs/phase1/IMPLEMENTATION_PLAN.md`](docs/phase1/IMPLEMENTATION_PLAN.md) — phased build plan (+ per-phase `PHASE*_TODO.md`)
 
 ## License

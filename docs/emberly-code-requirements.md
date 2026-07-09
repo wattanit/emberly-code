@@ -1,10 +1,11 @@
 # Emberly Code AI Coding Harness — Requirements Document
 
-**Version:** 0.3 
+**Version:** 0.4 
 **Status:** approved 
-**Date:** 2026-07-05
+**Date:** 2026-07-09
 **Owner:** Wattanit
-**Product name:** TBD (to be settled in the Design Guideline document)
+**Companion documents:** Design Guideline v0.4 (downstream), Technical
+Specification v0.2 (downstream)
 
 This document defines WHAT the harness must do and WHY. HOW it is built is
 deferred to the Technical Specification. UX, visual, and voice decisions are

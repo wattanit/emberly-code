@@ -1,11 +1,11 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.1 
+**Version:** 0.2 
 **Status:** approved 
-**Date:** 2026-07-06
+**Date:** 2026-07-09
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.3 (upstream contract),
-Design Guideline v0.3 (upstream for all UI/UX decisions)
+**Companion documents:** Requirements Document v0.4 (upstream contract),
+Design Guideline v0.4 (upstream for all UI/UX decisions)
 
 This document defines HOW Emberly Code is built. Requirements-level
 identifiers (HC-n, P-n, T-n, C-n, S-n, A-n) refer to the Requirements

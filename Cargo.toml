@@ -21,7 +21,7 @@ repository = ""
 # Foundational deps are declared here from Phase 0; heavier per-layer deps
 # (reqwest, ratatui, syntect, landlock, ignore/grep-searcher, similar, …) are
 # added to this table by the phase that introduces them — see
-# IMPLEMENTATION_PLAN.md and docs/emberly-code-tech-spec-v0.1.md §12.
+# IMPLEMENTATION_PLAN.md and docs/emberly-code-tech-spec.md §12.
 [workspace.dependencies]
 tokio = { version = "1", default-features = false }
 serde = { version = "1", features = ["derive"] }
