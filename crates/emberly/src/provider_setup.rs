@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
-use emberly_providers::{AnthropicProvider, ModelInfo, OpenAiProvider, Provider};
+use emberly_providers::{AnthropicProvider, Auth, ModelInfo, OpenAiProvider, Provider};
 
 use crate::config::Resolved;
 
@@ -43,7 +43,11 @@ pub fn build(resolved: &Resolved) -> anyhow::Result<Option<Selection>> {
         "anthropic" => {
             let key = crate::config::api_key("anthropic")?
                 .context("no Anthropic API key (set ANTHROPIC_API_KEY or keys.toml)")?;
-            Arc::new(AnthropicProvider::with_default_url(client, key, model_info))
+            Arc::new(AnthropicProvider::with_default_url(
+                client,
+                Auth::XApiKey(key),
+                model_info,
+            ))
         }
         "openai" | "openai-compat" => {
             // Key may be empty for local servers (Ollama/vLLM).
@@ -52,7 +56,7 @@ pub fn build(resolved: &Resolved) -> anyhow::Result<Option<Selection>> {
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-            Arc::new(OpenAiProvider::new(client, key, base, model_info))
+            Arc::new(OpenAiProvider::new(client, Auth::Bearer(key), base, model_info))
         }
         other => bail!("unknown provider '{other}' (expected 'anthropic' or 'openai')"),
     };

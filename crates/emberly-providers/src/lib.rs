@@ -10,6 +10,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 pub mod anthropic;
+pub mod auth;
 pub mod error;
 pub mod fake;
 pub mod id;
@@ -23,6 +24,7 @@ pub mod stream;
 mod wire;
 
 pub use anthropic::AnthropicProvider;
+pub use auth::Auth;
 pub use error::ProviderError;
 pub use fake::{FakeProvider, ScriptOutcome, ScriptedResponse};
 pub use id::ToolCallId;

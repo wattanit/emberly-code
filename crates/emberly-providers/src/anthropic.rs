@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use crate::auth::Auth;
 use crate::error::ProviderError;
 use crate::message::{CompletionRequest, ContentBlock, Message, Role};
 use crate::model::{ModelInfo, ProviderId, TokenEstimate};
@@ -23,10 +24,11 @@ use crate::ToolCallId;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
-/// A client for the Anthropic Messages API.
+/// A client for the Anthropic Messages API (and any endpoint speaking its wire
+/// format — the profile decides the base URL and auth, P-8).
 pub struct AnthropicProvider {
     client: reqwest::Client,
-    api_key: String,
+    auth: Auth,
     base_url: String,
     model_info: ModelInfo,
 }
@@ -37,13 +39,13 @@ impl AnthropicProvider {
     #[must_use]
     pub fn new(
         client: reqwest::Client,
-        api_key: impl Into<String>,
+        auth: Auth,
         base_url: impl Into<String>,
         model_info: ModelInfo,
     ) -> Self {
         Self {
             client,
-            api_key: api_key.into(),
+            auth,
             base_url: base_url.into(),
             model_info,
         }
@@ -51,12 +53,8 @@ impl AnthropicProvider {
 
     /// Convenience constructor using the public API base URL.
     #[must_use]
-    pub fn with_default_url(
-        client: reqwest::Client,
-        api_key: impl Into<String>,
-        model_info: ModelInfo,
-    ) -> Self {
-        Self::new(client, api_key, DEFAULT_BASE_URL, model_info)
+    pub fn with_default_url(client: reqwest::Client, auth: Auth, model_info: ModelInfo) -> Self {
+        Self::new(client, auth, DEFAULT_BASE_URL, model_info)
     }
 }
 
@@ -75,11 +73,13 @@ impl Provider for AnthropicProvider {
         request: CompletionRequest,
     ) -> Result<CompletionStream, ProviderError> {
         let body = build_body(&request, self.model_info.max_output_tokens);
-        let response = self
+        let builder = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("anthropic-version", ANTHROPIC_VERSION);
+        let response = self
+            .auth
+            .apply(builder)
             .json(&body)
             .send()
             .await

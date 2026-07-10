@@ -20,7 +20,7 @@ adapters, config/keys system, engine channels, and TUI sidebar all exist.
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. Auth-scheme abstraction in adapters | [ ] | |
+| 1. Auth-scheme abstraction in adapters | [x] | Done 2026-07-10; `Auth` enum + 5 unit tests; workspace green |
 | 2. `[providers.<name>]` profile config | [ ] | |
 | 3. Profile resolution in the composition root | [ ] | |
 | 4. Z.ai profile (example + init + docs) | [ ] | the acceptance driver |
@@ -39,20 +39,19 @@ Today auth is hardcoded per adapter (`anthropic.rs:81` `x-api-key` +
 `anthropic-version`; `openai.rs:67` `bearer_auth`). Lift it to data so any
 endpoint speaking a wire format we parse is reachable.
 
-- [ ] Define an `Auth` type in `emberly-providers` (e.g. in `wire.rs` or a
-      new `auth.rs`): `Bearer`, `XApiKey`, `Header{ name }` — plus the key
-      value. Keep it a plain data type; no wire logic leaks past the crate
-      (P-1).
-- [ ] `AnthropicProvider::new(..)` takes an `Auth` instead of assuming
-      `x-api-key`; still always sends `anthropic-version`. Preserve the
-      current default (`with_default_url` → `XApiKey`) so existing behavior
-      is byte-identical.
-- [ ] `OpenAiProvider::new(..)` takes an `Auth`; default stays `Bearer`, and
-      an empty key still sends no auth header (local Ollama/vLLM path in
-      `provider_setup.rs`).
-- [ ] Unit tests: each `Auth` variant produces the expected header on the
-      built `reqwest` request (assert via a request-inspecting fake or the
-      builder), incl. the empty-key no-header case.
+- [x] Defined `Auth` in new `emberly-providers/src/auth.rs`: `None`,
+      `Bearer`, `XApiKey`, `Header{ name, value }` — plain data type, key
+      carried inline, `apply()` is `pub(crate)`; no wire logic leaks (P-1).
+      Exported from `lib.rs`.
+- [x] `AnthropicProvider::new`/`with_default_url` take an `Auth`; still
+      always send `anthropic-version`. `provider_setup.rs` passes
+      `Auth::XApiKey` → byte-identical default behavior.
+- [x] `OpenAiProvider::new` takes an `Auth`; `provider_setup.rs` passes
+      `Auth::Bearer`, and an empty `Bearer` key sends no header (local
+      Ollama/vLLM path preserved).
+- [x] 5 unit tests in `auth.rs` assert each variant's header on a built
+      `reqwest::Request`, incl. empty-Bearer (no header) and empty-XApiKey
+      (header still sent). Live-client tests updated to the new signatures.
 
 ## 2. `[providers.<name>]` profile config  *(P-8; C-1/C-2; Tech Spec §4.5, §8)*
 
