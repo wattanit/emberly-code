@@ -203,6 +203,24 @@ fn block_to_anthropic(block: &ContentBlock) -> Value {
             "content": content,
             "is_error": is_error,
         }),
+        // Replay a captured thinking block verbatim so multi-turn thinking
+        // works (P-10). Redacted blocks carry their opaque `data` in the
+        // signature slot and go back as `redacted_thinking`.
+        ContentBlock::Reasoning {
+            text,
+            signature,
+            redacted,
+        } => {
+            if *redacted {
+                json!({ "type": "redacted_thinking", "data": signature.clone().unwrap_or_default() })
+            } else {
+                json!({
+                    "type": "thinking",
+                    "thinking": text,
+                    "signature": signature.clone().unwrap_or_default(),
+                })
+            }
+        }
     }
 }
 
@@ -221,6 +239,10 @@ fn map_stop_reason(reason: &str) -> StopReason {
 struct AnthropicMapper {
     /// content-block index → tool-call id, for routing `input_json_delta`.
     tool_ids: HashMap<u64, ToolCallId>,
+    /// content-block index → accumulated `signature_delta` for a thinking
+    /// block. Presence marks the index as a (non-redacted) thinking block, so
+    /// its signature is flushed as a `ReasoningSignature` at block stop (P-10).
+    thinking_sigs: HashMap<u64, String>,
     input_tokens: u64,
     stop_reason: StopReason,
 }
@@ -245,17 +267,42 @@ impl SseMapper for AnthropicMapper {
             "content_block_start" => {
                 let index = data.get("index").and_then(Value::as_u64).unwrap_or(0);
                 let block = &data["content_block"];
-                if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                    let id = ToolCallId::new(
-                        block.get("id").and_then(Value::as_str).unwrap_or_default(),
-                    );
-                    let name = block
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    self.tool_ids.insert(index, id.clone());
-                    out.push(Ok(StreamEvent::ToolCallStart { id, name }));
+                match block.get("type").and_then(Value::as_str) {
+                    Some("tool_use") => {
+                        let id = ToolCallId::new(
+                            block.get("id").and_then(Value::as_str).unwrap_or_default(),
+                        );
+                        let name = block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        self.tool_ids.insert(index, id.clone());
+                        out.push(Ok(StreamEvent::ToolCallStart { id, name }));
+                    }
+                    Some("thinking") => {
+                        // Mark this index as a thinking block; the signature
+                        // accumulates via `signature_delta` and flushes at stop.
+                        self.thinking_sigs.insert(index, String::new());
+                    }
+                    Some("redacted_thinking") => {
+                        // Encrypted reasoning: no text to stream. Surface a
+                        // placeholder so it is never silently dropped (P-10) and
+                        // preserve the opaque `data` for verbatim replay.
+                        let data_blob = block
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        out.push(Ok(StreamEvent::ReasoningDelta {
+                            text: "[redacted reasoning]".to_string(),
+                        }));
+                        out.push(Ok(StreamEvent::ReasoningSignature {
+                            signature: data_blob,
+                            redacted: true,
+                        }));
+                    }
+                    _ => {}
                 }
             }
             "content_block_delta" => {
@@ -280,6 +327,21 @@ impl SseMapper for AnthropicMapper {
                             }));
                         }
                     }
+                    Some("thinking_delta") => {
+                        if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                            out.push(Ok(StreamEvent::ReasoningDelta {
+                                text: text.to_string(),
+                            }));
+                        }
+                    }
+                    Some("signature_delta") => {
+                        if let (Some(acc), Some(sig)) = (
+                            self.thinking_sigs.get_mut(&index),
+                            delta.get("signature").and_then(Value::as_str),
+                        ) {
+                            acc.push_str(sig);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -287,6 +349,13 @@ impl SseMapper for AnthropicMapper {
                 let index = data.get("index").and_then(Value::as_u64).unwrap_or(0);
                 if let Some(id) = self.tool_ids.get(&index) {
                     out.push(Ok(StreamEvent::ToolCallEnd { id: id.clone() }));
+                }
+                // Flush a thinking block's accumulated signature for replay.
+                if let Some(signature) = self.thinking_sigs.remove(&index) {
+                    out.push(Ok(StreamEvent::ReasoningSignature {
+                        signature,
+                        redacted: false,
+                    }));
                 }
             }
             "message_delta" => {
@@ -398,5 +467,113 @@ mod tests {
             matches!(temp, Some(t) if (t - 0.7).abs() < 1e-6),
             "got {temp:?}"
         );
+    }
+
+    /// Drive `data` frames through the mapper, collecting only the `Ok` events.
+    fn run_mapper(frames: &[&str]) -> Vec<StreamEvent> {
+        let mut mapper = AnthropicMapper::default();
+        let mut out = Vec::new();
+        for data in frames {
+            let event = SseEvent {
+                event: None,
+                data: (*data).to_string(),
+            };
+            out.extend(mapper.map(event).into_iter().filter_map(Result::ok));
+        }
+        out
+    }
+
+    #[test]
+    fn thinking_stream_yields_reasoning_then_signature_then_text() {
+        let events = run_mapper(&[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" think"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig123"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}"#,
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ReasoningDelta {
+                    text: "Let me".into()
+                },
+                StreamEvent::ReasoningDelta {
+                    text: " think".into()
+                },
+                StreamEvent::ReasoningSignature {
+                    signature: "sig123".into(),
+                    redacted: false,
+                },
+                StreamEvent::TextDelta {
+                    text: "answer".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn redacted_thinking_surfaces_placeholder_and_preserves_data() {
+        let events = run_mapper(&[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"ENCRYPTED"}}"#,
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ReasoningDelta {
+                    text: "[redacted reasoning]".into()
+                },
+                StreamEvent::ReasoningSignature {
+                    signature: "ENCRYPTED".into(),
+                    redacted: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_text_stream_emits_no_reasoning() {
+        let events = run_mapper(&[
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+        ]);
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            StreamEvent::ReasoningDelta { .. } | StreamEvent::ReasoningSignature { .. }
+        )));
+    }
+
+    #[test]
+    fn reasoning_block_replays_as_thinking_with_signature() {
+        let block = ContentBlock::Reasoning {
+            text: "prior thought".into(),
+            signature: Some("sig999".into()),
+            redacted: false,
+        };
+        let wire = block_to_anthropic(&block);
+        assert_eq!(wire.get("type").and_then(Value::as_str), Some("thinking"));
+        assert_eq!(
+            wire.get("thinking").and_then(Value::as_str),
+            Some("prior thought")
+        );
+        assert_eq!(
+            wire.get("signature").and_then(Value::as_str),
+            Some("sig999")
+        );
+    }
+
+    #[test]
+    fn redacted_reasoning_block_replays_as_redacted_thinking() {
+        let block = ContentBlock::Reasoning {
+            text: String::new(),
+            signature: Some("ENCRYPTED".into()),
+            redacted: true,
+        };
+        let wire = block_to_anthropic(&block);
+        assert_eq!(
+            wire.get("type").and_then(Value::as_str),
+            Some("redacted_thinking")
+        );
+        assert_eq!(wire.get("data").and_then(Value::as_str), Some("ENCRYPTED"));
     }
 }

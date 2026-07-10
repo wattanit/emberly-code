@@ -27,7 +27,7 @@ effort picker is the same overlay as the model picker.
 |---|---|---|
 | 1. Effort model (data types) | [x] | Done 2026-07-10; `Effort` enum + `CompletionRequest.effort` + `ModelInfo` levels/default; 7 tests |
 | 2. Adapter effort mapping + no-op | [x] | Done 2026-07-10; anthropic→thinking-budget (2k/8k/16k/32k, clamped); openai→`reasoning_effort` (Max→high); no-op when unsupported; 10 tests |
-| 3. `ReasoningDelta` stream event + trace translation | [ ] | adapter reasoning parts → normalized delta; signature preserve/replay |
+| 3. `ReasoningDelta` stream event + trace translation | [x] | Done 2026-07-11; `ReasoningDelta`+`ReasoningSignature` events, `ContentBlock::Reasoning`; anthropic thinking/redacted capture + replay; openai `reasoning_content`; 8 tests |
 | 4. Effort as engine state | [ ] | `Command::SetEffort`, `EffortChanged`, `effort_change`; threaded into requests; per-model config default |
 | 5. Reasoning trace through engine + transcript | [ ] | `ReasoningDelta` UiEvent relay; distinct `reasoning` field; `hidden` still records |
 | 6. UI — thinking trail + effort picker | [ ] | collapsed/expand/stream/settle; `reasoning` view key; picker + sidebar line; `/effort`; degraded block; line mode |
@@ -86,25 +86,33 @@ or drops it — a no-op is never an error (P-9).
 
 ## 3. Reasoning trace — stream event + translation  *(Tech Spec §4.7, P-10)*
 
-- [ ] `StreamEvent::ReasoningDelta { text: String }` — a new arm on the
-      `#[non_exhaustive]` enum (additive; consumers already handle unknown
-      variants). Distinct from `TextDelta`; never concatenated with it.
-- [ ] `anthropic` adapter: translate `thinking`/`redacted_thinking` content
-      blocks into `ReasoningDelta`; keep the block's opaque **signature**
-      alongside the normalized reasoning so it can be echoed back on the next
-      tool-use turn (multi-turn thinking). The signature stays **inside the
-      adapter** — no wire detail leaks past the boundary (P-1). A provider
-      without this requirement ignores it.
-- [ ] `openai` adapter: translate the provider's reasoning-summary parts (if
-      any) into `ReasoningDelta`; no signature echo required unless the wire
-      demands it.
-- [ ] `fake` provider: a scripted stream that emits `ReasoningDelta` frames
-      interleaved before `TextDelta`, so the engine + UI trail can be tested
-      headlessly.
-- [ ] Tests: an SSE fixture with thinking blocks decodes to `ReasoningDelta`
-      then `TextDelta` in order; the signature is preserved and replayed on a
-      simulated follow-up tool-use turn; a stream with no thinking emits no
-      `ReasoningDelta`.
+- [x] `StreamEvent::ReasoningDelta { text }` **and** `ReasoningSignature
+      { signature, redacted }` — two additive arms on the `#[non_exhaustive]`
+      enum. Delta is the streamed reasoning text (UI/transcript); Signature
+      carries the opaque replay token once the block closes. Distinct from
+      `TextDelta`; never concatenated.
+- [x] `ContentBlock::Reasoning { text, signature, redacted }` — the normalized
+      captured block, carried in the conversation so an adapter that requires
+      reasoning echoed back can replay it. `signature` is an opaque `Option
+      <String>`, never interpreted by the engine (P-1); `redacted` marks an
+      encrypted block whose text was withheld.
+- [x] `anthropic` adapter: mapper translates `thinking_delta`→`ReasoningDelta`,
+      accumulates `signature_delta` and flushes it as `ReasoningSignature` at
+      block stop, and surfaces `redacted_thinking` as a placeholder delta +
+      preserved `data`. `block_to_anthropic` replays a `Reasoning` block as a
+      `thinking` (or `redacted_thinking`) wire block — the only place the wire
+      shape/signature is known (P-1).
+- [x] `openai` adapter: maps a `reasoning_content` / `reasoning` delta →
+      `ReasoningDelta`; no signature echo on this wire. `Reasoning` blocks in
+      the conversation are naturally skipped by `message_to_openai`.
+- [x] `fake` provider: no change needed — `ScriptedResponse` already carries
+      arbitrary `StreamEvent`s, so tests script `ReasoningDelta` frames directly.
+- [x] Tests (8): anthropic thinking stream → delta/delta/signature/text in
+      order; redacted → placeholder + preserved data; plain text emits no
+      reasoning; `Reasoning` replays as `thinking` w/ signature and as
+      `redacted_thinking`; openai `reasoning_content` → delta and plain content
+      emits none. Engine context-count includes replayed reasoning; summary
+      skips it.
 
 ## 4. Effort as engine state  *(C-6 effort half, Tech Spec §3.2, §6.6, §8)*
 
@@ -218,3 +226,14 @@ G-22 routes these to the owner):
 - **No `SCHEMA_VERSION` bump** for `EffortChange` / the `reasoning` field on
   `AssistantMessage` — both additive, warn-skipped by older readers, matching
   the `ModelSwitch` precedent from Phase 1.
+- **Spec feedback to raise in group 7 (docs):** the Spec §4.1 event list names
+  only `ReasoningDelta`; implementation added a companion `ReasoningSignature`
+  event and a normalized `ContentBlock::Reasoning { text, signature, redacted }`
+  so the opaque provider signature survives across turns for replay (§4.7's
+  "echoed back on subsequent tool-use turns"). The signature is opaque — no
+  wire *type* crosses the boundary, satisfying P-1 in substance. Record as a
+  downstream feedback entry (Spec §4.1/§4.7) at the next Spec bump (SFD G-24).
+- **Redacted-thinking replay is best-effort, untested live:** captured as a
+  placeholder delta + preserved `data` and replayed as `redacted_thinking`, but
+  never exercised against a live endpoint (redacted blocks are rare). Noted so
+  it is not mistaken for verified.

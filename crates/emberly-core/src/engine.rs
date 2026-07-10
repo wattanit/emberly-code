@@ -1308,6 +1308,9 @@ impl Engine {
                         count(name).saturating_add(count(&input.to_string()))
                     }
                     ContentBlock::ToolResult { content, .. } => count(content),
+                    // Replayed reasoning is sent back on the wire, so it counts
+                    // toward the context budget (P-10).
+                    ContentBlock::Reasoning { text, .. } => count(text),
                 });
             }
         }
@@ -1348,6 +1351,9 @@ fn render_for_summary(messages: &[Message]) -> String {
                 ContentBlock::Text { text } => text.clone(),
                 ContentBlock::ToolUse { name, input, .. } => format!("[tool call: {name} {input}]"),
                 ContentBlock::ToolResult { content, .. } => format!("[tool result: {content}]"),
+                // Reasoning is the model's private scratch, not conversation
+                // content; the summary is built from the answer, so skip it.
+                ContentBlock::Reasoning { .. } => String::new(),
             };
             if !piece.is_empty() {
                 out.push_str(role);

@@ -40,6 +40,25 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// A captured reasoning/thinking block from a prior assistant turn (P-10).
+    /// Carried in the conversation so a provider that requires reasoning to be
+    /// echoed back on later tool-use turns can replay it. `signature` is an
+    /// opaque provider token, never interpreted by the engine (P-1); `redacted`
+    /// marks an encrypted block whose `text` was withheld by the provider. An
+    /// adapter that has no use for reasoning blocks simply skips them.
+    Reasoning {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        redacted: bool,
+    },
+}
+
+/// `skip_serializing_if` helper: omit `redacted` from the wire when false.
+#[allow(clippy::trivially_copy_pass_by_ref)] // signature required by serde
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One message in the normalized conversation.

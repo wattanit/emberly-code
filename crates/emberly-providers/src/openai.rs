@@ -254,6 +254,22 @@ impl SseMapper for OpenAiMapper {
             }
         }
 
+        // Reasoning, where the server exposes it distinctly (P-10). OpenAI-
+        // compatible endpoints are inconsistent here — `reasoning_content`
+        // (DeepSeek) and `reasoning` are both seen — so accept either. No
+        // signature echo is required on this wire.
+        if let Some(reasoning) = delta
+            .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"))
+            .and_then(Value::as_str)
+        {
+            if !reasoning.is_empty() {
+                out.push(Ok(StreamEvent::ReasoningDelta {
+                    text: reasoning.to_string(),
+                }));
+            }
+        }
+
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in tool_calls {
                 let index = call.get("index").and_then(Value::as_u64).unwrap_or(0);
@@ -336,5 +352,35 @@ mod tests {
         // Empty effort_levels ⇒ the model has no reasoning control (P-9).
         let body = build_body(&req_with_effort(Some(Effort::High)), &[]);
         assert_eq!(body.get("reasoning_effort"), None);
+    }
+
+    fn map_one(data: &str) -> Vec<StreamEvent> {
+        let mut mapper = OpenAiMapper::default();
+        mapper
+            .map(SseEvent {
+                event: None,
+                data: data.to_string(),
+            })
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect()
+    }
+
+    #[test]
+    fn reasoning_content_delta_maps_to_reasoning_delta() {
+        let events =
+            map_one(r#"{"choices":[{"delta":{"reasoning_content":"pondering"},"index":0}]}"#);
+        assert_eq!(
+            events,
+            vec![StreamEvent::ReasoningDelta {
+                text: "pondering".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn plain_content_delta_emits_no_reasoning() {
+        let events = map_one(r#"{"choices":[{"delta":{"content":"hi"},"index":0}]}"#);
+        assert_eq!(events, vec![StreamEvent::TextDelta { text: "hi".into() }]);
     }
 }
