@@ -30,6 +30,15 @@ pub enum Command {
     /// the engine validates the transition against the sandbox status.
     SetMode { mode: Mode },
 
+    /// Switch the active provider profile — and optionally the model — for
+    /// subsequent turns (C-6). `model` `None` keeps the current model id.
+    /// Issued at idle (the frontend gates it while a turn runs); applies to the
+    /// next turn and never rewrites prior turns.
+    SwitchModel {
+        profile: String,
+        model: Option<String>,
+    },
+
     /// Request manual compaction (Requirements §8.3). Handled from Phase 5;
     /// queued until a clean message boundary if invoked mid-run.
     Compact,

@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 
 use crate::command::Command;
 use crate::event::UiEvent;
+use crate::factory::ProviderFactory;
 use crate::gate::{ChannelGate, PermissionAsk};
 use crate::id::{PermissionId, SessionId};
 use crate::transcript::{
@@ -92,6 +93,9 @@ pub struct EngineConfig {
     /// A `/compact` summarization-prompt override (P-7); `None` uses the
     /// built-in default.
     pub summary_prompt: Option<String>,
+    /// Builds a provider for a profile name on an in-session switch (C-6).
+    /// `None` disables switching (e.g. the offline placeholder session).
+    pub provider_factory: Option<Arc<dyn ProviderFactory>>,
 }
 
 impl EngineConfig {
@@ -189,6 +193,8 @@ pub struct Engine {
     compact_requested: bool,
     /// Optional `/compact` prompt override (P-7).
     summary_prompt: Option<String>,
+    /// Builds a provider on an in-session model switch (C-6); `None` disables it.
+    provider_factory: Option<Arc<dyn ProviderFactory>>,
 }
 
 impl Engine {
@@ -242,6 +248,7 @@ impl Engine {
             resuming: config.resuming,
             compact_requested: false,
             summary_prompt: config.summary_prompt,
+            provider_factory: config.provider_factory,
         };
         (engine, asks_rx)
     }
@@ -309,6 +316,9 @@ impl Engine {
                 Command::NewSession { session_id } => self.start_new_session(session_id).await,
                 Command::ResumeSession { session_id } => self.resume_session(session_id).await,
                 Command::SetMode { mode } => self.set_mode(mode).await,
+                Command::SwitchModel { profile, model } => {
+                    self.switch_model(profile, model).await;
+                }
             }
         }
 
@@ -874,6 +884,52 @@ impl Engine {
                         unavailable.reason,
                         mode_label(self.mode),
                     ),
+                })
+                .await;
+            }
+        }
+    }
+
+    /// Switch the active provider/model for subsequent turns (C-6). Runs at
+    /// this clean boundary (idle) and never rewrites prior turns; a failure to
+    /// build (unknown profile, missing key) is a harness-world error and the
+    /// current model stays active.
+    async fn switch_model(&mut self, profile: String, model: Option<String>) {
+        let Some(factory) = self.provider_factory.clone() else {
+            self.emit(UiEvent::Notice {
+                message: "switching models is not available in this session".into(),
+            })
+            .await;
+            return;
+        };
+        let model = model.unwrap_or_else(|| self.model.clone());
+        match factory.build(&profile, &model) {
+            Ok(choice) => {
+                if choice.profile == self.provider_label && choice.model == self.model {
+                    return; // no-op: already active
+                }
+                self.provider = choice.provider;
+                self.provider_label = choice.profile.clone();
+                self.model = choice.model.clone();
+                self.write_transcript(TranscriptEvent::ModelSwitch {
+                    provider: choice.profile.clone(),
+                    model: choice.model.clone(),
+                });
+                self.emit(UiEvent::ModelChanged {
+                    provider: choice.profile.clone(),
+                    model: choice.model.clone(),
+                })
+                .await;
+                self.emit(UiEvent::Notice {
+                    message: format!("switched to {} / {}", choice.profile, choice.model),
+                })
+                .await;
+            }
+            Err(why) => {
+                self.emit(UiEvent::HarnessError {
+                    what: format!("could not switch to '{profile}'"),
+                    why,
+                    next: format!("staying on {} / {}", self.provider_label, self.model),
                 })
                 .await;
             }

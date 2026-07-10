@@ -8,12 +8,13 @@
 //! overrides + `keys.toml`). When no provider is configured, the caller falls
 //! back to the offline placeholder.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context};
 use emberly_providers::{AnthropicProvider, Auth, ModelInfo, OpenAiProvider, Pricing, Provider};
 
-use crate::config::{AuthFile, Resolved};
+use crate::config::{AuthFile, ProfileFile, Resolved};
 
 /// A chosen live provider plus display/label info.
 pub struct Selection {
@@ -30,8 +31,27 @@ pub fn build(resolved: &Resolved) -> anyhow::Result<Option<Selection>> {
     let Some(profile_name) = resolved.provider.clone() else {
         return Ok(None);
     };
-    let profile = resolved.providers.get(&profile_name).ok_or_else(|| {
-        let mut known: Vec<&String> = resolved.providers.keys().collect();
+    let model = resolved.model.clone().context(
+        "a model must be configured when a provider is set (EMBERLY_MODEL, --model, or config.toml)",
+    )?;
+    let provider = build_profile(&resolved.providers, &profile_name, &model)?;
+    Ok(Some(Selection {
+        provider,
+        label: format!("{profile_name}/{model}"),
+        model,
+    }))
+}
+
+/// Build a provider from a single profile + model — the shared resolution used
+/// by [`build`] and by the in-session [`ProviderFactory`](emberly_core::ProviderFactory).
+/// Adding a provider that reuses an existing adapter is config only (P-8).
+fn build_profile(
+    providers: &HashMap<String, ProfileFile>,
+    profile_name: &str,
+    model: &str,
+) -> anyhow::Result<Arc<dyn Provider>> {
+    let profile = providers.get(profile_name).ok_or_else(|| {
+        let mut known: Vec<&String> = providers.keys().collect();
         known.sort();
         anyhow!(
             "unknown provider profile '{profile_name}' (configured: {})",
@@ -45,14 +65,11 @@ pub fn build(resolved: &Resolved) -> anyhow::Result<Option<Selection>> {
     let adapter = profile.adapter.as_deref().ok_or_else(|| {
         anyhow!("provider profile '{profile_name}' has no `adapter` (expected \"anthropic\" or \"openai\")")
     })?;
-    let model = resolved.model.clone().context(
-        "a model must be configured when a provider is set (EMBERLY_MODEL, --model, or config.toml)",
-    )?;
 
-    let auth = resolve_auth(profile.auth.as_ref(), &profile_name)?;
-    let meta = profile.models.get(&model);
+    let auth = resolve_auth(profile.auth.as_ref(), profile_name)?;
+    let meta = profile.models.get(model);
     let model_info = ModelInfo {
-        model: model.clone(),
+        model: model.to_string(),
         context_window: meta.and_then(|m| m.context_window).unwrap_or(200_000),
         max_output_tokens: meta.and_then(|m| m.max_output).unwrap_or(4_096),
         pricing: meta.and_then(|m| m.pricing).map(|p| Pricing {
@@ -79,12 +96,40 @@ pub fn build(resolved: &Resolved) -> anyhow::Result<Option<Selection>> {
              (expected \"anthropic\" or \"openai\")"
         ),
     };
+    Ok(provider)
+}
 
-    Ok(Some(Selection {
-        provider,
-        label: format!("{profile_name}/{model}"),
-        model,
-    }))
+/// A [`ProviderFactory`](emberly_core::ProviderFactory) over the resolved
+/// profiles, so the engine can switch models in-session (C-6) without
+/// depending on config/wiring. Holds the merged profile map (cheap to clone).
+pub struct ConfiguredProviders {
+    providers: HashMap<String, ProfileFile>,
+}
+
+impl ConfiguredProviders {
+    #[must_use]
+    pub fn new(resolved: &Resolved) -> Self {
+        Self {
+            providers: resolved.providers.clone(),
+        }
+    }
+}
+
+impl emberly_core::ProviderFactory for ConfiguredProviders {
+    fn build(&self, profile: &str, model: &str) -> Result<emberly_core::ProviderChoice, String> {
+        let provider = build_profile(&self.providers, profile, model).map_err(|e| e.to_string())?;
+        Ok(emberly_core::ProviderChoice {
+            provider,
+            profile: profile.to_string(),
+            model: model.to_string(),
+        })
+    }
+
+    fn profiles(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.providers.keys().cloned().collect();
+        names.sort();
+        names
+    }
 }
 
 /// Turn a profile's `auth` config into an [`Auth`], resolving the key

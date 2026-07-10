@@ -18,6 +18,7 @@ pub mod channels;
 pub mod command;
 pub mod engine;
 pub mod event;
+pub mod factory;
 pub mod gate;
 pub mod id;
 pub mod prompts;
@@ -31,6 +32,7 @@ pub use command::Command;
 pub use emberly_providers::{Message, RetryPolicy};
 pub use engine::{Engine, EngineConfig};
 pub use event::UiEvent;
+pub use factory::{ProviderChoice, ProviderFactory};
 pub use gate::PermissionAsk;
 pub use id::{PermissionId, SessionId, ToolCallId};
 pub use transcript::{

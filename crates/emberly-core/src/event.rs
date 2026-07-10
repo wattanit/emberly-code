@@ -79,6 +79,11 @@ pub enum UiEvent {
     /// The auto-accept mode changed (Requirements §6.4). Emitted from Phase 2.
     ModeChanged { mode: Mode },
 
+    /// The active provider profile / model changed in-session (C-6, Design
+    /// §3.1). The sidebar updates; the switch is also announced via a
+    /// [`Notice`](UiEvent::Notice) — never silent.
+    ModelChanged { provider: String, model: String },
+
     /// A plain-language, harness-voice notice for the timeline (Design §6.1):
     /// a persisted permission grant's written line (§6.6), a refused auto-mode
     /// switch when degraded (§6.7), or the one-time degraded-sandbox

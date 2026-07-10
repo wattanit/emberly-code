@@ -377,6 +377,12 @@ impl App {
             UiEvent::SessionUsage { usage } => self.session_usage = usage,
             UiEvent::SandboxStatus { status } => self.sandbox = Some(status),
             UiEvent::ModeChanged { mode } => self.mode = mode,
+            UiEvent::ModelChanged { provider, model } => {
+                // Sidebar reflects the new provider/model; the engine also emits
+                // a Notice, so the switch is never silent (Design §3.1).
+                self.session.provider = provider;
+                self.session.model = model;
+            }
             UiEvent::Notice { message } => self.conversation.push(ConvItem::Notice(message)),
             UiEvent::HarnessError { what, why, next } => {
                 self.conversation
@@ -796,6 +802,14 @@ impl App {
     /// Run a typed `/name` command; unknown names surface a calm notice.
     fn run_slash(&mut self, name: &str) -> Action {
         let name = name.trim();
+        // `/model <profile> [model]` takes arguments, so it is parsed before the
+        // argument-less command registry (C-6). `modelx` is not a match.
+        if let Some(rest) = name
+            .strip_prefix("model")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return self.run_model_command(rest.trim());
+        }
         match commands::by_name(name) {
             Some(cmd) => self.run_command(cmd),
             None => {
@@ -805,6 +819,30 @@ impl App {
                 Action::None
             }
         }
+    }
+
+    /// `/model <profile> [model]` — switch the active provider profile (and
+    /// optionally the model) for subsequent turns (C-6). Gated at idle, like
+    /// `/new`: a switch applies to the next turn.
+    fn run_model_command(&mut self, args: &str) -> Action {
+        if self.busy {
+            self.conversation.push(ConvItem::Notice(
+                "finish or cancel the current turn before switching models".into(),
+            ));
+            return Action::None;
+        }
+        let mut parts = args.split_whitespace();
+        let Some(profile) = parts.next() else {
+            self.conversation.push(ConvItem::Notice(
+                "usage: /model <profile> [model] — switches the active provider/model".into(),
+            ));
+            return Action::None;
+        };
+        let model = parts.next().map(str::to_string);
+        Action::Command(Command::SwitchModel {
+            profile: profile.to_string(),
+            model,
+        })
     }
 
     /// Execute a command from the palette, a slash command, or a keybinding.
@@ -1121,6 +1159,8 @@ fn help_text() -> String {
         let key = spec.key.map(|k| format!("  [{k}]")).unwrap_or_default();
         out.push_str(&format!("/{:<9}{}\n    {}\n", spec.name, key, spec.desc));
     }
+    // Argument-taking command, not in the registry (C-6).
+    out.push_str("/model <profile> [model]\n    Switch the active provider/model\n");
     out
 }
 
@@ -1131,6 +1171,58 @@ mod tests {
 
     fn app() -> App {
         App::new(SessionInfo::default(), std::env::temp_dir())
+    }
+
+    #[test]
+    fn slash_model_switches_provider_and_model() {
+        let mut a = app();
+        assert_eq!(
+            a.run_slash("model zai glm-4.6"),
+            Action::Command(Command::SwitchModel {
+                profile: "zai".into(),
+                model: Some("glm-4.6".into()),
+            })
+        );
+        // Profile only → keep-current-model (None).
+        assert_eq!(
+            a.run_slash("model openai"),
+            Action::Command(Command::SwitchModel {
+                profile: "openai".into(),
+                model: None,
+            })
+        );
+    }
+
+    #[test]
+    fn slash_model_without_args_shows_usage() {
+        let mut a = app();
+        assert_eq!(a.run_slash("model"), Action::None);
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("usage: /model"))));
+    }
+
+    #[test]
+    fn slash_modelx_is_not_the_model_command() {
+        // A command whose name merely starts with "model" is not `/model`.
+        let mut a = app();
+        assert_eq!(a.run_slash("modelx"), Action::None);
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown command"))));
+    }
+
+    #[test]
+    fn model_changed_updates_the_sidebar() {
+        let mut a = app();
+        a.apply_event(UiEvent::ModelChanged {
+            provider: "zai".into(),
+            model: "glm-4.6".into(),
+        });
+        assert_eq!(a.session.provider, "zai");
+        assert_eq!(a.session.model, "glm-4.6");
     }
 
     #[test]

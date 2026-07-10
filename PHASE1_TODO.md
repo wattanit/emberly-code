@@ -24,7 +24,7 @@ adapters, config/keys system, engine channels, and TUI sidebar all exist.
 | 2. `[providers.<name>]` profile config | [x] | Done 2026-07-10 (with group 3) |
 | 3. Profile resolution in the composition root | [x] | Done 2026-07-10; live smoke of all 3 paths |
 | 4. Z.ai profile (baked-in + init + docs) | [x] | Done 2026-07-10; baked-in zai (openai @ paas/v4), grep-gate test, README |
-| 5. In-session switching (`Command::SwitchModel`) | [ ] | C-6 model half |
+| 5. In-session switching (`Command::SwitchModel`) | [x] | Done 2026-07-10; engine + factory + `/model`; 5 tests |
 | 6. Sidebar model picker | [ ] | Design §3.1 |
 | 7. Tests (offline + live smoke) | [ ] | Tech Spec §14.5, §14.4 |
 | 8. Docs, provenance & exit criterion | [ ] | |
@@ -108,16 +108,24 @@ Replace the hardcoded `match kind.as_str()` in
 
 ## 5. In-session model/provider switching  *(C-6 model half; Tech Spec §8, §3)*
 
-- [ ] `Command::SwitchModel{ profile }` in `emberly-core`; the engine swaps
-      the active `Arc<dyn Provider>` for **subsequent** turns only, at a clean
-      message boundary (never mid-turn). Prior turns are untouched.
-- [ ] Emit `UiEvent::ModelChanged{ provider, model }` (Tech Spec §3.1) and
-      write a `model_switch` `TranscriptEvent` (Tech Spec §3.2) — additive,
-      forward-compatible (Tech Spec §3.3), so v0.1 transcripts still resume.
-- [ ] Announce the switch in the conversation in the harness's own voice —
-      never silently (Design §3.1, "speech about deviations").
-- [ ] `/model` command routes to the same `SwitchModel` command (palette +
-      slash + keybinding parity, Design §3.3).
+- [x] `Command::SwitchModel{ profile, model }` in `emberly-core`; engine swaps
+      the active provider at the idle boundary (frontend gates on `busy`).
+      Provider construction stays in the binary via a new injected
+      `ProviderFactory` trait (`factory.rs`) — the engine calls it, keeping
+      the engine/frontend boundary clean. Binary impl: `ConfiguredProviders`
+      wrapping the resolved profiles (shares `build_profile` with group 3).
+- [x] Emit `UiEvent::ModelChanged{ provider, model }` + write a `ModelSwitch`
+      `TranscriptEvent` — additive, warn-skipped by old readers (Tech Spec
+      §3.3), no schema bump (audit-only, skipped on rebuild).
+- [x] Switch announced via a harness-voice `Notice` — never silent
+      (Design §3.1). Failure (unknown profile / missing key) → `HarnessError`,
+      current model kept.
+- [x] `/model <profile> [model]` slash command → `SwitchModel`; `model`
+      omitted keeps the current model. Listed in `/help`. Sidebar updates on
+      `ModelChanged`. (Palette picker is group 6.)
+- [x] Tests: engine round-trip (swap + emit + record; unknown-profile error
+      without switching) and TUI parsing (args, usage, `modelx` non-match,
+      sidebar update) — 5 tests, all green.
 
 ## 6. Sidebar model picker  *(Design §3.1)*
 

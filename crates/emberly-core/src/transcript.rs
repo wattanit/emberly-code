@@ -129,6 +129,10 @@ pub enum TranscriptEvent {
     /// The auto-accept mode changed (Requirements §6.4).
     ModeChange { mode: Mode },
 
+    /// The active provider profile / model was switched in-session (C-6). An
+    /// audit record (HC-7); the conversation view is unaffected.
+    ModelSwitch { provider: String, model: String },
+
     /// A `/compact` occurred: the summary text and the range of view turns it
     /// replaced (Requirements §8.3). The JSONL log itself is untouched.
     Compaction {

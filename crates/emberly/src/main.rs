@@ -477,6 +477,9 @@ async fn run() -> anyhow::Result<()> {
         initial_conversation,
         resuming,
         summary_prompt: resolved.summary_prompt.clone(),
+        // Lets `/model` switch provider/model in-session (C-6); resolves any
+        // configured profile, so it works even from the offline placeholder.
+        provider_factory: Some(Arc::new(provider_setup::ConfiguredProviders::new(&resolved))),
     };
 
     let (engine_ports, frontend_ports) = channel();
