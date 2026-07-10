@@ -35,13 +35,13 @@ config-defeatable) with exactly that lean design. This phase is its named door.
 | Group | Status | Notes |
 |---|---|---|
 | 1. Tool-call explanation — schema injection + prompt + event (T-9 provider/engine) | [x] | Done 2026-07-11; injection at `build_request` (both adapters); `ui.tool_explanations` default true; VERSION 2→3 + `tool_explanation.md`; `ToolStarted.explanation`; 7 tests |
-| 2. Tool-call explanation — UI caption (T-9 TUI + degraded) | [ ] | dim caption under the call; absent when none (no placeholder); never result/error styling, never color-only; line-mode parity |
+| 2. Tool-call explanation — UI caption (T-9 TUI + degraded) | [x] | Done 2026-07-11; `ConvItem::Tool.explanation`; dim `↳` caption (rich) / `-` lead (line); absent→none; replay reads it from transcript args; 5 tests |
 | 3. ask_user — round-trip plumbing + the tool (T-8 engine) | [ ] | `AskId`, `AskUserRequest`/`AskUserAnswer`, `AskGate` oneshot+mpsc mirror of the permission gate, `ask_user` transcript event, the built-in tool in `default_registry()` |
 | 4. ask_user — the question prompt UI (T-8 rich TUI) | [ ] | calm styling (never the safety band), selectable options + free-text, no unsafe default (Enter never auto-answers), Esc→declined, no motion |
 | 5. ask_user — degraded-mode question prompt (T-8 line) | [ ] | full parity: numbered options + free-text line, deliberate answer, empty/Esc→declined; two pending slots so it can't collide with a permission prompt |
 | 6. End-to-end, exit criterion, docs & SFD bookkeeping | [ ] | combined offline round trip; README; Spec bump decision (owner); memory update (tool-explanation graduated) |
 
-**Overall Phase 4: IN PROGRESS** (1 / 6 groups). Branch
+**Overall Phase 4: IN PROGRESS** (2 / 6 groups). Branch
 `phase4/ask-user-and-explanation` off `version0.2` (Phase 3 merged).
 
 ---
@@ -151,17 +151,17 @@ Extraction (`explanation_from_args`) is unconditional and trims blanks to
 
 The call stays the headline; the explanation is the caption.
 
-- [ ] **Rich TUI:** `ConvItem::Tool` carries `explanation: Option<String>`
+- [x] **Rich TUI:** `ConvItem::Tool` carries `explanation: Option<String>`
       (from `ToolStarted`); render a **single dimmed caption line directly
       under the call**. Absent when `None` — **no placeholder**. Never styled as
       a result or error; never color-only (Design §4.5/§7) — the dim + position
       under the call carries it without relying on colour.
-- [ ] **Degraded/line mode** (`line.rs`): the caption renders too (plain,
+- [x] **Degraded/line mode** (`line.rs`): the caption renders too (plain,
       dimmed-by-convention prefix), absent when none — degraded parity, no ANSI.
-- [ ] Tests: caption rendered when present / absent when none (both frontends);
+- [x] Tests: caption rendered when present / absent when none (both frontends);
       line-mode emits no ANSI escape with an explanation in the stream; caption
       is not the result line.
-- [ ] `cargo fmt` + `clippy` + `test` green; commit.
+- [x] `cargo fmt` + `clippy` + `test` green; commit.
 
 ---
 

@@ -67,8 +67,19 @@ impl LineRenderer {
                 self.in_reasoning = false;
                 writeln!(out)?;
             }
-            UiEvent::ToolStarted { tool, summary, .. } => {
+            UiEvent::ToolStarted {
+                tool,
+                summary,
+                explanation,
+                ..
+            } => {
                 writeln!(out, "\n> {tool}: {summary}")?;
+                // The model's caption (T-9), indented under the call. ASCII
+                // lead so degraded mode carries it without a glyph or colour
+                // (Design §4.5/§7); absent → nothing.
+                if let Some(explanation) = explanation {
+                    writeln!(out, "    - {explanation}")?;
+                }
             }
             UiEvent::ToolFinished {
                 ok,
@@ -437,6 +448,36 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_explanation_renders_indented_under_the_call() {
+        let out = render_to_string(&UiEvent::ToolStarted {
+            call_id: ToolCallId::new("c"),
+            tool: "bash".into(),
+            summary: "run: sed -i s/debug/info/ log.conf".into(),
+            explanation: Some("raise the log level to info".into()),
+        });
+        assert!(
+            out.contains("run: sed"),
+            "the call stays the headline: {out:?}"
+        );
+        assert!(
+            out.contains("- raise the log level to info"),
+            "caption indented under the call, ASCII lead (Design §4.5/§7): {out:?}"
+        );
+    }
+
+    #[test]
+    fn no_explanation_renders_no_caption_line() {
+        let out = render_to_string(&UiEvent::ToolStarted {
+            call_id: ToolCallId::new("c"),
+            tool: "read_file".into(),
+            summary: "read src/main.rs".into(),
+            explanation: None,
+        });
+        // Only the call line — no dangling indented caption (no placeholder).
+        assert_eq!(out.trim(), "> read_file: read src/main.rs");
+    }
+
+    #[test]
     fn degraded_output_has_no_ansi_escapes() {
         // Degraded mode is colourless and append-only: no ANSI/cursor control
         // ever reaches the stream (Design §7).
@@ -448,7 +489,8 @@ mod tests {
                 call_id: ToolCallId::new("c"),
                 tool: "bash".into(),
                 summary: "run: ls".into(),
-                explanation: None,
+                // Exercise the caption path in the no-ANSI sweep too.
+                explanation: Some("list the working tree".into()),
             },
             UiEvent::ToolFinished {
                 call_id: ToolCallId::new("c"),

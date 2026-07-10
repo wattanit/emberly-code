@@ -56,6 +56,9 @@ pub enum ConvItem {
         /// What the call is doing (from `describe`) — e.g. `run: cargo test`.
         /// Set at start and kept; the result status is separate.
         summary: String,
+        /// The model's caption for a non-obvious call (T-9, Design §4.5).
+        /// `None` when the model gave none — rendered as nothing, no placeholder.
+        explanation: Option<String>,
         /// `None` while running; `Some(ok)` once finished.
         done: Option<bool>,
         /// The finished one-line status (e.g. `exit 0`, `read foo.rs (12 lines)`).
@@ -375,10 +378,19 @@ impl App {
                                 .map(|p| format!("{tool} {p}"))
                         })
                         .unwrap_or_else(|| tool.clone());
+                    // The explanation (T-9) rides in the recorded args, so a
+                    // replayed session shows the same caption a live one did.
+                    let explanation = args
+                        .get("explanation")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
                     self.conversation.push(ConvItem::Tool {
                         call_id: call_id.clone(),
                         tool: tool.clone(),
                         summary,
+                        explanation,
                         done: None,
                         result: None,
                         preview: None,
@@ -456,14 +468,14 @@ impl App {
                 call_id,
                 tool,
                 summary,
-                // Rendered as a caption in group 2 (T-9).
-                explanation: _,
+                explanation,
             } => {
                 self.streaming = false;
                 self.conversation.push(ConvItem::Tool {
                     call_id,
                     tool,
                     summary,
+                    explanation,
                     done: None,
                     result: None,
                     preview: None,
@@ -1834,6 +1846,23 @@ mod tests {
                 assert_eq!(summary, "run: ls");
                 assert_eq!(result.as_deref(), Some("exit 0"));
                 assert_eq!(preview.as_deref(), Some("hello\nworld"));
+            }
+            other => panic!("expected a tool item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_started_carries_the_explanation_onto_the_item() {
+        let mut a = app();
+        a.apply_event(UiEvent::ToolStarted {
+            call_id: ToolCallId::new("c1"),
+            tool: "bash".into(),
+            summary: "run: sed …".into(),
+            explanation: Some("raise the log level".into()),
+        });
+        match &a.conversation[0] {
+            ConvItem::Tool { explanation, .. } => {
+                assert_eq!(explanation.as_deref(), Some("raise the log level"));
             }
             other => panic!("expected a tool item, got {other:?}"),
         }

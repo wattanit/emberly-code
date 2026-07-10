@@ -409,6 +409,7 @@ fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             }
             ConvItem::Tool {
                 summary,
+                explanation,
                 done,
                 result,
                 preview,
@@ -429,6 +430,29 @@ fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                     spans.push(Span::styled(format!(" — {result}"), theme.chrome()));
                 }
                 out.push(Line::from(spans));
+
+                // The model's caption (T-9, Design §4.5): a single dim line
+                // directly under the call, led by a marker so it reads as an
+                // annotation, not tool output. Absent → nothing (no placeholder).
+                // Dim + marker + position carry it — never styled as a result or
+                // error, never meaning-by-colour (Design §4.5/§7).
+                if let Some(explanation) = explanation {
+                    let lead = format!("    {} ", markers::EXPLANATION);
+                    for (i, row) in text::wrap(explanation, w.saturating_sub(6))
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let prefix = if i == 0 {
+                            lead.clone()
+                        } else {
+                            "      ".into()
+                        };
+                        out.push(Line::from(vec![
+                            Span::raw(prefix),
+                            Span::styled(row, theme.chrome()),
+                        ]));
+                    }
+                }
 
                 // Result preview: a few indented, dimmed lines of the output so
                 // the user sees what the tool produced (Design §6.1).
@@ -1134,6 +1158,52 @@ mod tests {
         assert!(
             screen.contains("Cargo.toml"),
             "shows a preview of the output"
+        );
+    }
+
+    #[test]
+    fn tool_call_explanation_renders_as_a_dim_caption() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.apply_event(UiEvent::ToolStarted {
+            call_id: emberly_core::ToolCallId::new("c1"),
+            tool: "bash".into(),
+            summary: "run: sed -i s/debug/info/ log.conf".into(),
+            explanation: Some("raise the log level to info".into()),
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(
+            screen.contains("raise the log level to info"),
+            "caption shown under the call"
+        );
+        assert!(
+            screen.contains(crate::strings::markers::EXPLANATION),
+            "caption led by the annotation marker — meaning without colour (Design §4.5)"
+        );
+    }
+
+    #[test]
+    fn no_explanation_shows_no_caption() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.apply_event(UiEvent::ToolStarted {
+            call_id: emberly_core::ToolCallId::new("c1"),
+            tool: "read_file".into(),
+            summary: "read src/main.rs".into(),
+            explanation: None,
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(
+            !screen.contains(crate::strings::markers::EXPLANATION),
+            "no caption marker when the model gave none — no placeholder (Design §4.5)"
         );
     }
 
