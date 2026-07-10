@@ -31,6 +31,10 @@ pub enum AppCommand {
     /// Open the model/provider picker (C-6). `/model <profile>` switches
     /// directly; with no argument (or from the palette) it opens the picker.
     Model,
+    /// Edit the project `.agents/config.toml` in `$EDITOR` (C-5).
+    Config,
+    /// Edit a prompt file in `$EDITOR` (C-5). `/prompt [system|compact]`.
+    Prompt,
     /// Cancel the in-flight turn.
     Cancel,
     /// Exit emberly.
@@ -96,6 +100,18 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "Switch the active provider/model",
         cmd: AppCommand::Model,
+    },
+    CommandSpec {
+        name: "config",
+        key: None,
+        desc: "Edit .agents/config.toml in $EDITOR",
+        cmd: AppCommand::Config,
+    },
+    CommandSpec {
+        name: "prompt",
+        key: None,
+        desc: "Edit a prompt file in $EDITOR (/prompt system|compact)",
+        cmd: AppCommand::Prompt,
     },
     CommandSpec {
         name: "sidebar",

@@ -11,6 +11,9 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use crossterm::event::Event;
 use emberly_core::{resume, Command, FrontendPorts, SessionId, TranscriptRecord};
@@ -29,13 +32,16 @@ pub async fn run(
     history: Vec<TranscriptRecord>,
     sessions_dir: PathBuf,
     profiles: Vec<String>,
+    config_template: String,
 ) -> io::Result<()> {
     let mut guard = TerminalGuard::enter()?;
-    let mut app = App::new(session, sessions_dir, profiles);
+    let mut app = App::new(session, sessions_dir, profiles, config_template);
     app.seed_history(&history);
     app.motion = motion_enabled();
 
-    let mut input_rx = spawn_input_reader();
+    // Shared with the input reader so an `$EDITOR` handoff can pause it (C-5).
+    let input_paused = Arc::new(AtomicBool::new(false));
+    let mut input_rx = spawn_input_reader(input_paused.clone());
     let mut events_rx = ports.events_rx;
     // The single animation ticker (Design §6.4): ~12fps, and only ever causes a
     // redraw while something is animating, so an idle screen stays quiet.
@@ -84,6 +90,17 @@ pub async fn run(
                         }
                         Action::ResumeSession(id) => {
                             switch_session(&mut app, &commands_tx, id).await;
+                        }
+                        Action::EditFile(path) => {
+                            // Hand the terminal to $EDITOR (C-5): pause the input
+                            // reader so the editor gets the keystrokes, leave the
+                            // TUI, run the editor, then restore and redraw.
+                            input_paused.store(true, Ordering::Relaxed);
+                            guard.suspend()?;
+                            let status = crate::edit::run_editor(&path);
+                            guard.resume()?;
+                            input_paused.store(false, Ordering::Relaxed);
+                            app.note_edit(&path, status);
                         }
                         Action::None => {}
                     }
@@ -152,17 +169,29 @@ fn motion_enabled() -> bool {
     )
 }
 
-/// Spawn the blocking terminal-input reader on its own OS thread, forwarding
-/// events over a channel. `crossterm::event::read` blocks, so it cannot live in
-/// the async `select!`; the thread ends when the channel closes or the read
-/// errors (terminal gone).
-fn spawn_input_reader() -> mpsc::Receiver<Event> {
+/// Spawn the terminal-input reader on its own OS thread, forwarding events over
+/// a channel. It polls with a short timeout (rather than a bare blocking
+/// `read`) so it can be **paused**: while `paused` is set — during an `$EDITOR`
+/// handoff (C-5) — the thread reads nothing, leaving the terminal's input to the
+/// child editor. The thread ends when the channel closes or the read errors.
+fn spawn_input_reader(paused: Arc<AtomicBool>) -> mpsc::Receiver<Event> {
     let (tx, rx) = mpsc::channel::<Event>(64);
-    std::thread::spawn(move || {
-        while let Ok(event) = crossterm::event::read() {
-            if tx.blocking_send(event).is_err() {
-                break;
-            }
+    std::thread::spawn(move || loop {
+        if paused.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        match crossterm::event::poll(Duration::from_millis(50)) {
+            Ok(true) => match crossterm::event::read() {
+                Ok(event) => {
+                    if tx.blocking_send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            },
+            Ok(false) => {} // timeout — loop and re-check `paused`
+            Err(_) => break,
         }
     });
     rx

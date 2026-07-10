@@ -15,7 +15,7 @@ use emberly_core::{
 };
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::commands::{self, AppCommand};
 use crate::editor::LineEditor;
@@ -175,6 +175,9 @@ pub enum Action {
     /// Resume the saved session with this id (picker selection). The frontend
     /// reads its transcript, tells the engine, and reseeds the view.
     ResumeSession(SessionId),
+    /// Open this file in `$EDITOR` (C-5). The frontend suspends the TUI, runs
+    /// the editor, restores, and reports the outcome.
+    EditFile(PathBuf),
 }
 
 /// The complete view-model the renderer reads.
@@ -186,6 +189,10 @@ pub struct App {
     /// Configured provider-profile names, for the model picker (`/model`, C-6).
     /// Sorted; empty when no factory/profiles are available.
     pub profiles: Vec<String>,
+    /// The `.agents/config.toml` starter written by `/config` when the project
+    /// has none yet — same content `emberly init` materializes (C-5, single
+    /// source in the binary).
+    pub config_template: String,
     pub conversation: Vec<ConvItem>,
     /// True between the first `AssistantDelta` and `AssistantDone` of a turn.
     pub streaming: bool,
@@ -244,11 +251,17 @@ pub struct App {
 
 impl App {
     #[must_use]
-    pub fn new(session: SessionInfo, sessions_dir: PathBuf, profiles: Vec<String>) -> Self {
+    pub fn new(
+        session: SessionInfo,
+        sessions_dir: PathBuf,
+        profiles: Vec<String>,
+        config_template: String,
+    ) -> Self {
         Self {
             session,
             sessions_dir,
             profiles,
+            config_template,
             conversation: Vec::new(),
             streaming: false,
             editor: LineEditor::new(),
@@ -844,6 +857,79 @@ impl App {
         });
     }
 
+    /// The project's `.agents/` directory, derived from the sessions dir
+    /// (`<root>/.agents/sessions`).
+    fn agents_dir(&self) -> PathBuf {
+        self.sessions_dir
+            .parent()
+            .map_or_else(|| self.sessions_dir.clone(), Path::to_path_buf)
+    }
+
+    /// `/config` — edit the project `.agents/config.toml` in `$EDITOR` (C-5).
+    /// Seeds it from the init template (same content `emberly init` writes) if
+    /// the project has none yet (C-1/C-2); the write lands in the project tier.
+    fn edit_config(&mut self) -> Action {
+        let path = self.agents_dir().join("config.toml");
+        if !path.exists() {
+            if let Err(e) = seed_file(&path, &self.config_template) {
+                self.conversation.push(ConvItem::Notice(format!(
+                    "could not create {}: {e}",
+                    path.display()
+                )));
+                return Action::None;
+            }
+            self.conversation
+                .push(ConvItem::Notice(format!("created {}", path.display())));
+        }
+        Action::EditFile(path)
+    }
+
+    /// `/prompt [name]` — edit a prompt file (`system` | `compact`, default
+    /// `system`) in `$EDITOR` (C-5). Seeds from the baked-in default (C-1) if
+    /// the project has no override yet.
+    fn edit_prompt(&mut self, name: &str) -> Action {
+        let name = if name.is_empty() { "system" } else { name };
+        let default = match name {
+            "system" => emberly_core::prompts::system(),
+            "compact" => emberly_core::prompts::compact(),
+            other => {
+                self.conversation.push(ConvItem::Notice(format!(
+                    "unknown prompt '{other}' — try /prompt system or /prompt compact"
+                )));
+                return Action::None;
+            }
+        };
+        let path = self.agents_dir().join("prompts").join(format!("{name}.md"));
+        if !path.exists() {
+            if let Err(e) = seed_file(&path, &format!("{default}\n")) {
+                self.conversation.push(ConvItem::Notice(format!(
+                    "could not create {}: {e}",
+                    path.display()
+                )));
+                return Action::None;
+            }
+            self.conversation.push(ConvItem::Notice(format!(
+                "created {} from the default",
+                path.display()
+            )));
+        }
+        Action::EditFile(path)
+    }
+
+    /// Report an `$EDITOR` handoff's outcome as a timeline notice (C-5).
+    pub fn note_edit(&mut self, path: &Path, status: crate::edit::EditStatus) {
+        use crate::edit::EditStatus;
+        let message = match status {
+            // Live reload lands in group 5; until then it applies next session.
+            EditStatus::Edited => format!("edited {} — active on the next session", path.display()),
+            EditStatus::NoEditor => {
+                "no editor configured — set $EDITOR or $VISUAL, then try again".to_string()
+            }
+            EditStatus::Failed(why) => format!("editor failed: {why}"),
+        };
+        self.conversation.push(ConvItem::Notice(message));
+    }
+
     /// Push an overlay and start its brief ease-in (Design §6.4).
     fn push_overlay(&mut self, overlay: Overlay) {
         self.overlays.push(overlay);
@@ -870,6 +956,13 @@ impl App {
             .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
         {
             return self.run_model_command(rest.trim());
+        }
+        // `/prompt [name]` takes an optional argument (system|compact).
+        if let Some(rest) = name
+            .strip_prefix("prompt")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return self.edit_prompt(rest.trim());
         }
         match commands::by_name(name) {
             Some(cmd) => self.run_command(cmd),
@@ -969,6 +1062,8 @@ impl App {
                 self.open_model_picker();
                 Action::None
             }
+            AppCommand::Config => self.edit_config(),
+            AppCommand::Prompt => self.edit_prompt("system"),
             AppCommand::Cancel => Action::Command(Command::Cancel),
             AppCommand::Quit => Action::Quit,
         }
@@ -1287,6 +1382,15 @@ impl App {
 
 /// The `/help` body: every command with its keybinding and description, from
 /// the single registry (Design §3.3).
+/// Create a file (and any missing parent dirs) with `contents`. Used to seed a
+/// config or prompt file the project doesn't have yet, before editing (C-5).
+fn seed_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, contents)
+}
+
 fn help_text() -> String {
     let mut out = String::from("Commands — run via Ctrl-P, /name, or a keybinding.\n\n");
     for spec in commands::COMMANDS {
@@ -1308,6 +1412,7 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             vec!["anthropic".into(), "openai".into(), "zai".into()],
+            "# test config\n".to_string(),
         )
     }
 
@@ -1371,7 +1476,12 @@ mod tests {
 
     #[test]
     fn model_picker_reports_when_no_profiles() {
-        let mut a = App::new(SessionInfo::default(), std::env::temp_dir(), Vec::new());
+        let mut a = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
         a.open_model_picker();
         assert!(a.overlays.is_empty(), "no overlay without profiles");
         assert!(a
@@ -1389,6 +1499,65 @@ mod tests {
             .conversation
             .iter()
             .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown command"))));
+    }
+
+    #[test]
+    fn slash_config_seeds_then_edits_without_clobbering() {
+        let root = std::env::temp_dir().join(format!("emberly-cfgedit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sessions = root.join(".agents").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("mkdir");
+        let mut a = App::new(
+            SessionInfo::default(),
+            sessions,
+            Vec::new(),
+            "# seeded config\n".to_string(),
+        );
+
+        let cfg = root.join(".agents").join("config.toml");
+        let action = a.run_slash("config");
+        assert!(cfg.exists(), "config.toml is seeded when absent");
+        assert!(matches!(action, Action::EditFile(ref p) if *p == cfg));
+
+        // A second /config must not overwrite the (now user-edited) file.
+        std::fs::write(&cfg, "user edits").expect("write");
+        let _ = a.run_slash("config");
+        assert_eq!(std::fs::read_to_string(&cfg).expect("read"), "user edits");
+    }
+
+    #[test]
+    fn slash_prompt_seeds_from_default_and_rejects_unknown() {
+        let root = std::env::temp_dir().join(format!("emberly-promptedit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sessions = root.join(".agents").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("mkdir");
+        let mut a = App::new(SessionInfo::default(), sessions, Vec::new(), String::new());
+
+        let p = root.join(".agents").join("prompts").join("system.md");
+        let action = a.run_slash("prompt system");
+        assert!(p.exists(), "prompt seeded from the baked-in default");
+        assert!(matches!(action, Action::EditFile(ref pp) if *pp == p));
+        assert!(!std::fs::read_to_string(&p).expect("read").is_empty());
+
+        // An unknown prompt name is a notice, not an edit.
+        assert_eq!(a.run_slash("prompt bogus"), Action::None);
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown prompt"))));
+    }
+
+    #[test]
+    fn note_edit_reports_no_editor() {
+        let mut a = app();
+        a.note_edit(
+            Path::new("/x/config.toml"),
+            crate::edit::EditStatus::NoEditor,
+        );
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("no editor configured"))));
     }
 
     #[test]

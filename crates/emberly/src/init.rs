@@ -11,7 +11,7 @@ use anyhow::Context;
 
 /// A commented `config.toml` — everything works without it, so the template is
 /// mostly guidance (Requirements C-1).
-const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/config.toml)
+pub const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/config.toml)
 # Everything here is optional — emberly ships baked-in provider profiles:
 #   anthropic  (Anthropic Messages API)
 #   openai     (OpenAI Chat Completions)

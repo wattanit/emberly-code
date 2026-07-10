@@ -24,7 +24,7 @@ templates this phase reuses.
 | Group | Status | Notes |
 |---|---|---|
 | 1. `$EDITOR` handoff (suspend/run/restore) | [x] | Done 2026-07-10; `edit` module + guard suspend/resume; 3 tests |
-| 2. Edit commands & targets (`/config`, `/prompt`) | [ ] | Design §3.3 |
+| 2. Edit commands & targets (`/config`, `/prompt`) | [x] | Done 2026-07-10; rich TUI; 3 tests (line mode → group 6) |
 | 3. Quick-edit overlay (single value / short prompt) | [-] | Deferred — fast-follow (owner) |
 | 4. Provenance-before-edit + project-tier writes | [ ] | C-1, C-3 |
 | 5. Reload semantics (Live vs RestartRequired) | [ ] | Tech Spec §8 |
@@ -54,16 +54,22 @@ in-TUI text overlay). Build it once, reuse it for config and prompts.
 
 ## 2. Edit commands & targets  *(C-5; Design §3.3)*
 
-- [ ] `/config` — edit the project `.agents/config.toml`. If absent,
-      materialize it from the `init` template first (so there is something to
-      edit), then open it.
-- [ ] `/prompt [name]` — edit a prompt file (`system`, `compact`; default
-      `system`). If the project has no override, seed
-      `.agents/prompts/<name>.md` from the baked-in default
-      (`emberly_core::prompts`) so the user edits a real copy (C-1/C-2), then
-      open it.
-- [ ] Both reachable three ways (Design §3.3): command registry entries
-      (palette + `/name`) and — decision pending — a keybinding.
+- [x] `/config` — edits `.agents/config.toml`; seeds it from the shared init
+      template (`init::CONFIG_TEMPLATE`, now `pub`, single source) when absent,
+      never clobbering an existing file. Returns `Action::EditFile`.
+- [x] `/prompt [name]` — edits `system` (default) / `compact`; seeds from the
+      baked-in default (`emberly_core::prompts`) when the project has no
+      override (C-1/C-2); unknown name → notice. `/prompt` arg parsed in
+      `run_slash` (like `/model`).
+- [x] Reachable via palette + `/name` (registry entries `config`, `prompt`).
+      No dedicated keybinding (owner: palette + slash only).
+- [x] `Action::EditFile(PathBuf)` handled in `tui.rs`: **pause the input
+      reader** (refactored to poll+flag so the editor gets the keystrokes),
+      `suspend` → `run_editor` → `resume`, then `note_edit` reports the
+      outcome. `config_template` threaded `main.rs → frontend::run →
+      tui::run → App`.
+- [x] Tests: seed-then-edit without clobbering, prompt seed-from-default +
+      unknown-name rejection, `note_edit` no-editor notice.
 
 ## 3. Quick-edit overlay  *(Design §4.6)*
 
