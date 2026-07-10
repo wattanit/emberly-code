@@ -177,6 +177,24 @@ reasoning control, you own the latency/cost/quality trade per task:
   still recorded to the transcript. In plain mode the trail is a labeled
   `--- reasoning ---` block.
 
+**Asking you a question, and tool-call explanations.** Two touches that make
+the agent's work legible without getting in the way:
+
+- **The agent can ask you.** When it genuinely needs your decision or
+  information it can't get itself, it puts a calm question on screen and waits
+  — offering choices when it has them, with a free-text answer always
+  available. It is deliberately *not* the permission prompt: there is no
+  "safe default" keypress, so **Enter never answers for you**; you pick an
+  option or type a reply, and **Esc** declines (the agent is told you declined,
+  so it can proceed or stop). In plain mode the same question appears with
+  numbered options; an empty line declines.
+- **Non-obvious tool calls get a one-line caption.** When what a call does
+  isn't self-evident (an opaque `bash` command, a subtle edit), the model
+  writes a short dim line under it — `↳ raise the log level to info`. Obvious
+  calls get none (no clutter). It's **on by default**; set
+  `ui.tool_explanations = false` to turn it off entirely — with it off the
+  model is never asked for one, so no tokens are spent on it.
+
 ## Using a session
 
 The screen is a conversation timeline — your messages and the agent's, tool

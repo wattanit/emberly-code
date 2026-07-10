@@ -1560,3 +1560,55 @@ async fn ask_user_dismissed_returns_a_structured_decline() {
         TranscriptEvent::AskUser { answer: None, question, .. } if question == "proceed?"
     )));
 }
+
+/// The plan's combined "Done when" in one offline session (Tech Spec §14.5):
+/// with explanations on, a captioned call surfaces its explanation, an
+/// `ask_user` call blocks and resumes with the answer, and the request the
+/// engine sent carried both the schema property and the prompt instruction.
+#[tokio::test]
+async fn explanation_and_ask_user_together() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "read_file",
+            r#"{"path":"cfg.txt","explanation":"peek at the config"}"#,
+        ),
+        ScriptedResponse::tool_call(
+            "c2",
+            "ask_user",
+            r#"{"question":"continue?","options":["yes","no"]}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let fake = Arc::new(FakeProvider::new(scripts));
+    let mut h = spawn_keeping_provider(fake.clone(), root, true);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_answering_ask(&mut h, AskAnswer::Answered("yes".into())).await;
+
+    // T-9: the captioned call surfaced its explanation.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        UiEvent::ToolStarted { explanation: Some(x), .. } if x == "peek at the config"
+    )));
+    // T-8: the question was asked and the loop resumed with the answer.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::AskUserRequest { .. })));
+    assert_eq!(deltas(&events), "done");
+
+    // T-9: the request advertised the schema property and the instruction.
+    let req = match fake.last_request() {
+        Some(r) => r,
+        None => panic!("no request captured"),
+    };
+    assert!(req.tools.iter().all(|t| t
+        .input_schema
+        .get("properties")
+        .and_then(|p| p.get("explanation"))
+        .is_some()));
+    assert!(req
+        .system
+        .unwrap_or_default()
+        .contains("Tool-call explanations"));
+}

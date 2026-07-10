@@ -39,10 +39,10 @@ config-defeatable) with exactly that lean design. This phase is its named door.
 | 3. ask_user — round-trip plumbing + the tool (T-8 engine) | [x] | Done 2026-07-11; `AskId`, `AskAnswer`, `AskUserRequest`/`AskUserAnswer`, `AskGate` mirror of the permission gate (2nd channel + select arm + pending Vec), `AskUser` transcript event, `ask_user` tool registered; 4 tests |
 | 4. ask_user — the question prompt UI (T-8 rich TUI) | [x] | Done 2026-07-11; `AskPrompt` state + `on_ask_key` + `render_ask` (dim_accent, never safety band); options + free-text; Enter never auto-answers; Esc→declined; motion stilled; 7 tests |
 | 5. ask_user — degraded-mode question prompt (T-8 line) | [x] | Done 2026-07-11; `render_ask` (calm, no banner) + `parse_ask_answer` (number/text/empty→decline); single `Pending` enum so permission & question can't cross wires; no-ANSI sweep covers it; 3 tests |
-| 6. End-to-end, exit criterion, docs & SFD bookkeeping | [ ] | combined offline round trip; README; Spec bump decision (owner); memory update (tool-explanation graduated) |
+| 6. End-to-end, exit criterion, docs & SFD bookkeeping | [x] | Done 2026-07-11; combined offline test; README; Spec decision = **no bump** (v0.5 already covers T-8/T-9); memory updated; 1 test |
 
-**Overall Phase 4: IN PROGRESS** (5 / 6 groups). Branch
-`phase4/ask-user-and-explanation` off `version0.2` (Phase 3 merged).
+**Overall Phase 4: COMPLETE** (6 / 6 groups). Branch
+`phase4/ask-user-and-explanation` off `version0.2` (Phase 3 merged); not yet merged.
 
 ---
 
@@ -274,27 +274,36 @@ Full parity — the interaction is identical in meaning, ASCII-only.
 
 ## 6. End-to-end, exit criterion, docs & SFD bookkeeping  *(Tech Spec §14.5; SFD G-10/G-11/G-16)*
 
-- [ ] **Combined offline round trip** proving the plan's "Done when": one
+**Done 2026-07-11.** Combined test `explanation_and_ask_user_together` proves
+both features in one offline session; the per-group tests cover the decline
+path and the toggle-off path. README section added. **Spec decision: no bump**
+— v0.5 already specifies T-8 (§5.2), T-9 (§5.4), and the events (§3.1/§3.2), and
+the implementation introduced no deviation from them (`AskId`/`AskAnswer`/
+`AskUser`/`AskUserRequest`/`AskUserAnswer` are direct realizations of the named
+spec items), so Req/Design companion pins are untouched (G-16). Memory
+`tool-explanation-deferred` updated to "implemented".
+
+- [x] **Combined offline round trip** proving the plan's "Done when": one
       `FakeProvider` session that (a) makes an `ask_user` call → loop blocks →
       answer resumes with the answer, and a second where a dismiss returns a
       structured decline; (b) scripts a non-obvious tool call that renders its
       dim explanation and an obvious one that renders none; (c) asserts
       `ui.tool_explanations = false` removes **both** the schema property and the
       prompt instruction.
-- [ ] **Honest scope note:** offline coverage rides on `FakeProvider`; the live
+- [x] **Honest scope note:** offline coverage rides on `FakeProvider`; the live
       half (a real provider actually authoring `explanation` and calling
       `ask_user`) is an owner-run manual/nightly smoke (Tech Spec §14.4), same
       posture as Phase 3's reasoning paths. Record it here, don't claim it.
-- [ ] **README:** short "Asking you a question · tool-call explanations"
+- [x] **README:** short "Asking you a question · tool-call explanations"
       section.
-- [ ] **Spec bump decision (owner).** Spec v0.5 already fully specifies T-8
+- [x] **Spec bump decision (owner).** Spec v0.5 already fully specifies T-8
       (§5.2), T-9 (§5.4), and the events (§3.1/§3.2) — expected outcome is **no
       bump**. If implementation surfaces an additive refinement (as Phase 3 did),
       surface it and bump minor with owner approval; refresh Req/Design companion
       pins only if the Spec bumps (G-16).
-- [ ] **Memory:** update `tool-explanation-deferred` → implemented in v0.2
+- [x] **Memory:** update `tool-explanation-deferred` → implemented in v0.2
       Phase 4 (T-9), so it is no longer "deferred".
-- [ ] Full suite + `fmt` + `clippy` green; final commit.
+- [x] Full suite + `fmt` + `clippy` green; final commit.
 
 ---
 
