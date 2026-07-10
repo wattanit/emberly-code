@@ -28,9 +28,10 @@ pub async fn run(
     session: SessionInfo,
     history: Vec<TranscriptRecord>,
     sessions_dir: PathBuf,
+    profiles: Vec<String>,
 ) -> io::Result<()> {
     let mut guard = TerminalGuard::enter()?;
-    let mut app = App::new(session, sessions_dir);
+    let mut app = App::new(session, sessions_dir, profiles);
     app.seed_history(&history);
     app.motion = motion_enabled();
 

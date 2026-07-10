@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, ConvItem, Overlay, OverlayContent, SessionRow};
+use crate::app::{App, ChoiceRow, ConvItem, Overlay, OverlayContent, SessionRow};
 use crate::text;
 use crate::theme::Theme;
 use crate::{strings, strings::markers};
@@ -195,6 +195,10 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
             let (lines, sel_line) = session_picker_lines(rows, *selected, theme);
             (lines, Some(sel_line), " Enter resume · ↑↓ move · Esc close")
         }
+        OverlayContent::Choices { rows, selected, .. } => {
+            let (lines, sel_line) = choice_picker_lines(rows, *selected, theme);
+            (lines, Some(sel_line), " Enter select · ↑↓ move · Esc close")
+        }
     };
 
     let total = lines.len();
@@ -270,6 +274,38 @@ fn session_picker_lines(
             theme.chrome(),
         )));
         lines.push(Line::from(String::new()));
+    }
+    (lines, sel_line)
+}
+
+/// Render a generic choice picker (`/model`, C-6) as selectable rows, returning
+/// the lines and the selected line index (to scroll it into view). The active
+/// choice is marked; the selected one is accented.
+fn choice_picker_lines(
+    rows: &[ChoiceRow],
+    selected: usize,
+    theme: &crate::theme::Theme,
+) -> (Vec<Line<'static>>, usize) {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut sel_line = 0;
+    for (i, row) in rows.iter().enumerate() {
+        if i == selected {
+            sel_line = lines.len();
+        }
+        let marker = if i == selected { "▶ " } else { "  " };
+        let style = if i == selected {
+            theme.strong()
+        } else {
+            theme.primary()
+        };
+        let mut spans = vec![
+            Span::styled(marker.to_string(), theme.accent()),
+            Span::styled(row.label.clone(), style),
+        ];
+        if row.current {
+            spans.push(Span::styled("  (current)".to_string(), theme.success()));
+        }
+        lines.push(Line::from(spans));
     }
     (lines, sel_line)
 }
@@ -981,7 +1017,7 @@ mod tests {
 
     #[test]
     fn permission_prompt_shows_full_content_and_deny_default() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir(), Vec::new());
         pending(&mut app, false, "rm -rf build");
         let screen = draw(&app, 100, 24);
         assert!(screen.contains("PERMISSION REQUIRED"));
@@ -994,7 +1030,7 @@ mod tests {
 
     #[test]
     fn outside_root_prompt_is_loud() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir(), Vec::new());
         pending(&mut app, true, "rm -rf /etc/x");
         let screen = draw(&app, 100, 24);
         assert!(
@@ -1005,7 +1041,7 @@ mod tests {
 
     #[test]
     fn long_content_reports_more_below() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir(), Vec::new());
         let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
         pending(&mut app, false, &long);
         // A short screen forces the content to overflow the prompt body.
@@ -1018,7 +1054,7 @@ mod tests {
 
     #[test]
     fn tool_call_shows_what_and_result_and_output() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir(), Vec::new());
         let id = emberly_core::ToolCallId::new("c1");
         app.apply_event(UiEvent::ToolStarted {
             call_id: id.clone(),
@@ -1044,7 +1080,7 @@ mod tests {
     fn thai_content_renders_in_the_conversation() {
         // A stacked-mark Thai word must survive into the rendered buffer intact
         // (grapheme-correct wrap, §2.1).
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir(), Vec::new());
         app.apply_event(UiEvent::AssistantDelta {
             text: "สวัสดี ที่".into(),
         });
@@ -1056,7 +1092,7 @@ mod tests {
 
     #[test]
     fn sidebar_hides_below_the_collapse_threshold() {
-        let app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let app = App::new(SessionInfo::default(), std::env::temp_dir(), Vec::new());
         // Sidebar-only chrome present when wide, absent when narrow.
         assert!(draw(&app, 120, 20).contains("modified files"));
         assert!(!draw(&app, 80, 20).contains("modified files"));
@@ -1064,7 +1100,7 @@ mod tests {
 
     #[test]
     fn sidebar_shows_session_token_total() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir(), Vec::new());
         app.apply_event(UiEvent::SessionUsage {
             usage: emberly_core::TokenUsage {
                 input: 12_000,
@@ -1085,7 +1121,7 @@ mod tests {
 
     #[test]
     fn context_percent_only_on_status_bar_when_sidebar_hidden() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir(), Vec::new());
         app.apply_event(UiEvent::ContextUsage {
             pct: 42,
             tokens: 100,
@@ -1105,7 +1141,7 @@ mod tests {
 
     #[test]
     fn edit_prompt_renders_its_diff() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir(), Vec::new());
         pending(
             &mut app,
             false,
@@ -1141,7 +1177,7 @@ mod tests {
 
     #[test]
     fn conversation_wraps_and_counts_rows() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(SessionInfo::default(), std::env::temp_dir(), Vec::new());
         app.apply_event(emberly_core::UiEvent::AssistantDelta {
             text: "aaaa bbbb cccc".into(),
         });

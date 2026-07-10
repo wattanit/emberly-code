@@ -241,6 +241,20 @@ pub async fn run(ports: FrontendPorts) -> io::Result<()> {
                         let _ = tx.send(Command::Cancel).await;
                     } else if line.trim() == "/mode" {
                         let _ = tx.send(Command::SetMode { mode: next_mode(mode) }).await;
+                    } else if let Some(args) = line
+                        .trim()
+                        .strip_prefix("/model")
+                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+                    {
+                        // Degraded mode has no picker, so `/model` needs a
+                        // profile argument (C-6); the engine validates it.
+                        let mut parts = args.split_whitespace();
+                        if let Some(profile) = parts.next() {
+                            let model = parts.next().map(str::to_string);
+                            let _ = tx.send(Command::SwitchModel { profile: profile.to_string(), model }).await;
+                        } else {
+                            println!("usage: /model <profile> [model]");
+                        }
                     } else if !line.trim().is_empty() {
                         let _ = tx.send(Command::UserInput { text: line }).await;
                     }

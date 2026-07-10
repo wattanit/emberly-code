@@ -6,7 +6,7 @@
 //! No `.unwrap()`/`.expect()`: tests thread `Result` or `panic!` with context.
 
 use emberly_providers::{
-    AnthropicProvider, CompletionRequest, Message, ModelInfo, OpenAiProvider, Provider,
+    AnthropicProvider, Auth, CompletionRequest, Message, ModelInfo, OpenAiProvider, Provider,
     ProviderError, StopReason, StreamEvent, ToolSchema,
 };
 use futures::StreamExt;
@@ -97,7 +97,12 @@ async fn anthropic_streams_text_and_usage() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(http_client(), "test-key", server.uri(), model_info());
+    let provider = AnthropicProvider::new(
+        http_client(),
+        Auth::XApiKey("test-key".into()),
+        server.uri(),
+        model_info(),
+    );
     let events = drain(provider.stream_completion(sample_request()).await).await;
 
     assert_eq!(text(&events), "Hello สวัสดี");
@@ -141,7 +146,12 @@ async fn anthropic_streams_tool_call() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(http_client(), "k", server.uri(), model_info());
+    let provider = AnthropicProvider::new(
+        http_client(),
+        Auth::XApiKey("k".into()),
+        server.uri(),
+        model_info(),
+    );
     let mut req = sample_request();
     req.tools = vec![ToolSchema {
         name: "read_file".into(),
@@ -178,7 +188,12 @@ async fn anthropic_maps_auth_error() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(http_client(), "bad", server.uri(), model_info());
+    let provider = AnthropicProvider::new(
+        http_client(),
+        Auth::XApiKey("bad".into()),
+        server.uri(),
+        model_info(),
+    );
     match provider.stream_completion(sample_request()).await {
         Err(ProviderError::Auth) => {}
         other => panic!("expected auth error, got {:?}", other.err()),
@@ -211,7 +226,7 @@ async fn openai_streams_text_and_usage() {
 
     let provider = OpenAiProvider::new(
         http_client(),
-        "test-key",
+        Auth::Bearer("test-key".into()),
         format!("{}/v1", server.uri()),
         model_info(),
     );
@@ -244,7 +259,7 @@ async fn openai_uses_max_completion_tokens_not_max_tokens() {
 
     let provider = OpenAiProvider::new(
         http_client(),
-        "k",
+        Auth::Bearer("k".into()),
         format!("{}/v1", server.uri()),
         model_info(),
     );
@@ -276,7 +291,7 @@ async fn openai_streams_tool_call_across_chunks() {
 
     let provider = OpenAiProvider::new(
         http_client(),
-        "k",
+        Auth::Bearer("k".into()),
         format!("{}/v1", server.uri()),
         model_info(),
     );

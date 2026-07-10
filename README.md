@@ -52,14 +52,15 @@ install -m 0755 target/release/emberly ~/.local/bin/emberly
    export ANTHROPIC_API_KEY=sk-...
    ```
 
-   Or point at any OpenAI-compatible endpoint (OpenAI, Ollama, vLLM,
-   OpenRouter, …):
+   Emberly ships baked-in profiles — `anthropic`, `openai`, `zai` (the Z.ai
+   coding plan), and `local` (a keyless `http://localhost:11434/v1` for
+   Ollama/vLLM). Selecting one is just its name plus a key; each profile's key
+   comes from `<PROFILE-REF>_API_KEY` (or `keys.toml`):
 
    ```sh
-   export EMBERLY_PROVIDER=openai
-   export EMBERLY_MODEL=gpt-5.2
-   export EMBERLY_BASE_URL=http://localhost:11434/v1   # e.g. Ollama
-   export OPENAI_API_KEY=...                            # if the endpoint needs one
+   export EMBERLY_PROVIDER=zai
+   export EMBERLY_MODEL=glm-4.6
+   export ZAI_API_KEY=...
    ```
 
 2. **Run it in your project directory:**
@@ -98,29 +99,42 @@ overwritten.
 **`.agents/config.toml`:**
 
 ```toml
-provider = "anthropic"          # or "openai" (covers Ollama/vLLM/OpenRouter)
-model    = "claude-sonnet-5"
-# base_url = "http://localhost:11434/v1"   # for openai-compatible endpoints
-# context_window = 200000
-# max_output     = 8192
-
-# Optional per-model pricing → live session cost estimate.
-# [pricing."claude-sonnet-5"]
-# input  = 3.0     # USD per million input tokens
-# output = 15.0
+provider = "zai"                # a baked-in profile, or one you define below
+model    = "glm-4.6"
 ```
 
-**API keys** are read from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, or from
-`~/.config/emberly/keys.toml` (which must be mode `0600`). Keys are never read
-from project files, so they don't get committed.
+**Adding a provider is configuration, not code.** A provider is a *profile*
+naming a wire-format `adapter` (`anthropic` or `openai`), an endpoint, and a
+key *reference*. Any service that speaks a format Emberly already parses is
+reachable this way — no rebuild:
+
+```toml
+[providers.myserver]
+adapter  = "openai"                          # or "anthropic"
+base_url = "https://my-endpoint.example/v1"
+auth     = { scheme = "bearer", key = "myserver" }   # → MYSERVER_API_KEY
+
+# Optional per-model metadata → live session cost estimate:
+# [providers.myserver.models."my-model"]
+# context_window = 128000
+# max_output     = 8192
+# pricing = { input = 1.0, output = 2.0 }    # USD per million tokens
+```
+
+Baked-in profiles (`anthropic`, `openai`, `zai`, `local`) can be tweaked the
+same way — set just the field you want to change; the rest is kept.
+
+**API keys** are read from `<REF>_API_KEY` (e.g. `ANTHROPIC_API_KEY`,
+`ZAI_API_KEY`) or from `~/.config/emberly/keys.toml` — a flat `ref = "secret"`
+table that must be mode `0600`. Keys are never read from project files, so they
+don't get committed.
 
 **Project instructions:** an `AGENTS.md` (or `CLAUDE.md`) at your project root
 is picked up automatically and given to the agent as standing context.
 
-**Environment variables:** `EMBERLY_PROVIDER`, `EMBERLY_MODEL`,
-`EMBERLY_BASE_URL`, `EMBERLY_CONTEXT_WINDOW`, `EMBERLY_MAX_OUTPUT`. For display,
-`NO_COLOR` or `TERM=dumb` force plain mode and `EMBERLY_MOTION=0` disables
-animation.
+**Environment variables:** `EMBERLY_PROVIDER` (active profile) and
+`EMBERLY_MODEL`. For display, `NO_COLOR` or `TERM=dumb` force plain mode and
+`EMBERLY_MOTION=0` disables animation.
 
 Run **`emberly config show`** to see the resolved settings and where each value
 came from.
@@ -193,7 +207,7 @@ emberly init                Scaffold .agents/ (config, prompts, permissions)
 emberly config show         Show the resolved configuration and its sources
 emberly --version           Print the version
 
-  --provider <name>         Override the provider for this run (anthropic|openai)
+  --provider <name>         Select the active provider profile for this run
   --model <name>            Override the model for this run
 ```
 

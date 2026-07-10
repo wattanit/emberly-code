@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use crate::auth::Auth;
 use crate::error::ProviderError;
 use crate::message::{CompletionRequest, ContentBlock, Message, Role};
 use crate::model::{ModelInfo, ProviderId, TokenEstimate, TokenUsage};
@@ -20,7 +21,7 @@ use crate::ToolCallId;
 /// A client for any OpenAI-compatible `/chat/completions` endpoint.
 pub struct OpenAiProvider {
     client: reqwest::Client,
-    api_key: String,
+    auth: Auth,
     /// API base including the version segment, e.g. `https://api.openai.com/v1`
     /// (or an Ollama/vLLM base). `/chat/completions` is appended.
     base_url: String,
@@ -31,13 +32,13 @@ impl OpenAiProvider {
     #[must_use]
     pub fn new(
         client: reqwest::Client,
-        api_key: impl Into<String>,
+        auth: Auth,
         base_url: impl Into<String>,
         model_info: ModelInfo,
     ) -> Self {
         Self {
             client,
-            api_key: api_key.into(),
+            auth,
             base_url: base_url.into(),
             model_info,
         }
@@ -59,14 +60,13 @@ impl Provider for OpenAiProvider {
         request: CompletionRequest,
     ) -> Result<CompletionStream, ProviderError> {
         let body = build_body(&request);
-        let mut builder = self
+        let builder = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
             .json(&body);
-        if !self.api_key.is_empty() {
-            builder = builder.bearer_auth(&self.api_key);
-        }
-        let response = builder
+        let response = self
+            .auth
+            .apply(builder)
             .send()
             .await
             .map_err(|e| ProviderError::Connect(e.to_string()))?;

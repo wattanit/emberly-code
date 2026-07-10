@@ -80,6 +80,7 @@ fn make_config(
         initial_conversation: Vec::new(),
         resuming: false,
         summary_prompt: None,
+        provider_factory: None,
     }
 }
 
@@ -937,4 +938,97 @@ async fn allow_for_session_covers_the_next_identical_command() {
         "only the first `make build` prompts; the session grant covers the second"
     );
     assert_eq!(deltas(&events), "done");
+}
+
+/// A fake [`ProviderFactory`](emberly_core::ProviderFactory): every profile
+/// except `"unknown"` builds successfully (C-6 switch tests).
+struct FakeFactory;
+
+impl emberly_core::ProviderFactory for FakeFactory {
+    fn build(&self, profile: &str, model: &str) -> Result<emberly_core::ProviderChoice, String> {
+        if profile == "unknown" {
+            return Err("unknown provider profile 'unknown'".to_string());
+        }
+        Ok(emberly_core::ProviderChoice {
+            provider: Arc::new(FakeProvider::new(Vec::new())),
+            profile: profile.to_string(),
+            model: model.to_string(),
+        })
+    }
+
+    fn profiles(&self) -> Vec<String> {
+        vec!["zai".to_string()]
+    }
+}
+
+/// `SwitchModel` swaps the active provider/model, emits `ModelChanged` (never
+/// silent — a `Notice` too), and records a `ModelSwitch` audit event (C-6).
+#[tokio::test]
+async fn switch_model_swaps_emits_and_records() {
+    let sink = CaptureSink::new();
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        temp_project(),
+        Box::new(sink.clone()),
+    );
+    config.provider_factory = Some(Arc::new(FakeFactory));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await; // drain session_start / sandbox events
+
+    h.send(Command::SwitchModel {
+        profile: "zai".into(),
+        model: Some("glm-4.6".into()),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ModelChanged { provider, model } if provider == "zai" && model == "glm-4.6")),
+        "a ModelChanged is emitted"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message } if message.contains("switched to"))),
+        "the switch is announced, never silent"
+    );
+    assert!(
+        sink.records().iter().any(|r| matches!(&r.event,
+            TranscriptEvent::ModelSwitch { provider, model } if provider == "zai" && model == "glm-4.6")),
+        "a ModelSwitch audit record is written (HC-7)"
+    );
+}
+
+/// An unknown profile is a harness-world error; the current model stays active.
+#[tokio::test]
+async fn switch_model_unknown_profile_errors_without_switching() {
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        temp_project(),
+        EngineConfig::no_transcript(),
+    );
+    config.provider_factory = Some(Arc::new(FakeFactory));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await;
+
+    h.send(Command::SwitchModel {
+        profile: "unknown".into(),
+        model: None,
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::HarnessError { .. })),
+        "unknown profile surfaces a harness error"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ModelChanged { .. })),
+        "no ModelChanged on a failed switch"
+    );
 }

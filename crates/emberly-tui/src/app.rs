@@ -90,6 +90,32 @@ pub enum OverlayContent {
         rows: Vec<SessionRow>,
         selected: usize,
     },
+    /// A generic single-choice picker (Design §3.1): the model/provider picker
+    /// now (C-6), the reasoning-effort picker in Phase 3. Enter applies the
+    /// highlighted choice; `kind` decides which command it becomes.
+    Choices {
+        kind: ChoiceKind,
+        rows: Vec<ChoiceRow>,
+        selected: usize,
+    },
+}
+
+/// What a [`OverlayContent::Choices`] picker selects, so Enter knows which
+/// command to issue. Reused by the effort picker in Phase 3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoiceKind {
+    /// Switch the active provider profile (C-6). The row label is the profile
+    /// name; the current model is kept.
+    Model,
+}
+
+/// One row in a [`OverlayContent::Choices`] picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceRow {
+    /// The value (e.g. a profile name) and the displayed label.
+    pub label: String,
+    /// True for the currently-active choice (marked, not re-applied).
+    pub current: bool,
 }
 
 /// The command palette's state (Design §3.3): the fuzzy query and which match
@@ -157,6 +183,9 @@ pub struct App {
     /// Where session transcripts live, so the picker can list them and a
     /// resume can read one (`/session`, `/resume`).
     pub sessions_dir: PathBuf,
+    /// Configured provider-profile names, for the model picker (`/model`, C-6).
+    /// Sorted; empty when no factory/profiles are available.
+    pub profiles: Vec<String>,
     pub conversation: Vec<ConvItem>,
     /// True between the first `AssistantDelta` and `AssistantDone` of a turn.
     pub streaming: bool,
@@ -215,10 +244,11 @@ pub struct App {
 
 impl App {
     #[must_use]
-    pub fn new(session: SessionInfo, sessions_dir: PathBuf) -> Self {
+    pub fn new(session: SessionInfo, sessions_dir: PathBuf, profiles: Vec<String>) -> Self {
         Self {
             session,
             sessions_dir,
+            profiles,
             conversation: Vec::new(),
             streaming: false,
             editor: LineEditor::new(),
@@ -377,6 +407,12 @@ impl App {
             UiEvent::SessionUsage { usage } => self.session_usage = usage,
             UiEvent::SandboxStatus { status } => self.sandbox = Some(status),
             UiEvent::ModeChanged { mode } => self.mode = mode,
+            UiEvent::ModelChanged { provider, model } => {
+                // Sidebar reflects the new provider/model; the engine also emits
+                // a Notice, so the switch is never silent (Design §3.1).
+                self.session.provider = provider;
+                self.session.model = model;
+            }
             UiEvent::Notice { message } => self.conversation.push(ConvItem::Notice(message)),
             UiEvent::HarnessError { what, why, next } => {
                 self.conversation
@@ -777,6 +813,37 @@ impl App {
         });
     }
 
+    /// Open the model/provider picker (`/model` with no args, the palette, or a
+    /// keybinding — C-6). Rows are the configured profiles, the active one
+    /// marked; Enter issues a `SwitchModel`.
+    fn open_model_picker(&mut self) {
+        if self.profiles.is_empty() {
+            self.conversation.push(ConvItem::Notice(
+                "no provider profiles configured — add one in .agents/config.toml".into(),
+            ));
+            return;
+        }
+        let active = self.session.provider.clone();
+        let rows: Vec<ChoiceRow> = self
+            .profiles
+            .iter()
+            .map(|name| ChoiceRow {
+                label: name.clone(),
+                current: *name == active,
+            })
+            .collect();
+        let selected = rows.iter().position(|r| r.current).unwrap_or(0);
+        self.push_overlay(Overlay {
+            title: "switch model".into(),
+            content: OverlayContent::Choices {
+                kind: ChoiceKind::Model,
+                rows,
+                selected,
+            },
+            scroll: 0,
+        });
+    }
+
     /// Push an overlay and start its brief ease-in (Design §6.4).
     fn push_overlay(&mut self, overlay: Overlay) {
         self.overlays.push(overlay);
@@ -796,6 +863,14 @@ impl App {
     /// Run a typed `/name` command; unknown names surface a calm notice.
     fn run_slash(&mut self, name: &str) -> Action {
         let name = name.trim();
+        // `/model <profile> [model]` takes arguments, so it is parsed before the
+        // argument-less command registry (C-6). `modelx` is not a match.
+        if let Some(rest) = name
+            .strip_prefix("model")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return self.run_model_command(rest.trim());
+        }
         match commands::by_name(name) {
             Some(cmd) => self.run_command(cmd),
             None => {
@@ -805,6 +880,29 @@ impl App {
                 Action::None
             }
         }
+    }
+
+    /// `/model <profile> [model]` — switch the active provider profile (and
+    /// optionally the model) for subsequent turns (C-6). Gated at idle, like
+    /// `/new`: a switch applies to the next turn.
+    fn run_model_command(&mut self, args: &str) -> Action {
+        let mut parts = args.split_whitespace();
+        // No arguments → open the picker (browsing is fine even mid-turn).
+        let Some(profile) = parts.next() else {
+            self.open_model_picker();
+            return Action::None;
+        };
+        if self.busy {
+            self.conversation.push(ConvItem::Notice(
+                "finish or cancel the current turn before switching models".into(),
+            ));
+            return Action::None;
+        }
+        let model = parts.next().map(str::to_string);
+        Action::Command(Command::SwitchModel {
+            profile: profile.to_string(),
+            model,
+        })
     }
 
     /// Execute a command from the palette, a slash command, or a keybinding.
@@ -866,6 +964,10 @@ impl App {
                     emberly_core::Mode::Auto => emberly_core::Mode::Normal,
                 };
                 Action::Command(Command::SetMode { mode: next })
+            }
+            AppCommand::Model => {
+                self.open_model_picker();
+                Action::None
             }
             AppCommand::Cancel => Action::Command(Command::Cancel),
             AppCommand::Quit => Action::Quit,
@@ -1025,6 +1127,12 @@ impl App {
         ) {
             return self.on_session_picker_key(key);
         }
+        if matches!(
+            self.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::Choices { .. })
+        ) {
+            return self.on_choice_picker_key(key);
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
@@ -1106,6 +1214,70 @@ impl App {
         }
     }
 
+    /// Keys for the generic choice picker (`/model` now): ↑/↓ move, Enter
+    /// applies the highlighted choice via the command its `kind` maps to,
+    /// Esc/q dismiss.
+    fn on_choice_picker_key(&mut self, key: KeyEvent) -> Action {
+        let (kind, len, selected, chosen) = match self.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::Choices {
+                kind,
+                rows,
+                selected,
+            }) => (*kind, rows.len(), *selected, rows.get(*selected).cloned()),
+            _ => return Action::None,
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+                Action::None
+            }
+            KeyCode::Up => {
+                self.set_choice_selection(selected.saturating_sub(1));
+                Action::None
+            }
+            KeyCode::Down => {
+                self.set_choice_selection((selected + 1).min(len.saturating_sub(1)));
+                Action::None
+            }
+            KeyCode::Enter => {
+                let Some(row) = chosen else {
+                    return Action::None;
+                };
+                self.overlays.pop();
+                match kind {
+                    ChoiceKind::Model => {
+                        if row.current {
+                            self.conversation
+                                .push(ConvItem::Notice(format!("already using {}", row.label)));
+                            Action::None
+                        } else if self.busy {
+                            self.conversation.push(ConvItem::Notice(
+                                "finish or cancel the current turn before switching models".into(),
+                            ));
+                            Action::None
+                        } else {
+                            Action::Command(Command::SwitchModel {
+                                profile: row.label,
+                                model: None,
+                            })
+                        }
+                    }
+                }
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn set_choice_selection(&mut self, next: usize) {
+        if let Some(Overlay {
+            content: OverlayContent::Choices { selected, .. },
+            ..
+        }) = self.overlays.last_mut()
+        {
+            *selected = next;
+        }
+    }
+
     fn scroll_overlay(&mut self, delta: isize) {
         if let Some(o) = self.overlays.last_mut() {
             o.scroll = o.scroll.saturating_add_signed(delta);
@@ -1121,6 +1293,8 @@ fn help_text() -> String {
         let key = spec.key.map(|k| format!("  [{k}]")).unwrap_or_default();
         out.push_str(&format!("/{:<9}{}\n    {}\n", spec.name, key, spec.desc));
     }
+    // `/model` also accepts arguments for a direct switch (C-6).
+    out.push_str("  (also: /model <profile> [model] to switch directly)\n");
     out
 }
 
@@ -1130,7 +1304,102 @@ mod tests {
     use emberly_core::ToolCallId;
 
     fn app() -> App {
-        App::new(SessionInfo::default(), std::env::temp_dir())
+        App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            vec!["anthropic".into(), "openai".into(), "zai".into()],
+        )
+    }
+
+    #[test]
+    fn slash_model_switches_provider_and_model() {
+        let mut a = app();
+        assert_eq!(
+            a.run_slash("model zai glm-4.6"),
+            Action::Command(Command::SwitchModel {
+                profile: "zai".into(),
+                model: Some("glm-4.6".into()),
+            })
+        );
+        // Profile only → keep-current-model (None).
+        assert_eq!(
+            a.run_slash("model openai"),
+            Action::Command(Command::SwitchModel {
+                profile: "openai".into(),
+                model: None,
+            })
+        );
+    }
+
+    #[test]
+    fn slash_model_without_args_opens_the_picker() {
+        let mut a = app();
+        assert_eq!(a.run_slash("model"), Action::None);
+        assert!(
+            matches!(
+                a.overlays.last().map(|o| &o.content),
+                Some(OverlayContent::Choices {
+                    kind: ChoiceKind::Model,
+                    ..
+                })
+            ),
+            "no-arg /model opens the model picker"
+        );
+    }
+
+    #[test]
+    fn model_picker_marks_current_and_enter_switches() {
+        let mut a = app();
+        a.session.provider = "anthropic".into();
+        a.open_model_picker();
+        // The active profile is preselected and marked current.
+        let Some(OverlayContent::Choices { rows, selected, .. }) =
+            a.overlays.last().map(|o| &o.content)
+        else {
+            panic!("expected a choices overlay");
+        };
+        assert!(rows[*selected].current && rows[*selected].label == "anthropic");
+        // Move to a different profile and press Enter → SwitchModel (keep model).
+        let down = KeyEvent::from(KeyCode::Down);
+        let _ = a.on_choice_picker_key(down);
+        let enter = KeyEvent::from(KeyCode::Enter);
+        assert!(matches!(
+            a.on_choice_picker_key(enter),
+            Action::Command(Command::SwitchModel { model: None, .. })
+        ));
+    }
+
+    #[test]
+    fn model_picker_reports_when_no_profiles() {
+        let mut a = App::new(SessionInfo::default(), std::env::temp_dir(), Vec::new());
+        a.open_model_picker();
+        assert!(a.overlays.is_empty(), "no overlay without profiles");
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("no provider profiles"))));
+    }
+
+    #[test]
+    fn slash_modelx_is_not_the_model_command() {
+        // A command whose name merely starts with "model" is not `/model`.
+        let mut a = app();
+        assert_eq!(a.run_slash("modelx"), Action::None);
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown command"))));
+    }
+
+    #[test]
+    fn model_changed_updates_the_sidebar() {
+        let mut a = app();
+        a.apply_event(UiEvent::ModelChanged {
+            provider: "zai".into(),
+            model: "glm-4.6".into(),
+        });
+        assert_eq!(a.session.provider, "zai");
+        assert_eq!(a.session.model, "glm-4.6");
     }
 
     #[test]
