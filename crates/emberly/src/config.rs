@@ -133,6 +133,16 @@ fn builtin_profiles() -> HashMap<String, ProfileFile> {
             ),
         ),
         (
+            // Z.ai coding plan — OpenAI-compatible (bearer). Ready to use with
+            // ZAI_API_KEY / keys.toml; the user only supplies the key.
+            "zai".to_string(),
+            profile(
+                "openai",
+                Some("https://api.z.ai/api/paas/v4"),
+                auth("bearer", "zai"),
+            ),
+        ),
+        (
             // A local OpenAI-compatible server (Ollama default); keyless.
             "local".to_string(),
             profile("openai", Some("http://localhost:11434/v1"), None),

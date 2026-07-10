@@ -12,28 +12,26 @@ use anyhow::Context;
 /// A commented `config.toml` — everything works without it, so the template is
 /// mostly guidance (Requirements C-1).
 const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/config.toml)
-# Everything here is optional — emberly ships baked-in provider profiles
-# (anthropic, openai, local). Values here override the global config;
-# EMBERLY_* env vars override these.
+# Everything here is optional — emberly ships baked-in provider profiles:
+#   anthropic  (Anthropic Messages API)
+#   openai     (OpenAI Chat Completions)
+#   zai        (Z.ai coding plan — OpenAI-compatible)
+#   local      (http://localhost:11434/v1 — Ollama/vLLM, keyless)
+# Values here override the global config; EMBERLY_* env vars override these.
 
-# Pick the active profile and model:
-# provider = "anthropic"        # a [providers.<name>] profile below or baked-in
-# model    = "claude-sonnet-5"
+# Pick the active profile and model. Keys are never stored here — put them in
+# ~/.config/emberly/keys.toml (a flat `ref = "secret"` table) or the
+# <REF>_API_KEY env var, e.g. ZAI_API_KEY for the `zai` profile.
+# provider = "zai"
+# model    = "glm-4.6"
 
-# A provider is just configuration (no code): pick an `adapter` (the wire
-# format — "anthropic" or "openai"), an endpoint, and a key *reference*. The
-# key itself lives in ~/.config/emberly/keys.toml or the <REF>_API_KEY env var,
-# never here.
-#
-# [providers.zai]
-# adapter  = "anthropic"                 # speaks the Anthropic message format
-# base_url = "https://…"                 # your Z.ai coding-plan endpoint
-# auth     = { scheme = "x-api-key", key = "zai" }   # needs ZAI_API_KEY / keys.toml
-#
-# [providers.local]
+# Adding your own provider is configuration, not code: pick an `adapter` (the
+# wire format — "anthropic" or "openai"), an endpoint, and a key *reference*.
+# [providers.myserver]
 # adapter  = "openai"
-# base_url = "http://localhost:11434/v1" # Ollama/vLLM; keyless by default
-#
+# base_url = "https://my-endpoint.example/v1"
+# auth     = { scheme = "bearer", key = "myserver" }   # needs MYSERVER_API_KEY
+
 # Optional per-model metadata (context window, max output, pricing → cost est.):
 # [providers.anthropic.models."claude-sonnet-5"]
 # context_window = 200000

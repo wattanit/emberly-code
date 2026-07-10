@@ -23,7 +23,7 @@ adapters, config/keys system, engine channels, and TUI sidebar all exist.
 | 1. Auth-scheme abstraction in adapters | [x] | Done 2026-07-10; `Auth` enum + 5 unit tests; workspace green |
 | 2. `[providers.<name>]` profile config | [x] | Done 2026-07-10 (with group 3) |
 | 3. Profile resolution in the composition root | [x] | Done 2026-07-10; live smoke of all 3 paths |
-| 4. Z.ai profile (example + init + docs) | [~] | init template + machinery done; concrete baked-in zai needs real endpoint |
+| 4. Z.ai profile (baked-in + init + docs) | [x] | Done 2026-07-10; baked-in zai (openai @ paas/v4), grep-gate test, README |
 | 5. In-session switching (`Command::SwitchModel`) | [ ] | C-6 model half |
 | 6. Sidebar model picker | [ ] | Design §3.1 |
 | 7. Tests (offline + live smoke) | [ ] | Tech Spec §14.5, §14.4 |
@@ -95,15 +95,16 @@ Replace the hardcoded `match kind.as_str()` in
 
 ## 4. Z.ai profile — the acceptance driver  *(P-8; C-1/C-2; Tech Spec §4.5)*
 
-- [ ] Ship a ready-to-use `[providers.zai]` baked-in profile: the wire
-      adapter Z.ai's coding plan speaks, its `base_url`, its `auth` scheme,
-      and its model list — the user supplies only the key (keys.toml/env).
-      Materialized by `emberly init` (`emberly/src/init.rs`).
-- [ ] Add a short "adding a provider" note to the README/config docs using
-      the profile schema.
-- [ ] Confirm the harness carries **no** `zai`/`z.ai` string in code paths —
-      only in config/docs/tests (grep gate in the test or CI). This is the
-      P-8 proof: Z.ai is data, not code.
+- [x] Baked-in `zai` profile: **OpenAI-compatible** (`adapter = "openai"`,
+      `base_url = "https://api.z.ai/api/paas/v4"`, `bearer`, key ref `zai`) —
+      confirmed against docs.z.ai. Works with just `EMBERLY_PROVIDER=zai` +
+      `EMBERLY_MODEL` + `ZAI_API_KEY`, no config file (C-1). `init` template
+      lists it.
+- [x] README "adding a provider" section rewritten to the profile schema;
+      stale flat-config docs (`EMBERLY_BASE_URL`, `[pricing]`, …) removed.
+- [x] Grep-gate test `tests/no_vendor_code_in_providers.rs`: fails if
+      `zai`/`z.ai`/`glm` appears in `emberly-providers/src`. Green — Z.ai is
+      data, not code (P-8 proof).
 
 ## 5. In-session model/provider switching  *(C-6 model half; Tech Spec §8, §3)*
 
