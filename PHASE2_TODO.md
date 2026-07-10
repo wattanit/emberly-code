@@ -1,0 +1,136 @@
+# Phase 2 — In-app config & prompt editing — TODO & Progress
+
+**Milestone:** M6 group 2 (Tech Spec §15). Edit configuration and prompt
+files from within a running session, without dropping to a separate shell
+(C-5). Editing honors the tier model (C-1) and provenance (C-3): writes land
+in the project tier, and the user sees where a value comes from before
+changing it.
+**Satisfies:** C-5; Tech Spec §8; Design §3.3, §4.3, §4.6. Pinned to Req
+v0.5 / Design v0.5 / Spec v0.4.
+**Goal:** `/config` and `/prompt` open the file for editing (quick overlay
+or `$EDITOR`); a save takes effect on the running session, and any
+restart-only change is named at save time.
+
+**Depends on:** Phase 1 (merged) — the overlay machinery, the command
+registry, and the injected-capability pattern (`ProviderFactory`) are the
+templates this phase reuses.
+
+**Legend:** `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
+
+---
+
+## Progress summary
+
+| Group | Status | Notes |
+|---|---|---|
+| 1. `$EDITOR` handoff (suspend/run/restore) | [ ] | Design §4.3, new |
+| 2. Edit commands & targets (`/config`, `/prompt`) | [ ] | Design §3.3 |
+| 3. Quick-edit overlay (single value / short prompt) | [-] | Deferred — fast-follow (owner) |
+| 4. Provenance-before-edit + project-tier writes | [ ] | C-1, C-3 |
+| 5. Reload semantics (Live vs RestartRequired) | [ ] | Tech Spec §8 |
+| 6. Tests, degraded mode, docs, exit criterion | [ ] | |
+
+**Overall Phase 2: NOT STARTED.**
+
+---
+
+## 1. `$EDITOR` handoff  *(Design §4.3, §4.6)*
+
+The full-fidelity escape hatch does not exist yet (`/view` currently opens an
+in-TUI text overlay). Build it once, reuse it for config and prompts.
+
+- [ ] A helper that opens a path in `$VISUAL` → `$EDITOR` → a sensible
+      fallback (Design §4.3 order): **suspend** the rich TUI (leave raw mode
+      + alternate screen via the `TerminalGuard`), run the editor as a
+      foreground child to completion, then **restore** the terminal and
+      redraw. Never leaves the terminal corrupted on any exit path (HC-3).
+- [ ] Degraded/line mode has no alt screen: run the editor directly.
+- [ ] Non-fatal failures (`$EDITOR` unset with no fallback, editor exits
+      non-zero) surface as a harness-voice notice, never a crash.
+
+## 2. Edit commands & targets  *(C-5; Design §3.3)*
+
+- [ ] `/config` — edit the project `.agents/config.toml`. If absent,
+      materialize it from the `init` template first (so there is something to
+      edit), then open it.
+- [ ] `/prompt [name]` — edit a prompt file (`system`, `compact`; default
+      `system`). If the project has no override, seed
+      `.agents/prompts/<name>.md` from the baked-in default
+      (`emberly_core::prompts`) so the user edits a real copy (C-1/C-2), then
+      open it.
+- [ ] Both reachable three ways (Design §3.3): command registry entries
+      (palette + `/name`) and — decision pending — a keybinding.
+
+## 3. Quick-edit overlay  *(Design §4.6)*
+
+- [ ] An **editable** overlay (reuse the `OverlayContent` + `LineEditor`
+      machinery) for a single config value or a short prompt, for edits not
+      worth an `$EDITOR` round trip. Enter saves, Esc cancels.
+- **Deferred to a fast-follow (owner decision 2026-07-10).** v0.2 ships the
+  `$EDITOR` path (groups 1–2); the in-TUI editable overlay comes later. Left
+  here so the design intent (reuse `OverlayContent` + `LineEditor`) is
+  recorded.
+
+## 4. Provenance-before-edit + project-tier writes  *(C-1, C-3)*
+
+- [ ] Before an edit, show the value's current provenance tier (default /
+      global / project — reuse `config::show`'s provenance), so the user
+      knows whether they are overriding a baked-in default or an existing
+      project value.
+- [ ] Writes always land in the **project tier** (`.agents/config.toml`,
+      `.agents/prompts/`), never global config or the baked-in defaults
+      (C-1). Show the written path after saving.
+
+## 5. Reload semantics  *(Tech Spec §8)*
+
+The engine caches `system`/`summary_prompt` (and the picker's profile set)
+at construction. A save must take effect without a restart where it can.
+
+- [ ] Classify each editable piece `Live` vs `RestartRequired`. Proposed:
+      **Live** — prompt files (system/compact), the `[providers.*]` set (so a
+      newly-added profile appears in the picker and is switchable). **Restart
+      required** — startup-only keys (`sandbox.require`; trust settings when
+      Phase 5 lands). The editor names any restart-only change at save time.
+- [ ] Mechanism (mirrors Phase 1's `ProviderFactory`): a host-injected
+      config **reloader** re-runs `config::load` on save, diffs against the
+      active config, and applies the `Live` pieces to the engine (new
+      command, e.g. `Command::ReloadConfig`) — updating `system`, the summary
+      prompt, and the profile set — then emits a `Notice` summarizing what
+      changed and what needs a restart.
+- [ ] Prompts reload respects the pinned-content rule: a changed system
+      prompt applies to subsequent turns; it does not rewrite prior turns or
+      the transcript.
+
+## 6. Tests, degraded mode, docs & exit criterion
+
+- [ ] Unit tests: target-path resolution (`/config`, `/prompt system`),
+      seed-from-default when absent, project-tier write path, provenance
+      lookup, Live/RestartRequired classification, reload-diff application.
+- [ ] `$EDITOR` handoff tested via a fake editor (a script that appends to
+      the file) where feasible; terminal suspend/restore verified by a
+      smoke run.
+- [ ] Degraded-mode parity: `/config` / `/prompt` work in line mode
+      (direct editor, no overlay).
+- [ ] README/docs: the edit commands, where writes land, and what needs a
+      restart.
+- [ ] **Exit criterion (done when):** editing a prompt via `$EDITOR` (or the
+      overlay) writes to the project tier, provenance is shown before the
+      edit, the change takes effect on the next turn without a restart, and a
+      restart-only edit is clearly named; lint gates and the suite stay green.
+
+---
+
+## Decisions & notes log
+
+Confirmed with the owner 2026-07-10:
+
+- **`$EDITOR` handoff first; in-overlay editor is a fast-follow.** Group 1–2
+  (the `$EDITOR` path) is the v0.2 deliverable; group 3 (the editable
+  overlay) is deferred within this phase, not built now.
+- **Live-reload split accepted:** prompts (system/compact) and the
+  `[providers.*]` set reload **Live**; startup-only keys
+  (`sandbox.require`, later trust) are **RestartRequired** and named at save
+  time. Honest fallback if hot-swap proves fiddly: apply on next session and
+  always say what changed.
+- **Palette + slash only** for `/config` / `/prompt` (no dedicated
+  keybinding), consistent with Design §10's open question.
