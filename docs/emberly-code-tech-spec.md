@@ -1,6 +1,6 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.3 
+**Version:** 0.4 
 **Status:** approved 
 **Date:** 2026-07-10
 **Owner:** Wattanit
@@ -181,7 +181,7 @@ each talks to is data, not code. A provider is a config profile:
 
 ```toml
 [providers.<name>]
-adapter  = "anthropic-wire" | "openai-wire"  # which §4.2 parser
+adapter  = "anthropic" | "openai"            # which §4.2 wire-format parser
 base_url = "https://…"
 auth     = { scheme = "bearer" | "x-api-key" | "header", header = "…", key = "<ref>" }
 models   = ["model-id", …]
@@ -202,8 +202,8 @@ models   = ["model-id", …]
 
 - `CompletionRequest` carries `effort: Option<Effort>`, a normalized enum
   (`Low | Medium | High | Max`). Each adapter maps it to the provider's
-  native control — `anthropic-wire` to a thinking-budget token count,
-  `openai-wire` to the `reasoning_effort` field — or drops it when the
+  native control — the `anthropic` adapter to a thinking-budget token count,
+  the `openai` adapter to the `reasoning_effort` field — or drops it when the
   model has no such control (a no-op, never an error — P-9).
 - `ModelInfo` declares the levels a model offers and its default; the UI
   (Design §3.1) offers exactly those. Effort is engine state, changed by
