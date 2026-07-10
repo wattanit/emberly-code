@@ -13,6 +13,7 @@
 pub mod app;
 pub mod commands;
 pub mod diffview;
+pub mod edit;
 pub mod editor;
 pub mod frontend;
 pub mod line;

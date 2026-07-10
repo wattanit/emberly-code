@@ -37,6 +37,15 @@ impl TerminalGuard {
     /// Enter raw mode + the alternate screen, hide the cursor, and enable
     /// bracketed paste. Installs the panic-safe restore hook.
     pub fn enter() -> io::Result<Self> {
+        Self::enter_modes()?;
+        install_panic_hook();
+        let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+        Ok(Self { terminal })
+    }
+
+    /// Apply the TUI terminal modes (raw + alternate screen + capture + cursor
+    /// hide). Shared by [`enter`](Self::enter) and [`resume`](Self::resume).
+    fn enter_modes() -> io::Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(
@@ -56,9 +65,21 @@ impl TerminalGuard {
                 PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
             );
         }
-        install_panic_hook();
-        let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-        Ok(Self { terminal })
+        Ok(())
+    }
+
+    /// Suspend the TUI to hand the terminal to a foreground child (e.g.
+    /// `$EDITOR`): leave raw mode + the alternate screen so the child draws on
+    /// the normal screen (Design §4.3). Pair with [`resume`](Self::resume).
+    pub fn suspend(&mut self) -> io::Result<()> {
+        restore_terminal()
+    }
+
+    /// Re-enter the TUI modes after [`suspend`](Self::suspend) and clear for a
+    /// full redraw.
+    pub fn resume(&mut self) -> io::Result<()> {
+        Self::enter_modes()?;
+        self.terminal.clear()
     }
 
     /// The underlying ratatui terminal, for drawing a frame.

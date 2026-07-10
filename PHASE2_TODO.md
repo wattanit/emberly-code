@@ -23,7 +23,7 @@ templates this phase reuses.
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. `$EDITOR` handoff (suspend/run/restore) | [ ] | Design §4.3, new |
+| 1. `$EDITOR` handoff (suspend/run/restore) | [x] | Done 2026-07-10; `edit` module + guard suspend/resume; 3 tests |
 | 2. Edit commands & targets (`/config`, `/prompt`) | [ ] | Design §3.3 |
 | 3. Quick-edit overlay (single value / short prompt) | [-] | Deferred — fast-follow (owner) |
 | 4. Provenance-before-edit + project-tier writes | [ ] | C-1, C-3 |
@@ -39,14 +39,18 @@ templates this phase reuses.
 The full-fidelity escape hatch does not exist yet (`/view` currently opens an
 in-TUI text overlay). Build it once, reuse it for config and prompts.
 
-- [ ] A helper that opens a path in `$VISUAL` → `$EDITOR` → a sensible
-      fallback (Design §4.3 order): **suspend** the rich TUI (leave raw mode
-      + alternate screen via the `TerminalGuard`), run the editor as a
-      foreground child to completion, then **restore** the terminal and
-      redraw. Never leaves the terminal corrupted on any exit path (HC-3).
-- [ ] Degraded/line mode has no alt screen: run the editor directly.
-- [ ] Non-fatal failures (`$EDITOR` unset with no fallback, editor exits
-      non-zero) surface as a harness-voice notice, never a crash.
+- [x] `edit` module: `resolve_editor` (`$VISUAL` → `$EDITOR`, pure/testable),
+      `run_editor(path)` / `run_program(program, path)` spawning the editor as
+      a foreground child on the file and waiting. Returns a structured
+      `EditStatus` (`Edited` / `NoEditor` / `Failed`) — never an `Err`.
+- [x] `TerminalGuard::suspend`/`resume`: leave raw mode + alternate screen for
+      the child, then re-enter and clear for a redraw (shared `enter_modes`).
+      Restore is idempotent + panic-safe (HC-3), unchanged.
+- [x] Tests: editor resolution (VISUAL/EDITOR/empty), a fake-editor script
+      that appends to the file (proves the handoff runs on the file), and a
+      failing editor → `Failed` not a crash.
+- [ ] Line mode: run the editor directly (no alt screen) — wired in group 2
+      alongside the line-mode commands.
 
 ## 2. Edit commands & targets  *(C-5; Design §3.3)*
 
