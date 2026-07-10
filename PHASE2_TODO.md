@@ -27,7 +27,7 @@ templates this phase reuses.
 | 2. Edit commands & targets (`/config`, `/prompt`) | [x] | Done 2026-07-10; rich TUI; 3 tests (line mode → group 6) |
 | 3. Quick-edit overlay (single value / short prompt) | [-] | Deferred — fast-follow (owner) |
 | 4. Provenance-before-edit + project-tier writes | [x] | Done 2026-07-10; new-vs-existing notice; project-tier only |
-| 5. Reload semantics (Live vs RestartRequired) | [ ] | Tech Spec §8 |
+| 5. Reload semantics (Live vs RestartRequired) | [x] | Done 2026-07-10; ConfigReloader + ReloadConfig; 2 tests |
 | 6. Tests, degraded mode, docs, exit criterion | [ ] | |
 
 **Overall Phase 2: NOT STARTED.**
@@ -98,20 +98,22 @@ in-TUI text overlay). Build it once, reuse it for config and prompts.
 The engine caches `system`/`summary_prompt` (and the picker's profile set)
 at construction. A save must take effect without a restart where it can.
 
-- [ ] Classify each editable piece `Live` vs `RestartRequired`. Proposed:
-      **Live** — prompt files (system/compact), the `[providers.*]` set (so a
-      newly-added profile appears in the picker and is switchable). **Restart
-      required** — startup-only keys (`sandbox.require`; trust settings when
-      Phase 5 lands). The editor names any restart-only change at save time.
-- [ ] Mechanism (mirrors Phase 1's `ProviderFactory`): a host-injected
-      config **reloader** re-runs `config::load` on save, diffs against the
-      active config, and applies the `Live` pieces to the engine (new
-      command, e.g. `Command::ReloadConfig`) — updating `system`, the summary
-      prompt, and the profile set — then emits a `Notice` summarizing what
-      changed and what needs a restart.
-- [ ] Prompts reload respects the pinned-content rule: a changed system
-      prompt applies to subsequent turns; it does not rewrite prior turns or
-      the transcript.
+- [x] **Live** — system/compact prompts (and AGENTS.md, since `config::load`
+      recomputes the combined system prompt) + the `[providers.*]` set.
+      **RestartRequired** — `sandbox.require` (trust later): detected by the
+      reloader diffing against the launch value and surfaced as a note.
+- [x] Mechanism (mirrors `ProviderFactory`): `ConfigReloader` trait +
+      `ReloadedConfig` (core); host `ConfiguredReloader` re-runs `config::load`
+      and rebuilds the factory/prompts. `Command::ReloadConfig` → engine
+      applies `system`/`summary_prompt`/factory, emits `ProfilesChanged` when
+      the set changed (picker refresh) + a `Notice` listing what changed and
+      any restart note; a reload error is a `HarnessError`, current config
+      kept. The TUI sends `ReloadConfig` after a successful `$EDITOR` edit.
+- [x] Applies to subsequent turns only: the active provider/model is left
+      as-is (use `/model` to switch), and no prior turn or transcript line is
+      rewritten.
+- [x] Tests: reload applies + reports live changes + restart note + emits
+      `ProfilesChanged`; no-reloader path is a calm notice.
 
 ## 6. Tests, degraded mode, docs & exit criterion
 

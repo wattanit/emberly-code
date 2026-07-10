@@ -32,7 +32,7 @@ pub use command::Command;
 pub use emberly_providers::{Message, RetryPolicy};
 pub use engine::{Engine, EngineConfig};
 pub use event::UiEvent;
-pub use factory::{ProviderChoice, ProviderFactory};
+pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfig};
 pub use gate::PermissionAsk;
 pub use id::{PermissionId, SessionId, ToolCallId};
 pub use transcript::{

@@ -100,7 +100,12 @@ pub async fn run(
                             let status = crate::edit::run_editor(&path);
                             guard.resume()?;
                             input_paused.store(false, Ordering::Relaxed);
+                            let edited = matches!(status, crate::edit::EditStatus::Edited);
                             app.note_edit(&path, status);
+                            // Apply the saved edit to the running session (C-5).
+                            if edited {
+                                let _ = commands_tx.send(Command::ReloadConfig).await;
+                            }
                         }
                         Action::None => {}
                     }

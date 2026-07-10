@@ -81,6 +81,7 @@ fn make_config(
         resuming: false,
         summary_prompt: None,
         provider_factory: None,
+        config_reloader: None,
     }
 }
 
@@ -1031,4 +1032,70 @@ async fn switch_model_unknown_profile_errors_without_switching() {
             .any(|e| matches!(e, UiEvent::ModelChanged { .. })),
         "no ModelChanged on a failed switch"
     );
+}
+
+/// A fake [`ConfigReloader`](emberly_core::ConfigReloader): reports a changed
+/// system prompt, a new profile set, and a restart-only change (C-5).
+struct FakeReloader;
+
+impl emberly_core::ConfigReloader for FakeReloader {
+    fn reload(&self) -> Result<emberly_core::ReloadedConfig, String> {
+        Ok(emberly_core::ReloadedConfig {
+            system: Some("new system prompt".to_string()),
+            summary_prompt: None,
+            provider_factory: Arc::new(FakeFactory),
+            profiles: vec!["new".to_string(), "zai".to_string()],
+            restart_notes: vec!["sandbox.require changed — restart to apply".to_string()],
+        })
+    }
+}
+
+/// `ReloadConfig` applies the live pieces and reports what changed + what needs
+/// a restart; a changed profile set emits `ProfilesChanged` for the picker.
+#[tokio::test]
+async fn reload_config_applies_and_reports() {
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        temp_project(),
+        EngineConfig::no_transcript(),
+    );
+    config.config_reloader = Some(Arc::new(FakeReloader));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await;
+
+    h.send(Command::ReloadConfig).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ProfilesChanged { profiles }
+                if profiles == &vec!["new".to_string(), "zai".to_string()])),
+        "the picker's profile set is refreshed"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message }
+            if message.contains("reloaded")
+                && message.contains("system prompt")
+                && message.contains("restart"))),
+        "the notice reports live changes and the restart-only one"
+    );
+}
+
+/// Without a reloader (offline placeholder), `ReloadConfig` is a calm notice.
+#[tokio::test]
+async fn reload_config_without_reloader_is_a_notice() {
+    let mut h = spawn(make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        temp_project(),
+        EngineConfig::no_transcript(),
+    ));
+    let _ = h.collect(None).await;
+
+    h.send(Command::ReloadConfig).await;
+    let events = h.collect(None).await;
+
+    assert!(events.iter().any(|e| matches!(e,
+        UiEvent::Notice { message } if message.contains("not available"))));
 }

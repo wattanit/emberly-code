@@ -29,3 +29,30 @@ pub trait ProviderFactory: Send + Sync {
     /// The configured profile names, sorted — for validation and the picker.
     fn profiles(&self) -> Vec<String>;
 }
+
+/// The reloadable configuration a [`ConfigReloader`] produces on a save (C-5):
+/// the fresh prompt set and provider profiles, plus any change that only takes
+/// effect on restart (named to the user rather than silently ignored).
+pub struct ReloadedConfig {
+    /// The resolved system prompt (base + project instructions), or `None`.
+    pub system: Option<String>,
+    /// The resolved `/compact` summary-prompt override, or `None`.
+    pub summary_prompt: Option<String>,
+    /// A fresh factory over the reloaded provider profiles.
+    pub provider_factory: Arc<dyn ProviderFactory>,
+    /// The reloaded profile names, sorted (for the picker).
+    pub profiles: Vec<String>,
+    /// Human-readable notes for changes that need a restart (e.g. a changed
+    /// `sandbox.require`) — surfaced, never applied silently.
+    pub restart_notes: Vec<String>,
+}
+
+/// Re-resolves configuration from disk after an in-app edit (C-5), injected by
+/// the host so the engine can apply a saved edit without owning the config
+/// resolution (which lives in the binary) — the same seam as
+/// [`ProviderFactory`].
+pub trait ConfigReloader: Send + Sync {
+    /// Re-read config + prompts from disk. `Err` (e.g. a malformed
+    /// `config.toml`) is surfaced as a harness error; the live config is kept.
+    fn reload(&self) -> Result<ReloadedConfig, String>;
+}

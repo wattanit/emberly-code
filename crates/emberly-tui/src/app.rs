@@ -426,6 +426,11 @@ impl App {
                 self.session.provider = provider;
                 self.session.model = model;
             }
+            UiEvent::ProfilesChanged { profiles } => {
+                // A `/config` reload changed the provider set; refresh the
+                // picker's list (C-5).
+                self.profiles = profiles;
+            }
             UiEvent::Notice { message } => self.conversation.push(ConvItem::Notice(message)),
             UiEvent::HarnessError { what, why, next } => {
                 self.conversation
@@ -938,8 +943,8 @@ impl App {
     pub fn note_edit(&mut self, path: &Path, status: crate::edit::EditStatus) {
         use crate::edit::EditStatus;
         let message = match status {
-            // Live reload lands in group 5; until then it applies next session.
-            EditStatus::Edited => format!("edited {} — active on the next session", path.display()),
+            // A ReloadConfig follows (C-5), which reports what actually changed.
+            EditStatus::Edited => format!("edited {}", path.display()),
             EditStatus::NoEditor => {
                 "no editor configured — set $EDITOR or $VISUAL, then try again".to_string()
             }
