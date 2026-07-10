@@ -1266,3 +1266,98 @@ async fn turn_without_reasoning_records_no_reasoning() {
         "no reasoning ⇒ reasoning field is None"
     );
 }
+
+/// End-to-end (P-9 + P-10): with an effort set, a turn that emits reasoning
+/// sends the effort on the wire, streams the reasoning distinctly, and records
+/// it as a separate transcript field — the Phase 3 exit criterion in one turn.
+#[tokio::test]
+async fn effort_and_reasoning_round_trip_in_one_turn() {
+    let reasoning_turn = ScriptedResponse {
+        events: vec![
+            StreamEvent::ReasoningDelta {
+                text: "weighing options".into(),
+            },
+            StreamEvent::ReasoningSignature {
+                signature: "sig".into(),
+                redacted: false,
+            },
+            StreamEvent::TextDelta {
+                text: "final answer".into(),
+            },
+        ],
+        outcome: ScriptOutcome::Done(StopReason::EndTurn),
+    };
+    let fake = Arc::new(FakeProvider::new(vec![reasoning_turn]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let sink = CaptureSink::new();
+    let config = make_config(provider, temp_project(), Box::new(sink.clone()));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await; // startup events (incl. initial EffortChanged)
+
+    h.send(Command::SetEffort {
+        effort: Effort::High,
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    h.send(Command::UserInput {
+        text: "decide".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // P-9: the effort reached the wire.
+    assert_eq!(
+        fake.last_effort(),
+        Some(Effort::High),
+        "effort on the request"
+    );
+    // P-10: reasoning streamed distinctly from the answer.
+    assert!(events.iter().any(|e| matches!(e,
+        UiEvent::ReasoningDelta { text } if text == "weighing options")));
+    assert_eq!(deltas(&events), "final answer");
+    // P-10 + HC-7: recorded as a distinct transcript field.
+    assert!(sink.records().iter().any(|r| matches!(&r.event,
+        TranscriptEvent::AssistantMessage { text, reasoning }
+            if text == "final answer" && reasoning.as_deref() == Some("weighing options"))));
+}
+
+/// Setting effort on a model with no reasoning control is a calm no-op notice,
+/// never an error and never an announced change (P-9).
+#[tokio::test]
+async fn set_effort_on_a_model_without_a_control_declines_calmly() {
+    // A fake with no declared effort levels.
+    let info = ModelInfo {
+        model: "plain".into(),
+        context_window: 100,
+        max_output_tokens: 100,
+        pricing: None,
+        effort_levels: Vec::new(),
+        default_effort: None,
+    };
+    let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(Vec::new()).with_model_info(info));
+    let sink = CaptureSink::new();
+    let config = make_config(provider, temp_project(), Box::new(sink.clone()));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await;
+
+    h.send(Command::SetEffort {
+        effort: Effort::High,
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::Notice { message } if message.contains("no reasoning-effort control"))),
+        "declined with a calm notice"
+    );
+    // No transcript EffortChange is written.
+    assert!(
+        !sink
+            .records()
+            .iter()
+            .any(|r| matches!(&r.event, TranscriptEvent::EffortChange { .. })),
+        "no audit record for a declined change"
+    );
+}

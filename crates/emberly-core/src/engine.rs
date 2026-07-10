@@ -994,6 +994,24 @@ impl Engine {
     /// effort control still accepts the setting; the adapter drops it at the
     /// wire (P-9), so setting it is never an error.
     async fn set_effort(&mut self, effort: Effort) {
+        // The engine is the authority on what a model supports (P-9): decline
+        // (calmly, never an error) when the model has no control or the level
+        // isn't offered, so no frontend can announce a change that won't happen.
+        let levels = self.provider.model_info().effort_levels;
+        if levels.is_empty() {
+            self.emit(UiEvent::Notice {
+                message: "this model has no reasoning-effort control".into(),
+            })
+            .await;
+            return;
+        }
+        if !levels.contains(&effort) {
+            self.emit(UiEvent::Notice {
+                message: format!("this model does not offer '{effort}' reasoning effort"),
+            })
+            .await;
+            return;
+        }
         if self.effort == Some(effort) {
             return; // no-op: already active
         }

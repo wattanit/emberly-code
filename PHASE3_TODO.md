@@ -31,7 +31,7 @@ effort picker is the same overlay as the model picker.
 | 4. Effort as engine state | [x] | Done 2026-07-11; `SetEffort`/`EffortChanged`/`EffortChange`; seeded+threaded+re-seeded on switch; config `effort`/`effort_levels`; 6 tests |
 | 5. Reasoning trace through engine + transcript | [x] | Done 2026-07-11; `UiEvent::ReasoningDelta` relay; distinct `reasoning` field on `AssistantMessage`; `Reasoning` block prepended; 2 tests |
 | 6. UI — thinking trail + effort picker | [x] | Done 2026-07-11; trail (collapse/expand/settle, Ctrl-R); `reasoning` view key; effort picker + sidebar + `/effort`; line-mode block; README; 9 tests |
-| 7. Tests, docs, exit criterion | [ ] | fake-provider round-trips; README; exit met |
+| 7. Tests, docs, exit criterion | [~] | Done 2026-07-11 (code); combined round-trip + no-control decline tests; README; exit met. Open: Spec bump decision (owner) |
 
 **Overall Phase 3: groups 1–6 complete; group 7 (final tests/docs/exit)
 remaining.** Effort is a config-declared, in-session-switchable control mapped
@@ -193,24 +193,25 @@ state, switchable in-session, transcript-logged, announced never silent.
 
 ## 7. Tests, degraded mode, docs & exit criterion
 
-- [ ] Unit + integration: the group 1–6 tests above, plus a full
-      `fake`-provider engine turn asserting effort round-trip **and** a
-      reasoning trail end-to-end (delta → UiEvent → distinct transcript
-      field).
-- [ ] Degraded-mode parity: line mode `/effort <level>` and the reasoning
-      block are smoked; the rich-TUI trail collapse/expand and picker are
-      covered by render/app unit tests (the interactive glow is the
-      `TerminalGuard` path, as in Phase 2).
-- [ ] README: a "Reasoning effort and the thinking trail" section — the
-      `/effort` command + picker, the per-model config default, the
-      `reasoning` view key and its `collapsed`/`expanded`/`hidden` meaning
-      (and that `hidden` still records), and the plain-mode behavior.
-- [ ] **Exit criterion met:** effort is observable in the request per live
-      provider that supports one and a no-op on one that doesn't; a
-      `FakeProvider` emitting `ReasoningDelta` renders as a collapsed,
-      expandable trail and is recorded in a distinct transcript field; the
-      `hidden` view still writes the trace; `/effort` switches per session and
-      is announced. Lint gates + suite green.
+- [x] Unit + integration: the group 1–6 tests, plus a combined
+      `effort_and_reasoning_round_trip_in_one_turn` (effort on the wire +
+      distinct reasoning UiEvent + distinct transcript field) and
+      `set_effort_on_a_model_without_a_control_declines_calmly`.
+- [x] Degraded-mode parity: line-mode reasoning block + `hidden` suppression
+      unit-tested; `/effort` on the placeholder **live-smoked** — now declines
+      with "this model has no reasoning-effort control" (the smoke caught the
+      engine announcing a change that couldn't happen; fixed by making
+      `set_effort` the authority — declines when levels empty / not offered).
+      The rich-TUI trail + picker are render/app unit tests.
+- [x] README: "Reasoning effort and the thinking trail" section (group 6).
+- [x] **Exit criterion met:** effort round-trips on a model that supports one
+      and is a calm no-op otherwise (P-9); a `FakeProvider` emitting
+      `ReasoningDelta` renders as a collapsed, expandable trail and is recorded
+      in a distinct transcript field; `hidden` still records; `/effort`
+      switches per session and is announced. Lint gates + 21 binaries green.
+      Live smoke limited to the no-op path — no offline provider emits
+      reasoning or declares effort, so the streaming/mapping paths rest on the
+      `FakeProvider` + adapter fixture tests (honest scope note).
 
 ---
 
