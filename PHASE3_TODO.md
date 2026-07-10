@@ -6,7 +6,8 @@ visible without imposing it (P-10). Completes the effort half of C-6 that
 Phase 1 left open.
 **Satisfies:** P-9, P-10; C-6 (effort half); Tech Spec §4.6, §4.7,
 §3.1/§3.2 (events), §9; Design §3.1, §4.4. Pinned to Req v0.5 / Design v0.5
-/ Spec v0.4.
+/ Spec v0.5 (the Spec was bumped v0.4 → v0.5 at this phase's close to absorb
+its own additive refinements — see the notes ledger).
 **Goal:** an effort round-trip is observable per live provider that
 supports one and a no-op on one that doesn't; a `FakeProvider` emitting
 `ReasoningDelta` renders as a collapsed, expandable trail and is recorded
@@ -31,13 +32,16 @@ effort picker is the same overlay as the model picker.
 | 4. Effort as engine state | [x] | Done 2026-07-11; `SetEffort`/`EffortChanged`/`EffortChange`; seeded+threaded+re-seeded on switch; config `effort`/`effort_levels`; 6 tests |
 | 5. Reasoning trace through engine + transcript | [x] | Done 2026-07-11; `UiEvent::ReasoningDelta` relay; distinct `reasoning` field on `AssistantMessage`; `Reasoning` block prepended; 2 tests |
 | 6. UI — thinking trail + effort picker | [x] | Done 2026-07-11; trail (collapse/expand/settle, Ctrl-R); `reasoning` view key; effort picker + sidebar + `/effort`; line-mode block; README; 9 tests |
-| 7. Tests, docs, exit criterion | [~] | Done 2026-07-11 (code); combined round-trip + no-control decline tests; README; exit met. Open: Spec bump decision (owner) |
+| 7. Tests, docs, exit criterion | [x] | Done 2026-07-11; combined round-trip + no-control decline tests; README; Spec bumped v0.4→v0.5 (owner-approved); exit met |
 
-**Overall Phase 3: groups 1–6 complete; group 7 (final tests/docs/exit)
-remaining.** Effort is a config-declared, in-session-switchable control mapped
-per adapter (no-op when unsupported); the reasoning trace is captured,
-replayed, streamed to a collapsed/expandable trail, and recorded distinctly.
-Workspace clippy + fmt clean; 21 test binaries green (TUI 111).
+**Overall Phase 3: COMPLETE (2026-07-11).** Effort is a config-declared,
+in-session-switchable control mapped per adapter (no-op when unsupported, the
+engine the authority); the reasoning trace is captured, replayed across turns,
+streamed to a collapsed/expandable trail (Ctrl-R, `reasoning` view key), and
+recorded as a distinct transcript field (`hidden` still records). Tech Spec
+bumped v0.4 → v0.5 to absorb the additive refinements (owner-approved). Next:
+Phase 4 — ask-user tool & tool-call explanation (T-8, T-9). Workspace clippy +
+fmt clean; 21 test binaries green (TUI 111).
 
 ---
 
@@ -235,13 +239,13 @@ G-22 routes these to the owner):
   startup/set/switch, so one event drives both the sidebar (current level) and
   the picker (offered levels) across the process boundary. Pre-release, so no
   compat concern; the transcript `EffortChange` stays `{ effort: Effort }`.
-- **Spec feedback to raise in group 7 (docs):** the Spec §4.1 event list names
-  only `ReasoningDelta`; implementation added a companion `ReasoningSignature`
-  event and a normalized `ContentBlock::Reasoning { text, signature, redacted }`
-  so the opaque provider signature survives across turns for replay (§4.7's
-  "echoed back on subsequent tool-use turns"). The signature is opaque — no
-  wire *type* crosses the boundary, satisfying P-1 in substance. Record as a
-  downstream feedback entry (Spec §4.1/§4.7) at the next Spec bump (SFD G-24).
+- **Spec feedback — RESOLVED 2026-07-11 (Spec bumped v0.4 → v0.5).** The Spec
+  §4.1 event list named only `ReasoningDelta`; implementation added a companion
+  `ReasoningSignature` event and a normalized `ContentBlock::Reasoning { text,
+  signature, redacted }` so the opaque provider signature survives across turns
+  for replay (§4.7). The signature is opaque — no wire *type* crosses the
+  boundary, satisfying P-1 in substance. Absorbed into Spec §3.1/§4.1/§4.7;
+  companion pins in Requirements/Design updated to Spec v0.5 (G-16).
 - **Resume does not restore the last in-session effort:** a resumed session
   re-seeds from the model's `default_effort` rather than replaying the last
   `EffortChange` from the transcript. Effort is per-session state; restoring it
