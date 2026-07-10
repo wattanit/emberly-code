@@ -28,9 +28,14 @@ templates this phase reuses.
 | 3. Quick-edit overlay (single value / short prompt) | [-] | Deferred — fast-follow (owner) |
 | 4. Provenance-before-edit + project-tier writes | [x] | Done 2026-07-10; new-vs-existing notice; project-tier only |
 | 5. Reload semantics (Live vs RestartRequired) | [x] | Done 2026-07-10; ConfigReloader + ReloadConfig; 2 tests |
-| 6. Tests, degraded mode, docs, exit criterion | [ ] | |
+| 6. Tests, degraded mode, docs, exit criterion | [x] | Done 2026-07-10; line-mode `/config`/`/prompt`/`/reload`, README, exit met |
 
-**Overall Phase 2: NOT STARTED.**
+**Overall Phase 2: COMPLETE (2026-07-10)** (group 3 deferred as a
+fast-follow). In-app `/config` and `/prompt` edit via `$EDITOR` with
+provenance and project-tier writes; edits apply live to the running session
+(`/reload` on demand); line mode reaches the same via path + `/reload`.
+Workspace clippy + fmt clean; 21 test binaries green. Next: Phase 3 —
+reasoning effort & the thinking trail (P-9, P-10).
 
 ---
 
@@ -117,20 +122,25 @@ at construction. A save must take effect without a restart where it can.
 
 ## 6. Tests, degraded mode, docs & exit criterion
 
-- [ ] Unit tests: target-path resolution (`/config`, `/prompt system`),
-      seed-from-default when absent, project-tier write path, provenance
-      lookup, Live/RestartRequired classification, reload-diff application.
-- [ ] `$EDITOR` handoff tested via a fake editor (a script that appends to
-      the file) where feasible; terminal suspend/restore verified by a
-      smoke run.
-- [ ] Degraded-mode parity: `/config` / `/prompt` work in line mode
-      (direct editor, no overlay).
-- [ ] README/docs: the edit commands, where writes land, and what needs a
-      restart.
-- [ ] **Exit criterion (done when):** editing a prompt via `$EDITOR` (or the
-      overlay) writes to the project tier, provenance is shown before the
-      edit, the change takes effect on the next turn without a restart, and a
-      restart-only edit is clearly named; lint gates and the suite stay green.
+- [x] Unit tests: `config_target`/`prompt_target` (seed-from-default,
+      already-exists, unknown-name), the App `/config`/`/prompt` seeding +
+      provenance notices, `note_edit`, and the engine reload-diff/report.
+- [x] `$EDITOR` handoff tested via a fake-editor script (appends to the file);
+      `resolve_editor` unit-tested; terminal suspend/restore is the
+      `TerminalGuard` path, exercised by the interactive smoke.
+- [x] Degraded-mode parity: line mode has no editor handoff (stdin is the
+      reader / often a pipe); `/config` and `/prompt` seed + print the path
+      and `/reload` applies — smoked live. `/reload` also added to the rich
+      TUI as a manual escape hatch.
+- [x] README: an "Editing config and prompts from a session" section — the
+      commands, project-tier writes, live apply, restart-only naming, and the
+      plain-mode behavior.
+- [x] **Exit criterion met:** `/prompt` (or `/config`) via `$EDITOR` writes to
+      the project tier, a provenance notice precedes the edit, the change is
+      applied to the running session on save (system prompt next turn; new
+      profile in the `/model` picker), and a restart-only change
+      (`sandbox.require`) is named — verified by unit tests + the live line-mode
+      smoke; lint gates and the suite are green (21 binaries).
 
 ---
 

@@ -3,7 +3,8 @@
 //! The caller suspends and restores the terminal around this
 //! ([`TerminalGuard::suspend`](crate::terminal::TerminalGuard::suspend)).
 
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Outcome of an editor handoff — structured so the frontend surfaces it as a
@@ -17,6 +18,45 @@ pub enum EditStatus {
     NoEditor,
     /// The editor could not be launched, or exited non-zero.
     Failed(String),
+}
+
+/// Resolve `.agents/config.toml` under `agents_dir`, seeding it from `template`
+/// when the project has none yet (C-1/C-2). Returns the path and whether it
+/// already existed (for the provenance message). Shared by the rich TUI and
+/// line mode so the seeding/target logic lives in one place.
+pub fn config_target(agents_dir: &Path, template: &str) -> io::Result<(PathBuf, bool)> {
+    let path = agents_dir.join("config.toml");
+    let existed = path.exists();
+    if !existed {
+        write_new(&path, template)?;
+    }
+    Ok((path, existed))
+}
+
+/// Resolve a prompt file (`system` | `compact`, default `system`) under
+/// `agents_dir`, seeding from the baked-in default when absent (C-1/C-2).
+/// `Err` names an unknown prompt.
+pub fn prompt_target(agents_dir: &Path, name: &str) -> Result<(PathBuf, bool), String> {
+    let name = if name.is_empty() { "system" } else { name };
+    let default = match name {
+        "system" => emberly_core::prompts::system(),
+        "compact" => emberly_core::prompts::compact(),
+        other => return Err(format!("unknown prompt '{other}' — try system or compact")),
+    };
+    let path = agents_dir.join("prompts").join(format!("{name}.md"));
+    let existed = path.exists();
+    if !existed {
+        write_new(&path, &format!("{default}\n")).map_err(|e| e.to_string())?;
+    }
+    Ok((path, existed))
+}
+
+/// Create a file (and any missing parent dirs) with `contents`.
+fn write_new(path: &Path, contents: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, contents)
 }
 
 /// Resolve the editor command: `$VISUAL`, else `$EDITOR`, else `None`. Pure
@@ -107,6 +147,32 @@ mod tests {
             contents.contains("EDITED"),
             "editor ran on the file: {contents:?}"
         );
+    }
+
+    #[test]
+    fn config_target_seeds_then_reports_existing() {
+        let dir = std::env::temp_dir().join(format!("emberly-ct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let (path, existed) = config_target(&dir, "# tpl\n").expect("config target");
+        assert!(!existed, "first call seeds");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "# tpl\n");
+        let (_, existed2) = config_target(&dir, "# tpl\n").expect("second");
+        assert!(existed2, "second call sees the existing file");
+    }
+
+    #[test]
+    fn prompt_target_defaults_seeds_and_rejects_unknown() {
+        let dir = std::env::temp_dir().join(format!("emberly-pt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        // Empty name defaults to `system`, seeded from the baked-in default.
+        let (path, existed) = prompt_target(&dir, "").expect("prompt target");
+        assert!(!existed);
+        assert!(path.ends_with("prompts/system.md"));
+        assert!(!std::fs::read_to_string(&path).expect("read").is_empty());
+        // Unknown name is an error, no file created.
+        assert!(prompt_target(&dir, "bogus").is_err());
     }
 
     #[cfg(unix)]

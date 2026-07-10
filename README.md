@@ -139,6 +139,25 @@ is picked up automatically and given to the agent as standing context.
 Run **`emberly config show`** to see the resolved settings and where each value
 came from.
 
+**Editing config and prompts from a session.** You don't have to leave Emberly
+to tune it:
+
+- **`/config`** opens `.agents/config.toml` in your `$EDITOR` (`$VISUAL` is
+  tried first). If the project has none yet, it's created from the template.
+- **`/prompt [system|compact]`** opens a prompt file, seeded from the baked-in
+  default if you have no override yet. Edits are written to the **project
+  tier** (`.agents/`), never to the global config or the built-in defaults,
+  and Emberly tells you whether you're editing an existing value or creating a
+  new override.
+- On save, the change is **applied to the running session** — a new system
+  prompt takes effect on your next message, and a newly-added provider profile
+  shows up in the `/model` picker right away. Startup-only settings (e.g.
+  `sandbox.require`) are named as needing a restart rather than applied
+  silently. **`/reload`** re-reads everything on demand (handy if you edited a
+  file outside Emberly).
+- In plain/`--plain` mode there's no editor handoff: `/config` and `/prompt`
+  print the file path to edit with your own tools, and `/reload` applies it.
+
 ## Using a session
 
 The screen is a conversation timeline — your messages and the agent's, tool

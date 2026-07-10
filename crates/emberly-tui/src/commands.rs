@@ -35,6 +35,9 @@ pub enum AppCommand {
     Config,
     /// Edit a prompt file in `$EDITOR` (C-5). `/prompt [system|compact]`.
     Prompt,
+    /// Re-read config + prompts from disk and apply them (C-5) — useful after
+    /// editing a file outside emberly.
+    Reload,
     /// Cancel the in-flight turn.
     Cancel,
     /// Exit emberly.
@@ -112,6 +115,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "Edit a prompt file in $EDITOR (/prompt system|compact)",
         cmd: AppCommand::Prompt,
+    },
+    CommandSpec {
+        name: "reload",
+        key: None,
+        desc: "Re-read config & prompts from disk and apply them",
+        cmd: AppCommand::Reload,
     },
     CommandSpec {
         name: "sidebar",

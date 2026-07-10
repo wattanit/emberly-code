@@ -874,69 +874,57 @@ impl App {
     /// Seeds it from the init template (same content `emberly init` writes) if
     /// the project has none yet (C-1/C-2); the write lands in the project tier.
     fn edit_config(&mut self) -> Action {
-        let path = self.agents_dir().join("config.toml");
-        let existed = path.exists();
-        if !existed {
-            if let Err(e) = seed_file(&path, &self.config_template) {
-                self.conversation.push(ConvItem::Notice(format!(
-                    "could not create {}: {e}",
-                    path.display()
-                )));
-                return Action::None;
+        match crate::edit::config_target(&self.agents_dir(), &self.config_template) {
+            Ok((path, existed)) => {
+                // Provenance before the edit (C-3): existing project value vs a
+                // fresh override seeded from the defaults. Edits land here (C-1).
+                self.conversation.push(ConvItem::Notice(if existed {
+                    format!("editing your project config — {}", path.display())
+                } else {
+                    format!(
+                        "no project config yet — created {} from the template; \
+                         your edits override the defaults",
+                        path.display()
+                    )
+                }));
+                Action::EditFile(path)
+            }
+            Err(e) => {
+                self.conversation
+                    .push(ConvItem::Notice(format!("could not prepare config: {e}")));
+                Action::None
             }
         }
-        // Provenance before the edit (C-3): existing project value vs a fresh
-        // override seeded from the defaults. Edits always land here (C-1).
-        self.conversation.push(ConvItem::Notice(if existed {
-            format!("editing your project config — {}", path.display())
-        } else {
-            format!(
-                "no project config yet — created {} from the template; \
-                 your edits override the defaults",
-                path.display()
-            )
-        }));
-        Action::EditFile(path)
     }
 
     /// `/prompt [name]` — edit a prompt file (`system` | `compact`, default
     /// `system`) in `$EDITOR` (C-5). Seeds from the baked-in default (C-1) if
     /// the project has no override yet.
     fn edit_prompt(&mut self, name: &str) -> Action {
-        let name = if name.is_empty() { "system" } else { name };
-        let default = match name {
-            "system" => emberly_core::prompts::system(),
-            "compact" => emberly_core::prompts::compact(),
-            other => {
-                self.conversation.push(ConvItem::Notice(format!(
-                    "unknown prompt '{other}' — try /prompt system or /prompt compact"
-                )));
-                return Action::None;
+        match crate::edit::prompt_target(&self.agents_dir(), name.trim()) {
+            Ok((path, existed)) => {
+                let shown = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("prompt");
+                // Provenance before the edit (C-3): an existing project override
+                // vs a fresh copy of the baked-in default. Edits land here (C-1).
+                self.conversation.push(ConvItem::Notice(if existed {
+                    format!("editing your project '{shown}' prompt — {}", path.display())
+                } else {
+                    format!(
+                        "no project '{shown}' prompt yet — created {} from the baked-in \
+                         default; your edits override it",
+                        path.display()
+                    )
+                }));
+                Action::EditFile(path)
             }
-        };
-        let path = self.agents_dir().join("prompts").join(format!("{name}.md"));
-        let existed = path.exists();
-        if !existed {
-            if let Err(e) = seed_file(&path, &format!("{default}\n")) {
-                self.conversation.push(ConvItem::Notice(format!(
-                    "could not create {}: {e}",
-                    path.display()
-                )));
-                return Action::None;
+            Err(msg) => {
+                self.conversation.push(ConvItem::Notice(msg));
+                Action::None
             }
         }
-        // Provenance before the edit (C-3): an existing project override vs a
-        // fresh copy of the baked-in default. Edits always land here (C-1).
-        self.conversation.push(ConvItem::Notice(if existed {
-            format!("editing your project '{name}' prompt — {}", path.display())
-        } else {
-            format!(
-                "no project '{name}' prompt yet — created {} from the baked-in default; \
-                 your edits override it",
-                path.display()
-            )
-        }));
-        Action::EditFile(path)
     }
 
     /// Report an `$EDITOR` handoff's outcome as a timeline notice (C-5).
@@ -1087,6 +1075,7 @@ impl App {
             }
             AppCommand::Config => self.edit_config(),
             AppCommand::Prompt => self.edit_prompt("system"),
+            AppCommand::Reload => Action::Command(Command::ReloadConfig),
             AppCommand::Cancel => Action::Command(Command::Cancel),
             AppCommand::Quit => Action::Quit,
         }
@@ -1405,15 +1394,6 @@ impl App {
 
 /// The `/help` body: every command with its keybinding and description, from
 /// the single registry (Design §3.3).
-/// Create a file (and any missing parent dirs) with `contents`. Used to seed a
-/// config or prompt file the project doesn't have yet, before editing (C-5).
-fn seed_file(path: &Path, contents: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, contents)
-}
-
 fn help_text() -> String {
     let mut out = String::from("Commands — run via Ctrl-P, /name, or a keybinding.\n\n");
     for spec in commands::COMMANDS {

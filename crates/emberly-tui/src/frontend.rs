@@ -77,8 +77,9 @@ pub async fn run(
             .await
         }
         // Line mode notes the resumed-event count in its banner (see the
-        // binary); it does not replay the timeline or offer the picker.
-        FrontendKind::Plain => line::run(ports).await,
+        // binary); it does not replay the timeline or offer the picker, but it
+        // supports `/config`, `/prompt`, and `/reload` (C-5).
+        FrontendKind::Plain => line::run(ports, sessions_dir, config_template).await,
     }
 }
 
