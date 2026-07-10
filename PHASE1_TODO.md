@@ -21,9 +21,9 @@ adapters, config/keys system, engine channels, and TUI sidebar all exist.
 | Group | Status | Notes |
 |---|---|---|
 | 1. Auth-scheme abstraction in adapters | [x] | Done 2026-07-10; `Auth` enum + 5 unit tests; workspace green |
-| 2. `[providers.<name>]` profile config | [ ] | |
-| 3. Profile resolution in the composition root | [ ] | |
-| 4. Z.ai profile (example + init + docs) | [ ] | the acceptance driver |
+| 2. `[providers.<name>]` profile config | [x] | Done 2026-07-10 (with group 3) |
+| 3. Profile resolution in the composition root | [x] | Done 2026-07-10; live smoke of all 3 paths |
+| 4. Z.ai profile (example + init + docs) | [~] | init template + machinery done; concrete baked-in zai needs real endpoint |
 | 5. In-session switching (`Command::SwitchModel`) | [ ] | C-6 model half |
 | 6. Sidebar model picker | [ ] | Design §3.1 |
 | 7. Tests (offline + live smoke) | [ ] | Tech Spec §14.5, §14.4 |
@@ -60,42 +60,38 @@ pre-release, no real users). The flat `provider`/`base_url`/`context_window`/
 `max_output`/`pricing` fields in `config.rs` are **replaced** by profile
 tables, not augmented.
 
-- [ ] New config model in `emberly/src/config.rs`: `[providers.<name>]` with
-      `adapter` (`"anthropic" | "openai"`), `base_url`,
-      `auth = { scheme, header?, key = "<ref>" }`, and per-model entries
-      carrying `context_window`, `max_output`, and `pricing`
-      (`[providers.<name>.models."model-id"]`). Parse + layer/merge through
-      the existing precedence (built-in → global → project → `EMBERLY_*`).
-- [ ] `auth.key` is a **reference** resolved via the existing
-      `config::api_key(..)` path (env / `keys.toml`, `0600`), never an inline
-      secret (Tech Spec §8). Extend `api_key` to resolve a named ref.
-- [ ] Active-profile selection is explicit: a top-level `provider = "<name>"`
-      key (and `--provider <name>` / `EMBERLY_PROVIDER`) names the active
-      profile; optional `model` / `--model` overrides which model within it.
-      No silent default — no active profile configured → the offline
-      placeholder, as today.
-- [ ] Ship **baked-in profiles** (C-1) materialized by `emberly init` (C-2):
-      `anthropic` and `openai` (known endpoint + adapter + auth scheme
-      predefined; user supplies only the key), `zai` (group 4), and a `local`
-      template (`adapter`/`base_url` left for the user's server/model).
-      Silence about defaults, speech about deviations.
+- [x] New config model in `config.rs`: `ProfileFile`/`AuthFile`/`ModelFile`;
+      `[providers.<name>]` with `adapter`, `base_url`, `auth = {scheme,
+      header?, key}`, and `[providers.<name>.models."id"]` metadata
+      (`context_window`/`max_output`/`pricing`). Field-merge per profile
+      across tiers; flat provider fields removed (profile-only).
+- [x] `auth.key` is a **reference**; `api_key(ref)` resolves
+      `<REF>_API_KEY` then `keys.toml` (now a flat `ref = "secret"` map,
+      `0600`). Missing key for a configured ref → clear early error.
+- [x] Active-profile selection is explicit: top-level `provider` /
+      `--provider` / `EMBERLY_PROVIDER` names the profile; `model` / `--model`
+      the model. No profile → offline placeholder (unchanged).
+- [x] Baked-in profiles (C-1) injected at the lowest tier: `anthropic`,
+      `openai`, `local` (Ollama default). `emberly init` template shows the
+      profile schema incl. a commented `zai` example. Concrete ready-to-use
+      `zai` baked-in → group 4 (needs the real endpoint).
 
 ## 3. Profile resolution in the composition root  *(P-8; Tech Spec §4.5)*
 
 Replace the hardcoded `match kind.as_str()` in
 `emberly/src/provider_setup.rs::build()` with profile-driven construction.
 
-- [ ] Resolve the active profile → build `ModelInfo` (context window, max
-      output, pricing) from the profile's model entry → dispatch on `adapter`
-      to construct `AnthropicProvider` or `OpenAiProvider` with the profile's
-      `base_url` + `Auth`.
-- [ ] Unknown `adapter` value is a clear error naming the valid adapters
-      (mirrors the current `bail!("unknown provider …")`). Missing key /
-      base_url errors keep their current helpful wording.
-- [ ] The offline-placeholder fallback (no provider configured) is preserved.
-- [ ] Verify adding a provider that reuses an existing wire format touches
-      **no** code under `crates/emberly-providers/` — it is config only (the
-      P-8 acceptance property).
+- [x] `provider_setup::build` resolves the active profile → `ModelInfo` from
+      the profile's model entry (or defaults) → dispatch on `adapter` to
+      construct `AnthropicProvider`/`OpenAiProvider` with the profile's
+      `base_url` + `Auth`. `resolve_auth` maps scheme+key-ref → `Auth`.
+- [x] Clear errors: unknown profile (lists configured), missing `adapter`,
+      unknown adapter, unknown auth scheme, unresolved key ref — all verified
+      live via the binary.
+- [x] Offline-placeholder fallback (no active profile) preserved.
+- [x] P-8 property demonstrated live: a `zai` profile (adapter `anthropic`)
+      builds and starts a session with **zero** change under
+      `crates/emberly-providers/` — Z.ai is config, not code.
 
 ## 4. Z.ai profile — the acceptance driver  *(P-8; C-1/C-2; Tech Spec §4.5)*
 

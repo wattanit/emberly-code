@@ -12,19 +12,33 @@ use anyhow::Context;
 /// A commented `config.toml` — everything works without it, so the template is
 /// mostly guidance (Requirements C-1).
 const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/config.toml)
-# Everything here is optional — emberly runs on baked-in defaults. Values set
-# here override the global config; EMBERLY_* env vars override these.
+# Everything here is optional — emberly ships baked-in provider profiles
+# (anthropic, openai, local). Values here override the global config;
+# EMBERLY_* env vars override these.
 
-# provider = "anthropic"        # or "openai" (covers Ollama/vLLM/OpenRouter)
+# Pick the active profile and model:
+# provider = "anthropic"        # a [providers.<name>] profile below or baked-in
 # model    = "claude-sonnet-5"
-# base_url = "https://api.openai.com/v1"   # for openai-compatible endpoints
+
+# A provider is just configuration (no code): pick an `adapter` (the wire
+# format — "anthropic" or "openai"), an endpoint, and a key *reference*. The
+# key itself lives in ~/.config/emberly/keys.toml or the <REF>_API_KEY env var,
+# never here.
+#
+# [providers.zai]
+# adapter  = "anthropic"                 # speaks the Anthropic message format
+# base_url = "https://…"                 # your Z.ai coding-plan endpoint
+# auth     = { scheme = "x-api-key", key = "zai" }   # needs ZAI_API_KEY / keys.toml
+#
+# [providers.local]
+# adapter  = "openai"
+# base_url = "http://localhost:11434/v1" # Ollama/vLLM; keyless by default
+#
+# Optional per-model metadata (context window, max output, pricing → cost est.):
+# [providers.anthropic.models."claude-sonnet-5"]
 # context_window = 200000
 # max_output     = 8192
-
-# Per-model pricing (USD per million tokens) → session cost estimate.
-# [pricing."claude-sonnet-5"]
-# input  = 3.0
-# output = 15.0
+# pricing = { input = 3.0, output = 15.0 }   # USD per million tokens
 "#;
 
 /// A documented `permissions.toml`. The rule engine is Phase 2; this reserves

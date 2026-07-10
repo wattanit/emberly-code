@@ -10,10 +10,10 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context};
-use emberly_providers::{AnthropicProvider, Auth, ModelInfo, OpenAiProvider, Provider};
+use anyhow::{anyhow, bail, Context};
+use emberly_providers::{AnthropicProvider, Auth, ModelInfo, OpenAiProvider, Pricing, Provider};
 
-use crate::config::Resolved;
+use crate::config::{AuthFile, Resolved};
 
 /// A chosen live provider plus display/label info.
 pub struct Selection {
@@ -22,50 +22,102 @@ pub struct Selection {
     pub label: String,
 }
 
-/// Build a live provider from resolved config, or `None` to fall back to the
-/// offline placeholder (when no provider is configured).
+/// Build a live provider by resolving the active profile (Tech Spec §4.5), or
+/// `None` to fall back to the offline placeholder (when no profile is active).
+/// Adding a provider that reuses an existing adapter is config only — nothing
+/// here is vendor-specific (P-8).
 pub fn build(resolved: &Resolved) -> anyhow::Result<Option<Selection>> {
-    let Some(kind) = resolved.provider.clone() else {
+    let Some(profile_name) = resolved.provider.clone() else {
         return Ok(None);
     };
+    let profile = resolved.providers.get(&profile_name).ok_or_else(|| {
+        let mut known: Vec<&String> = resolved.providers.keys().collect();
+        known.sort();
+        anyhow!(
+            "unknown provider profile '{profile_name}' (configured: {})",
+            known
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let adapter = profile.adapter.as_deref().ok_or_else(|| {
+        anyhow!("provider profile '{profile_name}' has no `adapter` (expected \"anthropic\" or \"openai\")")
+    })?;
     let model = resolved.model.clone().context(
-        "a model must be configured when a provider is set (EMBERLY_MODEL or config.toml)",
+        "a model must be configured when a provider is set (EMBERLY_MODEL, --model, or config.toml)",
     )?;
+
+    let auth = resolve_auth(profile.auth.as_ref(), &profile_name)?;
+    let meta = profile.models.get(&model);
     let model_info = ModelInfo {
         model: model.clone(),
-        context_window: resolved.context_window.unwrap_or(200_000),
-        max_output_tokens: resolved.max_output.unwrap_or(4_096),
-        pricing: resolved.pricing,
+        context_window: meta.and_then(|m| m.context_window).unwrap_or(200_000),
+        max_output_tokens: meta.and_then(|m| m.max_output).unwrap_or(4_096),
+        pricing: meta.and_then(|m| m.pricing).map(|p| Pricing {
+            input_per_mtok: p.input,
+            output_per_mtok: p.output,
+        }),
     };
     let client = build_https_client()?;
 
-    let provider: Arc<dyn Provider> = match kind.as_str() {
-        "anthropic" => {
-            let key = crate::config::api_key("anthropic")?
-                .context("no Anthropic API key (set ANTHROPIC_API_KEY or keys.toml)")?;
-            Arc::new(AnthropicProvider::with_default_url(
-                client,
-                Auth::XApiKey(key),
-                model_info,
-            ))
-        }
-        "openai" | "openai-compat" => {
-            // Key may be empty for local servers (Ollama/vLLM).
-            let key = crate::config::api_key("openai")?.unwrap_or_default();
-            let base = resolved
+    let provider: Arc<dyn Provider> = match adapter {
+        "anthropic" => match &profile.base_url {
+            Some(base) => Arc::new(AnthropicProvider::new(client, auth, base.clone(), model_info)),
+            None => Arc::new(AnthropicProvider::with_default_url(client, auth, model_info)),
+        },
+        "openai" => {
+            let base = profile
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-            Arc::new(OpenAiProvider::new(client, Auth::Bearer(key), base, model_info))
+            Arc::new(OpenAiProvider::new(client, auth, base, model_info))
         }
-        other => bail!("unknown provider '{other}' (expected 'anthropic' or 'openai')"),
+        other => bail!(
+            "unknown adapter '{other}' in profile '{profile_name}' \
+             (expected \"anthropic\" or \"openai\")"
+        ),
     };
 
     Ok(Some(Selection {
         provider,
-        label: format!("{kind}/{model}"),
+        label: format!("{profile_name}/{model}"),
         model,
     }))
+}
+
+/// Turn a profile's `auth` config into an [`Auth`], resolving the key
+/// *reference* from env / `keys.toml`. A configured key reference that does not
+/// resolve is a clear early error rather than a silent 401 later.
+fn resolve_auth(auth: Option<&AuthFile>, profile: &str) -> anyhow::Result<Auth> {
+    let Some(auth) = auth else {
+        return Ok(Auth::None);
+    };
+    let scheme = auth.scheme.as_deref().unwrap_or("none");
+    let key = match &auth.key {
+        Some(reference) => crate::config::api_key(reference)?.ok_or_else(|| {
+            anyhow!(
+                "profile '{profile}' needs the '{reference}' key, but none is set \
+                 (export {}_API_KEY or add `{reference} = \"…\"` to keys.toml)",
+                reference.to_ascii_uppercase()
+            )
+        })?,
+        None => String::new(),
+    };
+    Ok(match scheme {
+        "none" => Auth::None,
+        "bearer" => Auth::Bearer(key),
+        "x-api-key" => Auth::XApiKey(key),
+        "header" => Auth::Header {
+            name: auth.header.clone().unwrap_or_default(),
+            value: key,
+        },
+        other => bail!(
+            "unknown auth scheme '{other}' in profile '{profile}' \
+             (expected bearer, x-api-key, header, or none)"
+        ),
+    })
 }
 
 /// Build an HTTPS-capable client backed by the pure-Rust crypto provider.
