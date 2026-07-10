@@ -38,10 +38,10 @@ config-defeatable) with exactly that lean design. This phase is its named door.
 | 2. Tool-call explanation — UI caption (T-9 TUI + degraded) | [x] | Done 2026-07-11; `ConvItem::Tool.explanation`; dim `↳` caption (rich) / `-` lead (line); absent→none; replay reads it from transcript args; 5 tests |
 | 3. ask_user — round-trip plumbing + the tool (T-8 engine) | [x] | Done 2026-07-11; `AskId`, `AskAnswer`, `AskUserRequest`/`AskUserAnswer`, `AskGate` mirror of the permission gate (2nd channel + select arm + pending Vec), `AskUser` transcript event, `ask_user` tool registered; 4 tests |
 | 4. ask_user — the question prompt UI (T-8 rich TUI) | [x] | Done 2026-07-11; `AskPrompt` state + `on_ask_key` + `render_ask` (dim_accent, never safety band); options + free-text; Enter never auto-answers; Esc→declined; motion stilled; 7 tests |
-| 5. ask_user — degraded-mode question prompt (T-8 line) | [ ] | full parity: numbered options + free-text line, deliberate answer, empty/Esc→declined; two pending slots so it can't collide with a permission prompt |
+| 5. ask_user — degraded-mode question prompt (T-8 line) | [x] | Done 2026-07-11; `render_ask` (calm, no banner) + `parse_ask_answer` (number/text/empty→decline); single `Pending` enum so permission & question can't cross wires; no-ANSI sweep covers it; 3 tests |
 | 6. End-to-end, exit criterion, docs & SFD bookkeeping | [ ] | combined offline round trip; README; Spec bump decision (owner); memory update (tool-explanation graduated) |
 
-**Overall Phase 4: IN PROGRESS** (4 / 6 groups). Branch
+**Overall Phase 4: IN PROGRESS** (5 / 6 groups). Branch
 `phase4/ask-user-and-explanation` off `version0.2` (Phase 3 merged).
 
 ---
@@ -257,18 +257,18 @@ richer reply payload (a chosen option / free text / decline, not Allow/Deny).
 
 Full parity — the interaction is identical in meaning, ASCII-only.
 
-- [ ] `line.rs`: `render_ask` (blank line, calm ASCII heading — **no** capitals
+- [x] `line.rs`: `render_ask` (blank line, calm ASCII heading — **no** capitals
       safety banner, this is not a safety prompt; the question, numbered options
       if any, a free-text prompt, and a plain "Esc/empty = declined" hint) +
       `parse_ask_answer` (a number/letter → that option; a non-empty line →
       free-text; empty → `Declined`).
-- [ ] **Two pending slots.** The run loop currently tracks a single pending
+- [x] **Two pending slots.** The run loop currently tracks a single pending
       permission id; add a second slot (or a small `Pending` enum) so a question
       prompt and a permission prompt cannot collide, and the right parser
       consumes the next stdin line.
-- [ ] Tests: no ANSI escape over a stream containing an `AskUserRequest`;
+- [x] Tests: no ANSI escape over a stream containing an `AskUserRequest`;
       numbered-option parse; free-text parse; empty → declined.
-- [ ] `cargo fmt` + `clippy` + `test` green; commit.
+- [x] `cargo fmt` + `clippy` + `test` green; commit.
 
 ---
 
