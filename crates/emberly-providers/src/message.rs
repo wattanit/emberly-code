@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::id::ToolCallId;
+use crate::model::Effort;
 
 /// The author of a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +104,11 @@ pub struct CompletionRequest {
     pub max_output_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// The reasoning effort for this turn (P-9, Tech Spec §4.6). Each adapter
+    /// maps it to its provider's native control or drops it (a no-op for a
+    /// model without such a control — never an error). `None` sends nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
 }
 
 impl CompletionRequest {
@@ -116,6 +122,33 @@ impl CompletionRequest {
             tools: Vec::new(),
             max_output_tokens: None,
             temperature: None,
+            effort: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_without_effort_field_deserializes_to_none() {
+        // A request serialized before Phase 3 carries no `effort` key.
+        let json = r#"{"model":"m","messages":[]}"#;
+        let req: CompletionRequest = match serde_json::from_str(json) {
+            Ok(r) => r,
+            Err(e) => panic!("deserialize legacy: {e}"),
+        };
+        assert_eq!(req.effort, None);
+    }
+
+    #[test]
+    fn new_request_omits_effort_when_none() {
+        let req = CompletionRequest::new("m");
+        let json = match serde_json::to_string(&req) {
+            Ok(s) => s,
+            Err(e) => panic!("serialize: {e}"),
+        };
+        assert!(!json.contains("effort"), "None effort is skipped: {json}");
     }
 }

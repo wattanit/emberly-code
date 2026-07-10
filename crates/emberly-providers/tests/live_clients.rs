@@ -32,6 +32,8 @@ fn model_info() -> ModelInfo {
         context_window: 200_000,
         max_output_tokens: 4096,
         pricing: None,
+        effort_levels: Vec::new(),
+        default_effort: None,
     }
 }
 

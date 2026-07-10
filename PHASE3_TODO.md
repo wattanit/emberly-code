@@ -25,7 +25,7 @@ effort picker is the same overlay as the model picker.
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. Effort model (data types) | [ ] | `Effort` enum; `CompletionRequest.effort`; `ModelInfo` levels + default |
+| 1. Effort model (data types) | [x] | Done 2026-07-10; `Effort` enum + `CompletionRequest.effort` + `ModelInfo` levels/default; 7 tests |
 | 2. Adapter effort mapping + no-op | [ ] | anthropic→thinking-budget; openai→`reasoning_effort`; drop when unsupported |
 | 3. `ReasoningDelta` stream event + trace translation | [ ] | adapter reasoning parts → normalized delta; signature preserve/replay |
 | 4. Effort as engine state | [ ] | `Command::SetEffort`, `EffortChanged`, `effort_change`; threaded into requests; per-model config default |
@@ -42,21 +42,23 @@ effort picker is the same overlay as the model picker.
 Pure data in `emberly-providers`; no wire mapping yet. Establishes the
 vocabulary the adapters and engine share.
 
-- [ ] `Effort` enum (`Low | Medium | High | Max`) in `emberly-providers`
-      (`model.rs` or a small `effort.rs`). `Serialize`/`Deserialize`
-      (snake_case), `Copy`, `PartialEq`. A `Display`/`as_str` for logs and
-      transcript. Ordered low→max so a UI can present them in order.
-- [ ] `CompletionRequest.effort: Option<Effort>` — `#[serde(default,
-      skip_serializing_if = "Option::is_none")]` so existing requests and
-      fixtures are unaffected; `CompletionRequest::new` leaves it `None`.
-- [ ] `ModelInfo` gains `effort_levels: Vec<Effort>` (empty ⇒ the model
-      exposes no control; the UI hides the picker) and `default_effort:
-      Option<Effort>`. `#[serde(default)]` on both so existing `ModelInfo`
-      values/fixtures deserialize. Populated from provider defaults + config
-      (§8), never hardcoded per vendor beyond a sane built-in default.
-- [ ] Unit tests: enum round-trips through serde; `CompletionRequest`
-      without an `effort` field still deserializes (`None`); a `ModelInfo`
-      with no effort fields deserializes to empty/`None`.
+- [x] `Effort` enum (`Low | Medium | High | Max`) in `model.rs`.
+      `Serialize`/`Deserialize` (snake_case), `Copy`, `Ord` (low→max),
+      `as_str`/`Display`/`parse` + `ALL` for logs, transcript, and CLI parsing.
+- [x] `CompletionRequest.effort: Option<Effort>` — `#[serde(default,
+      skip_serializing_if = "Option::is_none")]`; `CompletionRequest::new`
+      leaves it `None`. The engine's two request builders set `effort: None`
+      for now (summarize permanently; the turn builder until group 4).
+- [x] `ModelInfo` gains `effort_levels: Vec<Effort>` (empty ⇒ no control; UI
+      hides the picker) and `default_effort: Option<Effort>`, both
+      `#[serde(default)]`. The `fake` provider declares the full ladder
+      (default `Medium`) for headless round-trips; live/config providers stay
+      empty until adapters/config populate them (groups 2/4).
+- [x] Unit tests (7): enum serde round-trip + case-insensitive parse +
+      ordering; `CompletionRequest` without `effort` deserializes to `None`
+      and `new` omits it; `ModelInfo` with no effort fields deserializes to
+      empty/`None` and with them round-trips. (In-lib tests use the
+      `match/panic` helper, per the crate's `expect_used` deny.)
 
 ## 2. Adapter effort mapping + no-op  *(Tech Spec §4.6, P-9)*
 

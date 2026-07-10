@@ -542,6 +542,8 @@ async fn cost_and_context_use_authoritative_usage() {
             input_per_mtok: 3.0,
             output_per_mtok: 15.0,
         }),
+        effort_levels: Vec::new(),
+        default_effort: None,
     };
     let response = ScriptedResponse {
         events: vec![
@@ -595,6 +597,8 @@ async fn usage_chunk_after_done_still_counts() {
             input_per_mtok: 3.0,
             output_per_mtok: 15.0,
         }),
+        effort_levels: Vec::new(),
+        default_effort: None,
     };
     // `drop_after` appends no terminal event, so this is exactly the wire
     // order: content delta → finish_reason (Done) → usage chunk → EOF.

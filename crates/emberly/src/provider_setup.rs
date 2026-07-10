@@ -77,6 +77,10 @@ fn build_profile(
             input_per_mtok: p.input,
             output_per_mtok: p.output,
         }),
+        // Effort levels/default are declared by the adapter and refined by
+        // config in Phase 3 groups 2/4; empty until then (no effort control).
+        effort_levels: Vec::new(),
+        default_effort: None,
     };
     let client = build_https_client()?;
 

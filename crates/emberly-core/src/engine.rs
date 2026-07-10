@@ -526,6 +526,9 @@ impl Engine {
             tools: Vec::new(),
             max_output_tokens: Some(self.provider.model_info().max_output_tokens),
             temperature: None,
+            // Summarization is a fixed internal task; it does not carry the
+            // session's reasoning effort.
+            effort: None,
         };
         let mut stream = self.provider.stream_completion(request).await?;
         let mut text = String::new();
@@ -1217,6 +1220,9 @@ impl Engine {
             tools,
             max_output_tokens: Some(self.provider.model_info().max_output_tokens),
             temperature: None,
+            // Wired to the session's active effort in Phase 3 group 4; `None`
+            // until then sends the provider's own default.
+            effort: None,
         }
     }
 
