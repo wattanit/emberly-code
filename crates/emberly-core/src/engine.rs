@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 
 use crate::command::Command;
 use crate::event::UiEvent;
-use crate::factory::ProviderFactory;
+use crate::factory::{ConfigReloader, ProviderFactory};
 use crate::gate::{ChannelGate, PermissionAsk};
 use crate::id::{PermissionId, SessionId};
 use crate::transcript::{
@@ -96,6 +96,9 @@ pub struct EngineConfig {
     /// Builds a provider for a profile name on an in-session switch (C-6).
     /// `None` disables switching (e.g. the offline placeholder session).
     pub provider_factory: Option<Arc<dyn ProviderFactory>>,
+    /// Re-reads config + prompts from disk on an in-app edit (C-5). `None`
+    /// disables live reload (the edit still lands on disk for the next session).
+    pub config_reloader: Option<Arc<dyn ConfigReloader>>,
 }
 
 impl EngineConfig {
@@ -195,6 +198,8 @@ pub struct Engine {
     summary_prompt: Option<String>,
     /// Builds a provider on an in-session model switch (C-6); `None` disables it.
     provider_factory: Option<Arc<dyn ProviderFactory>>,
+    /// Re-reads config on an in-app edit (C-5); `None` disables live reload.
+    config_reloader: Option<Arc<dyn ConfigReloader>>,
 }
 
 impl Engine {
@@ -249,6 +254,7 @@ impl Engine {
             compact_requested: false,
             summary_prompt: config.summary_prompt,
             provider_factory: config.provider_factory,
+            config_reloader: config.config_reloader,
         };
         (engine, asks_rx)
     }
@@ -319,6 +325,7 @@ impl Engine {
                 Command::SwitchModel { profile, model } => {
                     self.switch_model(profile, model).await;
                 }
+                Command::ReloadConfig => self.reload_config().await,
             }
         }
 
@@ -934,6 +941,68 @@ impl Engine {
                 .await;
             }
         }
+    }
+
+    /// Re-read config + prompts from disk and apply the live pieces to the
+    /// running session (C-5): the system/compact prompts and the provider
+    /// profile set (so a newly-added profile is switchable and shows in the
+    /// picker). The active provider/model is left as-is — use `/model` to
+    /// switch. Restart-only changes are named, not applied. Applies to
+    /// subsequent turns; never rewrites prior turns or the transcript.
+    async fn reload_config(&mut self) {
+        let Some(reloader) = self.config_reloader.clone() else {
+            self.emit(UiEvent::Notice {
+                message: "config reload is not available in this session".into(),
+            })
+            .await;
+            return;
+        };
+        let reloaded = match reloader.reload() {
+            Ok(reloaded) => reloaded,
+            Err(why) => {
+                self.emit(UiEvent::HarnessError {
+                    what: "could not reload config".into(),
+                    why,
+                    next: "keeping the current config".into(),
+                })
+                .await;
+                return;
+            }
+        };
+
+        let mut changed = Vec::new();
+        if reloaded.system != self.system {
+            self.system = reloaded.system;
+            changed.push("system prompt");
+        }
+        if reloaded.summary_prompt != self.summary_prompt {
+            self.summary_prompt = reloaded.summary_prompt;
+            changed.push("compact prompt");
+        }
+        let old_profiles = self
+            .provider_factory
+            .as_ref()
+            .map(|factory| factory.profiles())
+            .unwrap_or_default();
+        if reloaded.profiles != old_profiles {
+            changed.push("provider profiles");
+            self.emit(UiEvent::ProfilesChanged {
+                profiles: reloaded.profiles.clone(),
+            })
+            .await;
+        }
+        self.provider_factory = Some(reloaded.provider_factory);
+
+        let mut message = if changed.is_empty() {
+            "reloaded config — no live changes".to_string()
+        } else {
+            format!("reloaded: {}", changed.join(", "))
+        };
+        for note in &reloaded.restart_notes {
+            message.push_str("; ");
+            message.push_str(note);
+        }
+        self.emit(UiEvent::Notice { message }).await;
     }
 
     /// Add an in-memory session grant from an approved request (Requirements

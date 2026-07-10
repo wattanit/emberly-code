@@ -39,6 +39,12 @@ pub enum Command {
         model: Option<String>,
     },
 
+    /// Re-read config + prompts from disk and apply them to the running session
+    /// (C-5) — sent by the frontend after an in-app edit. Live pieces (prompts,
+    /// provider profiles) take effect on the next turn; restart-only changes are
+    /// named, not applied.
+    ReloadConfig,
+
     /// Request manual compaction (Requirements §8.3). Handled from Phase 5;
     /// queued until a clean message boundary if invoked mid-run.
     Compact,

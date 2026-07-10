@@ -9,12 +9,13 @@
 //! back to the offline placeholder.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context};
 use emberly_providers::{AnthropicProvider, Auth, ModelInfo, OpenAiProvider, Pricing, Provider};
 
-use crate::config::{AuthFile, ProfileFile, Resolved};
+use crate::config::{self, AuthFile, CliOverrides, ProfileFile, Resolved};
 
 /// A chosen live provider plus display/label info.
 pub struct Selection {
@@ -136,6 +137,52 @@ impl emberly_core::ProviderFactory for ConfiguredProviders {
         let mut names: Vec<String> = self.providers.keys().cloned().collect();
         names.sort();
         names
+    }
+}
+
+/// A [`ConfigReloader`](emberly_core::ConfigReloader) that re-runs
+/// [`config::load`] for the project on an in-app edit (C-5), so `/config` and
+/// `/prompt` take effect on the running session. Holds the launch-time
+/// `sandbox.require` to detect a restart-only change.
+pub struct ConfiguredReloader {
+    project_root: PathBuf,
+    provider: Option<String>,
+    model: Option<String>,
+    launch_sandbox_require: bool,
+}
+
+impl ConfiguredReloader {
+    #[must_use]
+    pub fn new(project_root: PathBuf, cli: &CliOverrides, launch_sandbox_require: bool) -> Self {
+        Self {
+            project_root,
+            provider: cli.provider.clone(),
+            model: cli.model.clone(),
+            launch_sandbox_require,
+        }
+    }
+}
+
+impl emberly_core::ConfigReloader for ConfiguredReloader {
+    fn reload(&self) -> Result<emberly_core::ReloadedConfig, String> {
+        let cli = CliOverrides {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+        };
+        let resolved = config::load(&self.project_root, &cli).map_err(|e| e.to_string())?;
+        let mut profiles: Vec<String> = resolved.providers.keys().cloned().collect();
+        profiles.sort();
+        let mut restart_notes = Vec::new();
+        if resolved.sandbox_require != self.launch_sandbox_require {
+            restart_notes.push("sandbox.require changed — restart to apply".to_string());
+        }
+        Ok(emberly_core::ReloadedConfig {
+            system: resolved.system_prompt.clone(),
+            summary_prompt: resolved.summary_prompt.clone(),
+            provider_factory: Arc::new(ConfiguredProviders::new(&resolved)),
+            profiles,
+            restart_notes,
+        })
     }
 }
 

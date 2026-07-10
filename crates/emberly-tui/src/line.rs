@@ -9,6 +9,7 @@
 //! lines and [`UiEvent`]s to the engine's channels.
 
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use emberly_core::{
     Command, FrontendPorts, Mode, PermissionDecision, PermissionId, PermissionRendering,
@@ -195,7 +196,16 @@ pub fn parse_permission_answer(line: &str) -> PermissionDecision {
 ///
 /// While a permission prompt is open, the next input line is its answer; a
 /// `/cancel` line cancels the current turn; anything else is a user message.
-pub async fn run(ports: FrontendPorts) -> io::Result<()> {
+pub async fn run(
+    ports: FrontendPorts,
+    sessions_dir: PathBuf,
+    config_template: String,
+) -> io::Result<()> {
+    // `.agents/` is the parent of the sessions dir; `/config` and `/prompt`
+    // resolve their targets under it (C-5).
+    let agents_dir = sessions_dir
+        .parent()
+        .map_or(sessions_dir.clone(), Path::to_path_buf);
     let renderer = LineRenderer::new();
     let mut stdout = io::stdout();
     let mut events_rx = ports.events_rx;
@@ -254,6 +264,33 @@ pub async fn run(ports: FrontendPorts) -> io::Result<()> {
                             let _ = tx.send(Command::SwitchModel { profile: profile.to_string(), model }).await;
                         } else {
                             println!("usage: /model <profile> [model]");
+                        }
+                    } else if line.trim() == "/reload" {
+                        let _ = tx.send(Command::ReloadConfig).await;
+                    } else if line.trim() == "/config" {
+                        // Line mode does not launch $EDITOR (stdin is the line
+                        // reader / often a pipe): seed + point at the file, then
+                        // the user edits it and runs /reload (C-5, degraded §7).
+                        match crate::edit::config_target(&agents_dir, &config_template) {
+                            Ok((path, existed)) => println!(
+                                "{} {} — edit it, then /reload to apply",
+                                if existed { "editing" } else { "created" },
+                                path.display()
+                            ),
+                            Err(e) => println!("could not prepare config: {e}"),
+                        }
+                    } else if let Some(rest) = line
+                        .trim()
+                        .strip_prefix("/prompt")
+                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+                    {
+                        match crate::edit::prompt_target(&agents_dir, rest.trim()) {
+                            Ok((path, existed)) => println!(
+                                "{} {} — edit it, then /reload to apply",
+                                if existed { "editing" } else { "created" },
+                                path.display()
+                            ),
+                            Err(msg) => println!("{msg}"),
                         }
                     } else if !line.trim().is_empty() {
                         let _ = tx.send(Command::UserInput { text: line }).await;

@@ -454,6 +454,14 @@ async fn run() -> anyhow::Result<()> {
         emberly_core::spawn::HostSandbox::new(sandbox.is_confined(), git_binary, path_env),
     );
 
+    // Re-resolves config + prompts on an in-app `/config` / `/prompt` edit (C-5).
+    let config_reloader: Arc<dyn emberly_core::ConfigReloader> =
+        Arc::new(provider_setup::ConfiguredReloader::new(
+            project_root.clone(),
+            &cli_overrides,
+            resolved.sandbox_require,
+        ));
+
     let config = EngineConfig {
         provider,
         tools: default_registry(),
@@ -482,6 +490,7 @@ async fn run() -> anyhow::Result<()> {
         provider_factory: Some(Arc::new(provider_setup::ConfiguredProviders::new(
             &resolved,
         ))),
+        config_reloader: Some(config_reloader),
     };
 
     let (engine_ports, frontend_ports) = channel();
@@ -505,6 +514,7 @@ async fn run() -> anyhow::Result<()> {
         history,
         sessions_dir.clone(),
         profiles,
+        init::CONFIG_TEMPLATE.to_string(),
     )
     .await?;
 

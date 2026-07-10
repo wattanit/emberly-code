@@ -62,12 +62,24 @@ pub async fn run(
     history: Vec<TranscriptRecord>,
     sessions_dir: std::path::PathBuf,
     profiles: Vec<String>,
+    config_template: String,
 ) -> io::Result<()> {
     match kind {
-        FrontendKind::Rich => tui::run(ports, session, history, sessions_dir, profiles).await,
+        FrontendKind::Rich => {
+            tui::run(
+                ports,
+                session,
+                history,
+                sessions_dir,
+                profiles,
+                config_template,
+            )
+            .await
+        }
         // Line mode notes the resumed-event count in its banner (see the
-        // binary); it does not replay the timeline or offer the picker.
-        FrontendKind::Plain => line::run(ports).await,
+        // binary); it does not replay the timeline or offer the picker, but it
+        // supports `/config`, `/prompt`, and `/reload` (C-5).
+        FrontendKind::Plain => line::run(ports, sessions_dir, config_template).await,
     }
 }
 

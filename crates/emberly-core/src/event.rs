@@ -84,6 +84,10 @@ pub enum UiEvent {
     /// [`Notice`](UiEvent::Notice) — never silent.
     ModelChanged { provider: String, model: String },
 
+    /// The configured provider profiles changed after a `/config` reload (C-5),
+    /// so the frontend refreshes its model picker.
+    ProfilesChanged { profiles: Vec<String> },
+
     /// A plain-language, harness-voice notice for the timeline (Design §6.1):
     /// a persisted permission grant's written line (§6.6), a refused auto-mode
     /// switch when degraded (§6.7), or the one-time degraded-sandbox
