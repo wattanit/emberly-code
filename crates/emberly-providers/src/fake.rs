@@ -124,6 +124,9 @@ pub struct FakeProvider {
     id: ProviderId,
     model_info: ModelInfo,
     scripts: Mutex<VecDeque<ScriptedResponse>>,
+    /// The most recent request received, captured for assertions (e.g. the
+    /// effort round-trip, P-9). `None` until the first `stream_completion`.
+    last_request: Mutex<Option<CompletionRequest>>,
 }
 
 impl FakeProvider {
@@ -143,6 +146,17 @@ impl FakeProvider {
                 default_effort: Some(Effort::Medium),
             },
             scripts: Mutex::new(scripts.into_iter().collect()),
+            last_request: Mutex::new(None),
+        }
+    }
+
+    /// The `effort` on the most recent request the engine sent — for asserting
+    /// the effort round-trip (P-9). `None` if no request yet or it carried none.
+    #[must_use]
+    pub fn last_effort(&self) -> Option<Effort> {
+        match self.last_request.lock() {
+            Ok(guard) => guard.as_ref().and_then(|r| r.effort),
+            Err(poisoned) => poisoned.into_inner().as_ref().and_then(|r| r.effort),
         }
     }
 
@@ -176,8 +190,12 @@ impl Provider for FakeProvider {
 
     async fn stream_completion(
         &self,
-        _req: CompletionRequest,
+        req: CompletionRequest,
     ) -> Result<CompletionStream, ProviderError> {
+        match self.last_request.lock() {
+            Ok(mut guard) => *guard = Some(req),
+            Err(poisoned) => *poisoned.into_inner() = Some(req),
+        }
         let Some(response) = self.pop() else {
             // Under-scripted test: fail loudly rather than looping forever.
             return Err(ProviderError::InvalidRequest(

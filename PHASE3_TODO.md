@@ -26,7 +26,7 @@ effort picker is the same overlay as the model picker.
 | Group | Status | Notes |
 |---|---|---|
 | 1. Effort model (data types) | [x] | Done 2026-07-10; `Effort` enum + `CompletionRequest.effort` + `ModelInfo` levels/default; 7 tests |
-| 2. Adapter effort mapping + no-op | [ ] | anthropic→thinking-budget; openai→`reasoning_effort`; drop when unsupported |
+| 2. Adapter effort mapping + no-op | [x] | Done 2026-07-10; anthropic→thinking-budget (2k/8k/16k/32k, clamped); openai→`reasoning_effort` (Max→high); no-op when unsupported; 10 tests |
 | 3. `ReasoningDelta` stream event + trace translation | [ ] | adapter reasoning parts → normalized delta; signature preserve/replay |
 | 4. Effort as engine state | [ ] | `Command::SetEffort`, `EffortChanged`, `effort_change`; threaded into requests; per-model config default |
 | 5. Reasoning trace through engine + transcript | [ ] | `ReasoningDelta` UiEvent relay; distinct `reasoning` field; `hidden` still records |
@@ -65,22 +65,24 @@ vocabulary the adapters and engine share.
 Each adapter maps the normalized `Effort` to its provider's native control,
 or drops it — a no-op is never an error (P-9).
 
-- [ ] `anthropic` adapter: `effort` → a thinking-budget token count on the
-      wire request (the mapping table lives in the adapter; document the
-      four-level → budget mapping as "initial; tune with use"). `None` or an
-      unsupported model ⇒ omit the thinking block entirely.
-- [ ] `openai` adapter: `effort` → the `reasoning_effort` wire field
-      (map `Max` to the provider's highest supported value; note the mapping
-      inline). `None` ⇒ omit the field.
-- [ ] No-op path: when a request carries an `Effort` the active model does
-      not support, the adapter silently omits it — asserted by a test, since
-      "setting it is never an error" is the P-9 contract.
-- [ ] `fake` provider: echoes the received `effort` (e.g. via a captured
-      last-request handle or a `ReasoningDelta`/text marker) so the engine
-      round-trip test in group 4/7 can assert what the engine sent.
-- [ ] Tests: anthropic maps each level to the expected budget and omits when
-      `None`; openai maps each level to `reasoning_effort` and omits when
-      `None`; unsupported-model no-op.
+- [x] `anthropic` adapter: `effort` → `thinking.budget_tokens`. Owner-approved
+      ladder (2026-07-10): Low 2k / Medium 8k / High 16k / Max 32k, **clamped**
+      to `max_output − 1024` (Anthropic requires `1024 ≤ budget < max_tokens`;
+      a 1024-token reserve leaves room for the answer). Too-small `max_output`
+      (< 2048) ⇒ omit the block. Temperature override dropped when thinking is
+      on (the API forbids it).
+- [x] `openai` adapter: `effort` → `reasoning_effort` (`low`/`medium`/`high`);
+      `Max`→`high` since the field has no higher value (noted inline). `None`
+      ⇒ omit.
+- [x] No-op path: an adapter maps effort only when `model_info.effort_levels`
+      is non-empty (the model declares reasoning control). Empty ⇒ the field is
+      silently omitted even if the request carries an effort — asserted by a
+      test in each adapter (P-9: "never an error").
+- [x] `fake` provider: captures the last request (`last_effort()` accessor) so
+      the engine round-trip test in group 4 can assert the effort sent.
+- [x] Tests (10): anthropic per-level budget + clamp + tiny-allowance omit +
+      no-effort omit + unsupported no-op + temperature-drop; openai per-level
+      (incl. Max→high) + no-effort omit + unsupported no-op.
 
 ## 3. Reasoning trace — stream event + translation  *(Tech Spec §4.7, P-10)*
 
@@ -206,11 +208,11 @@ state, switchable in-session, transcript-logged, announced never silent.
 Open decisions to confirm with the owner as they arise (do not guess — SFD
 G-22 routes these to the owner):
 
-- **Effort-level → thinking-budget token mapping** (anthropic, §4.6): the
-  four-level → budget table is "initial; tune with use". Values proposed in
-  group 2, confirmed with the owner before commit. (Tech Spec Open Question:
-  effort enum granularity, validate the four-level mapping against live
-  endpoints in M6.)
+- **Effort-level → thinking-budget token mapping** (anthropic, §4.6):
+  **owner-approved 2026-07-10** — Low 2,048 / Medium 8,192 / High 16,384 /
+  Max 32,768, clamped to `max_output − 1024`, floored at 1,024, omitted when
+  `max_output < 2048`. "Initial; tune with use." Still the Tech Spec Open
+  Question to validate against live endpoints in M6.
 - **`reasoning` view key default = `collapsed`** — already resolved in
   Design v0.4 (§4.4). No re-decision needed.
 - **No `SCHEMA_VERSION` bump** for `EffortChange` / the `reasoning` field on

@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use crate::auth::Auth;
 use crate::error::ProviderError;
 use crate::message::{CompletionRequest, ContentBlock, Message, Role};
-use crate::model::{ModelInfo, ProviderId, TokenEstimate};
+use crate::model::{Effort, ModelInfo, ProviderId, TokenEstimate};
 use crate::provider::Provider;
 use crate::sse::SseEvent;
 use crate::stream::{CompletionStream, StopReason, StreamEvent};
@@ -72,7 +72,11 @@ impl Provider for AnthropicProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionStream, ProviderError> {
-        let body = build_body(&request, self.model_info.max_output_tokens);
+        let body = build_body(
+            &request,
+            self.model_info.max_output_tokens,
+            &self.model_info.effort_levels,
+        );
         let builder = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
@@ -97,8 +101,40 @@ impl Provider for AnthropicProvider {
     }
 }
 
-/// Build the Messages request body from the normalized request.
-fn build_body(request: &CompletionRequest, default_max_tokens: u32) -> Value {
+/// The target `thinking.budget_tokens` for each effort level, before clamping
+/// (Tech Spec §4.6). Initial values; tune with use — owner-approved 2026-07-10.
+fn effort_budget_target(effort: Effort) -> u32 {
+    match effort {
+        Effort::Low => 2_048,
+        Effort::Medium => 8_192,
+        Effort::High => 16_384,
+        Effort::Max => 32_768,
+    }
+}
+
+/// The Anthropic thinking budget for `effort`, clamped to fit the model's
+/// output allowance. Anthropic requires `1024 <= budget_tokens < max_tokens`;
+/// we leave a 1024-token reserve so the answer always has room. `None` when
+/// `max_tokens` is too small to fit any valid thinking block — the adapter then
+/// omits thinking entirely (a no-op, never an error — P-9).
+fn thinking_budget(effort: Effort, max_tokens: u32) -> Option<u32> {
+    const RESERVE: u32 = 1_024;
+    const MIN: u32 = 1_024;
+    let ceiling = max_tokens.checked_sub(RESERVE)?;
+    if ceiling < MIN {
+        return None;
+    }
+    Some(effort_budget_target(effort).clamp(MIN, ceiling))
+}
+
+/// Build the Messages request body from the normalized request. `effort_levels`
+/// is the active model's declared support (empty ⇒ no reasoning control, so an
+/// `effort` on the request is silently ignored — P-9).
+fn build_body(
+    request: &CompletionRequest,
+    default_max_tokens: u32,
+    effort_levels: &[Effort],
+) -> Value {
     let max_tokens = request
         .max_output_tokens
         .unwrap_or(default_max_tokens)
@@ -119,8 +155,22 @@ fn build_body(request: &CompletionRequest, default_max_tokens: u32) -> Value {
             .map(|t| json!({ "name": t.name, "description": t.description, "input_schema": t.input_schema }))
             .collect();
     }
+    // Reasoning effort → thinking block, only if the model declares support and
+    // a valid budget fits (P-9, Tech Spec §4.6).
+    let thinking_enabled = request
+        .effort
+        .filter(|_| !effort_levels.is_empty())
+        .and_then(|effort| thinking_budget(effort, max_tokens))
+        .map(|budget| {
+            body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+        })
+        .is_some();
+    // Extended thinking requires the default temperature; omit any override when
+    // thinking is on, otherwise the API rejects the request.
     if let Some(temp) = request.temperature {
-        body["temperature"] = json!(temp);
+        if !thinking_enabled {
+            body["temperature"] = json!(temp);
+        }
     }
     body
 }
@@ -268,5 +318,85 @@ impl SseMapper for AnthropicMapper {
             _ => {} // ping, unknown
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req_with_effort(effort: Option<Effort>) -> CompletionRequest {
+        let mut r = CompletionRequest::new("claude-x");
+        r.effort = effort;
+        r
+    }
+
+    fn budget_of(body: &Value) -> Option<u64> {
+        body.get("thinking")
+            .and_then(|t| t.get("budget_tokens"))
+            .and_then(Value::as_u64)
+    }
+
+    #[test]
+    fn maps_each_level_to_its_budget_when_supported() {
+        // A large output allowance so no clamping occurs.
+        let levels = Effort::ALL.to_vec();
+        for (effort, want) in [
+            (Effort::Low, 2_048),
+            (Effort::Medium, 8_192),
+            (Effort::High, 16_384),
+            (Effort::Max, 32_768),
+        ] {
+            let body = build_body(&req_with_effort(Some(effort)), 64_000, &levels);
+            assert_eq!(budget_of(&body), Some(want), "level {effort}");
+        }
+    }
+
+    #[test]
+    fn omits_thinking_when_no_effort() {
+        let body = build_body(&req_with_effort(None), 64_000, &Effort::ALL);
+        assert_eq!(body.get("thinking"), None);
+    }
+
+    #[test]
+    fn unsupported_model_is_a_noop_even_with_effort() {
+        // Empty effort_levels ⇒ the model has no reasoning control (P-9).
+        let body = build_body(&req_with_effort(Some(Effort::High)), 64_000, &[]);
+        assert_eq!(body.get("thinking"), None);
+    }
+
+    #[test]
+    fn budget_is_clamped_to_the_output_allowance() {
+        // max_tokens 8192 ⇒ ceiling 7168; Max's 32768 target clamps down.
+        let body = build_body(&req_with_effort(Some(Effort::Max)), 8_192, &Effort::ALL);
+        assert_eq!(budget_of(&body), Some(7_168));
+    }
+
+    #[test]
+    fn tiny_allowance_omits_thinking() {
+        // max_tokens < 2048 can't fit a valid block ⇒ no-op, not an error.
+        let body = build_body(&req_with_effort(Some(Effort::Low)), 1_500, &Effort::ALL);
+        assert_eq!(body.get("thinking"), None);
+    }
+
+    #[test]
+    fn temperature_dropped_when_thinking_enabled() {
+        let mut r = req_with_effort(Some(Effort::Low));
+        r.temperature = Some(0.7);
+        let body = build_body(&r, 64_000, &Effort::ALL);
+        assert!(body.get("thinking").is_some());
+        assert_eq!(
+            body.get("temperature"),
+            None,
+            "thinking forbids a temp override"
+        );
+        // Without thinking, the temperature passes through (f32→JSON widens to
+        // f64, so compare with a tolerance rather than for exact equality).
+        let body2 = build_body(&r, 64_000, &[]);
+        let temp = body2.get("temperature").and_then(Value::as_f64);
+        assert!(
+            matches!(temp, Some(t) if (t - 0.7).abs() < 1e-6),
+            "got {temp:?}"
+        );
     }
 }
