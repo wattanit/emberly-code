@@ -37,11 +37,11 @@ config-defeatable) with exactly that lean design. This phase is its named door.
 | 1. Tool-call explanation — schema injection + prompt + event (T-9 provider/engine) | [x] | Done 2026-07-11; injection at `build_request` (both adapters); `ui.tool_explanations` default true; VERSION 2→3 + `tool_explanation.md`; `ToolStarted.explanation`; 7 tests |
 | 2. Tool-call explanation — UI caption (T-9 TUI + degraded) | [x] | Done 2026-07-11; `ConvItem::Tool.explanation`; dim `↳` caption (rich) / `-` lead (line); absent→none; replay reads it from transcript args; 5 tests |
 | 3. ask_user — round-trip plumbing + the tool (T-8 engine) | [x] | Done 2026-07-11; `AskId`, `AskAnswer`, `AskUserRequest`/`AskUserAnswer`, `AskGate` mirror of the permission gate (2nd channel + select arm + pending Vec), `AskUser` transcript event, `ask_user` tool registered; 4 tests |
-| 4. ask_user — the question prompt UI (T-8 rich TUI) | [ ] | calm styling (never the safety band), selectable options + free-text, no unsafe default (Enter never auto-answers), Esc→declined, no motion |
+| 4. ask_user — the question prompt UI (T-8 rich TUI) | [x] | Done 2026-07-11; `AskPrompt` state + `on_ask_key` + `render_ask` (dim_accent, never safety band); options + free-text; Enter never auto-answers; Esc→declined; motion stilled; 7 tests |
 | 5. ask_user — degraded-mode question prompt (T-8 line) | [ ] | full parity: numbered options + free-text line, deliberate answer, empty/Esc→declined; two pending slots so it can't collide with a permission prompt |
 | 6. End-to-end, exit criterion, docs & SFD bookkeeping | [ ] | combined offline round trip; README; Spec bump decision (owner); memory update (tool-explanation graduated) |
 
-**Overall Phase 4: IN PROGRESS** (3 / 6 groups). Branch
+**Overall Phase 4: IN PROGRESS** (4 / 6 groups). Branch
 `phase4/ask-user-and-explanation` off `version0.2` (Phase 3 merged).
 
 ---
@@ -223,33 +223,33 @@ richer reply payload (a chosen option / free text / decline, not Allow/Deny).
 > overload `OverlayContent::Choices` (that entangles blocking semantics with the
 > dismissable overlay stack).
 
-- [ ] **State + dispatch:** `pending_ask: Option<(AskId, AskUserRendering)>` on
+- [x] **State + dispatch:** `pending_ask: Option<(AskId, AskUserRendering)>` on
       `App`, set on `AskUserRequest`; a dedicated `on_ask_key`; slot it into the
       `on_key` precedence next to the permission prompt (a question prompt is
       never opened over a permission prompt and vice-versa — one blocking
       decision surface at a time).
-- [ ] **Calm styling — never the safety band.** `render_ask` takes over the
+- [x] **Calm styling — never the safety band.** `render_ask` takes over the
       main area using the routine `dim_accent()` border + `accent()`/`chrome()`
       heading/body — the exact calm treatment of a non-outside-root permission
       prompt, minus any `error()`/`safety_band()` path. A render test asserts the
       safety band is **absent**.
-- [ ] **Options + free text.** When the model offered options, render them as a
+- [x] **Options + free text.** When the model offered options, render them as a
       selectable list (↑/↓ + a selected index, borrowing the picker idiom) with
       a number/letter to pick; a free-text answer is **always** available (reuse
       `LineEditor` for the field, grapheme-correct per §6.2).
-- [ ] **No unsafe default** (Design §5.1): **Enter never auto-selects** on the
+- [x] **No unsafe default** (Design §5.1): **Enter never auto-selects** on the
       user's behalf — Enter submits the *typed* text (or the *explicitly moved-to*
       selection), never a default option. **Esc → `Declined`** (a real answer
       over the oneshot, "user declined to answer"). A stray key is ignored.
-- [ ] **No motion** while the question is up (Design §6.4) — the ticker is
+- [x] **No motion** while the question is up (Design §6.4) — the ticker is
       gated off exactly as for the permission prompt.
-- [ ] **Strings:** a new `strings::ask_user` module (kept **separate** from
+- [x] **Strings:** a new `strings::ask_user` module (kept **separate** from
       `strings::permission` so it is obvious it does not share the safety
       vocabulary): title, prompt hint, decline hint.
-- [ ] Tests (`TestBackend`): calm render (no safety band, question + options +
+- [x] Tests (`TestBackend`): calm render (no safety band, question + options +
       input line shown); Enter-doesn't-auto-answer; Esc→`Declined`; moving the
       selection then Enter picks that option; free-text submit; motion gated off.
-- [ ] `cargo fmt` + `clippy` + `test` green; commit.
+- [x] `cargo fmt` + `clippy` + `test` green; commit.
 
 ---
 

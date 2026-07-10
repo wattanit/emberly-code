@@ -53,10 +53,13 @@ pub fn frame(f: &mut Frame, app: &App) {
         (body, None)
     };
 
-    // A pending permission prompt takes over the whole main area — no input box
-    // is shown, so nothing can be typed into a decision (Design §5).
+    // A pending permission prompt or question prompt takes over the whole main
+    // area — no input box is shown, so nothing can be typed into a decision
+    // (Design §5, §5.1). The permission prompt wins if somehow both are set.
     if app.pending_permission.is_some() {
         render_permission(f, app, main);
+    } else if app.pending_ask.is_some() {
+        render_ask(f, app, main);
     } else {
         // Conversation over the input box.
         let input_rows = app.editor.line_count().clamp(1, MAX_INPUT_ROWS);
@@ -758,6 +761,8 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
     let theme = &app.theme;
     let hints = if app.pending_permission.is_some() {
         strings::hints::PERMISSION
+    } else if app.pending_ask.is_some() {
+        strings::ask_user::HINT
     } else {
         strings::hints::NORMAL
     };
@@ -904,6 +909,96 @@ fn render_permission(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(visible), body_area);
     f.render_widget(
         Paragraph::new(footer_lines(theme, hidden_below)),
+        footer_area,
+    );
+}
+
+// ---- question prompt — the model asking your opinion (Design §5.1) --------
+
+/// Render the `ask_user` question prompt (T-8). **Calm and neutral** — the same
+/// routine styling as a non-outside-root permission prompt (`dim_accent`
+/// border), **never** the reserved safety band (Design §5.1/§2). The question,
+/// any options as a selectable list, and a free-text answer that is always
+/// available. There is no default selection and Enter never auto-answers — see
+/// `App::on_ask_key`.
+fn render_ask(f: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
+    let Some(p) = &app.pending_ask else {
+        return;
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.dim_accent())
+        .title(Span::styled(
+            format!(" {} ", strings::ask_user::TITLE),
+            theme.accent(),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 3 || inner.width == 0 {
+        return;
+    }
+    let width = usize::from(inner.width);
+
+    let mut lines: Vec<Line> = Vec::new();
+    // The question, wrapped — the first row carries the emphasis.
+    for (i, row) in text::wrap(&p.question, width).into_iter().enumerate() {
+        let style = if i == 0 {
+            theme.strong()
+        } else {
+            theme.primary()
+        };
+        lines.push(Line::from(Span::styled(row, style)));
+    }
+    lines.push(Line::from(""));
+
+    // Options as a selectable list. No highlight until the user moves to one
+    // (no default selection — Design §5.1).
+    for (i, opt) in p.options.iter().enumerate() {
+        let selected = p.selected == Some(i);
+        let (marker, style) = if selected {
+            (markers::USER_PROMPT, theme.accent())
+        } else {
+            (" ", theme.primary())
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker} "), theme.accent()),
+            Span::styled(format!("{}. {}", i + 1, opt), style),
+        ]));
+    }
+    if !p.options.is_empty() {
+        lines.push(Line::from(""));
+    }
+
+    // The free-text answer field, always available, with a caret.
+    lines.push(Line::from(Span::styled(
+        strings::ask_user::ANSWER_LABEL,
+        theme.chrome(),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled(format!("{} ", markers::USER_PROMPT), theme.accent()),
+        Span::styled(p.editor.text().to_string(), theme.primary()),
+        Span::styled("▏", theme.accent()),
+    ]));
+
+    let footer_h = 1u16;
+    let body_h = inner.height.saturating_sub(footer_h).max(1);
+    let body_area = Rect {
+        height: body_h,
+        ..inner
+    };
+    let footer_area = Rect {
+        y: inner.y + inner.height - footer_h,
+        height: footer_h,
+        ..inner
+    };
+    f.render_widget(Paragraph::new(lines), body_area);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            strings::ask_user::HINT,
+            theme.chrome(),
+        ))),
         footer_area,
     );
 }
@@ -1205,6 +1300,32 @@ mod tests {
             !screen.contains(crate::strings::markers::EXPLANATION),
             "no caption marker when the model gave none — no placeholder (Design §4.5)"
         );
+    }
+
+    #[test]
+    fn question_prompt_is_calm_not_a_permission_prompt() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.apply_event(UiEvent::AskUserRequest {
+            id: emberly_core::AskId(1),
+            question: "which environment?".into(),
+            options: vec!["dev".into(), "prod".into()],
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(screen.contains("which environment?"), "question shown");
+        assert!(
+            screen.contains("dev") && screen.contains("prod"),
+            "options shown"
+        );
+        assert!(screen.contains("question"), "calm title");
+        // It must NOT borrow the permission prompt's loud safety vocabulary
+        // (Design §5.1/§2 — the safety band stays rare).
+        assert!(!screen.contains("PERMISSION REQUIRED"));
+        assert!(!screen.contains("OUTSIDE YOUR PROJECT"));
     }
 
     #[test]
