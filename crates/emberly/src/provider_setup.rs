@@ -81,8 +81,15 @@ fn build_profile(
 
     let provider: Arc<dyn Provider> = match adapter {
         "anthropic" => match &profile.base_url {
-            Some(base) => Arc::new(AnthropicProvider::new(client, auth, base.clone(), model_info)),
-            None => Arc::new(AnthropicProvider::with_default_url(client, auth, model_info)),
+            Some(base) => Arc::new(AnthropicProvider::new(
+                client,
+                auth,
+                base.clone(),
+                model_info,
+            )),
+            None => Arc::new(AnthropicProvider::with_default_url(
+                client, auth, model_info,
+            )),
         },
         "openai" => {
             let base = profile
@@ -174,4 +181,81 @@ fn build_https_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .build()
         .context("failed to build the HTTPS client")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ModelFile;
+
+    fn profile(adapter: &str, base_url: Option<&str>) -> ProfileFile {
+        ProfileFile {
+            adapter: Some(adapter.to_string()),
+            base_url: base_url.map(str::to_string),
+            auth: None, // Auth::None → no key needed, keeps the test hermetic.
+            models: HashMap::new(),
+        }
+    }
+
+    /// The P-8 property, as a unit test: which client is built is decided purely
+    /// by the profile's `adapter` — no vendor branching, no network.
+    #[test]
+    fn build_profile_selects_adapter_from_config_only() {
+        let mut providers = HashMap::new();
+        providers.insert("a".to_string(), profile("anthropic", None));
+        providers.insert(
+            "o".to_string(),
+            profile("openai", Some("http://localhost:0/v1")),
+        );
+
+        let anth = build_profile(&providers, "a", "m1").expect("anthropic builds");
+        assert_eq!(anth.id().to_string(), "anthropic");
+        assert_eq!(anth.model_info().model, "m1");
+
+        let oai = build_profile(&providers, "o", "m2").expect("openai builds");
+        assert_eq!(oai.id().to_string(), "openai-compat");
+        assert_eq!(oai.model_info().model, "m2");
+    }
+
+    #[test]
+    fn build_profile_errors_are_clear() {
+        // `Arc<dyn Provider>` isn't Debug, so extract the error message by hand.
+        fn err(result: anyhow::Result<Arc<dyn Provider>>) -> String {
+            match result {
+                Ok(_) => panic!("expected an error"),
+                Err(e) => e.to_string(),
+            }
+        }
+
+        let empty = HashMap::new();
+        assert!(err(build_profile(&empty, "nope", "m")).contains("unknown provider profile"));
+
+        let mut weird = HashMap::new();
+        weird.insert("x".to_string(), profile("weird", None));
+        assert!(err(build_profile(&weird, "x", "m")).contains("unknown adapter"));
+
+        let mut no_adapter = HashMap::new();
+        no_adapter.insert("y".to_string(), ProfileFile::default());
+        assert!(err(build_profile(&no_adapter, "y", "m")).contains("no `adapter`"));
+    }
+
+    #[test]
+    fn per_model_metadata_feeds_model_info() {
+        let mut prof = profile("openai", Some("http://localhost:0/v1"));
+        prof.models.insert(
+            "m".to_string(),
+            ModelFile {
+                context_window: Some(123_456),
+                max_output: Some(4_321),
+                pricing: None,
+            },
+        );
+        let mut providers = HashMap::new();
+        providers.insert("p".to_string(), prof);
+        let info = build_profile(&providers, "p", "m")
+            .expect("builds")
+            .model_info();
+        assert_eq!(info.context_window, 123_456);
+        assert_eq!(info.max_output_tokens, 4_321);
+    }
 }

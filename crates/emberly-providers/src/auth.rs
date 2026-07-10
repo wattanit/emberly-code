@@ -72,7 +72,10 @@ mod tests {
     #[test]
     fn bearer_sets_authorization() {
         let req = apply(&Auth::Bearer("sk-123".into()));
-        assert_eq!(header(&req, "authorization").as_deref(), Some("Bearer sk-123"));
+        assert_eq!(
+            header(&req, "authorization").as_deref(),
+            Some("Bearer sk-123")
+        );
     }
 
     #[test]

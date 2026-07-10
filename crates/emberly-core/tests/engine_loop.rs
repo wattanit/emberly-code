@@ -945,11 +945,7 @@ async fn allow_for_session_covers_the_next_identical_command() {
 struct FakeFactory;
 
 impl emberly_core::ProviderFactory for FakeFactory {
-    fn build(
-        &self,
-        profile: &str,
-        model: &str,
-    ) -> Result<emberly_core::ProviderChoice, String> {
+    fn build(&self, profile: &str, model: &str) -> Result<emberly_core::ProviderChoice, String> {
         if profile == "unknown" {
             return Err("unknown provider profile 'unknown'".to_string());
         }

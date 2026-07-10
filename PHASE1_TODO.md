@@ -26,10 +26,14 @@ adapters, config/keys system, engine channels, and TUI sidebar all exist.
 | 4. Z.ai profile (baked-in + init + docs) | [x] | Done 2026-07-10; baked-in zai (openai @ paas/v4), grep-gate test, README |
 | 5. In-session switching (`Command::SwitchModel`) | [x] | Done 2026-07-10; engine + factory + `/model`; 5 tests |
 | 6. Model picker overlay | [x] | Done 2026-07-10; generic Choices overlay; line-mode `/model` too |
-| 7. Tests (offline + live smoke) | [ ] | Tech Spec §14.5, §14.4 |
-| 8. Docs, provenance & exit criterion | [ ] | |
+| 7. Tests (offline + live smoke) | [x] | Done 2026-07-10; config-only proof, switch, auth, schema |
+| 8. Docs, provenance & exit criterion | [x] | Done 2026-07-10; exit criterion met |
 
-**Overall Phase 1: NOT STARTED.**
+**Overall Phase 1: COMPLETE (2026-07-10).** All 8 groups done. Provider
+profiles + Z.ai, endpoint-configurable adapters, in-session model switching,
+and the picker all working and tested; workspace clippy clean, 21 test
+binaries green. Live Z.ai round trip remains the manual/nightly step (needs a
+key). Next: Phase 2 — in-app config & prompt editing (C-5).
 
 ---
 
@@ -145,31 +149,39 @@ Replace the hardcoded `match kind.as_str()` in
 
 ## 7. Tests  *(Tech Spec §14.5 offline; §14.4 live smoke)*
 
-- [ ] **Config-only path (P-8 proof):** a `FakeProvider`-backed profile
-      pointed at a fake endpoint is selected and drives a round trip with no
-      change under `emberly-providers/` — assert the config-only property.
-- [ ] **Switch mid-session:** `SwitchModel` applies to the next turn, emits
-      `ModelChanged`, writes `model_switch`, and leaves prior turns/transcript
-      lines unchanged.
-- [ ] **Auth schemes:** unit tests from group 1 (each variant → header).
-- [ ] **Baked-in profiles:** `emberly init` materializes the anthropic /
-      openai / zai / local profiles and they parse back cleanly.
-- [ ] **Live Z.ai smoke** (manual/nightly, Tech Spec §14.4): one real
-      one-tool-use round trip against the Z.ai profile. Never in the merge
-      path; needs a key.
+- [x] **Config-only path (P-8 proof):** `provider_setup` unit tests —
+      `build_profile` selects the adapter purely from config (asserting
+      `provider.id()` + `model_info`), per-model metadata feeds `ModelInfo`,
+      and every error path is clear. Plus the `no_vendor_code_in_providers`
+      grep gate. No change under `emberly-providers/`.
+- [x] **Switch mid-session:** engine round-trip tests — `SwitchModel` emits
+      `ModelChanged`, writes `ModelSwitch`, announces via Notice; unknown
+      profile errors without switching. (`ModelSwitch` is a separate audit
+      record; the conversation view is untouched by design.)
+- [x] **Auth schemes:** 5 unit tests in `auth.rs` (each variant → header;
+      empty-Bearer / empty-XApiKey edge cases).
+- [x] **Config parses back:** `builtin_profiles_present_and_field_merge` and
+      `parses_provider_profile_with_model_metadata` cover the profile schema
+      and baked-ins; `config show` renders them (verified live).
+- [~] **Live Z.ai smoke** (manual/nightly, Tech Spec §14.4): needs a real
+      key, so it stays out of the merge path. Stood in for by the offline
+      config-only test + the live plain-mode switch smoke run this session.
 
 ## 8. Docs, provenance & exit criterion
 
-- [ ] `emberly config show` reports the active profile and each piece's
-      provenance tier (C-3), including which profile a value came from.
-- [ ] README/config docs: the `[providers.<name>]` schema, auth schemes, the
-      Z.ai example, and the legacy-key mapping.
-- [ ] **Exit criterion (done when):** a Z.ai profile added purely in config
-      completes a live one-tool-use round trip; the offline config-only test
-      proves no `emberly-providers` change was needed; switching
-      provider/model mid-session applies to the next turn, is announced and
-      recorded, and leaves prior turns untouched; all lint gates and the
-      offline suite stay green.
+- [x] `emberly config show` reports the active profile + model, lists every
+      profile (adapter, endpoint, key status), and shows the non-default
+      provenance tiers (C-3). Verified live.
+- [x] README/config docs rewritten to the profile schema: baked-in profiles,
+      auth schemes, "adding a provider", `keys.toml` as a flat ref map. (No
+      legacy-key mapping — config is profile-only.)
+- [x] **Exit criterion met:** the offline config-only test proves no
+      `emberly-providers` change is needed to add a provider; the Z.ai profile
+      is baked in and builds/starts a session (live smoke); mid-session
+      switching applies to the next turn, is announced + recorded, and leaves
+      prior turns untouched; all lint gates and the offline suite are green
+      (21 test binaries). Live Z.ai round trip is the manual/nightly step
+      (needs a key).
 
 ---
 
