@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use emberly_providers::{
-    CompletionRequest, CompletionStream, ContentBlock, Message, Provider, ProviderError,
+    CompletionRequest, CompletionStream, ContentBlock, Effort, Message, Provider, ProviderError,
     RetryPolicy, Role, StreamEvent, ToolCallId, ToolSchema,
 };
 use emberly_sandbox::{Decision, Mode, Query, RuleEngine};
@@ -150,6 +150,10 @@ pub struct Engine {
     tools: ToolRegistry,
     project_root: PathBuf,
     model: String,
+    /// The active reasoning-effort level for subsequent turns (C-6/P-9). Seeded
+    /// from the model's `default_effort`, changed by `SetEffort`, re-seeded on a
+    /// model switch. `None` sends no effort (the provider's own default).
+    effort: Option<Effort>,
     system: Option<String>,
     truncate: TruncateConfig,
     retry: RetryPolicy,
@@ -223,11 +227,15 @@ impl Engine {
                 String::new(),
             ))
         });
+        // Seed the session effort from the model's declared default before the
+        // provider is moved into the struct (P-9, Tech Spec §4.6).
+        let seed_effort = config.provider.model_info().default_effort;
         let engine = Self {
             provider: config.provider,
             tools: config.tools,
             project_root: config.project_root,
             model: config.model,
+            effort: seed_effort,
             system: config.system,
             truncate: config.truncate,
             retry: config.retry,
@@ -325,6 +333,7 @@ impl Engine {
                 Command::SwitchModel { profile, model } => {
                     self.switch_model(profile, model).await;
                 }
+                Command::SetEffort { effort } => self.set_effort(effort).await,
                 Command::ReloadConfig => self.reload_config().await,
             }
         }
@@ -934,6 +943,16 @@ impl Engine {
                     message: format!("switched to {} / {}", choice.profile, choice.model),
                 })
                 .await;
+                // Re-seed the reasoning effort to the new model's default — its
+                // available levels and default differ per model (P-9). The
+                // sidebar refreshes off `EffortChanged`.
+                let new_effort = self.provider.model_info().default_effort;
+                if new_effort != self.effort {
+                    self.effort = new_effort;
+                    if let Some(effort) = new_effort {
+                        self.emit(UiEvent::EffortChanged { effort }).await;
+                    }
+                }
             }
             Err(why) => {
                 self.emit(UiEvent::HarnessError {
@@ -944,6 +963,23 @@ impl Engine {
                 .await;
             }
         }
+    }
+
+    /// Set the session reasoning effort for subsequent turns (C-6/P-9). Logged
+    /// to the transcript (HC-7) and announced — never silent. A model with no
+    /// effort control still accepts the setting; the adapter drops it at the
+    /// wire (P-9), so setting it is never an error.
+    async fn set_effort(&mut self, effort: Effort) {
+        if self.effort == Some(effort) {
+            return; // no-op: already active
+        }
+        self.effort = Some(effort);
+        self.write_transcript(TranscriptEvent::EffortChange { effort });
+        self.emit(UiEvent::EffortChanged { effort }).await;
+        self.emit(UiEvent::Notice {
+            message: format!("reasoning effort set to {effort}"),
+        })
+        .await;
     }
 
     /// Re-read config + prompts from disk and apply the live pieces to the
@@ -1220,9 +1256,9 @@ impl Engine {
             tools,
             max_output_tokens: Some(self.provider.model_info().max_output_tokens),
             temperature: None,
-            // Wired to the session's active effort in Phase 3 group 4; `None`
-            // until then sends the provider's own default.
-            effort: None,
+            // The session's active reasoning effort (P-9). The adapter maps it
+            // to the provider's control or drops it when unsupported.
+            effort: self.effort,
         }
     }
 

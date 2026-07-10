@@ -18,7 +18,7 @@ use emberly_core::{
     UiEvent,
 };
 use emberly_providers::{
-    ContentBlock, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
+    ContentBlock, Effort, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
     ScriptOutcome, ScriptedResponse, StopReason, StreamEvent, TokenUsage,
 };
 use emberly_tools::{default_registry, TruncateConfig};
@@ -1102,4 +1102,114 @@ async fn reload_config_without_reloader_is_a_notice() {
 
     assert!(events.iter().any(|e| matches!(e,
         UiEvent::Notice { message } if message.contains("not available"))));
+}
+
+/// A factory whose built provider declares a different default effort, so a
+/// `SwitchModel` re-seeds the session effort to the new model's default (P-9).
+struct ReseedFactory;
+
+impl emberly_core::ProviderFactory for ReseedFactory {
+    fn build(&self, profile: &str, model: &str) -> Result<emberly_core::ProviderChoice, String> {
+        let info = ModelInfo {
+            model: model.to_string(),
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+            pricing: None,
+            effort_levels: Effort::ALL.to_vec(),
+            default_effort: Some(Effort::High),
+        };
+        Ok(emberly_core::ProviderChoice {
+            provider: Arc::new(FakeProvider::new(Vec::new()).with_model_info(info)),
+            profile: profile.to_string(),
+            model: model.to_string(),
+        })
+    }
+
+    fn profiles(&self) -> Vec<String> {
+        vec!["other".to_string()]
+    }
+}
+
+/// `SetEffort` threads the level into the next turn's request (P-9), announces
+/// the change (never silent), and records an `EffortChange` audit event (HC-7).
+#[tokio::test]
+async fn effort_threads_into_request_and_is_announced() {
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::text("one"),
+        ScriptedResponse::text("two"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let sink = CaptureSink::new();
+    let config = make_config(provider, temp_project(), Box::new(sink.clone()));
+    let mut h = spawn(config);
+
+    // First turn carries the model's default effort (fake ⇒ Medium).
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+    assert_eq!(fake.last_effort(), Some(Effort::Medium), "seeded default");
+
+    // Switch effort at idle: announced via EffortChanged + a Notice.
+    h.send(Command::SetEffort {
+        effort: Effort::High,
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::EffortChanged { effort } if *effort == Effort::High)),
+        "EffortChanged is emitted"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message } if message.contains("effort"))),
+        "the change is announced, never silent"
+    );
+
+    // The next turn carries the new effort.
+    h.send(Command::UserInput {
+        text: "again".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+    assert_eq!(
+        fake.last_effort(),
+        Some(Effort::High),
+        "threaded into request"
+    );
+
+    assert!(
+        sink.records().iter().any(|r| matches!(&r.event,
+            TranscriptEvent::EffortChange { effort } if *effort == Effort::High)),
+        "an EffortChange audit record is written (HC-7)"
+    );
+}
+
+/// A model switch re-seeds the session effort to the new model's default and
+/// announces it via `EffortChanged` (P-9).
+#[tokio::test]
+async fn switch_model_reseeds_effort_to_new_default() {
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())), // default effort Medium
+        temp_project(),
+        EngineConfig::no_transcript(),
+    );
+    config.provider_factory = Some(Arc::new(ReseedFactory));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await; // drain startup events
+
+    h.send(Command::SwitchModel {
+        profile: "other".into(),
+        model: Some("m2".into()),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::EffortChanged { effort } if *effort == Effort::High)),
+        "the switch re-seeds effort to the new model's default (Medium → High)"
+    );
 }

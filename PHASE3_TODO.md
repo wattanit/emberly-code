@@ -28,7 +28,7 @@ effort picker is the same overlay as the model picker.
 | 1. Effort model (data types) | [x] | Done 2026-07-10; `Effort` enum + `CompletionRequest.effort` + `ModelInfo` levels/default; 7 tests |
 | 2. Adapter effort mapping + no-op | [x] | Done 2026-07-10; anthropic→thinking-budget (2k/8k/16k/32k, clamped); openai→`reasoning_effort` (Max→high); no-op when unsupported; 10 tests |
 | 3. `ReasoningDelta` stream event + trace translation | [x] | Done 2026-07-11; `ReasoningDelta`+`ReasoningSignature` events, `ContentBlock::Reasoning`; anthropic thinking/redacted capture + replay; openai `reasoning_content`; 8 tests |
-| 4. Effort as engine state | [ ] | `Command::SetEffort`, `EffortChanged`, `effort_change`; threaded into requests; per-model config default |
+| 4. Effort as engine state | [x] | Done 2026-07-11; `SetEffort`/`EffortChanged`/`EffortChange`; seeded+threaded+re-seeded on switch; config `effort`/`effort_levels`; 6 tests |
 | 5. Reasoning trace through engine + transcript | [ ] | `ReasoningDelta` UiEvent relay; distinct `reasoning` field; `hidden` still records |
 | 6. UI — thinking trail + effort picker | [ ] | collapsed/expand/stream/settle; `reasoning` view key; picker + sidebar line; `/effort`; degraded block; line mode |
 | 7. Tests, docs, exit criterion | [ ] | fake-provider round-trips; README; exit met |
@@ -119,26 +119,24 @@ or drops it — a no-op is never an error (P-9).
 Mirrors the mode/`SwitchModel` machinery from earlier phases: per-session
 state, switchable in-session, transcript-logged, announced never silent.
 
-- [ ] `Command::SetEffort { effort: Effort }` (core) — issued at idle; the
-      frontend gates it while a turn runs; applies to subsequent turns and
-      never rewrites prior turns.
-- [ ] `UiEvent::EffortChanged { effort: Effort }` (core) — the sidebar
-      updates; the change is also announced via a `Notice` (never silent,
-      Design §3.1), consistent with `ModelChanged`.
-- [ ] `TranscriptEvent::EffortChange { effort: Effort }` — additive, no
-      `SCHEMA_VERSION` bump (warn-skipped by older readers, like `ModelSwitch`
-      was). An audit record (HC-7); the conversation view is unaffected.
-- [ ] Engine holds the active `effort` in state, seeds it from the model's
-      `default_effort` (and the per-model config default, §8), threads it
-      into every `CompletionRequest`, and resets/re-seeds on `SwitchModel`
-      to the new model's default. `SetEffort` updates it, logs the transcript
-      event, emits `EffortChanged` + `Notice`.
-- [ ] Config: a per-model `effort` default key (Tech Spec §8) resolved at
-      construction and on reload, feeding `default_effort`. Absent ⇒ the
-      model's built-in default.
-- [ ] Tests: an engine test with the `fake` provider asserts the effort it
-      sends changes after `SetEffort`, that `EffortChanged` + the transcript
-      event are emitted, and that `SwitchModel` re-seeds the default.
+- [x] `Command::SetEffort { effort }`, `UiEvent::EffortChanged { effort }`,
+      `TranscriptEvent::EffortChange { effort }` — `Effort` re-exported through
+      `core::types` so all three share one type. Transcript event is additive,
+      no `SCHEMA_VERSION` bump (warn-skipped, like `ModelSwitch`).
+- [x] Engine holds `effort: Option<Effort>`, seeds it from the model's
+      `default_effort` at construction, threads it into the turn request
+      builder (summarize stays `None`), and re-seeds on `SwitchModel` (emitting
+      `EffortChanged` when the new default differs). `set_effort` is a no-op
+      when unchanged, else logs the transcript event and emits `EffortChanged`
+      + a `Notice`. Mid-turn `SetEffort` is ignored (applies next turn).
+- [x] Config: per-model `effort` (default level; presence enables the control)
+      + optional `effort_levels` subset (defaults to the full ladder), resolved
+      in `provider_setup` into `ModelInfo.default_effort`/`effort_levels`.
+      `ModelFile` lost `Copy` (now `Clone`) to hold the `String`/`Vec`.
+- [x] Tests (6): engine — effort seeded/threaded/re-seeded, `EffortChanged` +
+      `Notice` + `EffortChange` transcript, switch re-seed (via `last_effort()`
+      + a re-seeding `ProviderFactory`); config — default+full-ladder, no-effort
+      ⇒ no control, explicit level subset.
 
 ## 5. Reasoning trace through the engine + transcript  *(Tech Spec §4.7, P-10)*
 
@@ -233,6 +231,10 @@ G-22 routes these to the owner):
   "echoed back on subsequent tool-use turns"). The signature is opaque — no
   wire *type* crosses the boundary, satisfying P-1 in substance. Record as a
   downstream feedback entry (Spec §4.1/§4.7) at the next Spec bump (SFD G-24).
+- **Resume does not restore the last in-session effort:** a resumed session
+  re-seeds from the model's `default_effort` rather than replaying the last
+  `EffortChange` from the transcript. Effort is per-session state; restoring it
+  on resume is a possible later refinement, not in this phase's scope.
 - **Redacted-thinking replay is best-effort, untested live:** captured as a
   placeholder delta + preserved `data` and replayed as `redacted_thinking`, but
   never exercised against a live endpoint (redacted blocks are rare). Noted so

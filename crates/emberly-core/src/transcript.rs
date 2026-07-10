@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::id::{PermissionId, SessionId, ToolCallId};
-use crate::types::{Mode, PermissionDecision, PermissionRendering, SandboxStatus};
+use crate::types::{Effort, Mode, PermissionDecision, PermissionRendering, SandboxStatus};
 
 /// Current transcript schema version. Present on every record from day one so
 /// a reader can detect and warn on newer schemas rather than crash (Tech Spec
@@ -132,6 +132,11 @@ pub enum TranscriptEvent {
     /// The active provider profile / model was switched in-session (C-6). An
     /// audit record (HC-7); the conversation view is unaffected.
     ModelSwitch { provider: String, model: String },
+
+    /// The reasoning-effort level was changed in-session (C-6/P-9). An audit
+    /// record (HC-7); the conversation view is unaffected. Additive — older
+    /// readers warn-skip it, so no `SCHEMA_VERSION` bump (like `ModelSwitch`).
+    EffortChange { effort: Effort },
 
     /// A `/compact` occurred: the summary text and the range of view turns it
     /// replaced (Requirements §8.3). The JSONL log itself is untouched.

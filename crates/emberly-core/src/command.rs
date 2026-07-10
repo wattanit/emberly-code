@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::{PermissionId, SessionId};
-use crate::types::{Mode, PermissionDecision};
+use crate::types::{Effort, Mode, PermissionDecision};
 
 /// A command issued to the engine. `#[non_exhaustive]` so new commands are not
 /// a breaking change.
@@ -38,6 +38,12 @@ pub enum Command {
         profile: String,
         model: Option<String>,
     },
+
+    /// Set the reasoning-effort level for subsequent turns (C-6, P-9). Issued at
+    /// idle (the frontend gates it while a turn runs); applies to the next turn
+    /// and never rewrites prior turns. A model without an effort control accepts
+    /// the setting silently — it just never reaches the wire (P-9).
+    SetEffort { effort: Effort },
 
     /// Re-read config + prompts from disk and apply them to the running session
     /// (C-5) — sent by the frontend after an in-app edit. Live pieces (prompts,

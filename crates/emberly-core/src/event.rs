@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::{PermissionId, SessionId, ToolCallId};
-use crate::types::{Mode, PermissionRendering, SandboxStatus, TokenUsage};
+use crate::types::{Effort, Mode, PermissionRendering, SandboxStatus, TokenUsage};
 
 /// An event emitted by the engine for a frontend to render.
 ///
@@ -87,6 +87,11 @@ pub enum UiEvent {
     /// The configured provider profiles changed after a `/config` reload (C-5),
     /// so the frontend refreshes its model picker.
     ProfilesChanged { profiles: Vec<String> },
+
+    /// The reasoning-effort level changed in-session (C-6/P-9, Design §3.1). The
+    /// sidebar effort line updates; the change is also announced via a
+    /// [`Notice`](UiEvent::Notice) — never silent.
+    EffortChanged { effort: Effort },
 
     /// A plain-language, harness-voice notice for the timeline (Design §6.1):
     /// a persisted permission grant's written line (§6.6), a refused auto-mode

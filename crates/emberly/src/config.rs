@@ -61,11 +61,18 @@ pub struct AuthFile {
 }
 
 /// Optional per-model metadata inside a profile.
-#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct ModelFile {
     pub context_window: Option<u32>,
     pub max_output: Option<u32>,
     pub pricing: Option<PricingEntry>,
+    /// The default reasoning-effort level (P-9): `low|medium|high|max`. Its
+    /// presence declares that this model has an effort control; absent ⇒ no
+    /// control and the effort picker is hidden.
+    pub effort: Option<String>,
+    /// The effort levels this model offers, if a subset. Omitted ⇒ the full
+    /// ladder (`low|medium|high|max`) when `effort` is set.
+    pub effort_levels: Option<Vec<String>>,
 }
 
 impl ProfileFile {
