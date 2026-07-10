@@ -71,3 +71,8 @@ impl PermissionDecision {
 /// cost estimate. Defined in `emberly-providers` and re-exported so the two
 /// crates agree on the accounting unit.
 pub use emberly_providers::TokenUsage;
+
+/// The reasoning-effort level (Requirements P-9, Tech Spec §4.6). Defined in
+/// `emberly-providers` (it rides on `CompletionRequest`/`ModelInfo`) and
+/// re-exported so commands, events, and the transcript share one type.
+pub use emberly_providers::Effort;

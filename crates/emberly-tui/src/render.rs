@@ -378,6 +378,35 @@ fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 // inline code, lists, headings; everything else plain (§4.1).
                 out.extend(crate::markdown::render_message(text, theme, w));
             }
+            ConvItem::Reasoning { text, expanded } => {
+                // A quiet register, one visual step below the answer (Design
+                // §4.4): a dim summary line, and — when expanded — the reasoning
+                // in chrome colour so it never reads as the conclusion.
+                let lines = text.lines().count().max(1);
+                let (mark, label) = if *expanded {
+                    (markers::REASONING_EXPANDED, "reasoning".to_string())
+                } else {
+                    (
+                        markers::REASONING_COLLAPSED,
+                        format!("reasoning ({lines} lines)"),
+                    )
+                };
+                out.push(Line::from(vec![Span::styled(
+                    format!("{mark} {label}"),
+                    theme.chrome(),
+                )]));
+                if *expanded {
+                    for row in text
+                        .split('\n')
+                        .flat_map(|l| text::wrap(l, w.saturating_sub(2)))
+                    {
+                        out.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(row, theme.chrome()),
+                        ]));
+                    }
+                }
+            }
             ConvItem::Tool {
                 summary,
                 done,
@@ -523,6 +552,17 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
         format!("{}/{}", app.session.provider, app.session.model)
     };
     lines.push(labeled(theme, strings::status::MODEL_LABEL, &model, w));
+    // Effort line: shown only when the active model exposes a control (P-9,
+    // Design §3.1); hidden otherwise so it never implies a knob that does
+    // nothing.
+    if let Some(effort) = app.effort {
+        lines.push(labeled(
+            theme,
+            strings::status::EFFORT_LABEL,
+            effort.as_str(),
+            w,
+        ));
+    }
     lines.push(Line::from(vec![
         Span::styled(
             format!("{} ", strings::status::CONTEXT_ABBR),

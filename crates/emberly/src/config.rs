@@ -29,6 +29,9 @@ pub struct ConfigFile {
     /// Sandbox policy knobs (Requirements §6.7).
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    /// Reasoning-trail view default (Design §4.4): `collapsed` | `expanded` |
+    /// `hidden`. A view choice only — the trace is always recorded (P-10).
+    pub reasoning: Option<String>,
 }
 
 /// A `[providers.<name>]` profile: an adapter (wire format) plus the endpoint
@@ -61,11 +64,18 @@ pub struct AuthFile {
 }
 
 /// Optional per-model metadata inside a profile.
-#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct ModelFile {
     pub context_window: Option<u32>,
     pub max_output: Option<u32>,
     pub pricing: Option<PricingEntry>,
+    /// The default reasoning-effort level (P-9): `low|medium|high|max`. Its
+    /// presence declares that this model has an effort control; absent ⇒ no
+    /// control and the effort picker is hidden.
+    pub effort: Option<String>,
+    /// The effort levels this model offers, if a subset. Omitted ⇒ the full
+    /// ladder (`low|medium|high|max`) when `effort` is set.
+    pub effort_levels: Option<Vec<String>>,
 }
 
 impl ProfileFile {
@@ -185,6 +195,9 @@ impl ConfigFile {
         if higher.sandbox.require.is_some() {
             self.sandbox.require = higher.sandbox.require;
         }
+        if higher.reasoning.is_some() {
+            self.reasoning = higher.reasoning;
+        }
     }
 }
 
@@ -211,6 +224,9 @@ pub struct Resolved {
     pub notices: Vec<String>,
     /// `sandbox.require`: refuse to start without kernel confinement (§6.7).
     pub sandbox_require: bool,
+    /// The reasoning-trail view default (`collapsed`|`expanded`|`hidden`,
+    /// Design §4.4), or `None` for the built-in default (`collapsed`).
+    pub reasoning: Option<String>,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -355,6 +371,7 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         provenance,
         notices,
         sandbox_require: merged.sandbox.require.unwrap_or(false),
+        reasoning: merged.reasoning,
     })
 }
 

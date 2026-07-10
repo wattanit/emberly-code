@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::id::ToolCallId;
+use crate::model::Effort;
 
 /// The author of a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +40,25 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// A captured reasoning/thinking block from a prior assistant turn (P-10).
+    /// Carried in the conversation so a provider that requires reasoning to be
+    /// echoed back on later tool-use turns can replay it. `signature` is an
+    /// opaque provider token, never interpreted by the engine (P-1); `redacted`
+    /// marks an encrypted block whose `text` was withheld by the provider. An
+    /// adapter that has no use for reasoning blocks simply skips them.
+    Reasoning {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        redacted: bool,
+    },
+}
+
+/// `skip_serializing_if` helper: omit `redacted` from the wire when false.
+#[allow(clippy::trivially_copy_pass_by_ref)] // signature required by serde
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One message in the normalized conversation.
@@ -103,6 +123,11 @@ pub struct CompletionRequest {
     pub max_output_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// The reasoning effort for this turn (P-9, Tech Spec §4.6). Each adapter
+    /// maps it to its provider's native control or drops it (a no-op for a
+    /// model without such a control — never an error). `None` sends nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
 }
 
 impl CompletionRequest {
@@ -116,6 +141,33 @@ impl CompletionRequest {
             tools: Vec::new(),
             max_output_tokens: None,
             temperature: None,
+            effort: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_without_effort_field_deserializes_to_none() {
+        // A request serialized before Phase 3 carries no `effort` key.
+        let json = r#"{"model":"m","messages":[]}"#;
+        let req: CompletionRequest = match serde_json::from_str(json) {
+            Ok(r) => r,
+            Err(e) => panic!("deserialize legacy: {e}"),
+        };
+        assert_eq!(req.effort, None);
+    }
+
+    #[test]
+    fn new_request_omits_effort_when_none() {
+        let req = CompletionRequest::new("m");
+        let json = match serde_json::to_string(&req) {
+            Ok(s) => s,
+            Err(e) => panic!("serialize: {e}"),
+        };
+        assert!(!json.contains("effort"), "None effort is skipped: {json}");
     }
 }

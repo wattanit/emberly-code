@@ -13,7 +13,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context};
-use emberly_providers::{AnthropicProvider, Auth, ModelInfo, OpenAiProvider, Pricing, Provider};
+use emberly_providers::{
+    AnthropicProvider, Auth, Effort, ModelInfo, OpenAiProvider, Pricing, Provider,
+};
 
 use crate::config::{self, AuthFile, CliOverrides, ProfileFile, Resolved};
 
@@ -41,6 +43,23 @@ pub fn build(resolved: &Resolved) -> anyhow::Result<Option<Selection>> {
         label: format!("{profile_name}/{model}"),
         model,
     }))
+}
+
+/// The effort levels a model offers (P-9), from its config metadata. A model
+/// declares an effort control by setting a default `effort`; its levels are the
+/// named subset, or the full ladder when none is named. No `effort` ⇒ empty (no
+/// control, so the picker is hidden). Unparseable level names are skipped.
+fn effort_levels_from(meta: Option<&config::ModelFile>) -> Vec<Effort> {
+    let Some(meta) = meta else {
+        return Vec::new();
+    };
+    if meta.effort.is_none() {
+        return Vec::new();
+    }
+    match &meta.effort_levels {
+        Some(names) => names.iter().filter_map(|n| Effort::parse(n)).collect(),
+        None => Effort::ALL.to_vec(),
+    }
 }
 
 /// Build a provider from a single profile + model — the shared resolution used
@@ -77,6 +96,13 @@ fn build_profile(
             input_per_mtok: p.input,
             output_per_mtok: p.output,
         }),
+        // Reasoning effort (P-9): a model declares a control by setting a
+        // default `effort`. Levels default to the full ladder unless the config
+        // names a subset. No `effort` ⇒ no control (empty levels).
+        default_effort: meta
+            .and_then(|m| m.effort.as_deref())
+            .and_then(Effort::parse),
+        effort_levels: effort_levels_from(meta),
     };
     let client = build_https_client()?;
 
@@ -295,6 +321,8 @@ mod tests {
                 context_window: Some(123_456),
                 max_output: Some(4_321),
                 pricing: None,
+                effort: None,
+                effort_levels: None,
             },
         );
         let mut providers = HashMap::new();
@@ -304,5 +332,58 @@ mod tests {
             .model_info();
         assert_eq!(info.context_window, 123_456);
         assert_eq!(info.max_output_tokens, 4_321);
+    }
+
+    #[test]
+    fn effort_config_declares_default_and_levels() {
+        // A default `effort` with no explicit levels ⇒ the full ladder.
+        let mut prof = profile("openai", Some("http://localhost:0/v1"));
+        prof.models.insert(
+            "m".to_string(),
+            ModelFile {
+                effort: Some("high".into()),
+                ..Default::default()
+            },
+        );
+        let mut providers = HashMap::new();
+        providers.insert("p".to_string(), prof);
+        let info = build_profile(&providers, "p", "m")
+            .expect("builds")
+            .model_info();
+        assert_eq!(info.default_effort, Some(Effort::High));
+        assert_eq!(info.effort_levels, Effort::ALL.to_vec());
+    }
+
+    #[test]
+    fn no_effort_config_means_no_control() {
+        // No `effort` key ⇒ no levels, so the picker stays hidden (P-9).
+        let mut prof = profile("openai", Some("http://localhost:0/v1"));
+        prof.models.insert("m".to_string(), ModelFile::default());
+        let mut providers = HashMap::new();
+        providers.insert("p".to_string(), prof);
+        let info = build_profile(&providers, "p", "m")
+            .expect("builds")
+            .model_info();
+        assert_eq!(info.default_effort, None);
+        assert!(info.effort_levels.is_empty());
+    }
+
+    #[test]
+    fn effort_config_honors_an_explicit_level_subset() {
+        let mut prof = profile("openai", Some("http://localhost:0/v1"));
+        prof.models.insert(
+            "m".to_string(),
+            ModelFile {
+                effort: Some("low".into()),
+                effort_levels: Some(vec!["low".into(), "high".into()]),
+                ..Default::default()
+            },
+        );
+        let mut providers = HashMap::new();
+        providers.insert("p".to_string(), prof);
+        let info = build_profile(&providers, "p", "m")
+            .expect("builds")
+            .model_info();
+        assert_eq!(info.effort_levels, vec![Effort::Low, Effort::High]);
     }
 }

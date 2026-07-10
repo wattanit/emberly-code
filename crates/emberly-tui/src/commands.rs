@@ -31,6 +31,9 @@ pub enum AppCommand {
     /// Open the model/provider picker (C-6). `/model <profile>` switches
     /// directly; with no argument (or from the palette) it opens the picker.
     Model,
+    /// Open the reasoning-effort picker (P-9). `/effort <level>` sets it
+    /// directly; with no argument (or from the palette) it opens the picker.
+    Effort,
     /// Edit the project `.agents/config.toml` in `$EDITOR` (C-5).
     Config,
     /// Edit a prompt file in `$EDITOR` (C-5). `/prompt [system|compact]`.
@@ -103,6 +106,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "Switch the active provider/model",
         cmd: AppCommand::Model,
+    },
+    CommandSpec {
+        name: "effort",
+        key: None,
+        desc: "Set the reasoning-effort level (/effort low|medium|high|max)",
+        cmd: AppCommand::Effort,
     },
     CommandSpec {
         name: "config",

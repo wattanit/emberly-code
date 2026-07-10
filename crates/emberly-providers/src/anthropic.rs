@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use crate::auth::Auth;
 use crate::error::ProviderError;
 use crate::message::{CompletionRequest, ContentBlock, Message, Role};
-use crate::model::{ModelInfo, ProviderId, TokenEstimate};
+use crate::model::{Effort, ModelInfo, ProviderId, TokenEstimate};
 use crate::provider::Provider;
 use crate::sse::SseEvent;
 use crate::stream::{CompletionStream, StopReason, StreamEvent};
@@ -72,7 +72,11 @@ impl Provider for AnthropicProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionStream, ProviderError> {
-        let body = build_body(&request, self.model_info.max_output_tokens);
+        let body = build_body(
+            &request,
+            self.model_info.max_output_tokens,
+            &self.model_info.effort_levels,
+        );
         let builder = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
@@ -97,8 +101,40 @@ impl Provider for AnthropicProvider {
     }
 }
 
-/// Build the Messages request body from the normalized request.
-fn build_body(request: &CompletionRequest, default_max_tokens: u32) -> Value {
+/// The target `thinking.budget_tokens` for each effort level, before clamping
+/// (Tech Spec §4.6). Initial values; tune with use — owner-approved 2026-07-10.
+fn effort_budget_target(effort: Effort) -> u32 {
+    match effort {
+        Effort::Low => 2_048,
+        Effort::Medium => 8_192,
+        Effort::High => 16_384,
+        Effort::Max => 32_768,
+    }
+}
+
+/// The Anthropic thinking budget for `effort`, clamped to fit the model's
+/// output allowance. Anthropic requires `1024 <= budget_tokens < max_tokens`;
+/// we leave a 1024-token reserve so the answer always has room. `None` when
+/// `max_tokens` is too small to fit any valid thinking block — the adapter then
+/// omits thinking entirely (a no-op, never an error — P-9).
+fn thinking_budget(effort: Effort, max_tokens: u32) -> Option<u32> {
+    const RESERVE: u32 = 1_024;
+    const MIN: u32 = 1_024;
+    let ceiling = max_tokens.checked_sub(RESERVE)?;
+    if ceiling < MIN {
+        return None;
+    }
+    Some(effort_budget_target(effort).clamp(MIN, ceiling))
+}
+
+/// Build the Messages request body from the normalized request. `effort_levels`
+/// is the active model's declared support (empty ⇒ no reasoning control, so an
+/// `effort` on the request is silently ignored — P-9).
+fn build_body(
+    request: &CompletionRequest,
+    default_max_tokens: u32,
+    effort_levels: &[Effort],
+) -> Value {
     let max_tokens = request
         .max_output_tokens
         .unwrap_or(default_max_tokens)
@@ -119,8 +155,22 @@ fn build_body(request: &CompletionRequest, default_max_tokens: u32) -> Value {
             .map(|t| json!({ "name": t.name, "description": t.description, "input_schema": t.input_schema }))
             .collect();
     }
+    // Reasoning effort → thinking block, only if the model declares support and
+    // a valid budget fits (P-9, Tech Spec §4.6).
+    let thinking_enabled = request
+        .effort
+        .filter(|_| !effort_levels.is_empty())
+        .and_then(|effort| thinking_budget(effort, max_tokens))
+        .map(|budget| {
+            body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+        })
+        .is_some();
+    // Extended thinking requires the default temperature; omit any override when
+    // thinking is on, otherwise the API rejects the request.
     if let Some(temp) = request.temperature {
-        body["temperature"] = json!(temp);
+        if !thinking_enabled {
+            body["temperature"] = json!(temp);
+        }
     }
     body
 }
@@ -153,6 +203,24 @@ fn block_to_anthropic(block: &ContentBlock) -> Value {
             "content": content,
             "is_error": is_error,
         }),
+        // Replay a captured thinking block verbatim so multi-turn thinking
+        // works (P-10). Redacted blocks carry their opaque `data` in the
+        // signature slot and go back as `redacted_thinking`.
+        ContentBlock::Reasoning {
+            text,
+            signature,
+            redacted,
+        } => {
+            if *redacted {
+                json!({ "type": "redacted_thinking", "data": signature.clone().unwrap_or_default() })
+            } else {
+                json!({
+                    "type": "thinking",
+                    "thinking": text,
+                    "signature": signature.clone().unwrap_or_default(),
+                })
+            }
+        }
     }
 }
 
@@ -171,6 +239,10 @@ fn map_stop_reason(reason: &str) -> StopReason {
 struct AnthropicMapper {
     /// content-block index → tool-call id, for routing `input_json_delta`.
     tool_ids: HashMap<u64, ToolCallId>,
+    /// content-block index → accumulated `signature_delta` for a thinking
+    /// block. Presence marks the index as a (non-redacted) thinking block, so
+    /// its signature is flushed as a `ReasoningSignature` at block stop (P-10).
+    thinking_sigs: HashMap<u64, String>,
     input_tokens: u64,
     stop_reason: StopReason,
 }
@@ -195,17 +267,42 @@ impl SseMapper for AnthropicMapper {
             "content_block_start" => {
                 let index = data.get("index").and_then(Value::as_u64).unwrap_or(0);
                 let block = &data["content_block"];
-                if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                    let id = ToolCallId::new(
-                        block.get("id").and_then(Value::as_str).unwrap_or_default(),
-                    );
-                    let name = block
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    self.tool_ids.insert(index, id.clone());
-                    out.push(Ok(StreamEvent::ToolCallStart { id, name }));
+                match block.get("type").and_then(Value::as_str) {
+                    Some("tool_use") => {
+                        let id = ToolCallId::new(
+                            block.get("id").and_then(Value::as_str).unwrap_or_default(),
+                        );
+                        let name = block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        self.tool_ids.insert(index, id.clone());
+                        out.push(Ok(StreamEvent::ToolCallStart { id, name }));
+                    }
+                    Some("thinking") => {
+                        // Mark this index as a thinking block; the signature
+                        // accumulates via `signature_delta` and flushes at stop.
+                        self.thinking_sigs.insert(index, String::new());
+                    }
+                    Some("redacted_thinking") => {
+                        // Encrypted reasoning: no text to stream. Surface a
+                        // placeholder so it is never silently dropped (P-10) and
+                        // preserve the opaque `data` for verbatim replay.
+                        let data_blob = block
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        out.push(Ok(StreamEvent::ReasoningDelta {
+                            text: "[redacted reasoning]".to_string(),
+                        }));
+                        out.push(Ok(StreamEvent::ReasoningSignature {
+                            signature: data_blob,
+                            redacted: true,
+                        }));
+                    }
+                    _ => {}
                 }
             }
             "content_block_delta" => {
@@ -230,6 +327,21 @@ impl SseMapper for AnthropicMapper {
                             }));
                         }
                     }
+                    Some("thinking_delta") => {
+                        if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                            out.push(Ok(StreamEvent::ReasoningDelta {
+                                text: text.to_string(),
+                            }));
+                        }
+                    }
+                    Some("signature_delta") => {
+                        if let (Some(acc), Some(sig)) = (
+                            self.thinking_sigs.get_mut(&index),
+                            delta.get("signature").and_then(Value::as_str),
+                        ) {
+                            acc.push_str(sig);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -237,6 +349,13 @@ impl SseMapper for AnthropicMapper {
                 let index = data.get("index").and_then(Value::as_u64).unwrap_or(0);
                 if let Some(id) = self.tool_ids.get(&index) {
                     out.push(Ok(StreamEvent::ToolCallEnd { id: id.clone() }));
+                }
+                // Flush a thinking block's accumulated signature for replay.
+                if let Some(signature) = self.thinking_sigs.remove(&index) {
+                    out.push(Ok(StreamEvent::ReasoningSignature {
+                        signature,
+                        redacted: false,
+                    }));
                 }
             }
             "message_delta" => {
@@ -268,5 +387,193 @@ impl SseMapper for AnthropicMapper {
             _ => {} // ping, unknown
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req_with_effort(effort: Option<Effort>) -> CompletionRequest {
+        let mut r = CompletionRequest::new("claude-x");
+        r.effort = effort;
+        r
+    }
+
+    fn budget_of(body: &Value) -> Option<u64> {
+        body.get("thinking")
+            .and_then(|t| t.get("budget_tokens"))
+            .and_then(Value::as_u64)
+    }
+
+    #[test]
+    fn maps_each_level_to_its_budget_when_supported() {
+        // A large output allowance so no clamping occurs.
+        let levels = Effort::ALL.to_vec();
+        for (effort, want) in [
+            (Effort::Low, 2_048),
+            (Effort::Medium, 8_192),
+            (Effort::High, 16_384),
+            (Effort::Max, 32_768),
+        ] {
+            let body = build_body(&req_with_effort(Some(effort)), 64_000, &levels);
+            assert_eq!(budget_of(&body), Some(want), "level {effort}");
+        }
+    }
+
+    #[test]
+    fn omits_thinking_when_no_effort() {
+        let body = build_body(&req_with_effort(None), 64_000, &Effort::ALL);
+        assert_eq!(body.get("thinking"), None);
+    }
+
+    #[test]
+    fn unsupported_model_is_a_noop_even_with_effort() {
+        // Empty effort_levels ⇒ the model has no reasoning control (P-9).
+        let body = build_body(&req_with_effort(Some(Effort::High)), 64_000, &[]);
+        assert_eq!(body.get("thinking"), None);
+    }
+
+    #[test]
+    fn budget_is_clamped_to_the_output_allowance() {
+        // max_tokens 8192 ⇒ ceiling 7168; Max's 32768 target clamps down.
+        let body = build_body(&req_with_effort(Some(Effort::Max)), 8_192, &Effort::ALL);
+        assert_eq!(budget_of(&body), Some(7_168));
+    }
+
+    #[test]
+    fn tiny_allowance_omits_thinking() {
+        // max_tokens < 2048 can't fit a valid block ⇒ no-op, not an error.
+        let body = build_body(&req_with_effort(Some(Effort::Low)), 1_500, &Effort::ALL);
+        assert_eq!(body.get("thinking"), None);
+    }
+
+    #[test]
+    fn temperature_dropped_when_thinking_enabled() {
+        let mut r = req_with_effort(Some(Effort::Low));
+        r.temperature = Some(0.7);
+        let body = build_body(&r, 64_000, &Effort::ALL);
+        assert!(body.get("thinking").is_some());
+        assert_eq!(
+            body.get("temperature"),
+            None,
+            "thinking forbids a temp override"
+        );
+        // Without thinking, the temperature passes through (f32→JSON widens to
+        // f64, so compare with a tolerance rather than for exact equality).
+        let body2 = build_body(&r, 64_000, &[]);
+        let temp = body2.get("temperature").and_then(Value::as_f64);
+        assert!(
+            matches!(temp, Some(t) if (t - 0.7).abs() < 1e-6),
+            "got {temp:?}"
+        );
+    }
+
+    /// Drive `data` frames through the mapper, collecting only the `Ok` events.
+    fn run_mapper(frames: &[&str]) -> Vec<StreamEvent> {
+        let mut mapper = AnthropicMapper::default();
+        let mut out = Vec::new();
+        for data in frames {
+            let event = SseEvent {
+                event: None,
+                data: (*data).to_string(),
+            };
+            out.extend(mapper.map(event).into_iter().filter_map(Result::ok));
+        }
+        out
+    }
+
+    #[test]
+    fn thinking_stream_yields_reasoning_then_signature_then_text() {
+        let events = run_mapper(&[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" think"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig123"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}"#,
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ReasoningDelta {
+                    text: "Let me".into()
+                },
+                StreamEvent::ReasoningDelta {
+                    text: " think".into()
+                },
+                StreamEvent::ReasoningSignature {
+                    signature: "sig123".into(),
+                    redacted: false,
+                },
+                StreamEvent::TextDelta {
+                    text: "answer".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn redacted_thinking_surfaces_placeholder_and_preserves_data() {
+        let events = run_mapper(&[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"ENCRYPTED"}}"#,
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ReasoningDelta {
+                    text: "[redacted reasoning]".into()
+                },
+                StreamEvent::ReasoningSignature {
+                    signature: "ENCRYPTED".into(),
+                    redacted: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_text_stream_emits_no_reasoning() {
+        let events = run_mapper(&[
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+        ]);
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            StreamEvent::ReasoningDelta { .. } | StreamEvent::ReasoningSignature { .. }
+        )));
+    }
+
+    #[test]
+    fn reasoning_block_replays_as_thinking_with_signature() {
+        let block = ContentBlock::Reasoning {
+            text: "prior thought".into(),
+            signature: Some("sig999".into()),
+            redacted: false,
+        };
+        let wire = block_to_anthropic(&block);
+        assert_eq!(wire.get("type").and_then(Value::as_str), Some("thinking"));
+        assert_eq!(
+            wire.get("thinking").and_then(Value::as_str),
+            Some("prior thought")
+        );
+        assert_eq!(
+            wire.get("signature").and_then(Value::as_str),
+            Some("sig999")
+        );
+    }
+
+    #[test]
+    fn redacted_reasoning_block_replays_as_redacted_thinking() {
+        let block = ContentBlock::Reasoning {
+            text: String::new(),
+            signature: Some("ENCRYPTED".into()),
+            redacted: true,
+        };
+        let wire = block_to_anthropic(&block);
+        assert_eq!(
+            wire.get("type").and_then(Value::as_str),
+            Some("redacted_thinking")
+        );
+        assert_eq!(wire.get("data").and_then(Value::as_str), Some("ENCRYPTED"));
     }
 }

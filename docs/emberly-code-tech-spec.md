@@ -1,8 +1,8 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.4 
+**Version:** 0.5 
 **Status:** approved 
-**Date:** 2026-07-10
+**Date:** 2026-07-11
 **Owner:** Wattanit
 **Companion documents:** Requirements Document v0.5 (upstream contract),
 Design Guideline v0.5 (upstream for all UI/UX decisions)
@@ -79,7 +79,10 @@ Non-exhaustive enum, serializable (A-3):
 `AskUserRequest{id, question, options}` (T-8), `LoopHalted{reason}` (S-5),
 `TrustRequest{path}` (FR-1), `ContextUsage{pct, tokens}`, `CostEstimate{..}`,
 `SandboxStatus(..)`, `ModeChanged(..)`, `ModelChanged{provider, model}` and
-`EffortChanged(level)` (C-6/P-9), `HarnessError{..}`, `SessionMeta{..}`,
+`EffortChanged{effort: Option<Effort>, available: Vec<Effort>}` (C-6/P-9 —
+carries the model's offered levels so the picker knows its options and the
+sidebar the current one; `effort`/`available` empty when the model has no
+control), `HarnessError{..}`, `SessionMeta{..}`,
 `FileModified{path, adds, dels}`, `CompactionStatus(..)`.
 
 ### 3.2 `TranscriptEvent` (durable, append-only JSONL)
@@ -137,6 +140,9 @@ pub trait Provider: Send + Sync {
 
 `CompletionStream` yields normalized `StreamEvent`s: `TextDelta`,
 `ReasoningDelta` (model thinking, distinct from the answer — P-10),
+`ReasoningSignature{signature, redacted}` (emitted once when a reasoning
+block closes — the opaque provider token to replay it verbatim on later
+tool-use turns, §4.7; a provider without one never emits it),
 `ToolCallStart/Delta/End`, `Usage`, `Done`, `Err`. No provider wire
 type crosses this boundary (P-1). A provider that does not stream
 reasoning simply never emits `ReasoningDelta`.
@@ -216,10 +222,16 @@ models   = ["model-id", …]
   **distinct field**, never concatenated into the answer text.
 - Where a provider requires reasoning blocks (and their opaque signatures)
   to be echoed back on subsequent tool-use turns for multi-turn thinking to
-  work, the adapter preserves the signature alongside the normalized
-  reasoning and replays it per that provider's rule — kept inside the
-  adapter so no wire detail leaks past the boundary (P-1). A provider
-  without this requirement ignores it.
+  work, the adapter preserves the signature and replays it per that
+  provider's rule. The signature travels as a `ReasoningSignature` stream
+  event (§4.1) and is held in the normalized conversation as a
+  `ContentBlock::Reasoning{text, signature, redacted}` — an opaque token the
+  engine never interprets, so no wire *type* crosses the boundary (P-1). The
+  engine places that block ahead of the turn's text/tool-use so a provider
+  that demands the ordering (e.g. Anthropic extended thinking) accepts the
+  replay; a provider with no such requirement ignores the block. Resume does
+  not reconstruct reasoning blocks — the signature is not persisted, and only
+  the live turn needs replay.
 
 ## 5. Tool Layer (`emberly-tools`)
 
@@ -677,8 +689,12 @@ loop-breaking guardrail (S-5). *Proves the 0.2 scope.*
 - Provider auth-scheme coverage (§4.5): confirm bearer / x-api-key /
   custom-header suffices for target endpoints; extend the set only if a
   real profile needs it (M6).
-- Effort enum granularity (§4.6): validate the four-level mapping against
-  each live provider's native control in M6; collapse or extend if the
-  mapping is lossy.
-- Reasoning-signature replay (§4.7): confirm per-provider echo requirements
-  against live endpoints in M6 so multi-turn thinking is correct.
+- Effort enum granularity (§4.6): the four-level → thinking-budget ladder is
+  implemented and owner-approved (2026-07-11: Low 2k / Medium 8k / High 16k /
+  Max 32k, clamped to the model's output allowance; openai maps to
+  `reasoning_effort` with Max→high). Still to do: validate against each live
+  provider's native control in M6; collapse or extend if the mapping is lossy.
+- Reasoning-signature replay (§4.7): the mechanism ships (a `ReasoningSignature`
+  stream event + `ContentBlock::Reasoning` carrier); confirm per-provider echo
+  requirements against live endpoints in M6 so multi-turn thinking is correct.
+  Redacted-thinking replay is implemented but untested against a live endpoint.

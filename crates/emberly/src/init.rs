@@ -33,10 +33,18 @@ pub const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/co
 # auth     = { scheme = "bearer", key = "myserver" }   # needs MYSERVER_API_KEY
 
 # Optional per-model metadata (context window, max output, pricing → cost est.):
+# Set `effort` to enable the reasoning-effort control (/effort, low|medium|
+# high|max); it maps to the provider's native knob or is ignored if none.
 # [providers.anthropic.models."claude-sonnet-5"]
 # context_window = 200000
 # max_output     = 8192
 # pricing = { input = 3.0, output = 15.0 }   # USD per million tokens
+# effort  = "medium"                         # default level; enables /effort
+# effort_levels = ["low", "medium", "high"]  # optional subset (default: all)
+
+# Reasoning-trail view: how the model's thinking is shown (collapsed|expanded|
+# hidden). Default collapsed; hidden still records the trace to the transcript.
+# reasoning = "collapsed"
 "#;
 
 /// A documented `permissions.toml`. The rule engine is Phase 2; this reserves

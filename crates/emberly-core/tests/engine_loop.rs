@@ -18,7 +18,7 @@ use emberly_core::{
     UiEvent,
 };
 use emberly_providers::{
-    ContentBlock, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
+    ContentBlock, Effort, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
     ScriptOutcome, ScriptedResponse, StopReason, StreamEvent, TokenUsage,
 };
 use emberly_tools::{default_registry, TruncateConfig};
@@ -288,7 +288,7 @@ async fn transcript_records_the_durable_session() {
     // The closing assistant message is stored complete, not as deltas.
     assert!(events
         .iter()
-        .any(|e| matches!(e, TranscriptEvent::AssistantMessage { text } if text == "done")));
+        .any(|e| matches!(e, TranscriptEvent::AssistantMessage { text, .. } if text == "done")));
 
     // Closing the command channel ends the session cleanly.
     drop(h);
@@ -542,6 +542,8 @@ async fn cost_and_context_use_authoritative_usage() {
             input_per_mtok: 3.0,
             output_per_mtok: 15.0,
         }),
+        effort_levels: Vec::new(),
+        default_effort: None,
     };
     let response = ScriptedResponse {
         events: vec![
@@ -595,6 +597,8 @@ async fn usage_chunk_after_done_still_counts() {
             input_per_mtok: 3.0,
             output_per_mtok: 15.0,
         }),
+        effort_levels: Vec::new(),
+        default_effort: None,
     };
     // `drop_after` appends no terminal event, so this is exactly the wire
     // order: content delta → finish_reason (Done) → usage chunk → EOF.
@@ -1098,4 +1102,262 @@ async fn reload_config_without_reloader_is_a_notice() {
 
     assert!(events.iter().any(|e| matches!(e,
         UiEvent::Notice { message } if message.contains("not available"))));
+}
+
+/// A factory whose built provider declares a different default effort, so a
+/// `SwitchModel` re-seeds the session effort to the new model's default (P-9).
+struct ReseedFactory;
+
+impl emberly_core::ProviderFactory for ReseedFactory {
+    fn build(&self, profile: &str, model: &str) -> Result<emberly_core::ProviderChoice, String> {
+        let info = ModelInfo {
+            model: model.to_string(),
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+            pricing: None,
+            effort_levels: Effort::ALL.to_vec(),
+            default_effort: Some(Effort::High),
+        };
+        Ok(emberly_core::ProviderChoice {
+            provider: Arc::new(FakeProvider::new(Vec::new()).with_model_info(info)),
+            profile: profile.to_string(),
+            model: model.to_string(),
+        })
+    }
+
+    fn profiles(&self) -> Vec<String> {
+        vec!["other".to_string()]
+    }
+}
+
+/// `SetEffort` threads the level into the next turn's request (P-9), announces
+/// the change (never silent), and records an `EffortChange` audit event (HC-7).
+#[tokio::test]
+async fn effort_threads_into_request_and_is_announced() {
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::text("one"),
+        ScriptedResponse::text("two"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let sink = CaptureSink::new();
+    let config = make_config(provider, temp_project(), Box::new(sink.clone()));
+    let mut h = spawn(config);
+
+    // First turn carries the model's default effort (fake ⇒ Medium).
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+    assert_eq!(fake.last_effort(), Some(Effort::Medium), "seeded default");
+
+    // Switch effort at idle: announced via EffortChanged + a Notice.
+    h.send(Command::SetEffort {
+        effort: Effort::High,
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::EffortChanged { effort: Some(l), .. } if *l == Effort::High)),
+        "EffortChanged is emitted"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message } if message.contains("effort"))),
+        "the change is announced, never silent"
+    );
+
+    // The next turn carries the new effort.
+    h.send(Command::UserInput {
+        text: "again".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+    assert_eq!(
+        fake.last_effort(),
+        Some(Effort::High),
+        "threaded into request"
+    );
+
+    assert!(
+        sink.records().iter().any(|r| matches!(&r.event,
+            TranscriptEvent::EffortChange { effort } if *effort == Effort::High)),
+        "an EffortChange audit record is written (HC-7)"
+    );
+}
+
+/// A model switch re-seeds the session effort to the new model's default and
+/// announces it via `EffortChanged` (P-9).
+#[tokio::test]
+async fn switch_model_reseeds_effort_to_new_default() {
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())), // default effort Medium
+        temp_project(),
+        EngineConfig::no_transcript(),
+    );
+    config.provider_factory = Some(Arc::new(ReseedFactory));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await; // drain startup events
+
+    h.send(Command::SwitchModel {
+        profile: "other".into(),
+        model: Some("m2".into()),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::EffortChanged { effort: Some(l), .. } if *l == Effort::High)),
+        "the switch re-seeds effort to the new model's default (Medium → High)"
+    );
+}
+
+/// Reasoning arrives as a distinct `ReasoningDelta` UiEvent and is recorded in
+/// the transcript as a distinct field — never merged into the answer (P-10).
+#[tokio::test]
+async fn reasoning_streams_distinctly_and_records_a_separate_field() {
+    let response = ScriptedResponse {
+        events: vec![
+            StreamEvent::ReasoningDelta {
+                text: "thinking…".into(),
+            },
+            StreamEvent::ReasoningSignature {
+                signature: "sig".into(),
+                redacted: false,
+            },
+            StreamEvent::TextDelta {
+                text: "the answer".into(),
+            },
+        ],
+        outcome: ScriptOutcome::Done(StopReason::EndTurn),
+    };
+    let (mut h, sink) = start_capturing(vec![response], temp_project());
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let events = h.collect(None).await;
+
+    // The reasoning surfaces as its own event, distinct from the answer deltas.
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ReasoningDelta { text } if text == "thinking…")),
+        "a ReasoningDelta UiEvent is emitted"
+    );
+    assert_eq!(deltas(&events), "the answer", "answer excludes reasoning");
+
+    // The transcript records reasoning as a distinct field (recorded regardless
+    // of any view choice — hidden is a view, not a discard).
+    assert!(
+        sink.records().iter().any(|r| matches!(&r.event,
+            TranscriptEvent::AssistantMessage { text, reasoning }
+                if text == "the answer" && reasoning.as_deref() == Some("thinking…"))),
+        "AssistantMessage carries reasoning distinct from text"
+    );
+}
+
+/// A turn with no reasoning leaves the transcript `reasoning` field `None`.
+#[tokio::test]
+async fn turn_without_reasoning_records_no_reasoning() {
+    let (mut h, sink) = start_capturing(vec![ScriptedResponse::text("plain")], temp_project());
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+    assert!(
+        sink.records().iter().any(|r| matches!(&r.event,
+            TranscriptEvent::AssistantMessage { text, reasoning }
+                if text == "plain" && reasoning.is_none())),
+        "no reasoning ⇒ reasoning field is None"
+    );
+}
+
+/// End-to-end (P-9 + P-10): with an effort set, a turn that emits reasoning
+/// sends the effort on the wire, streams the reasoning distinctly, and records
+/// it as a separate transcript field — the Phase 3 exit criterion in one turn.
+#[tokio::test]
+async fn effort_and_reasoning_round_trip_in_one_turn() {
+    let reasoning_turn = ScriptedResponse {
+        events: vec![
+            StreamEvent::ReasoningDelta {
+                text: "weighing options".into(),
+            },
+            StreamEvent::ReasoningSignature {
+                signature: "sig".into(),
+                redacted: false,
+            },
+            StreamEvent::TextDelta {
+                text: "final answer".into(),
+            },
+        ],
+        outcome: ScriptOutcome::Done(StopReason::EndTurn),
+    };
+    let fake = Arc::new(FakeProvider::new(vec![reasoning_turn]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let sink = CaptureSink::new();
+    let config = make_config(provider, temp_project(), Box::new(sink.clone()));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await; // startup events (incl. initial EffortChanged)
+
+    h.send(Command::SetEffort {
+        effort: Effort::High,
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    h.send(Command::UserInput {
+        text: "decide".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // P-9: the effort reached the wire.
+    assert_eq!(
+        fake.last_effort(),
+        Some(Effort::High),
+        "effort on the request"
+    );
+    // P-10: reasoning streamed distinctly from the answer.
+    assert!(events.iter().any(|e| matches!(e,
+        UiEvent::ReasoningDelta { text } if text == "weighing options")));
+    assert_eq!(deltas(&events), "final answer");
+    // P-10 + HC-7: recorded as a distinct transcript field.
+    assert!(sink.records().iter().any(|r| matches!(&r.event,
+        TranscriptEvent::AssistantMessage { text, reasoning }
+            if text == "final answer" && reasoning.as_deref() == Some("weighing options"))));
+}
+
+/// Setting effort on a model with no reasoning control is a calm no-op notice,
+/// never an error and never an announced change (P-9).
+#[tokio::test]
+async fn set_effort_on_a_model_without_a_control_declines_calmly() {
+    // A fake with no declared effort levels.
+    let info = ModelInfo {
+        model: "plain".into(),
+        context_window: 100,
+        max_output_tokens: 100,
+        pricing: None,
+        effort_levels: Vec::new(),
+        default_effort: None,
+    };
+    let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(Vec::new()).with_model_info(info));
+    let sink = CaptureSink::new();
+    let config = make_config(provider, temp_project(), Box::new(sink.clone()));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await;
+
+    h.send(Command::SetEffort {
+        effort: Effort::High,
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::Notice { message } if message.contains("no reasoning-effort control"))),
+        "declined with a calm notice"
+    );
+    // No transcript EffortChange is written.
+    assert!(
+        !sink
+            .records()
+            .iter()
+            .any(|r| matches!(&r.event, TranscriptEvent::EffortChange { .. })),
+        "no audit record for a declined change"
+    );
 }

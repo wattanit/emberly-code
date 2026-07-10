@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use emberly_providers::{
-    CompletionRequest, CompletionStream, ContentBlock, Message, Provider, ProviderError,
+    CompletionRequest, CompletionStream, ContentBlock, Effort, Message, Provider, ProviderError,
     RetryPolicy, Role, StreamEvent, ToolCallId, ToolSchema,
 };
 use emberly_sandbox::{Decision, Mode, Query, RuleEngine};
@@ -129,6 +129,19 @@ enum StreamEnd {
     Dropped,
 }
 
+/// The assistant output accumulated while draining one completion stream: the
+/// answer text and, distinct from it, the reasoning trail (P-10) plus the
+/// opaque signature to replay it on later turns.
+#[derive(Default)]
+struct TurnOutput {
+    text: String,
+    /// Reasoning/thinking text as streamed (for display + the transcript).
+    reasoning: String,
+    /// `(signature, redacted)` for the reasoning block, when the provider sent
+    /// one. `redacted` blocks carry opaque `data` here and have no replay text.
+    reasoning_signature: Option<(String, bool)>,
+}
+
 /// Outcome of running one tool call.
 enum ToolCallResult {
     Completed(emberly_tools::ToolOutcome),
@@ -150,6 +163,10 @@ pub struct Engine {
     tools: ToolRegistry,
     project_root: PathBuf,
     model: String,
+    /// The active reasoning-effort level for subsequent turns (C-6/P-9). Seeded
+    /// from the model's `default_effort`, changed by `SetEffort`, re-seeded on a
+    /// model switch. `None` sends no effort (the provider's own default).
+    effort: Option<Effort>,
     system: Option<String>,
     truncate: TruncateConfig,
     retry: RetryPolicy,
@@ -223,11 +240,15 @@ impl Engine {
                 String::new(),
             ))
         });
+        // Seed the session effort from the model's declared default before the
+        // provider is moved into the struct (P-9, Tech Spec §4.6).
+        let seed_effort = config.provider.model_info().default_effort;
         let engine = Self {
             provider: config.provider,
             tools: config.tools,
             project_root: config.project_root,
             model: config.model,
+            effort: seed_effort,
             system: config.system,
             truncate: config.truncate,
             retry: config.retry,
@@ -296,6 +317,9 @@ impl Engine {
             })
             .await;
         }
+        // Surface the initial reasoning-effort state so the sidebar and picker
+        // start correct (P-9).
+        self.emit_effort().await;
 
         while let Some(command) = commands_rx.recv().await {
             match command {
@@ -325,6 +349,7 @@ impl Engine {
                 Command::SwitchModel { profile, model } => {
                     self.switch_model(profile, model).await;
                 }
+                Command::SetEffort { effort } => self.set_effort(effort).await,
                 Command::ReloadConfig => self.reload_config().await,
             }
         }
@@ -526,6 +551,9 @@ impl Engine {
             tools: Vec::new(),
             max_output_tokens: Some(self.provider.model_info().max_output_tokens),
             temperature: None,
+            // Summarization is a fixed internal task; it does not carry the
+            // session's reasoning effort.
+            effort: None,
         };
         let mut stream = self.provider.stream_completion(request).await?;
         let mut text = String::new();
@@ -554,10 +582,10 @@ impl Engine {
                 }
             };
 
-            let (end, text) = self.consume_stream(stream, commands_rx).await;
+            let (end, out) = self.consume_stream(stream, commands_rx).await;
             match end {
                 StreamEnd::Done { tool_calls } => {
-                    self.push_assistant_message(&text, &tool_calls);
+                    self.push_assistant_message(&out, &tool_calls);
                     self.emit_context_usage().await;
                     self.emit(UiEvent::AssistantDone).await;
                     if tool_calls.is_empty() {
@@ -574,7 +602,7 @@ impl Engine {
                 }
                 StreamEnd::Interrupted => {
                     // Keep the partial text visible in the conversation.
-                    self.push_assistant_message(&text, &[]);
+                    self.push_assistant_message(&out, &[]);
                     self.emit_context_usage().await;
                     self.emit(UiEvent::AssistantDone).await;
                     return;
@@ -654,8 +682,8 @@ impl Engine {
         &mut self,
         mut stream: CompletionStream,
         commands_rx: &mut mpsc::Receiver<Command>,
-    ) -> (StreamEnd, String) {
-        let mut text = String::new();
+    ) -> (StreamEnd, TurnOutput) {
+        let mut out = TurnOutput::default();
         let mut tool_calls: Vec<PendingToolCall> = Vec::new();
         let mut saw_done = false;
 
@@ -663,7 +691,7 @@ impl Engine {
             tokio::select! {
                 item = stream.next() => match item {
                     Some(Ok(event)) => {
-                        self.handle_stream_event(event, &mut text, &mut tool_calls, &mut saw_done)
+                        self.handle_stream_event(event, &mut out, &mut tool_calls, &mut saw_done)
                             .await;
                     }
                     Some(Err(error)) => break StreamEnd::Errored(error),
@@ -685,7 +713,7 @@ impl Engine {
 
         // The caller commits the assistant message: on Done/Interrupted it is
         // kept; on a retryable Dropped it is discarded (not stitched, §4.3).
-        (end, text)
+        (end, out)
     }
 
     /// Apply one stream event. Terminal events (`Done`) only set `saw_done`;
@@ -695,14 +723,26 @@ impl Engine {
     async fn handle_stream_event(
         &mut self,
         event: StreamEvent,
-        text: &mut String,
+        out: &mut TurnOutput,
         tool_calls: &mut Vec<PendingToolCall>,
         saw_done: &mut bool,
     ) {
         match event {
             StreamEvent::TextDelta { text: delta } => {
-                text.push_str(&delta);
+                out.text.push_str(&delta);
                 self.emit(UiEvent::AssistantDelta { text: delta }).await;
+            }
+            StreamEvent::ReasoningDelta { text: delta } => {
+                out.reasoning.push_str(&delta);
+                self.emit(UiEvent::ReasoningDelta { text: delta }).await;
+            }
+            StreamEvent::ReasoningSignature {
+                signature,
+                redacted,
+            } => {
+                // Opaque replay token for the reasoning block (P-1); kept to
+                // echo back on later tool-use turns.
+                out.reasoning_signature = Some((signature, redacted));
             }
             StreamEvent::ToolCallStart { id, name } => {
                 tool_calls.push(PendingToolCall {
@@ -931,6 +971,12 @@ impl Engine {
                     message: format!("switched to {} / {}", choice.profile, choice.model),
                 })
                 .await;
+                // Re-seed the reasoning effort to the new model's default — its
+                // available levels and default differ per model (P-9). Always
+                // re-emit so the sidebar/picker track the new model's levels
+                // even when the default happens to match.
+                self.effort = self.provider.model_info().default_effort;
+                self.emit_effort().await;
             }
             Err(why) => {
                 self.emit(UiEvent::HarnessError {
@@ -941,6 +987,51 @@ impl Engine {
                 .await;
             }
         }
+    }
+
+    /// Set the session reasoning effort for subsequent turns (C-6/P-9). Logged
+    /// to the transcript (HC-7) and announced — never silent. A model with no
+    /// effort control still accepts the setting; the adapter drops it at the
+    /// wire (P-9), so setting it is never an error.
+    async fn set_effort(&mut self, effort: Effort) {
+        // The engine is the authority on what a model supports (P-9): decline
+        // (calmly, never an error) when the model has no control or the level
+        // isn't offered, so no frontend can announce a change that won't happen.
+        let levels = self.provider.model_info().effort_levels;
+        if levels.is_empty() {
+            self.emit(UiEvent::Notice {
+                message: "this model has no reasoning-effort control".into(),
+            })
+            .await;
+            return;
+        }
+        if !levels.contains(&effort) {
+            self.emit(UiEvent::Notice {
+                message: format!("this model does not offer '{effort}' reasoning effort"),
+            })
+            .await;
+            return;
+        }
+        if self.effort == Some(effort) {
+            return; // no-op: already active
+        }
+        self.effort = Some(effort);
+        self.write_transcript(TranscriptEvent::EffortChange { effort });
+        self.emit_effort().await;
+        self.emit(UiEvent::Notice {
+            message: format!("reasoning effort set to {effort}"),
+        })
+        .await;
+    }
+
+    /// Emit the current effort and the active model's available levels (P-9), so
+    /// the sidebar and the effort picker stay in sync with the model.
+    async fn emit_effort(&self) {
+        self.emit(UiEvent::EffortChanged {
+            effort: self.effort,
+            available: self.provider.model_info().effort_levels,
+        })
+        .await;
     }
 
     /// Re-read config + prompts from disk and apply the live pieces to the
@@ -1162,19 +1253,44 @@ impl Engine {
         .await;
     }
 
-    /// Build the assistant message for the turn: text plus any tool-use blocks.
-    /// Records the complete assistant message and each requested tool call to
-    /// the transcript (Tech Spec §3.2).
-    fn push_assistant_message(&mut self, text: &str, tool_calls: &[PendingToolCall]) {
-        if text.is_empty() && tool_calls.is_empty() {
+    /// Build the assistant message for the turn: reasoning (P-10), then text,
+    /// then any tool-use blocks. Records the complete assistant message — with
+    /// reasoning as a distinct field, never merged into the answer — and each
+    /// requested tool call to the transcript (Tech Spec §3.2, §4.7).
+    fn push_assistant_message(&mut self, out: &TurnOutput, tool_calls: &[PendingToolCall]) {
+        let text = out.text.as_str();
+        let has_reasoning = !out.reasoning.is_empty() || out.reasoning_signature.is_some();
+        if text.is_empty() && tool_calls.is_empty() && !has_reasoning {
             return;
         }
-        if !text.is_empty() {
+        if !text.is_empty() || has_reasoning {
             self.write_transcript(TranscriptEvent::AssistantMessage {
                 text: text.to_string(),
+                // Recorded whatever the view key: `hidden` is a view choice, not
+                // a discard (P-10, Design §4.4).
+                reasoning: (!out.reasoning.is_empty()).then(|| out.reasoning.clone()),
             });
         }
         let mut content = Vec::new();
+        // Reasoning must precede text/tool_use so a provider that requires the
+        // thinking block echoed back accepts the turn (Anthropic ordering).
+        if has_reasoning {
+            let (signature, redacted) = match &out.reasoning_signature {
+                Some((sig, red)) => (Some(sig.clone()), *red),
+                None => (None, false),
+            };
+            content.push(ContentBlock::Reasoning {
+                // A redacted block has no replayable text; a normal one replays
+                // the exact reasoning it streamed.
+                text: if redacted {
+                    String::new()
+                } else {
+                    out.reasoning.clone()
+                },
+                signature,
+                redacted,
+            });
+        }
         if !text.is_empty() {
             content.push(ContentBlock::Text {
                 text: text.to_string(),
@@ -1217,6 +1333,9 @@ impl Engine {
             tools,
             max_output_tokens: Some(self.provider.model_info().max_output_tokens),
             temperature: None,
+            // The session's active reasoning effort (P-9). The adapter maps it
+            // to the provider's control or drops it when unsupported.
+            effort: self.effort,
         }
     }
 
@@ -1302,6 +1421,9 @@ impl Engine {
                         count(name).saturating_add(count(&input.to_string()))
                     }
                     ContentBlock::ToolResult { content, .. } => count(content),
+                    // Replayed reasoning is sent back on the wire, so it counts
+                    // toward the context budget (P-10).
+                    ContentBlock::Reasoning { text, .. } => count(text),
                 });
             }
         }
@@ -1342,6 +1464,9 @@ fn render_for_summary(messages: &[Message]) -> String {
                 ContentBlock::Text { text } => text.clone(),
                 ContentBlock::ToolUse { name, input, .. } => format!("[tool call: {name} {input}]"),
                 ContentBlock::ToolResult { content, .. } => format!("[tool result: {content}]"),
+                // Reasoning is the model's private scratch, not conversation
+                // content; the summary is built from the answer, so skip it.
+                ContentBlock::Reasoning { .. } => String::new(),
             };
             if !piece.is_empty() {
                 out.push_str(role);
