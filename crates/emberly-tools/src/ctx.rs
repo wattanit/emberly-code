@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::ask_user::{AskUserGate, AskUserOutcome, DeclineAskGate};
 use crate::permission::{PermissionGate, PermissionOutcome, PermissionRequest};
 use crate::sandbox::Sandbox;
 
@@ -46,11 +47,14 @@ pub struct ToolCtx {
     truncate: TruncateConfig,
     gate: Arc<dyn PermissionGate>,
     sandbox: Arc<dyn Sandbox>,
+    ask: Arc<dyn AskUserGate>,
 }
 
 impl ToolCtx {
     /// Build a context rooted at `project_root`, gated by `gate`, spawning
     /// through `sandbox` (confined or plain — the tool does not care which).
+    /// The ask-user gate defaults to decline; the engine installs a real one
+    /// with [`with_ask_gate`](ToolCtx::with_ask_gate).
     #[must_use]
     pub fn new(
         project_root: impl Into<PathBuf>,
@@ -63,7 +67,16 @@ impl ToolCtx {
             truncate,
             gate,
             sandbox,
+            ask: Arc::new(DeclineAskGate),
         }
+    }
+
+    /// Install the ask-user gate (T-8). Kept a builder so existing callers and
+    /// tests, which never ask, need no change.
+    #[must_use]
+    pub fn with_ask_gate(mut self, ask: Arc<dyn AskUserGate>) -> Self {
+        self.ask = ask;
+        self
     }
 
     /// The project root all tool actions are confined to.
@@ -89,5 +102,11 @@ impl ToolCtx {
     #[must_use]
     pub fn sandbox(&self) -> &dyn Sandbox {
         self.sandbox.as_ref()
+    }
+
+    /// Put a question to the user and block until answered (T-8). The single
+    /// path to the ask-user gate; touches no filesystem or network.
+    pub async fn ask_user(&self, question: String, options: Vec<String>) -> AskUserOutcome {
+        self.ask.ask(question, options).await
     }
 }

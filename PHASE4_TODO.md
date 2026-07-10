@@ -36,12 +36,12 @@ config-defeatable) with exactly that lean design. This phase is its named door.
 |---|---|---|
 | 1. Tool-call explanation — schema injection + prompt + event (T-9 provider/engine) | [x] | Done 2026-07-11; injection at `build_request` (both adapters); `ui.tool_explanations` default true; VERSION 2→3 + `tool_explanation.md`; `ToolStarted.explanation`; 7 tests |
 | 2. Tool-call explanation — UI caption (T-9 TUI + degraded) | [x] | Done 2026-07-11; `ConvItem::Tool.explanation`; dim `↳` caption (rich) / `-` lead (line); absent→none; replay reads it from transcript args; 5 tests |
-| 3. ask_user — round-trip plumbing + the tool (T-8 engine) | [ ] | `AskId`, `AskUserRequest`/`AskUserAnswer`, `AskGate` oneshot+mpsc mirror of the permission gate, `ask_user` transcript event, the built-in tool in `default_registry()` |
+| 3. ask_user — round-trip plumbing + the tool (T-8 engine) | [x] | Done 2026-07-11; `AskId`, `AskAnswer`, `AskUserRequest`/`AskUserAnswer`, `AskGate` mirror of the permission gate (2nd channel + select arm + pending Vec), `AskUser` transcript event, `ask_user` tool registered; 4 tests |
 | 4. ask_user — the question prompt UI (T-8 rich TUI) | [ ] | calm styling (never the safety band), selectable options + free-text, no unsafe default (Enter never auto-answers), Esc→declined, no motion |
 | 5. ask_user — degraded-mode question prompt (T-8 line) | [ ] | full parity: numbered options + free-text line, deliberate answer, empty/Esc→declined; two pending slots so it can't collide with a permission prompt |
 | 6. End-to-end, exit criterion, docs & SFD bookkeeping | [ ] | combined offline round trip; README; Spec bump decision (owner); memory update (tool-explanation graduated) |
 
-**Overall Phase 4: IN PROGRESS** (2 / 6 groups). Branch
+**Overall Phase 4: IN PROGRESS** (3 / 6 groups). Branch
 `phase4/ask-user-and-explanation` off `version0.2` (Phase 3 merged).
 
 ---
@@ -170,24 +170,24 @@ The call stays the headline; the explanation is the caption.
 Mirror the permission-gate blueprint exactly; the only real difference is the
 richer reply payload (a chosen option / free text / decline, not Allow/Deny).
 
-- [ ] **Id + boundary types.** `AskId(pub u64)` in `id.rs` (sibling of
+- [x] **Id + boundary types.** `AskId(pub u64)` in `id.rs` (sibling of
       `PermissionId`, engine-minted, monotonic). A self-contained rendering
       payload in `types.rs` (`AskUserRendering { question, options: Vec<String>
       }`) and an answer type (`AskUserAnswer` — a selected option index / free
       text, or **declined**; model as `enum { Answer(String), Declined }` or
       `Option<String>` with `None` = declined — decide in-group, favour an
       explicit `Declined` for clarity in the transcript).
-- [ ] **New UiEvent/Command variants** (both `#[non_exhaustive]`, additive):
+- [x] **New UiEvent/Command variants** (both `#[non_exhaustive]`, additive):
       `UiEvent::AskUserRequest { id, question, options }` and
       `Command::AskUserAnswer { id, answer }`.
-- [ ] **`AskGate` — the second gate.** In `gate.rs`, an `AskUserAsk { request,
+- [x] **`AskGate` — the second gate.** In `gate.rs`, an `AskUserAsk { request,
       reply: oneshot::Sender<AskUserOutcome> }` and an `AskGate { asks:
       mpsc::Sender<AskUserAsk> }` mirroring `ChannelGate`; fail **closed to a
       structured decline** if the engine is gone (HC-6 — never an error). Add an
       `ask_user(question, options) -> AskUserOutcome` method to `ToolCtx`
       (`ctx.rs`) + a `AskUserGate` trait in `emberly-tools` (parallel to
       `PermissionGate`); this is the tool's only channel for this round trip.
-- [ ] **Engine wiring.** A second `mpsc` (`ask_rx`) created in `Engine::new`
+- [x] **Engine wiring.** A second `mpsc` (`ask_rx`) created in `Engine::new`
       and threaded to `run_one_tool_call`; a `PendingAsk`-equivalent local
       `Vec`; an extra `Some(ask) = ask_rx.recv()` arm **and** a
       `Command::AskUserAnswer` arm in the same `tokio::select!` that already
@@ -195,22 +195,22 @@ richer reply payload (a chosen option / free text / decline, not Allow/Deny).
       `on_permission_ask` (mint id, emit `AskUserRequest`, stash pending) and
       `answer_permission` (match id, `reply.send(answer)`, write transcript).
       Cancel/frontend-gone paths resolve every pending ask to `Declined`.
-- [ ] **Transcript:** `TranscriptEvent::AskUser { question, options, answer }`
+- [x] **Transcript:** `TranscriptEvent::AskUser { question, options, answer }`
       (question+options+answer/decline — §3.2), adjacent to the permission
       variants; additive, **no schema bump**.
-- [ ] **The `ask_user` tool** in `crates/emberly-tools/src/builtin/ask_user.rs`,
+- [x] **The `ask_user` tool** in `crates/emberly-tools/src/builtin/ask_user.rs`,
       registered in `default_registry()`. `spec()` declares `question:
       string` (required) + `options: array<string>` (optional); `execute`
       deserializes, calls `ctx.ask_user(...)`, and returns a `ToolOutcome`
       carrying the typed answer, or a structured `{declined:true}` content on
       decline (HC-6). Touches no filesystem/sandbox. `describe()` → a short
       `ask: <question>` summary.
-- [ ] Tests (`FakeProvider`, §14.5, no terminal): a scripted `ask_user` tool
+- [x] Tests (`FakeProvider`, §14.5, no terminal): a scripted `ask_user` tool
       call blocks the loop; injecting `Command::AskUserAnswer` resumes with the
       answer as tool-result content; a decline yields the structured
       `{declined:true}`; the transcript records question + answer/decline;
       frontend-gone → decline, loop still resumable.
-- [ ] `cargo fmt` + `clippy` + `test` green; commit.
+- [x] `cargo fmt` + `clippy` + `test` green; commit.
 
 ---
 

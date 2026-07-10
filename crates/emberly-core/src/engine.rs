@@ -17,8 +17,8 @@ use emberly_providers::{
 };
 use emberly_sandbox::{Decision, Mode, Query, RuleEngine};
 use emberly_tools::{
-    truncate_output, PermissionOutcome, PermissionRequest, Sandbox, ToolCtx, ToolRegistry,
-    TruncateConfig,
+    truncate_output, AskUserOutcome, PermissionOutcome, PermissionRequest, Sandbox, ToolCtx,
+    ToolRegistry, TruncateConfig,
 };
 use futures::StreamExt;
 use time::OffsetDateTime;
@@ -27,8 +27,8 @@ use tokio::sync::mpsc;
 use crate::command::Command;
 use crate::event::UiEvent;
 use crate::factory::{ConfigReloader, ProviderFactory};
-use crate::gate::{ChannelGate, PermissionAsk};
-use crate::id::{PermissionId, SessionId};
+use crate::gate::{AskGate, AskUserAsk, ChannelGate, PermissionAsk};
+use crate::id::{AskId, PermissionId, SessionId};
 use crate::transcript::{
     ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord, TranscriptSink,
 };
@@ -188,6 +188,16 @@ struct PendingAsk {
     request: PermissionRequest,
 }
 
+/// An `ask_user` question awaiting the user's answer (T-8): the id shown to the
+/// frontend, the question/options (kept for the transcript record written on
+/// resolution), and the oneshot the blocked tool waits on.
+struct PendingUserAsk {
+    id: AskId,
+    question: String,
+    options: Vec<String>,
+    reply: tokio::sync::oneshot::Sender<AskUserOutcome>,
+}
+
 /// The agent engine.
 pub struct Engine {
     provider: Arc<dyn Provider>,
@@ -204,6 +214,9 @@ pub struct Engine {
     truncate: TruncateConfig,
     retry: RetryPolicy,
     gate: Arc<ChannelGate>,
+    /// The ask-user gate (T-8), installed into every `ToolCtx` so the
+    /// `ask_user` tool can block on a frontend round trip.
+    ask_gate: Arc<AskGate>,
     events_tx: mpsc::Sender<UiEvent>,
     conversation: Vec<Message>,
     /// Cumulative billed tokens this session (summed per request — each
@@ -216,6 +229,8 @@ pub struct Engine {
     /// `None` until the first provider `Usage`; then it drives the context %.
     context_tokens_authoritative: Option<u64>,
     next_permission_id: u64,
+    /// Monotonic id source for `ask_user` questions (T-8).
+    next_ask_id: u64,
     /// Durable transcript sink (HC-7). Written per event; a `NoopSink` when no
     /// session file is configured.
     transcript: Box<dyn TranscriptSink>,
@@ -253,15 +268,20 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Build an engine and the receiver for its internal permission-ask
-    /// channel. The caller passes that receiver straight back into
-    /// [`run`](Engine::run); it is opaque otherwise.
+    /// Build an engine and the receivers for its internal permission-ask and
+    /// ask-user channels. The caller passes both straight back into
+    /// [`run`](Engine::run); they are opaque otherwise.
     #[must_use]
     pub fn new(
         config: EngineConfig,
         events_tx: mpsc::Sender<UiEvent>,
-    ) -> (Self, mpsc::Receiver<PermissionAsk>) {
+    ) -> (
+        Self,
+        mpsc::Receiver<PermissionAsk>,
+        mpsc::Receiver<AskUserAsk>,
+    ) {
         let (asks_tx, asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        let (user_asks_tx, user_asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         // Capture before `config.sandbox` is moved into the struct below.
         let sandbox_spawn: Arc<dyn Sandbox> = config.sandbox_spawn.unwrap_or_else(|| {
             // Fallback (no explicit spawner): confine from the status, but with
@@ -287,12 +307,14 @@ impl Engine {
             truncate: config.truncate,
             retry: config.retry,
             gate: Arc::new(ChannelGate { asks: asks_tx }),
+            ask_gate: Arc::new(AskGate { asks: user_asks_tx }),
             events_tx,
             conversation: config.initial_conversation,
             session_usage: TokenUsage::default(),
             session_cost_usd: 0.0,
             context_tokens_authoritative: None,
             next_permission_id: 0,
+            next_ask_id: 0,
             transcript: config.transcript,
             session_id: config.session_id,
             sessions_dir: config.sessions_dir,
@@ -311,7 +333,7 @@ impl Engine {
             provider_factory: config.provider_factory,
             config_reloader: config.config_reloader,
         };
-        (engine, asks_rx)
+        (engine, asks_rx, user_asks_rx)
     }
 
     /// Run the engine until the command channel closes. Idle between turns,
@@ -321,6 +343,7 @@ impl Engine {
         mut self,
         mut commands_rx: mpsc::Receiver<Command>,
         mut asks_rx: mpsc::Receiver<PermissionAsk>,
+        mut user_asks_rx: mpsc::Receiver<AskUserAsk>,
     ) {
         if self.resuming {
             // Continuing an existing transcript: no fresh session_start, but
@@ -361,7 +384,8 @@ impl Engine {
                     self.record_user_message(&text);
                     self.conversation.push(Message::user_text(text));
                     self.emit_context_usage().await;
-                    self.run_turn(&mut commands_rx, &mut asks_rx).await;
+                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx)
+                        .await;
                     // The engine is idle again; let the frontend stop its
                     // "working" affordance (Design §6.3).
                     self.emit(UiEvent::TurnEnded).await;
@@ -372,7 +396,9 @@ impl Engine {
                     }
                 }
                 // No turn is running while idle; these are strays or no-ops here.
-                Command::Cancel | Command::PermissionAnswer { .. } => {}
+                Command::Cancel
+                | Command::PermissionAnswer { .. }
+                | Command::AskUserAnswer { .. } => {}
                 // Idle is already a clean boundary — compact immediately.
                 Command::Compact => self.compact().await,
                 // Session switches are only issued at idle (the frontend gates
@@ -605,6 +631,7 @@ impl Engine {
         &mut self,
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
+        user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
     ) {
         let mut drop_attempts = 0u32;
         loop {
@@ -626,7 +653,7 @@ impl Engine {
                         return; // model finished its turn
                     }
                     if self
-                        .run_tool_calls(tool_calls, commands_rx, asks_rx)
+                        .run_tool_calls(tool_calls, commands_rx, asks_rx, user_asks_rx)
                         .await
                         .is_canceled()
                     {
@@ -822,10 +849,14 @@ impl Engine {
         tool_calls: Vec<PendingToolCall>,
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
+        user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
     ) -> ToolCallResult {
         let mut iter = tool_calls.into_iter();
         while let Some(call) = iter.next() {
-            match self.run_one_tool_call(&call, commands_rx, asks_rx).await {
+            match self
+                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx)
+                .await
+            {
                 ToolCallResult::Completed(outcome) => self.ingest_tool_result(&call, outcome).await,
                 ToolCallResult::Canceled => {
                     self.push_canceled_result(&call).await;
@@ -846,6 +877,7 @@ impl Engine {
         call: &PendingToolCall,
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
+        user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
     ) -> ToolCallResult {
         let args = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
 
@@ -874,15 +906,20 @@ impl Engine {
         let ctx = self.make_ctx();
         let mut exec = Box::pin(tool.execute(args, &ctx));
         let mut pending: Vec<PendingAsk> = Vec::new();
+        let mut pending_user: Vec<PendingUserAsk> = Vec::new();
         let mut commands_open = true;
 
         loop {
             tokio::select! {
                 outcome = &mut exec => return ToolCallResult::Completed(outcome),
                 Some(ask) = asks_rx.recv() => self.on_permission_ask(ask, &mut pending).await,
+                Some(ask) = user_asks_rx.recv() => self.on_user_ask(ask, &mut pending_user).await,
                 command = commands_rx.recv(), if commands_open => match command {
                     Some(Command::PermissionAnswer { id, decision }) => {
                         self.answer_permission(id, decision, &mut pending).await;
+                    }
+                    Some(Command::AskUserAnswer { id, answer }) => {
+                        self.answer_user_ask(id, answer, &mut pending_user).await;
                     }
                     Some(Command::Cancel) => return ToolCallResult::Canceled,
                     // Queue a compaction for the clean boundary (Tech Spec §7).
@@ -891,12 +928,17 @@ impl Engine {
                     Some(Command::SetMode { mode }) => self.set_mode(mode).await,
                     Some(_) => {}
                     None => {
-                        // No more input (frontend gone): deny anything pending
-                        // as the safe default and stop watching commands, so we
-                        // never hang on an answer that cannot arrive.
+                        // No more input (frontend gone): resolve anything pending
+                        // as the safe default (deny / decline) and stop watching
+                        // commands, so we never hang on an answer that cannot
+                        // arrive.
                         commands_open = false;
                         for p in pending.drain(..) {
                             let _ = p.reply.send(PermissionOutcome::Deny);
+                        }
+                        for p in pending_user.drain(..) {
+                            self.record_ask(&p.question, &p.options, None);
+                            let _ = p.reply.send(AskUserOutcome::Declined);
                         }
                     }
                 },
@@ -946,6 +988,69 @@ impl Engine {
             PermissionOutcome::Deny
         };
         let _ = reply.send(outcome);
+    }
+
+    /// Handle an `ask_user` question from the tool (T-8): mint an id, surface it
+    /// to the frontend, and stash the pending question. The transcript record is
+    /// written on resolution (question + answer together), so an unanswered
+    /// question that is later declined is still recorded once.
+    async fn on_user_ask(&mut self, ask: AskUserAsk, pending: &mut Vec<PendingUserAsk>) {
+        let AskUserAsk {
+            question,
+            options,
+            reply,
+        } = ask;
+        let id = self.take_ask_id();
+        self.emit(UiEvent::AskUserRequest {
+            id,
+            question: question.clone(),
+            options: options.clone(),
+        })
+        .await;
+        pending.push(PendingUserAsk {
+            id,
+            question,
+            options,
+            reply,
+        });
+    }
+
+    /// Resolve the user's answer to a pending `ask_user` question: record it and
+    /// reply to the blocked tool. Unknown ids are ignored (a stray or
+    /// already-answered question).
+    async fn answer_user_ask(
+        &mut self,
+        id: AskId,
+        answer: crate::types::AskAnswer,
+        pending: &mut Vec<PendingUserAsk>,
+    ) {
+        let Some(pos) = pending.iter().position(|p| p.id == id) else {
+            return;
+        };
+        let PendingUserAsk {
+            question,
+            options,
+            reply,
+            ..
+        } = pending.swap_remove(pos);
+
+        let (recorded, outcome) = match answer {
+            crate::types::AskAnswer::Answered(text) => {
+                (Some(text.clone()), AskUserOutcome::Answered(text))
+            }
+            crate::types::AskAnswer::Declined => (None, AskUserOutcome::Declined),
+        };
+        self.record_ask(&question, &options, recorded);
+        let _ = reply.send(outcome);
+    }
+
+    /// Write the durable `ask_user` record (HC-7). `answer` is `None` on decline.
+    fn record_ask(&mut self, question: &str, options: &[String], answer: Option<String>) {
+        self.write_transcript(TranscriptEvent::AskUser {
+            question: question.to_string(),
+            options: options.to_vec(),
+            answer,
+        });
     }
 
     /// Change the auto-accept mode (Requirements §6.4, §6.7). Auto tiers are
@@ -1411,11 +1516,18 @@ impl Engine {
             self.gate.clone(),
             self.sandbox_spawn.clone(),
         )
+        .with_ask_gate(self.ask_gate.clone())
     }
 
     fn take_permission_id(&mut self) -> PermissionId {
         let id = PermissionId(self.next_permission_id);
         self.next_permission_id += 1;
+        id
+    }
+
+    fn take_ask_id(&mut self) -> AskId {
+        let id = AskId(self.next_ask_id);
+        self.next_ask_id += 1;
         id
     }
 

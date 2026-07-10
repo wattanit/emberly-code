@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::{PermissionId, SessionId, ToolCallId};
+use crate::id::{AskId, PermissionId, SessionId, ToolCallId};
 use crate::types::{Effort, Mode, PermissionRendering, SandboxStatus, TokenUsage};
 
 /// An event emitted by the engine for a frontend to render.
@@ -65,6 +65,18 @@ pub enum UiEvent {
     PermissionRequest {
         id: PermissionId,
         rendering: PermissionRendering,
+    },
+
+    /// The model is asking the user a question and the loop is blocked until
+    /// they answer (T-8, Tech Spec §5.2, Design §5.1). The frontend renders the
+    /// question (and `options` as a selectable list when non-empty) with a
+    /// free-text answer always available, then replies with an
+    /// [`AskUserAnswer`](crate::command::Command::AskUserAnswer) carrying the
+    /// same `id`. Calm styling, never the safety band; no unsafe default.
+    AskUserRequest {
+        id: AskId,
+        question: String,
+        options: Vec<String>,
     },
 
     /// Context-window usage against the budget (Requirements §8.4). Always

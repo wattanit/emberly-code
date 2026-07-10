@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use emberly_core::{
-    channel, CaptureSink, Command, Engine, EngineConfig, FileTranscript, Mode, PermissionDecision,
-    RetryPolicy, RuleEngine, RuleSource, SandboxStatus, SessionId, TranscriptEvent, TranscriptSink,
-    UiEvent,
+    channel, AskAnswer, CaptureSink, Command, Engine, EngineConfig, FileTranscript, Mode,
+    PermissionDecision, RetryPolicy, RuleEngine, RuleSource, SandboxStatus, SessionId,
+    TranscriptEvent, TranscriptSink, UiEvent,
 };
 use emberly_providers::{
     ContentBlock, Effort, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
@@ -120,8 +120,8 @@ fn start_with_file_transcript(
 
 fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
-    let (engine, asks_rx) = Engine::new(config, engine_ports.events_tx);
-    tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx));
+    let (engine, asks_rx, user_asks_rx) = Engine::new(config, engine_ports.events_tx);
+    tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx, user_asks_rx));
     Harness {
         commands_tx: frontend.commands_tx,
         events_rx: frontend.events_rx,
@@ -1472,4 +1472,91 @@ async fn tool_started_surfaces_the_models_explanation() {
         vec![Some("peek at the config".to_string()), None],
         "captioned call carries the explanation; the obvious one carries none"
     );
+}
+
+// --- T-8: ask_user round trip (Tech Spec §5.2) --------------------------------
+
+/// Drive a turn to completion, answering the first `AskUserRequest` with
+/// `answer`. Returns the collected events (the caller asserts on them and on
+/// the transcript).
+async fn drive_answering_ask(h: &mut Harness, answer: AskAnswer) -> Vec<UiEvent> {
+    let mut events = Vec::new();
+    let mut answered: Option<AskAnswer> = Some(answer);
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(500), h.events_rx.recv()).await
+    {
+        if let UiEvent::AskUserRequest { id, .. } = &event {
+            if let Some(answer) = answered.take() {
+                h.send(Command::AskUserAnswer { id: *id, answer }).await;
+            }
+        }
+        events.push(event);
+    }
+    events
+}
+
+#[tokio::test]
+async fn ask_user_blocks_then_resumes_with_the_answer() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "ask_user",
+            r#"{"question":"which environment?","options":["dev","prod"]}"#,
+        ),
+        ScriptedResponse::text("deploying to dev"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, root);
+    h.send(Command::UserInput {
+        text: "deploy".into(),
+    })
+    .await;
+    let events = drive_answering_ask(&mut h, AskAnswer::Answered("dev".into())).await;
+
+    assert!(events.iter().any(|e| matches!(
+        e,
+        UiEvent::AskUserRequest { question, options, .. }
+            if question == "which environment?"
+                && options == &["dev".to_string(), "prod".to_string()]
+    )));
+    assert_eq!(deltas(&events), "deploying to dev");
+    assert!(
+        sink.records().iter().any(|r| matches!(
+            &r.event,
+            TranscriptEvent::ToolResult { output, ok, .. }
+                if *ok && output.contains("The user answered: dev")
+        )),
+        "answer returned to the model as tool-result data"
+    );
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::AskUser { question, answer: Some(a), .. }
+            if question == "which environment?" && a == "dev"
+    )));
+}
+
+#[tokio::test]
+async fn ask_user_dismissed_returns_a_structured_decline() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "ask_user", r#"{"question":"proceed?"}"#),
+        ScriptedResponse::text("stopping, as you didn't say"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, root);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_answering_ask(&mut h, AskAnswer::Declined).await;
+
+    assert_eq!(deltas(&events), "stopping, as you didn't say");
+    assert!(
+        sink.records().iter().any(|r| matches!(
+            &r.event,
+            TranscriptEvent::ToolResult { output, ok, .. }
+                if *ok && output.contains("declined to answer")
+        )),
+        "decline returned to the model as data"
+    );
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::AskUser { answer: None, question, .. } if question == "proceed?"
+    )));
 }

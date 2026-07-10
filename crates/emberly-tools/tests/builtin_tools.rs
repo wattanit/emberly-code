@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use emberly_tools::{
-    BashTool, EditFileTool, GlobTool, GrepTool, PermissionGate, PermissionOutcome,
-    PermissionRequest, PlainSandbox, ReadFileTool, Sandbox, Tool, ToolCtx, TruncateConfig,
-    WriteFileTool,
+    AskUserGate, AskUserOutcome, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool,
+    PermissionGate, PermissionOutcome, PermissionRequest, PlainSandbox, ReadFileTool, Sandbox,
+    Tool, ToolCtx, TruncateConfig, WriteFileTool,
 };
 use serde_json::json;
 
@@ -432,4 +432,65 @@ async fn grep_invalid_regex_is_a_failure_not_a_crash() {
         .await;
     assert!(!outcome.ok);
     assert!(outcome.summary.contains("bad pattern"));
+}
+
+// ---- ask_user (T-8) ------------------------------------------------------
+
+/// A gate that echoes a fixed answer, capturing what it was asked.
+struct FixedAskGate {
+    answer: AskUserOutcome,
+    seen: std::sync::Mutex<Option<(String, Vec<String>)>>,
+}
+#[async_trait]
+impl AskUserGate for FixedAskGate {
+    async fn ask(&self, question: String, options: Vec<String>) -> AskUserOutcome {
+        if let Ok(mut g) = self.seen.lock() {
+            *g = Some((question, options));
+        }
+        self.answer.clone()
+    }
+}
+
+#[tokio::test]
+async fn ask_user_returns_the_answer_as_data() {
+    let root = temp_project();
+    let gate = Arc::new(FixedAskGate {
+        answer: AskUserOutcome::Answered("dev".into()),
+        seen: std::sync::Mutex::new(None),
+    });
+    let ctx = ToolCtx::new(
+        root,
+        TruncateConfig::default(),
+        Arc::new(AllowGate),
+        Arc::new(PlainSandbox) as Arc<dyn Sandbox>,
+    )
+    .with_ask_gate(gate.clone());
+
+    let outcome = AskUserTool
+        .execute(
+            json!({ "question": "which env?", "options": ["dev", "prod"] }),
+            &ctx,
+        )
+        .await;
+    assert!(outcome.ok);
+    assert!(outcome.content.contains("dev"));
+    // The tool passed the question and options through to the gate.
+    let seen = gate.seen.lock().ok().and_then(|g| g.clone());
+    assert_eq!(
+        seen,
+        Some(("which env?".to_string(), vec!["dev".into(), "prod".into()]))
+    );
+}
+
+#[tokio::test]
+async fn ask_user_default_gate_declines() {
+    let root = temp_project();
+    // A ctx built without `with_ask_gate` declines by default (safe no-op).
+    let ctx = ctx(&root, true);
+    let outcome = AskUserTool
+        .execute(json!({ "question": "proceed?" }), &ctx)
+        .await;
+    // A decline is structured data, not a failure (HC-6).
+    assert!(outcome.ok);
+    assert!(outcome.content.contains("declined"));
 }
