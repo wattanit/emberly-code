@@ -86,8 +86,15 @@ pub enum TranscriptEvent {
         original_task: bool,
     },
 
-    /// A complete assistant message (post-stream).
-    AssistantMessage { text: String },
+    /// A complete assistant message (post-stream). `reasoning` holds the
+    /// model's thinking trail as a distinct field, never merged into `text`
+    /// (P-10, Tech Spec §4.7); recorded even when the view hides it. Additive —
+    /// older readers warn-skip it, so no `SCHEMA_VERSION` bump.
+    AssistantMessage {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
+    },
 
     /// A tool invocation the model requested.
     ToolCall {

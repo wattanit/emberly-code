@@ -18,22 +18,55 @@ use emberly_core::{
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
-/// Renders [`UiEvent`]s as append-only lines. Stateless; holds no color or
-/// cursor state (degraded mode, Design §7).
-pub struct LineRenderer;
+use crate::app::ReasoningView;
+
+/// Renders [`UiEvent`]s as append-only lines. Holds no color or cursor state
+/// (degraded mode, Design §7); the only state is the reasoning-block toggle so
+/// the plain `--- reasoning ---` block is labeled once (Design §4.4).
+pub struct LineRenderer {
+    reasoning_view: ReasoningView,
+    /// True while streaming a reasoning block, so the answer that follows gets a
+    /// separating label.
+    in_reasoning: bool,
+}
 
 impl LineRenderer {
     #[must_use]
-    pub fn new() -> Self {
-        Self
+    pub fn new(reasoning_view: ReasoningView) -> Self {
+        Self {
+            reasoning_view,
+            in_reasoning: false,
+        }
     }
 
     /// Write one event to `out`. Assistant deltas stream without a trailing
     /// newline; `AssistantDone` closes the line.
-    pub fn render(&self, event: &UiEvent, out: &mut impl Write) -> io::Result<()> {
+    pub fn render(&mut self, event: &UiEvent, out: &mut impl Write) -> io::Result<()> {
         match event {
-            UiEvent::AssistantDelta { text } => write!(out, "{text}")?,
-            UiEvent::AssistantDone => writeln!(out)?,
+            UiEvent::AssistantDelta { text } => {
+                // Close a preceding reasoning block with a plain label so the
+                // answer is never confused with the thinking (Design §4.4, §7).
+                if self.in_reasoning {
+                    writeln!(out, "\n--- answer ---")?;
+                    self.in_reasoning = false;
+                }
+                write!(out, "{text}")?;
+            }
+            UiEvent::ReasoningDelta { text } => {
+                // `hidden` suppresses the trail in the view; the trace is still
+                // recorded by the engine (P-10).
+                if self.reasoning_view != ReasoningView::Hidden {
+                    if !self.in_reasoning {
+                        writeln!(out, "--- reasoning ---")?;
+                        self.in_reasoning = true;
+                    }
+                    write!(out, "{text}")?;
+                }
+            }
+            UiEvent::AssistantDone => {
+                self.in_reasoning = false;
+                writeln!(out)?;
+            }
             UiEvent::ToolStarted { tool, summary, .. } => {
                 writeln!(out, "\n> {tool}: {summary}")?;
             }
@@ -164,7 +197,7 @@ impl LineRenderer {
 
 impl Default for LineRenderer {
     fn default() -> Self {
-        Self::new()
+        Self::new(ReasoningView::default())
     }
 }
 
@@ -200,13 +233,14 @@ pub async fn run(
     ports: FrontendPorts,
     sessions_dir: PathBuf,
     config_template: String,
+    reasoning_view: ReasoningView,
 ) -> io::Result<()> {
     // `.agents/` is the parent of the sessions dir; `/config` and `/prompt`
     // resolve their targets under it (C-5).
     let agents_dir = sessions_dir
         .parent()
         .map_or(sessions_dir.clone(), Path::to_path_buf);
-    let renderer = LineRenderer::new();
+    let mut renderer = LineRenderer::new(reasoning_view);
     let mut stdout = io::stdout();
     let mut events_rx = ports.events_rx;
     // Held in an Option so stdin EOF can drop it, signaling the engine to
@@ -292,6 +326,20 @@ pub async fn run(
                             ),
                             Err(msg) => println!("{msg}"),
                         }
+                    } else if let Some(rest) = line
+                        .trim()
+                        .strip_prefix("/effort")
+                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+                    {
+                        // Degraded mode has no picker, so `/effort` needs a level
+                        // argument (P-9); the engine drops it if the model has no
+                        // control.
+                        match emberly_core::Effort::parse(rest.trim()) {
+                            Some(effort) => {
+                                let _ = tx.send(Command::SetEffort { effort }).await;
+                            }
+                            None => println!("usage: /effort <low|medium|high|max>"),
+                        }
                     } else if !line.trim().is_empty() {
                         let _ = tx.send(Command::UserInput { text: line }).await;
                     }
@@ -316,9 +364,18 @@ mod tests {
     use emberly_core::{PermissionRendering, ToolCallId};
 
     fn render_to_string(event: &UiEvent) -> String {
+        render_with(ReasoningView::Collapsed, &[event])
+    }
+
+    /// Render a sequence of events through one renderer (state carries across
+    /// events, e.g. the reasoning→answer transition).
+    fn render_with(view: ReasoningView, events: &[&UiEvent]) -> String {
+        let mut renderer = LineRenderer::new(view);
         let mut buf: Vec<u8> = Vec::new();
-        let ok = LineRenderer::new().render(event, &mut buf).is_ok();
-        assert!(ok, "render should not fail writing to a Vec");
+        for event in events {
+            let ok = renderer.render(event, &mut buf).is_ok();
+            assert!(ok, "render should not fail writing to a Vec");
+        }
         String::from_utf8(buf).unwrap_or_default()
     }
 
@@ -329,6 +386,44 @@ mod tests {
             "hi"
         );
         assert_eq!(render_to_string(&UiEvent::AssistantDone), "\n");
+    }
+
+    #[test]
+    fn reasoning_renders_a_labeled_block_then_the_answer() {
+        let out = render_with(
+            ReasoningView::Collapsed,
+            &[
+                &UiEvent::ReasoningDelta {
+                    text: "let me think".into(),
+                },
+                &UiEvent::AssistantDelta {
+                    text: "answer".into(),
+                },
+                &UiEvent::AssistantDone,
+            ],
+        );
+        assert!(out.contains("--- reasoning ---"), "labeled block: {out:?}");
+        assert!(out.contains("let me think"));
+        assert!(out.contains("--- answer ---"), "answer separated: {out:?}");
+        assert!(out.contains("answer"));
+    }
+
+    #[test]
+    fn hidden_view_suppresses_reasoning_in_plain_mode() {
+        let out = render_with(
+            ReasoningView::Hidden,
+            &[
+                &UiEvent::ReasoningDelta {
+                    text: "secret".into(),
+                },
+                &UiEvent::AssistantDelta {
+                    text: "answer".into(),
+                },
+            ],
+        );
+        assert!(!out.contains("reasoning"), "no trail when hidden: {out:?}");
+        assert!(!out.contains("secret"));
+        assert!(out.contains("answer"));
     }
 
     #[test]

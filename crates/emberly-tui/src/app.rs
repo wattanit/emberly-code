@@ -10,7 +10,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use emberly_core::{
-    resume, Command, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus,
+    resume, Command, Effort, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus,
     SessionId, TokenUsage, ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
 };
 
@@ -45,6 +45,10 @@ pub enum ConvItem {
     User(String),
     /// Accumulated assistant text for one turn (deltas append to it).
     Assistant(String),
+    /// The model's reasoning trail for one turn (P-10, Design §4.4), distinct
+    /// from the answer. Collapsed to a dim one-line summary by default;
+    /// `expanded` shows the full text. Deltas append while thinking.
+    Reasoning { text: String, expanded: bool },
     /// A tool invocation and its outcome.
     Tool {
         call_id: ToolCallId,
@@ -107,6 +111,34 @@ pub enum ChoiceKind {
     /// Switch the active provider profile (C-6). The row label is the profile
     /// name; the current model is kept.
     Model,
+    /// Set the reasoning-effort level (P-9). The row label is the level name.
+    Effort,
+}
+
+/// How the reasoning trail is shown by default (Design §4.4). A view choice
+/// only — the trace is always recorded to the transcript regardless (P-10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReasoningView {
+    /// One dim summary line, expandable. The default.
+    #[default]
+    Collapsed,
+    /// The full reasoning text, always shown.
+    Expanded,
+    /// Not shown in the view (still recorded to the transcript).
+    Hidden,
+}
+
+impl ReasoningView {
+    /// Parse the `reasoning` config key; unknown values fall back to the
+    /// default (`collapsed`) so a typo is never fatal.
+    #[must_use]
+    pub fn parse(s: &str) -> ReasoningView {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "expanded" => ReasoningView::Expanded,
+            "hidden" => ReasoningView::Hidden,
+            _ => ReasoningView::Collapsed,
+        }
+    }
 }
 
 /// One row in a [`OverlayContent::Choices`] picker.
@@ -196,6 +228,15 @@ pub struct App {
     pub conversation: Vec<ConvItem>,
     /// True between the first `AssistantDelta` and `AssistantDone` of a turn.
     pub streaming: bool,
+    /// How the reasoning trail is displayed (Design §4.4); from the `reasoning`
+    /// config key. `Hidden` suppresses the trail in the view only.
+    pub reasoning_view: ReasoningView,
+    /// The active reasoning-effort level, for the sidebar (P-9). `None` when the
+    /// model has no effort control (the line is hidden). Set by `EffortChanged`.
+    pub effort: Option<Effort>,
+    /// The levels the active model offers, for the `/effort` picker. Empty ⇒ no
+    /// control. Set by `EffortChanged`.
+    pub effort_levels: Vec<Effort>,
     /// The grapheme-aware input editor (multi-line, history, Thai-correct
     /// cursor motion). See [`crate::editor`].
     pub editor: LineEditor,
@@ -264,6 +305,9 @@ impl App {
             config_template,
             conversation: Vec::new(),
             streaming: false,
+            reasoning_view: ReasoningView::default(),
+            effort: None,
+            effort_levels: Vec::new(),
             editor: LineEditor::new(),
             context_pct: 0,
             context_tokens: 0,
@@ -300,8 +344,20 @@ impl App {
                 TranscriptEvent::UserMessage { text, .. } => {
                     self.conversation.push(ConvItem::User(text.clone()));
                 }
-                TranscriptEvent::AssistantMessage { text } => {
-                    self.conversation.push(ConvItem::Assistant(text.clone()));
+                TranscriptEvent::AssistantMessage { text, reasoning } => {
+                    // Replay a recorded reasoning trail (collapsed) unless the
+                    // view hides it (P-10, Design §4.4).
+                    if let Some(reasoning) = reasoning {
+                        if self.reasoning_view != ReasoningView::Hidden {
+                            self.conversation.push(ConvItem::Reasoning {
+                                text: reasoning.clone(),
+                                expanded: self.reasoning_view == ReasoningView::Expanded,
+                            });
+                        }
+                    }
+                    if !text.is_empty() {
+                        self.conversation.push(ConvItem::Assistant(text.clone()));
+                    }
                 }
                 TranscriptEvent::ToolCall {
                     call_id,
@@ -362,8 +418,34 @@ impl App {
                         return;
                     }
                 }
+                // The answer is starting: settle the just-streamed reasoning
+                // trail to its collapsed line unless the view pins it open
+                // (Design §4.4).
+                if self.reasoning_view == ReasoningView::Collapsed {
+                    if let Some(ConvItem::Reasoning { expanded, .. }) = self.conversation.last_mut()
+                    {
+                        *expanded = false;
+                    }
+                }
                 self.streaming = true;
                 self.conversation.push(ConvItem::Assistant(text));
+            }
+            UiEvent::ReasoningDelta { text } => {
+                // `hidden` is a view choice: skip the trail but the engine still
+                // records the trace to the transcript (P-10, Design §4.4).
+                if self.reasoning_view == ReasoningView::Hidden {
+                    return;
+                }
+                if let Some(ConvItem::Reasoning { text: buf, .. }) = self.conversation.last_mut() {
+                    buf.push_str(&text);
+                } else {
+                    // Stream in place while thinking; expanded until the answer
+                    // begins (then settled), or always when the view pins it.
+                    self.conversation.push(ConvItem::Reasoning {
+                        text,
+                        expanded: true,
+                    });
+                }
             }
             UiEvent::AssistantDone => self.streaming = false,
             UiEvent::TurnEnded => {
@@ -425,6 +507,10 @@ impl App {
                 // a Notice, so the switch is never silent (Design §3.1).
                 self.session.provider = provider;
                 self.session.model = model;
+            }
+            UiEvent::EffortChanged { effort, available } => {
+                self.effort = effort;
+                self.effort_levels = available;
             }
             UiEvent::ProfilesChanged { profiles } => {
                 // A `/config` reload changed the provider set; refresh the
@@ -565,6 +651,11 @@ impl App {
             // Open the most-recently-modified file's diff in an overlay.
             KeyCode::Char('o') if ctrl => {
                 self.open_last_diff();
+                Action::None
+            }
+            // Toggle the most recent reasoning trail open/closed (Design §4.4).
+            KeyCode::Char('r') if ctrl => {
+                self.toggle_reasoning();
                 Action::None
             }
             // Emacs-style line editing.
@@ -862,6 +953,86 @@ impl App {
         });
     }
 
+    /// Open the reasoning-effort picker (`/effort`, P-9): the active model's
+    /// levels, current one marked; Enter issues a `SetEffort`. A model with no
+    /// effort control declines with a calm notice.
+    fn open_effort_picker(&mut self) {
+        if self.effort_levels.is_empty() {
+            self.conversation.push(ConvItem::Notice(
+                "this model has no reasoning-effort control".into(),
+            ));
+            return;
+        }
+        let rows: Vec<ChoiceRow> = self
+            .effort_levels
+            .iter()
+            .map(|level| ChoiceRow {
+                label: level.as_str().to_string(),
+                current: self.effort == Some(*level),
+            })
+            .collect();
+        let selected = rows.iter().position(|r| r.current).unwrap_or(0);
+        self.push_overlay(Overlay {
+            title: "reasoning effort".into(),
+            content: OverlayContent::Choices {
+                kind: ChoiceKind::Effort,
+                rows,
+                selected,
+            },
+            scroll: 0,
+        });
+    }
+
+    /// Handle `/effort [level]`: no arg opens the picker; an arg sets the level
+    /// directly, validated against the model's declared levels (P-9).
+    fn effort_command(&mut self, arg: &str) -> Action {
+        let arg = arg.trim();
+        if arg.is_empty() {
+            self.open_effort_picker();
+            return Action::None;
+        }
+        match Effort::parse(arg) {
+            Some(level) if self.effort_levels.contains(&level) => {
+                Action::Command(Command::SetEffort { effort: level })
+            }
+            Some(level) if self.effort_levels.is_empty() => {
+                self.conversation.push(ConvItem::Notice(format!(
+                    "this model has no reasoning-effort control (ignoring '{level}')"
+                )));
+                Action::None
+            }
+            Some(level) => {
+                let offered = self
+                    .effort_levels
+                    .iter()
+                    .map(Effort::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.conversation.push(ConvItem::Notice(format!(
+                    "this model does not offer '{level}' — try: {offered}"
+                )));
+                Action::None
+            }
+            None => {
+                self.conversation.push(ConvItem::Notice(format!(
+                    "unknown effort '{arg}' — try low, medium, high, or max"
+                )));
+                Action::None
+            }
+        }
+    }
+
+    /// Toggle the most recent reasoning trail open/closed (the expand
+    /// affordance, Design §4.4).
+    fn toggle_reasoning(&mut self) {
+        for item in self.conversation.iter_mut().rev() {
+            if let ConvItem::Reasoning { expanded, .. } = item {
+                *expanded = !*expanded;
+                return;
+            }
+        }
+    }
+
     /// The project's `.agents/` directory, derived from the sessions dir
     /// (`<root>/.agents/sessions`).
     fn agents_dir(&self) -> PathBuf {
@@ -975,6 +1146,13 @@ impl App {
         {
             return self.edit_prompt(rest.trim());
         }
+        // `/effort [level]` takes an optional argument (low|medium|high|max).
+        if let Some(rest) = name
+            .strip_prefix("effort")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return self.effort_command(rest.trim());
+        }
         match commands::by_name(name) {
             Some(cmd) => self.run_command(cmd),
             None => {
@@ -1071,6 +1249,10 @@ impl App {
             }
             AppCommand::Model => {
                 self.open_model_picker();
+                Action::None
+            }
+            AppCommand::Effort => {
+                self.open_effort_picker();
                 Action::None
             }
             AppCommand::Config => self.edit_config(),
@@ -1367,6 +1549,16 @@ impl App {
                                 profile: row.label,
                                 model: None,
                             })
+                        }
+                    }
+                    ChoiceKind::Effort => {
+                        if row.current {
+                            Action::None // already at this level
+                        } else {
+                            match Effort::parse(&row.label) {
+                                Some(effort) => Action::Command(Command::SetEffort { effort }),
+                                None => Action::None,
+                            }
                         }
                     }
                 }
@@ -2091,5 +2283,127 @@ mod tests {
             .conversation
             .iter()
             .any(|i| matches!(i, ConvItem::User(t) if t == "old")));
+    }
+
+    #[test]
+    fn reasoning_delta_builds_a_trail_that_settles_on_the_answer() {
+        let mut a = app();
+        a.apply_event(UiEvent::ReasoningDelta {
+            text: "think ".into(),
+        });
+        a.apply_event(UiEvent::ReasoningDelta {
+            text: "more".into(),
+        });
+        // While thinking, the trail streams expanded.
+        assert!(matches!(
+            a.conversation.last(),
+            Some(ConvItem::Reasoning { text, expanded: true }) if text == "think more"
+        ));
+        // The answer begins → the trail settles to collapsed (default view).
+        a.apply_event(UiEvent::AssistantDelta {
+            text: "answer".into(),
+        });
+        assert!(matches!(
+            a.conversation.first(),
+            Some(ConvItem::Reasoning {
+                expanded: false,
+                ..
+            })
+        ));
+        assert!(matches!(a.conversation.last(), Some(ConvItem::Assistant(t)) if t == "answer"));
+    }
+
+    #[test]
+    fn hidden_view_drops_the_trail_but_keeps_the_answer() {
+        let mut a = app();
+        a.reasoning_view = ReasoningView::Hidden;
+        a.apply_event(UiEvent::ReasoningDelta {
+            text: "secret".into(),
+        });
+        a.apply_event(UiEvent::AssistantDelta {
+            text: "answer".into(),
+        });
+        assert!(!a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Reasoning { .. })));
+        assert!(matches!(a.conversation.last(), Some(ConvItem::Assistant(t)) if t == "answer"));
+    }
+
+    #[test]
+    fn expanded_view_keeps_the_trail_open_after_the_answer() {
+        let mut a = app();
+        a.reasoning_view = ReasoningView::Expanded;
+        a.apply_event(UiEvent::ReasoningDelta { text: "why".into() });
+        a.apply_event(UiEvent::AssistantDelta { text: "a".into() });
+        assert!(matches!(
+            a.conversation.first(),
+            Some(ConvItem::Reasoning { expanded: true, .. })
+        ));
+    }
+
+    #[test]
+    fn ctrl_r_toggles_the_reasoning_trail() {
+        let mut a = app();
+        a.apply_event(UiEvent::ReasoningDelta { text: "hmm".into() });
+        a.apply_event(UiEvent::AssistantDelta { text: "a".into() }); // settle → collapsed
+        a.toggle_reasoning();
+        assert!(matches!(
+            a.conversation.first(),
+            Some(ConvItem::Reasoning { expanded: true, .. })
+        ));
+    }
+
+    #[test]
+    fn effort_picker_offers_levels_and_declines_when_none() {
+        let mut a = app();
+        // No effort control ⇒ a calm notice, no overlay.
+        assert_eq!(a.run_slash("effort"), Action::None);
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("no reasoning-effort"))));
+        assert!(a.overlays.is_empty());
+
+        // With levels available, `/effort` opens the picker.
+        a.effort_levels = vec![Effort::Low, Effort::High];
+        a.effort = Some(Effort::Low);
+        a.run_slash("effort");
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::Choices {
+                kind: ChoiceKind::Effort,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn effort_arg_sets_a_supported_level_and_rejects_others() {
+        let mut a = app();
+        a.effort_levels = vec![Effort::Low, Effort::High];
+        assert_eq!(
+            a.run_slash("effort high"),
+            Action::Command(Command::SetEffort {
+                effort: Effort::High
+            })
+        );
+        // A level the model doesn't offer is a notice, not a command.
+        assert_eq!(a.run_slash("effort medium"), Action::None);
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("does not offer"))));
+    }
+
+    #[test]
+    fn effort_changed_updates_sidebar_state() {
+        let mut a = app();
+        a.apply_event(UiEvent::EffortChanged {
+            effort: Some(Effort::High),
+            available: vec![Effort::Low, Effort::High],
+        });
+        assert_eq!(a.effort, Some(Effort::High));
+        assert_eq!(a.effort_levels, vec![Effort::Low, Effort::High]);
     }
 }

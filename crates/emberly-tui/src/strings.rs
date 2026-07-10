@@ -49,6 +49,7 @@ pub mod status {
     pub const SANDBOX_UNKNOWN: &str = "—";
     pub const MODIFIED_FILES_TITLE: &str = "modified files";
     pub const MODEL_LABEL: &str = "model";
+    pub const EFFORT_LABEL: &str = "effort";
     pub const ROOT_LABEL: &str = "root";
 }
 
@@ -74,6 +75,9 @@ pub mod markers {
     pub const RUNNING: &str = "…";
     pub const OK: &str = "ok";
     pub const FAILED: &str = "FAILED";
+    /// Reasoning trail: collapsed (expandable) vs expanded (Design §4.4).
+    pub const REASONING_COLLAPSED: &str = "▸";
+    pub const REASONING_EXPANDED: &str = "▾";
 }
 
 /// One-line orientation shown on clean exit (Design §8.3). The richer summary

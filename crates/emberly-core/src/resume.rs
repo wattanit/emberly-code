@@ -67,8 +67,15 @@ pub fn rebuild_conversation(records: &[TranscriptRecord]) -> Vec<Message> {
             TranscriptEvent::UserMessage { text, .. } => {
                 messages.push(Message::user_text(text.clone()));
             }
-            TranscriptEvent::AssistantMessage { text } => {
-                let mut content = vec![ContentBlock::Text { text: text.clone() }];
+            TranscriptEvent::AssistantMessage { text, .. } => {
+                // Reasoning is deliberately not reconstructed: the opaque
+                // signature is not persisted, and historical thinking blocks may
+                // be stripped (only the live turn needs replay — P-10/§4.7). A
+                // tool-only-with-thinking turn has empty text and no text block.
+                let mut content = Vec::new();
+                if !text.is_empty() {
+                    content.push(ContentBlock::Text { text: text.clone() });
+                }
                 i += gather_tool_calls(&records[i + 1..], &mut content);
                 messages.push(Message {
                     role: Role::Assistant,
@@ -281,6 +288,7 @@ mod tests {
             }),
             rec(TranscriptEvent::AssistantMessage {
                 text: "on it".into(),
+                reasoning: None,
             }),
             rec(TranscriptEvent::ToolCall {
                 call_id: ToolCallId::new("c1"),
@@ -296,6 +304,7 @@ mod tests {
             }),
             rec(TranscriptEvent::AssistantMessage {
                 text: "done".into(),
+                reasoning: None,
             }),
         ];
         let messages = rebuild_conversation(&records);
@@ -315,10 +324,17 @@ mod tests {
                 text: "task".into(),
                 original_task: true,
             }),
-            rec(TranscriptEvent::AssistantMessage { text: "a".into() }),
-            rec(TranscriptEvent::AssistantMessage { text: "b".into() }),
+            rec(TranscriptEvent::AssistantMessage {
+                text: "a".into(),
+                reasoning: None,
+            }),
+            rec(TranscriptEvent::AssistantMessage {
+                text: "b".into(),
+                reasoning: None,
+            }),
             rec(TranscriptEvent::AssistantMessage {
                 text: "recent".into(),
+                reasoning: None,
             }),
             // Keep [0] (task) and [3] (recent); replace [1..3] with the summary.
             rec(TranscriptEvent::Compaction {

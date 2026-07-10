@@ -26,6 +26,9 @@ use crate::terminal::TerminalGuard;
 /// Run the rich TUI until the user quits or the engine closes its event stream.
 /// Sets up and tears down the terminal via [`TerminalGuard`] (HC-3). `history`
 /// seeds the conversation timeline when resuming a session (Tech Spec §3.3).
+// The frontend entry point threads several independent session inputs; a
+// bundle struct would only move the argument list elsewhere.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     ports: FrontendPorts,
     session: SessionInfo,
@@ -33,9 +36,13 @@ pub async fn run(
     sessions_dir: PathBuf,
     profiles: Vec<String>,
     config_template: String,
+    reasoning_view: crate::app::ReasoningView,
 ) -> io::Result<()> {
     let mut guard = TerminalGuard::enter()?;
     let mut app = App::new(session, sessions_dir, profiles, config_template);
+    // Set the trail view before seeding history so resumed reasoning items
+    // render with the configured default (Design §4.4).
+    app.reasoning_view = reasoning_view;
     app.seed_history(&history);
     app.motion = motion_enabled();
 

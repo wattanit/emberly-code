@@ -288,7 +288,7 @@ async fn transcript_records_the_durable_session() {
     // The closing assistant message is stored complete, not as deltas.
     assert!(events
         .iter()
-        .any(|e| matches!(e, TranscriptEvent::AssistantMessage { text } if text == "done")));
+        .any(|e| matches!(e, TranscriptEvent::AssistantMessage { text, .. } if text == "done")));
 
     // Closing the command channel ends the session cleanly.
     drop(h);
@@ -1155,9 +1155,8 @@ async fn effort_threads_into_request_and_is_announced() {
     .await;
     let events = h.collect(None).await;
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, UiEvent::EffortChanged { effort } if *effort == Effort::High)),
+        events.iter().any(|e| matches!(e,
+            UiEvent::EffortChanged { effort: Some(l), .. } if *l == Effort::High)),
         "EffortChanged is emitted"
     );
     assert!(
@@ -1207,9 +1206,63 @@ async fn switch_model_reseeds_effort_to_new_default() {
     let events = h.collect(None).await;
 
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, UiEvent::EffortChanged { effort } if *effort == Effort::High)),
+        events.iter().any(|e| matches!(e,
+            UiEvent::EffortChanged { effort: Some(l), .. } if *l == Effort::High)),
         "the switch re-seeds effort to the new model's default (Medium → High)"
+    );
+}
+
+/// Reasoning arrives as a distinct `ReasoningDelta` UiEvent and is recorded in
+/// the transcript as a distinct field — never merged into the answer (P-10).
+#[tokio::test]
+async fn reasoning_streams_distinctly_and_records_a_separate_field() {
+    let response = ScriptedResponse {
+        events: vec![
+            StreamEvent::ReasoningDelta {
+                text: "thinking…".into(),
+            },
+            StreamEvent::ReasoningSignature {
+                signature: "sig".into(),
+                redacted: false,
+            },
+            StreamEvent::TextDelta {
+                text: "the answer".into(),
+            },
+        ],
+        outcome: ScriptOutcome::Done(StopReason::EndTurn),
+    };
+    let (mut h, sink) = start_capturing(vec![response], temp_project());
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let events = h.collect(None).await;
+
+    // The reasoning surfaces as its own event, distinct from the answer deltas.
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ReasoningDelta { text } if text == "thinking…")),
+        "a ReasoningDelta UiEvent is emitted"
+    );
+    assert_eq!(deltas(&events), "the answer", "answer excludes reasoning");
+
+    // The transcript records reasoning as a distinct field (recorded regardless
+    // of any view choice — hidden is a view, not a discard).
+    assert!(
+        sink.records().iter().any(|r| matches!(&r.event,
+            TranscriptEvent::AssistantMessage { text, reasoning }
+                if text == "the answer" && reasoning.as_deref() == Some("thinking…"))),
+        "AssistantMessage carries reasoning distinct from text"
+    );
+}
+
+/// A turn with no reasoning leaves the transcript `reasoning` field `None`.
+#[tokio::test]
+async fn turn_without_reasoning_records_no_reasoning() {
+    let (mut h, sink) = start_capturing(vec![ScriptedResponse::text("plain")], temp_project());
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+    assert!(
+        sink.records().iter().any(|r| matches!(&r.event,
+            TranscriptEvent::AssistantMessage { text, reasoning }
+                if text == "plain" && reasoning.is_none())),
+        "no reasoning ⇒ reasoning field is None"
     );
 }

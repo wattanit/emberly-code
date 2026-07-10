@@ -23,6 +23,10 @@ use crate::types::{Effort, Mode, PermissionRendering, SandboxStatus, TokenUsage}
 pub enum UiEvent {
     /// A chunk of streaming assistant text. High-frequency.
     AssistantDelta { text: String },
+    /// A chunk of the model's reasoning/thinking, distinct from the answer
+    /// (P-10, Design §4.4). The frontend streams it into the collapsed thinking
+    /// trail; it is never rendered as the answer. High-frequency.
+    ReasoningDelta { text: String },
     /// The assistant's turn finished streaming (no more deltas for this turn).
     AssistantDone,
 
@@ -88,10 +92,16 @@ pub enum UiEvent {
     /// so the frontend refreshes its model picker.
     ProfilesChanged { profiles: Vec<String> },
 
-    /// The reasoning-effort level changed in-session (C-6/P-9, Design §3.1). The
-    /// sidebar effort line updates; the change is also announced via a
-    /// [`Notice`](UiEvent::Notice) — never silent.
-    EffortChanged { effort: Effort },
+    /// The active reasoning-effort level and the levels this model offers
+    /// (C-6/P-9, Design §3.1). Emitted at startup, on a set, and on a model
+    /// switch, so the sidebar shows the current level and the picker offers the
+    /// right options. `effort` is `None` and `available` empty when the model
+    /// has no effort control (the sidebar hides the line, the picker declines).
+    /// A user-driven change is also announced via a [`Notice`] — never silent.
+    EffortChanged {
+        effort: Option<Effort>,
+        available: Vec<Effort>,
+    },
 
     /// A plain-language, harness-voice notice for the timeline (Design §6.1):
     /// a persisted permission grant's written line (§6.6), a refused auto-mode

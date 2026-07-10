@@ -515,6 +515,7 @@ async fn run() -> anyhow::Result<()> {
         sessions_dir.clone(),
         profiles,
         init::CONFIG_TEMPLATE.to_string(),
+        resolved.reasoning.clone(),
     )
     .await?;
 

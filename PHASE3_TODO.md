@@ -29,11 +29,15 @@ effort picker is the same overlay as the model picker.
 | 2. Adapter effort mapping + no-op | [x] | Done 2026-07-10; anthropic→thinking-budget (2k/8k/16k/32k, clamped); openai→`reasoning_effort` (Max→high); no-op when unsupported; 10 tests |
 | 3. `ReasoningDelta` stream event + trace translation | [x] | Done 2026-07-11; `ReasoningDelta`+`ReasoningSignature` events, `ContentBlock::Reasoning`; anthropic thinking/redacted capture + replay; openai `reasoning_content`; 8 tests |
 | 4. Effort as engine state | [x] | Done 2026-07-11; `SetEffort`/`EffortChanged`/`EffortChange`; seeded+threaded+re-seeded on switch; config `effort`/`effort_levels`; 6 tests |
-| 5. Reasoning trace through engine + transcript | [ ] | `ReasoningDelta` UiEvent relay; distinct `reasoning` field; `hidden` still records |
-| 6. UI — thinking trail + effort picker | [ ] | collapsed/expand/stream/settle; `reasoning` view key; picker + sidebar line; `/effort`; degraded block; line mode |
+| 5. Reasoning trace through engine + transcript | [x] | Done 2026-07-11; `UiEvent::ReasoningDelta` relay; distinct `reasoning` field on `AssistantMessage`; `Reasoning` block prepended; 2 tests |
+| 6. UI — thinking trail + effort picker | [x] | Done 2026-07-11; trail (collapse/expand/settle, Ctrl-R); `reasoning` view key; effort picker + sidebar + `/effort`; line-mode block; README; 9 tests |
 | 7. Tests, docs, exit criterion | [ ] | fake-provider round-trips; README; exit met |
 
-**Overall Phase 3: NOT STARTED.**
+**Overall Phase 3: groups 1–6 complete; group 7 (final tests/docs/exit)
+remaining.** Effort is a config-declared, in-session-switchable control mapped
+per adapter (no-op when unsupported); the reasoning trace is captured,
+replayed, streamed to a collapsed/expandable trail, and recorded distinctly.
+Workspace clippy + fmt clean; 21 test binaries green (TUI 111).
 
 ---
 
@@ -140,51 +144,52 @@ state, switchable in-session, transcript-logged, announced never silent.
 
 ## 5. Reasoning trace through the engine + transcript  *(Tech Spec §4.7, P-10)*
 
-- [ ] Engine relays `StreamEvent::ReasoningDelta` as `UiEvent::ReasoningDelta
-      { text }` (a new UiEvent arm) — the frontend streams it into the trail.
-- [ ] The engine accumulates reasoning for the turn and records it as a
-      **distinct field** on the assistant transcript event:
-      `AssistantMessage { text, reasoning: Option<String> }` (additive field,
-      `#[serde(default, skip_serializing_if = "Option::is_none")]`, no schema
-      bump). Never concatenated into `text` (P-10).
-- [ ] `hidden` view still writes the trace: the transcript record is written
-      regardless of the view key — `hidden` is a view choice, never a discard
-      (Design §4.4). Verified by a test.
-- [ ] Tests: a `fake`-provider turn emitting reasoning produces a
-      `ReasoningDelta` UiEvent and an `AssistantMessage` whose `reasoning` is
-      populated and whose `text` excludes the reasoning; a turn with no
-      reasoning leaves `reasoning` `None`.
+- [x] Engine relays `StreamEvent::ReasoningDelta` → `UiEvent::ReasoningDelta
+      { text }` and stashes `ReasoningSignature` into a per-turn `TurnOutput`
+      (text + reasoning + opaque signature), replacing the old `(StreamEnd,
+      String)` return.
+- [x] The engine records reasoning as a **distinct field** —
+      `AssistantMessage { text, reasoning: Option<String> }` (additive, serde
+      default/skip, no schema bump) — and prepends a `ContentBlock::Reasoning`
+      to the assistant message (before text/tool_use, Anthropic ordering) so
+      the signature replays. Never concatenated into `text` (P-10).
+- [x] `hidden` writes the trace: the engine always records reasoning; hiding is
+      the frontend's view choice (group 6). Verified by a test. `resume` does
+      **not** reconstruct reasoning blocks (signature not persisted; historical
+      thinking may be stripped — only the live turn needs replay).
+- [x] Tests (2): a `fake`-provider turn emitting reasoning yields a
+      `ReasoningDelta` UiEvent + an `AssistantMessage` whose `reasoning` is set
+      and `text` excludes it; a turn with no reasoning leaves `reasoning` `None`.
 
 ## 6. UI — the thinking trail + effort picker  *(Design §4.4, §3.1)*
 
 ### Thinking trail (Design §4.4)
-- [ ] Collapsed by default: a single dimmed line — `reasoning (N lines)` —
-      with an expand affordance. Expanded, renders in secondary/chrome color,
-      one visual step below assistant text so reasoning is always
-      distinguishable from the answer.
-- [ ] Live while streaming: the dimmed reasoning may stream in place; when the
-      answer begins (`AssistantDelta`), the trail settles to its collapsed
-      line unless the user pinned it open.
-- [ ] `reasoning = collapsed | expanded | hidden` view key (Design §4.4),
-      **default `collapsed`**. `hidden` suppresses the trail in the view only;
-      the trace is still recorded (group 5). Threaded from config →
-      `frontend::run` → the TUI (same pattern as `config_template`).
-- [ ] Degraded mode (§7): the trail is a plain labeled block
-      (`--- reasoning ---`), never color-only; defaults to collapsed via a
-      one-line marker (`/view`-able). Line mode prints reasoning under the
-      marker or omits it per the view key.
+- [x] `ConvItem::Reasoning { text, expanded }`: collapsed default renders a dim
+      `▸ reasoning (N lines)`; expanded renders `▾ reasoning` + the text in
+      chrome colour, one step below the answer. **Ctrl-R** toggles the latest
+      trail (the expand affordance).
+- [x] Live/settle: the trail streams expanded while thinking; on the first
+      `AssistantDelta` it settles to collapsed unless the view pins it
+      (`Expanded`).
+- [x] `ReasoningView` (collapsed|expanded|hidden), **default collapsed**, from
+      the `reasoning` config key. Threaded config → `Resolved.reasoning` →
+      `frontend::run` (parses) → `tui::run`/`line::run`. `hidden` skips the
+      view item (engine still records — group 5).
+- [x] Degraded mode (§7): `LineRenderer` prints a plain `--- reasoning ---`
+      block then `--- answer ---`; `hidden` suppresses it. (Stateful renderer:
+      one toggle flag for the block label.)
 
 ### Effort picker + sidebar (Design §3.1)
-- [ ] `ChoiceKind::Effort` on the existing `Choices` overlay, rows fed by the
-      active model's `ModelInfo.effort_levels`; selecting sends
-      `Command::SetEffort`. When `effort_levels` is empty, the picker reports
-      "this model has no effort control" rather than showing an empty list.
-- [ ] Sidebar effort line (Design §3.1 model block): shows the current level;
-      hidden/greyed when the model exposes none. Updated on `EffortChanged`.
-- [ ] `/effort [level]` command + palette entry (`AppCommand::Effort`): no
-      arg opens the picker; an arg sets it directly (validated against the
-      model's levels). Line mode: `/effort <level>` sets it and prints the
-      new level (no overlay), consistent with line-mode `/model`.
+- [x] `ChoiceKind::Effort` on the `Choices` overlay, rows from the model's
+      levels (carried on `EffortChanged { effort, available }`, emitted at
+      startup/set/switch); Enter → `Command::SetEffort`. Empty levels ⇒ a calm
+      "no reasoning-effort control" notice, no overlay.
+- [x] Sidebar effort line: shows the current level; hidden when the model
+      exposes none. Updated on `EffortChanged`.
+- [x] `/effort [level]` + palette entry (`AppCommand::Effort`): no arg opens
+      the picker; an arg sets it, validated against the model's levels (a
+      not-offered level is a notice, not a command). Line mode: `/effort
+      <level>` sends `SetEffort`; no arg prints usage.
 
 ## 7. Tests, degraded mode, docs & exit criterion
 
@@ -224,6 +229,11 @@ G-22 routes these to the owner):
 - **No `SCHEMA_VERSION` bump** for `EffortChange` / the `reasoning` field on
   `AssistantMessage` — both additive, warn-skipped by older readers, matching
   the `ModelSwitch` precedent from Phase 1.
+- **`EffortChanged` reshaped in group 5/6:** from group 4's `{ effort: Effort }`
+  to `{ effort: Option<Effort>, available: Vec<Effort> }`, emitted at
+  startup/set/switch, so one event drives both the sidebar (current level) and
+  the picker (offered levels) across the process boundary. Pre-release, so no
+  compat concern; the transcript `EffortChange` stays `{ effort: Effort }`.
 - **Spec feedback to raise in group 7 (docs):** the Spec §4.1 event list names
   only `ReasoningDelta`; implementation added a companion `ReasoningSignature`
   event and a normalized `ContentBlock::Reasoning { text, signature, redacted }`

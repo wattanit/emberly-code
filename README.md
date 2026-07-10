@@ -158,6 +158,25 @@ to tune it:
 - In plain/`--plain` mode there's no editor handoff: `/config` and `/prompt`
   print the file path to edit with your own tools, and `/reload` applies it.
 
+**Reasoning effort and the thinking trail.** For models that expose a
+reasoning control, you own the latency/cost/quality trade per task:
+
+- Enable it per model in config with an `effort` default (and optionally an
+  `effort_levels` subset) — see `.agents/config.toml`. A model with no such
+  control ignores the setting; it's never an error.
+- **`/effort [low|medium|high|max]`** sets the level for your next message —
+  no argument opens a picker. The engine maps it to the provider's native
+  knob (Anthropic's thinking budget, OpenAI's `reasoning_effort`). The active
+  level shows in the sidebar; switching model re-seeds it to that model's
+  default. Every change is announced and recorded to the transcript.
+- When a provider streams its **reasoning** distinctly from the answer, it
+  renders as a quiet, collapsed trail — `▸ reasoning (N lines)` — one step
+  below the answer, never mistaken for it. **Ctrl-R** toggles it open. Set the
+  default view with the **`reasoning`** config key: `collapsed` (default),
+  `expanded`, or `hidden`. `hidden` only hides it from view — the trace is
+  still recorded to the transcript. In plain mode the trail is a labeled
+  `--- reasoning ---` block.
+
 ## Using a session
 
 The screen is a conversation timeline — your messages and the agent's, tool
