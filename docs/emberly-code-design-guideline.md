@@ -1,11 +1,11 @@
 # Emberly Code — Design Guideline
 
-**Version:** 0.4 
+**Version:** 0.5 
 **Status:** approved 
-**Date:** 2026-07-09
+**Date:** 2026-07-10
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.4 (upstream), Technical
-Specification v0.2 (downstream — this document constrains it)
+**Companion documents:** Requirements Document v0.5 (upstream), Technical
+Specification v0.3 (downstream — this document constrains it)
 
 This document defines how Emberly Code looks, feels, and speaks. It is the
 second of three project documents. Where a decision here has technical
@@ -77,7 +77,7 @@ Design translation, stated as principles:
     warning/caution `#DBA94D`, used only for their semantic meaning,
     never decoratively. Diff colors follow universal convention (green
     additions, red deletions) using the success/error values.
-- **One theme in v1.** User theming is out of scope for v1; the single
+- **One theme.** User theming is out of current scope; the single
   built-in warm-dark theme ships, with a light-terminal legibility
   fallback. The centralized theme definition is the future-proofing —
   a theme system later means loading a different set of values into the
@@ -105,17 +105,23 @@ current harnesses:
      dominant.
   2. Session title (auto-generated from the task, user-renamable).
   3. Project root path (abbreviated with `~`).
-  4. Model block: provider + model name, context usage percentage
+  4. Model block: provider + model name, the reasoning-effort level when
+     the model exposes one (Requirements P-9), context usage percentage
      (Requirements §8.4), session cost estimate, and sandbox status
      (Requirements §6.7) — one dimmed line when fully confined, warning
      styling with a short reason when degraded. Sandbox status is
      always-visible state, like context percentage, never a silent
-     assumption.
+     assumption. The provider/model line and the effort line are
+     selectable → each opens a picker (Requirements C-6): the model picker
+     lists the configured provider profiles (Requirements P-8); the effort
+     picker lists the levels the active model offers. A switch applies to
+     the next turn and is announced in the conversation in the harness's
+     own voice — never silently.
   5. **Modified files** — every file the agent has created or changed
      this session, with add/remove line counts. Each entry is
      selectable → opens the cumulative diff for inspection (§4.2).
   6. Extension sections — MCP, LSP, Skills — rendered only when the
-     underlying subsystem exists and has content. In v1 these are absent,
+     underlying subsystem exists and has content. Today these are absent,
      not shown as empty "None" stubs. The layout reserves the pattern,
      not the pixels.
 - **Status line** (bottom, one line): current mode (normal /
@@ -170,6 +176,62 @@ print raw to the pane with a notice. The same mechanism is reused for
 inspecting full untruncated tool outputs referenced by truncation markers
 (Requirements §8.1).
 
+### 4.4 The reasoning trail
+
+When a provider streams the model's reasoning distinctly from its answer
+(Requirements P-10), it renders as its own quiet register, never as the
+answer:
+
+- **Collapsed by default**, shown as a single dimmed line — "reasoning
+  (12 lines)" — with an expand affordance. The answer is what the user
+  came for; the reasoning is available, not imposed. Expanded, it renders
+  in secondary/chrome color (§2), one visual step below assistant text, so
+  a glance always distinguishes reasoning from conclusion.
+- **Live while streaming:** the dimmed reasoning may stream in place so the
+  workspace feels alive during long thinks (this is where the accent
+  streaming glow, §6.4, lives); when the answer begins, the trail settles
+  to its collapsed line unless the user pinned it open.
+- A `reasoning = collapsed | expanded | hidden` config key sets the
+  default view; **the default is `collapsed`** — reasoning is available at a
+  glance's cost, never imposed and never hidden by surprise. `hidden` still
+  records the trace to the transcript (Requirements P-10) — hidden is a view
+  choice, never a discard.
+- Degraded mode (§7): the trail is a plain labeled block
+  (`--- reasoning ---`), never color-only, and defaults to collapsed via a
+  one-line marker the user can `/view`.
+
+### 4.5 The tool-call explanation line
+
+The model-authored explanation (Requirements T-9) renders as a single
+dimmed line directly under the tool call it explains — the call stays the
+headline, the explanation is the caption. It appears only when the model
+supplied one (non-obvious calls); its absence is normal and never shows a
+placeholder. It is never styled as a result or an error, and it never
+carries meaning by color alone (§7). **On by default**; a config key
+(`ui.tool_explanations`) defeats it entirely for users who do not want the
+tokens spent (Requirements T-9).
+
+### 4.6 Editing config and prompts in place
+
+In-app editing (Requirements C-5) offers two paths, chosen by the size of
+the edit, both reachable from the command palette (§3.3):
+
+- **Quick edit — a TUI overlay.** A focused, scrollable overlay (the §4.2
+  overlay pattern, made editable) for a single config value or a short
+  prompt. Before an edit, the overlay shows the value's provenance tier
+  (Requirements C-3) in a dimmed line — you always see whether you are
+  about to override a baked-in default or an existing project value.
+  Saving writes to the project tier (Requirements C-1), never to the
+  baked-in defaults, and shows the written path.
+- **Full edit — `$EDITOR` handoff.** For a whole prompt file or the full
+  config, hand off to `$VISUAL`/`$EDITOR` (the §4.3 fallback order),
+  reloading on save. This reuses the user's real editor rather than
+  growing a text editor inside the TUI.
+
+Either way, a change that cannot take effect until restart is named as such
+at the moment of saving — silence about live changes, speech about the ones
+that need a restart.
+
 ## 5. The Permission Prompt
 
 The most important screen in the product. It is where the safety model
@@ -199,6 +261,27 @@ requires having seen what you are saying yes to.**
   project root") in one dimmed line — this teaches the permission model
   in situ.
 
+### 5.1 The question prompt (the model asking your opinion)
+
+The ask-user tool (Requirements T-8) produces a prompt that looks and
+behaves unlike a permission prompt, because the two ask opposite things: a
+permission prompt guards you against an action and defaults to *deny*; a
+question prompt invites your input and has no dangerous default.
+
+- **Its own quiet styling — never the reserved safety treatment (§2).**
+  Reusing the outside-project-root band here would dilute the one signal
+  that must stay rare and loud. The question prompt is calm and neutral: a
+  clear question, the model's options as a selectable list when it offered
+  them, and a free-text answer always available.
+- **No unsafe default.** Unlike the permission prompt, there is no
+  "safe default" keypress that answers for you — the model asked because it
+  genuinely needs *your* choice, so the prompt waits. It is still
+  dismissible (Esc returns "user declined to answer" to the model as a
+  structured result, so the model can proceed or stop), but Enter never
+  auto-selects an option on the user's behalf.
+- **No motion on this screen** (§6.4): like the permission prompt, nothing
+  animates while you are being asked to decide.
+
 ## 6. Voice and Language
 
 ### 6.1 Error voice
@@ -226,7 +309,7 @@ correct response differs:
   fireplace feeling is *calm*, and calm text is short text.
 - Hints and chrome are terse (2–5 words). Explanations live in `/help`
   and docs, not in the interface chrome.
-- **Interface text is English in v1; Thai text is fully supported as
+- **Interface text is English in current scope; Thai text is fully supported as
   content.** The user must be able to type Thai in the input box and
   read Thai anywhere it appears — messages, model output, file content,
   diffs, session titles — with correct rendering, wrapping, and cursor
@@ -321,6 +404,52 @@ After abnormal exit (Requirements HC-3/S-2), the next launch in that
 project offers resume: "Found an interrupted session from 14:02 —
 resume? (y/N)". Never auto-resume.
 
+### 8.4 Trusting a folder
+
+The workspace-trust gate (Requirements FR-1) is the first thing the user
+sees in a folder Emberly has not been trusted in before — it appears
+*before* the session starts, before any project file is read into a prompt.
+
+- **Calm, plain, and honest about what it is.** It names the folder, states
+  plainly what agreeing means ("Emberly will read, edit, and run commands
+  in this folder"), and asks whether the user trusts this code — with a
+  one-line nudge to review unfamiliar folders first. It is not styled as an
+  alarm; it is a considered question, in keeping with §1.2's "calmest
+  screens in the app."
+- **The safe default is decline.** The default keypress does not grant
+  trust; trusting is the deliberate choice. Declining does not start the
+  session (Requirements FR-1) — Emberly says so in one line and exits
+  cleanly, never half-starting in a crippled state.
+- **It is not the permission prompt and not the reserved safety band
+  (§2).** Trust is a once-per-folder gate on *whether* Emberly runs here;
+  it never stands in for the per-action prompts that govern *what* it does
+  (Requirements FR-1 honesty clause). The prompt says as much in a dimmed
+  line: trusting the folder does not switch off later prompts.
+- **Asked once per trusted subtree.** Trusting a folder trusts its
+  subdirectories too, so the gate does not reappear as the user moves
+  within a project they already trusted (Requirements FR-1) — the prompt is
+  a rare, considered moment, not a recurring toll.
+- Degraded mode (§7): the same content, ASCII-framed, capitalized
+  TRUST / DON'T TRUST choices, deliberate key to trust.
+
+### 8.5 When the loop is broken
+
+When the guardrail halts a non-progressing loop (Requirements S-5), the
+halt is a harness-world moment (§6.1), rendered in the harness's own
+out-of-band voice — not as model output, because the model is precisely
+what is not making progress:
+
+- One calm line of what happened and why — "Stopped: the last few steps
+  repeated without progress." — then the choices: keep going (resume the
+  loop), stop here, or say something (hand a steer back to the model). No
+  blame, no alarm styling.
+- The user is always the one who decides what happens next; the guardrail
+  never quietly resumes or quietly abandons the task. This is the visible
+  counterpart to S-5's promise that a runaway loop ends in a user decision.
+- It is distinct from the question prompt (§5.1): that is the *model*
+  choosing to ask; this is the *harness* stepping in when the model did
+  not.
+
 ## 9. Design-Driven Requirements Feedback
 
 Decisions in this document that add to or refine the Requirements doc,
@@ -337,12 +466,28 @@ recorded so the trace is explicit:
   §8.1) as a concrete UX mechanism.
 - **`--plain` / line-oriented degraded mode** (§7) — is the de facto
   contract for the future headless frontend (Requirements A-1).
-- **Thai text support (content, not chrome)** (§6.2) — a v1 scope item
+- **Thai text support (content, not chrome)** (§6.2) — a scope item
   for the Requirements doc: Thai input and display everywhere content
   appears, with grapheme-cluster-aware text layout. Interface
-  localization is not a v1 requirement.
+  localization is not a requirement in current scope.
 - **Single built-in theme, theming deferred** (§2) — a new explicit
   deferral for the Requirements doc's §2.2.
+- **Reasoning-trail view key `reasoning = collapsed|expanded|hidden`**
+  (§4.4) — refines Requirements P-10: `hidden` is a view choice only; the
+  trace is still recorded to the transcript. The config key is a Design
+  addition the Tech Spec absorbs.
+- **Model/effort switch is announced, never silent** (§3.1) — refines
+  Requirements C-6: a switch is surfaced in the conversation, consistent
+  with "silence about defaults, speech about deviations."
+- **Question prompt has no unsafe default** (§5.1) — refines Requirements
+  T-8: Esc returns a structured "declined to answer"; Enter never
+  auto-answers.
+- **Trust gate defaults to decline and exits cleanly on decline** (§8.4) —
+  realizes Requirements FR-1 as concrete UX, and reinforces its honesty
+  clause (trust ≠ waiver of later prompts) in the prompt text itself.
+- **Loop-break offers keep-going / stop / steer** (§8.5) — realizes
+  Requirements S-5's "ends in a user decision" as three concrete choices in
+  the harness voice.
 
 ## 10. Open Questions
 
@@ -352,3 +497,10 @@ recorded so the trace is explicit:
   related on a shared screen.
 - Session-title auto-generation approach (model-generated from the first
   task vs. heuristic; Tech Spec).
+- Whether the model/effort picker and the config/prompt editor get
+  dedicated keybindings beyond palette + `/command` reachability (§3.1,
+  §4.6). Tune with use once the surfaces exist.
+
+Resolved since v0.4: reasoning-trail default view — `collapsed` (§4.4,
+owner); tool-call explanation line — on by default, config-defeatable
+(§4.5, owner).
