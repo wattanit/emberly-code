@@ -32,6 +32,20 @@ pub struct ConfigFile {
     /// Reasoning-trail view default (Design §4.4): `collapsed` | `expanded` |
     /// `hidden`. A view choice only — the trace is always recorded (P-10).
     pub reasoning: Option<String>,
+    /// `[ui]` presentation toggles (Tech Spec §8).
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+/// `[ui]` — presentation toggles that shape what the interface shows without
+/// changing what the agent may do (Tech Spec §8).
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct UiConfig {
+    /// Tool-call explanation line (T-9, Design §4.5). When on, the model is
+    /// asked to caption non-obvious calls; when off, the schema property and the
+    /// prompt instruction are both omitted so no tokens are spent. Default
+    /// `true`.
+    pub tool_explanations: Option<bool>,
 }
 
 /// A `[providers.<name>]` profile: an adapter (wire format) plus the endpoint
@@ -198,6 +212,9 @@ impl ConfigFile {
         if higher.reasoning.is_some() {
             self.reasoning = higher.reasoning;
         }
+        if higher.ui.tool_explanations.is_some() {
+            self.ui.tool_explanations = higher.ui.tool_explanations;
+        }
     }
 }
 
@@ -227,6 +244,10 @@ pub struct Resolved {
     /// The reasoning-trail view default (`collapsed`|`expanded`|`hidden`,
     /// Design §4.4), or `None` for the built-in default (`collapsed`).
     pub reasoning: Option<String>,
+    /// Whether tool-call explanations are enabled (T-9, Design §4.5). Default
+    /// `true`; when `false` the schema property and prompt instruction are both
+    /// omitted (no tokens spent).
+    pub tool_explanations: bool,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -349,6 +370,20 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         );
     }
 
+    // Tool-call explanations (T-9): on unless a user tier turned it off; record
+    // provenance only on a deviation from the default (speech about deviations).
+    record(
+        &mut provenance,
+        "tool_explanations",
+        source_of(
+            false,
+            false,
+            field(&project, |c| c.ui.tool_explanations.is_some()),
+            field(&global, |c| c.ui.tool_explanations.is_some()),
+        ),
+        merged.ui.tool_explanations.is_some(),
+    );
+
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
     let mut notices = Vec::new();
@@ -372,6 +407,7 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         notices,
         sandbox_require: merged.sandbox.require.unwrap_or(false),
         reasoning: merged.reasoning,
+        tool_explanations: merged.ui.tool_explanations.unwrap_or(true),
     })
 }
 
@@ -785,6 +821,22 @@ mod tests {
         base.merge(higher);
         assert_eq!(base.provider.as_deref(), Some("openai")); // untouched
         assert_eq!(base.model.as_deref(), Some("b")); // overridden
+    }
+
+    #[test]
+    fn ui_tool_explanations_parses_and_merges() {
+        // Absent unless set (resolves to the `true` default in `load`).
+        assert_eq!(
+            ConfigFile::parse("").expect("empty").ui.tool_explanations,
+            None
+        );
+        // Parsed from the `[ui]` table.
+        let off = ConfigFile::parse("[ui]\ntool_explanations = false").expect("ui");
+        assert_eq!(off.ui.tool_explanations, Some(false));
+        // A higher tier overrides a lower one.
+        let mut base = ConfigFile::parse("[ui]\ntool_explanations = true").expect("base");
+        base.merge(off);
+        assert_eq!(base.ui.tool_explanations, Some(false));
     }
 
     #[cfg(unix)]

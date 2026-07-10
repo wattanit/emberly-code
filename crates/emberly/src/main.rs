@@ -468,6 +468,7 @@ async fn run() -> anyhow::Result<()> {
         project_root,
         model,
         system: resolved.system_prompt.clone(),
+        tool_explanations: resolved.tool_explanations,
         truncate: TruncateConfig::default(),
         retry: emberly_core::RetryPolicy::default(),
         session_id,

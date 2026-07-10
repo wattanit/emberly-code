@@ -41,6 +41,10 @@ pub enum UiEvent {
         tool: String,
         /// One-line human summary (e.g. `read src/main.rs`).
         summary: String,
+        /// The model's optional caption for a non-obvious call (T-9, §5.4,
+        /// Design §4.5). `None` when the model gave none — the UI shows no
+        /// placeholder.
+        explanation: Option<String>,
     },
     /// A tool finished. `ok` distinguishes a success payload from a structured
     /// failure payload — both are normal data to the model (HC-6), never a

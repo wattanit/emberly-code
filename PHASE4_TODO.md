@@ -34,15 +34,15 @@ config-defeatable) with exactly that lean design. This phase is its named door.
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. Tool-call explanation — schema injection + prompt + event (T-9 provider/engine) | [ ] | inject optional `explanation` into every input_schema at the one choke point; `ui.tool_explanations` (default true); bump `prompts::VERSION` 2→3; `ToolStarted.explanation` |
+| 1. Tool-call explanation — schema injection + prompt + event (T-9 provider/engine) | [x] | Done 2026-07-11; injection at `build_request` (both adapters); `ui.tool_explanations` default true; VERSION 2→3 + `tool_explanation.md`; `ToolStarted.explanation`; 7 tests |
 | 2. Tool-call explanation — UI caption (T-9 TUI + degraded) | [ ] | dim caption under the call; absent when none (no placeholder); never result/error styling, never color-only; line-mode parity |
 | 3. ask_user — round-trip plumbing + the tool (T-8 engine) | [ ] | `AskId`, `AskUserRequest`/`AskUserAnswer`, `AskGate` oneshot+mpsc mirror of the permission gate, `ask_user` transcript event, the built-in tool in `default_registry()` |
 | 4. ask_user — the question prompt UI (T-8 rich TUI) | [ ] | calm styling (never the safety band), selectable options + free-text, no unsafe default (Enter never auto-answers), Esc→declined, no motion |
 | 5. ask_user — degraded-mode question prompt (T-8 line) | [ ] | full parity: numbered options + free-text line, deliberate answer, empty/Esc→declined; two pending slots so it can't collide with a permission prompt |
 | 6. End-to-end, exit criterion, docs & SFD bookkeeping | [ ] | combined offline round trip; README; Spec bump decision (owner); memory update (tool-explanation graduated) |
 
-**Overall Phase 4: NOT STARTED.** Branch `phase4/ask-user-and-explanation` off
-`version0.2` (Phase 3 merged).
+**Overall Phase 4: IN PROGRESS** (1 / 6 groups). Branch
+`phase4/ask-user-and-explanation` off `version0.2` (Phase 3 merged).
 
 ---
 
@@ -93,16 +93,27 @@ guiding principle, ships the offline `FakeProvider`-driven tests of Tech Spec
 The provider/engine half: make the model *able and asked* to explain, gated by
 config, and surface the explanation to the frontend.
 
-- [ ] **`ui.tool_explanations` config key, default `true`** (Tech Spec §8,
+**Done 2026-07-11.** Injection lives in `Engine::build_request` (the one
+`ToolSpec→ToolSchema` bridge), so both wire adapters get it with no per-adapter
+code. The instruction is a new `prompts/tool_explanation.md` (not baked into
+`system.md`), appended by `Engine::effective_system` only when the toggle is on
+— so with it off, `system.md` is byte-identical to v2's and no `explanation`
+property is sent. `VERSION` 2→3 (the prompt *set* gained a file; the actual
+bytes already vary by project instructions, so this matches how VERSION works).
+Extraction (`explanation_from_args`) is unconditional and trims blanks to
+`None`. 7 tests (3 in-lib helper unit tests, 3 engine integration via
+`FakeProvider::last_request`, 1 config parse/merge).
+
+- [x] **`ui.tool_explanations` config key, default `true`** (Tech Spec §8,
       Requirements T-9). No `[ui]` table exists yet — add a `UiConfig`
       (all-optional) to `ConfigFile` (`crates/emberly/src/config.rs`), resolve
       onto `Resolved` (default true), following the `reasoning` view-key
       pattern. Provenance (`config show`) must remain correct.
-- [ ] **Thread the toggle to the one choke point.** `EngineConfig`
+- [x] **Thread the toggle to the one choke point.** `EngineConfig`
       (`crates/emberly-core/src/engine.rs`) gains `tool_explanations: bool`;
       `main.rs` populates it from `resolved`; `Engine` stores it. This is the
       wire T-9 needs — nothing about `ui.*` reaches the engine today.
-- [ ] **Inject the optional `explanation` property at the single
+- [x] **Inject the optional `explanation` property at the single
       `ToolSpec → provider` point** — `Engine::build_request` (where
       `self.tools.specs()` becomes `Vec<ToolSchema>`). When
       `tool_explanations` is on, mutate each spec's `input_schema`
@@ -111,7 +122,7 @@ config, and surface the explanation to the frontend.
       Covers **both** adapters at once — no edit to anthropic.rs/openai.rs
       `build_body`, which stay generic over `ToolSchema`. When off, the property
       is never added, so the model is never prompted and no tokens are spent.
-- [ ] **Bump `prompts::VERSION` 2 → 3** and add the instruction to
+- [x] **Bump `prompts::VERSION` 2 → 3** and add the instruction to
       `crates/emberly-core/prompts/system.md`: fill `explanation` briefly and
       **only** for calls whose intent is not self-evident; add a
       `prompts/CHANGELOG.md` entry. The instruction is emitted **only when the
@@ -121,18 +132,18 @@ config, and surface the explanation to the frontend.
       constant — the instruction text can be conditional on `tool_explanations`
       when assembling the system message. Prompt wording is drafted for owner
       review at this group.)*
-- [ ] **`explanation: Option<String>` on `UiEvent::ToolStarted`** (§3.1). The
+- [x] **`explanation: Option<String>` on `UiEvent::ToolStarted`** (§3.1). The
       engine extracts it from the tool-call `args` (the `explanation` key, if
       present and non-empty) when emitting `ToolStarted`, then the tool ignores
       it during `execute` (no tool declares `deny_unknown_fields`).
-- [ ] **Transcript:** confirm `tool_call` already records full `args` so the
+- [x] **Transcript:** confirm `tool_call` already records full `args` so the
       explanation persists with **no `SCHEMA_VERSION` bump** (Tech Spec §5.4);
       add a test asserting the round trip through the transcript.
-- [ ] Tests (`FakeProvider`, §14.5): schema property present when on / absent
+- [x] Tests (`FakeProvider`, §14.5): schema property present when on / absent
       when off; prompt instruction present iff on; engine surfaces a supplied
       `explanation` onto `ToolStarted`; a call with no `explanation` in args
       yields `None`; `explanation` never lands in `required`.
-- [ ] `cargo fmt` + `clippy` + `test` green; commit.
+- [x] `cargo fmt` + `clippy` + `test` green; commit.
 
 ---
 

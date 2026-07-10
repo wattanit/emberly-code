@@ -1120,6 +1120,7 @@ mod tests {
             call_id: id.clone(),
             tool: "bash".into(),
             summary: "run: ls -la".into(),
+            explanation: None,
         });
         app.apply_event(UiEvent::ToolFinished {
             call_id: id,

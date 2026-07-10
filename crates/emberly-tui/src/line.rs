@@ -448,6 +448,7 @@ mod tests {
                 call_id: ToolCallId::new("c"),
                 tool: "bash".into(),
                 summary: "run: ls".into(),
+                explanation: None,
             },
             UiEvent::ToolFinished {
                 call_id: ToolCallId::new("c"),

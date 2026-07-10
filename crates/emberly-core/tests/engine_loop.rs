@@ -55,6 +55,9 @@ fn make_config(
         project_root: root,
         model: "fake-1".into(),
         system: None,
+        // Off by default here so existing tests see byte-identical requests;
+        // the T-9 tests flip this field on the returned config explicitly.
+        tool_explanations: false,
         truncate: TruncateConfig::default(),
         // Fast retries so retry tests don't wait on real backoff.
         retry: RetryPolicy {
@@ -1359,5 +1362,114 @@ async fn set_effort_on_a_model_without_a_control_declines_calmly() {
             .iter()
             .any(|r| matches!(&r.event, TranscriptEvent::EffortChange { .. })),
         "no audit record for a declined change"
+    );
+}
+
+// --- T-9: tool-call explanation (Tech Spec §5.4) ------------------------------
+
+/// Build a harness from a retained `FakeProvider` handle with the T-9 toggle
+/// set, so a test can drive a turn and then inspect the request the engine sent.
+fn spawn_keeping_provider(
+    fake: Arc<FakeProvider>,
+    root: PathBuf,
+    tool_explanations: bool,
+) -> Harness {
+    let mut config = make_config(fake, root, EngineConfig::no_transcript());
+    config.tool_explanations = tool_explanations;
+    spawn(config)
+}
+
+#[tokio::test]
+async fn explanations_on_inject_schema_property_and_prompt_instruction() {
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("hi")]));
+    let mut h = spawn_keeping_provider(fake.clone(), temp_project(), true);
+    h.send(Command::UserInput {
+        text: "hello".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = match fake.last_request() {
+        Some(r) => r,
+        None => panic!("no request captured"),
+    };
+    // Every advertised tool gained the optional `explanation` property.
+    assert!(!req.tools.is_empty(), "built-ins are advertised");
+    assert!(
+        req.tools.iter().all(|t| t
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.get("explanation"))
+            .is_some()),
+        "explanation injected into every tool schema"
+    );
+    // The instruction is appended to the outgoing system prompt.
+    let system = req.system.unwrap_or_default();
+    assert!(
+        system.contains("Tool-call explanations"),
+        "prompt instructs the model to explain"
+    );
+}
+
+#[tokio::test]
+async fn explanations_off_omit_property_and_instruction() {
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("hi")]));
+    let mut h = spawn_keeping_provider(fake.clone(), temp_project(), false);
+    h.send(Command::UserInput {
+        text: "hello".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = match fake.last_request() {
+        Some(r) => r,
+        None => panic!("no request captured"),
+    };
+    assert!(
+        req.tools.iter().all(|t| t
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.get("explanation"))
+            .is_none()),
+        "no explanation property when the feature is off — no tokens spent"
+    );
+    // The test harness starts from `system: None`, so off → still no system.
+    assert!(
+        req.system.unwrap_or_default().is_empty(),
+        "no instruction appended when off"
+    );
+}
+
+#[tokio::test]
+async fn tool_started_surfaces_the_models_explanation() {
+    let root = temp_project();
+    // A non-obvious call the model captioned, then an obvious one it did not.
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "read_file",
+            r#"{"path":"a.txt","explanation":"peek at the config"}"#,
+        ),
+        ScriptedResponse::tool_call("c2", "read_file", r#"{"path":"b.txt"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = start(scripts, root);
+    h.send(Command::UserInput {
+        text: "look".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    let explanations: Vec<Option<String>> = events
+        .iter()
+        .filter_map(|e| match e {
+            UiEvent::ToolStarted { explanation, .. } => Some(explanation.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        explanations,
+        vec![Some("peek at the config".to_string()), None],
+        "captioned call carries the explanation; the obvious one carries none"
     );
 }

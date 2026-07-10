@@ -45,6 +45,12 @@ pub const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/co
 # Reasoning-trail view: how the model's thinking is shown (collapsed|expanded|
 # hidden). Default collapsed; hidden still records the trace to the transcript.
 # reasoning = "collapsed"
+
+# [ui]
+# Tool-call explanations: a dim caption under non-obvious tool calls, authored
+# by the model. On by default. Set false to defeat it — the schema property and
+# the prompt instruction are both dropped, so no tokens are spent on it.
+# tool_explanations = true
 "#;
 
 /// A documented `permissions.toml`. The rule engine is Phase 2; this reserves

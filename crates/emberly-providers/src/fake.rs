@@ -160,6 +160,16 @@ impl FakeProvider {
         }
     }
 
+    /// A clone of the most recent request the engine sent — for asserting on
+    /// the serialized tools/system (e.g. the T-9 explanation injection).
+    #[must_use]
+    pub fn last_request(&self) -> Option<CompletionRequest> {
+        match self.last_request.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
     /// Override the reported model info (window/pricing) for accounting tests.
     #[must_use]
     pub fn with_model_info(mut self, info: ModelInfo) -> Self {

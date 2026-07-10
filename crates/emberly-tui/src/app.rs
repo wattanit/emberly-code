@@ -456,6 +456,8 @@ impl App {
                 call_id,
                 tool,
                 summary,
+                // Rendered as a caption in group 2 (T-9).
+                explanation: _,
             } => {
                 self.streaming = false;
                 self.conversation.push(ConvItem::Tool {
@@ -1811,6 +1813,7 @@ mod tests {
             call_id: id.clone(),
             tool: "bash".into(),
             summary: "run: ls".into(),
+            explanation: None,
         });
         a.apply_event(UiEvent::ToolFinished {
             call_id: id.clone(),

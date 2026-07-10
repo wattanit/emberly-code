@@ -53,6 +53,12 @@ pub struct EngineConfig {
     pub project_root: PathBuf,
     pub model: String,
     pub system: Option<String>,
+    /// Tool-call explanations (T-9, Tech Spec §5.4). When true, an optional
+    /// `explanation` property is injected into every tool's schema and the
+    /// prompt instruction is appended; when false, both are omitted so the model
+    /// is never prompted and no tokens are spent (Requirements T-9). Fixed for
+    /// the engine's life (a live config reload does not change it).
+    pub tool_explanations: bool,
     pub truncate: TruncateConfig,
     /// Retry policy for retryable provider failures and mid-stream drops.
     pub retry: RetryPolicy,
@@ -148,6 +154,31 @@ enum ToolCallResult {
     Canceled,
 }
 
+/// Inject the optional `explanation` string property into a tool's JSON schema
+/// (T-9, Tech Spec §5.4). Additive and **never** added to `required`, so a call
+/// that omits it is valid; tools ignore it (no `deny_unknown_fields`). Only
+/// touches object schemas with a `properties` map — a schema without one is
+/// left untouched.
+fn inject_explanation_property(schema: &mut serde_json::Value) {
+    let Some(props) = schema.get_mut("properties").and_then(|p| p.as_object_mut()) else {
+        return;
+    };
+    props.entry("explanation").or_insert_with(|| {
+        serde_json::json!({
+            "type": "string",
+            "description": "Optional: one short line on what this call does and \
+                            why, only when the intent is not self-evident.",
+        })
+    });
+}
+
+/// Extract the model's tool-call explanation from the call arguments (T-9).
+/// Returns `None` when absent or blank so the UI shows no empty caption.
+fn explanation_from_args(args: &serde_json::Value) -> Option<String> {
+    let text = args.get("explanation")?.as_str()?.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 /// A permission ask awaiting the user's answer: the id shown to the frontend,
 /// the oneshot the blocked tool waits on, and the original request (kept so an
 /// "allow for session"/"always allow" answer can be turned into a grant).
@@ -168,6 +199,8 @@ pub struct Engine {
     /// model switch. `None` sends no effort (the provider's own default).
     effort: Option<Effort>,
     system: Option<String>,
+    /// Whether tool-call explanations are enabled (T-9); see [`EngineConfig`].
+    tool_explanations: bool,
     truncate: TruncateConfig,
     retry: RetryPolicy,
     gate: Arc<ChannelGate>,
@@ -250,6 +283,7 @@ impl Engine {
             model: config.model,
             effort: seed_effort,
             system: config.system,
+            tool_explanations: config.tool_explanations,
             truncate: config.truncate,
             retry: config.retry,
             gate: Arc::new(ChannelGate { asks: asks_tx }),
@@ -826,10 +860,14 @@ impl Engine {
         // `read src/main.rs`) so the activity line says what is happening, not
         // just the tool name (Design §6.3).
         let summary = tool.describe(&args).unwrap_or_else(|| call.name.clone());
+        // T-9: the model's caption for a non-obvious call rides in `args`
+        // (§5.4); surface it to the frontend. Absent/empty → None (no caption).
+        let explanation = explanation_from_args(&args);
         self.emit(UiEvent::ToolStarted {
             call_id: call.id.clone(),
             tool: call.name.clone(),
             summary,
+            explanation,
         })
         .await;
 
@@ -1320,15 +1358,28 @@ impl Engine {
             .tools
             .specs()
             .into_iter()
-            .map(|spec| ToolSchema {
-                name: spec.name,
-                description: spec.description,
-                input_schema: spec.input_schema,
+            .map(|spec| {
+                let mut input_schema = spec.input_schema;
+                // T-9: inject the optional `explanation` property at the single
+                // ToolSpec→provider point, so both wire adapters get it without
+                // any per-adapter code (Tech Spec §5.4). Off → nothing added.
+                if self.tool_explanations {
+                    inject_explanation_property(&mut input_schema);
+                }
+                ToolSchema {
+                    name: spec.name,
+                    description: spec.description,
+                    input_schema,
+                }
             })
             .collect();
         CompletionRequest {
             model: self.model.clone(),
-            system: self.system.clone(),
+            // T-9: append the explanation instruction only when the feature is
+            // on, so with it off the model is never asked and no tokens are
+            // spent. Kept out of the stored `self.system` so a config reload
+            // (which replaces it) stays orthogonal to this toggle.
+            system: self.effective_system(),
             messages: self.conversation.clone(),
             tools,
             max_output_tokens: Some(self.provider.model_info().max_output_tokens),
@@ -1336,6 +1387,20 @@ impl Engine {
             // The session's active reasoning effort (P-9). The adapter maps it
             // to the provider's control or drops it when unsupported.
             effort: self.effort,
+        }
+    }
+
+    /// The outgoing system prompt: the stored base (base prompt + project
+    /// instructions) with the tool-call explanation instruction appended when
+    /// enabled (T-9).
+    fn effective_system(&self) -> Option<String> {
+        if !self.tool_explanations {
+            return self.system.clone();
+        }
+        let instruction = crate::prompts::tool_explanation();
+        match &self.system {
+            Some(base) => Some(format!("{base}\n\n{instruction}")),
+            None => Some(instruction.to_string()),
         }
     }
 
@@ -1587,4 +1652,46 @@ fn append_rule_block(path: &std::path::Path, block: &str) -> std::io::Result<()>
     writeln!(file)?;
     write!(file, "{block}")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{explanation_from_args, inject_explanation_property};
+    use serde_json::json;
+
+    #[test]
+    fn injects_optional_explanation_never_required() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } },
+            "required": ["path"],
+        });
+        inject_explanation_property(&mut schema);
+        assert_eq!(schema["properties"]["explanation"]["type"], "string");
+        // Never added to `required` — a call omitting it stays valid (§5.4).
+        assert_eq!(schema["required"], json!(["path"]));
+    }
+
+    #[test]
+    fn injection_is_idempotent_and_skips_schemas_without_properties() {
+        // A model that already sent an `explanation` property is not clobbered.
+        let mut has = json!({ "properties": { "explanation": { "type": "number" } } });
+        inject_explanation_property(&mut has);
+        assert_eq!(has["properties"]["explanation"]["type"], "number");
+        // A schema with no `properties` map is left untouched (no panic).
+        let mut bare = json!({ "type": "string" });
+        inject_explanation_property(&mut bare);
+        assert_eq!(bare, json!({ "type": "string" }));
+    }
+
+    #[test]
+    fn explanation_extracted_only_when_present_and_nonblank() {
+        assert_eq!(
+            explanation_from_args(&json!({ "explanation": "raise log level" })),
+            Some("raise log level".to_string())
+        );
+        assert_eq!(explanation_from_args(&json!({ "explanation": "  " })), None);
+        assert_eq!(explanation_from_args(&json!({ "path": "x" })), None);
+        assert_eq!(explanation_from_args(&serde_json::Value::Null), None);
+    }
 }
