@@ -870,7 +870,8 @@ impl App {
     /// the project has none yet (C-1/C-2); the write lands in the project tier.
     fn edit_config(&mut self) -> Action {
         let path = self.agents_dir().join("config.toml");
-        if !path.exists() {
+        let existed = path.exists();
+        if !existed {
             if let Err(e) = seed_file(&path, &self.config_template) {
                 self.conversation.push(ConvItem::Notice(format!(
                     "could not create {}: {e}",
@@ -878,9 +879,18 @@ impl App {
                 )));
                 return Action::None;
             }
-            self.conversation
-                .push(ConvItem::Notice(format!("created {}", path.display())));
         }
+        // Provenance before the edit (C-3): existing project value vs a fresh
+        // override seeded from the defaults. Edits always land here (C-1).
+        self.conversation.push(ConvItem::Notice(if existed {
+            format!("editing your project config — {}", path.display())
+        } else {
+            format!(
+                "no project config yet — created {} from the template; \
+                 your edits override the defaults",
+                path.display()
+            )
+        }));
         Action::EditFile(path)
     }
 
@@ -900,7 +910,8 @@ impl App {
             }
         };
         let path = self.agents_dir().join("prompts").join(format!("{name}.md"));
-        if !path.exists() {
+        let existed = path.exists();
+        if !existed {
             if let Err(e) = seed_file(&path, &format!("{default}\n")) {
                 self.conversation.push(ConvItem::Notice(format!(
                     "could not create {}: {e}",
@@ -908,11 +919,18 @@ impl App {
                 )));
                 return Action::None;
             }
-            self.conversation.push(ConvItem::Notice(format!(
-                "created {} from the default",
-                path.display()
-            )));
         }
+        // Provenance before the edit (C-3): an existing project override vs a
+        // fresh copy of the baked-in default. Edits always land here (C-1).
+        self.conversation.push(ConvItem::Notice(if existed {
+            format!("editing your project '{name}' prompt — {}", path.display())
+        } else {
+            format!(
+                "no project '{name}' prompt yet — created {} from the baked-in default; \
+                 your edits override it",
+                path.display()
+            )
+        }));
         Action::EditFile(path)
     }
 
@@ -1545,6 +1563,33 @@ mod tests {
             .conversation
             .iter()
             .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown prompt"))));
+    }
+
+    #[test]
+    fn edit_provenance_distinguishes_new_override_from_existing() {
+        let root = std::env::temp_dir().join(format!("emberly-prov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sessions = root.join(".agents").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("mkdir");
+        let mut a = App::new(
+            SessionInfo::default(),
+            sessions,
+            Vec::new(),
+            "# t\n".to_string(),
+        );
+
+        // First edit: no project config yet → seeded, told it overrides defaults.
+        a.run_slash("config");
+        assert!(matches!(
+            a.conversation.last(),
+            Some(ConvItem::Notice(n)) if n.contains("no project config yet")
+        ));
+        // Second edit: the file exists → editing an existing project value.
+        a.run_slash("config");
+        assert!(matches!(
+            a.conversation.last(),
+            Some(ConvItem::Notice(n)) if n.contains("editing your project config")
+        ));
     }
 
     #[test]

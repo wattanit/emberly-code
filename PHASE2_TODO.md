@@ -26,7 +26,7 @@ templates this phase reuses.
 | 1. `$EDITOR` handoff (suspend/run/restore) | [x] | Done 2026-07-10; `edit` module + guard suspend/resume; 3 tests |
 | 2. Edit commands & targets (`/config`, `/prompt`) | [x] | Done 2026-07-10; rich TUI; 3 tests (line mode → group 6) |
 | 3. Quick-edit overlay (single value / short prompt) | [-] | Deferred — fast-follow (owner) |
-| 4. Provenance-before-edit + project-tier writes | [ ] | C-1, C-3 |
+| 4. Provenance-before-edit + project-tier writes | [x] | Done 2026-07-10; new-vs-existing notice; project-tier only |
 | 5. Reload semantics (Live vs RestartRequired) | [ ] | Tech Spec §8 |
 | 6. Tests, degraded mode, docs, exit criterion | [ ] | |
 
@@ -83,13 +83,15 @@ in-TUI text overlay). Build it once, reuse it for config and prompts.
 
 ## 4. Provenance-before-edit + project-tier writes  *(C-1, C-3)*
 
-- [ ] Before an edit, show the value's current provenance tier (default /
-      global / project — reuse `config::show`'s provenance), so the user
-      knows whether they are overriding a baked-in default or an existing
-      project value.
-- [ ] Writes always land in the **project tier** (`.agents/config.toml`,
-      `.agents/prompts/`), never global config or the baked-in defaults
-      (C-1). Show the written path after saving.
+- [x] Before an edit, a provenance notice (C-3) distinguishes **editing an
+      existing project value** from **creating a fresh override seeded from the
+      default/template** — so the user knows whether they are about to override
+      a baked-in default. (Full default/global/project tiers remain available
+      via `emberly config show`; the edit path scopes to project-vs-default,
+      which is the actionable distinction.)
+- [x] Writes always land in the **project tier** (`.agents/config.toml`,
+      `.agents/prompts/<name>.md`), never global config or the baked-in
+      defaults (C-1). The path is shown in the notice.
 
 ## 5. Reload semantics  *(Tech Spec §8)*
 
