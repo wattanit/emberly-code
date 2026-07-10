@@ -490,7 +490,21 @@ async fn run() -> anyhow::Result<()> {
     // The frontend drops its command sender on quit, the engine finishes, and
     // its events channel closes. The terminal is restored by the TUI's guard
     // (HC-3) on every exit path, including panics.
-    frontend::run(kind, frontend_ports, session, history, sessions_dir.clone()).await?;
+    // Profile names for the in-app model picker (C-6), sorted for a stable list.
+    let profiles = {
+        let mut names: Vec<String> = resolved.providers.keys().cloned().collect();
+        names.sort();
+        names
+    };
+    frontend::run(
+        kind,
+        frontend_ports,
+        session,
+        history,
+        sessions_dir.clone(),
+        profiles,
+    )
+    .await?;
 
     match engine_task.await {
         Ok(()) => {}

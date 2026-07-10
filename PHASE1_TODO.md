@@ -25,7 +25,7 @@ adapters, config/keys system, engine channels, and TUI sidebar all exist.
 | 3. Profile resolution in the composition root | [x] | Done 2026-07-10; live smoke of all 3 paths |
 | 4. Z.ai profile (baked-in + init + docs) | [x] | Done 2026-07-10; baked-in zai (openai @ paas/v4), grep-gate test, README |
 | 5. In-session switching (`Command::SwitchModel`) | [x] | Done 2026-07-10; engine + factory + `/model`; 5 tests |
-| 6. Sidebar model picker | [ ] | Design §3.1 |
+| 6. Model picker overlay | [x] | Done 2026-07-10; generic Choices overlay; line-mode `/model` too |
 | 7. Tests (offline + live smoke) | [ ] | Tech Spec §14.5, §14.4 |
 | 8. Docs, provenance & exit criterion | [ ] | |
 
@@ -127,15 +127,21 @@ Replace the hardcoded `match kind.as_str()` in
       without switching) and TUI parsing (args, usage, `modelx` non-match,
       sidebar update) — 5 tests, all green.
 
-## 6. Sidebar model picker  *(Design §3.1)*
+## 6. Model picker overlay  *(Design §3.1)*
 
-- [ ] Make the sidebar model line selectable → opens a picker overlay listing
-      the configured `[providers.*]` profiles (reuse the existing overlay
-      machinery in `emberly-tui`). Selecting one issues `SwitchModel`.
-- [ ] The picker is the surface Phase 3's effort picker will reuse — keep it
-      general (a labeled-choice overlay), not model-specific.
-- [ ] Degraded-mode parity: the picker is reachable and operable with no
-      color / ASCII markers (`--plain`).
+- [x] Model picker as a **generic `OverlayContent::Choices`** overlay
+      (`ChoiceKind::Model`) listing the configured profiles with the active
+      one marked; ↑/↓ move, Enter → `SwitchModel` (keeps current model),
+      Esc closes. Reachable via the palette (`model`), `/model` with no args,
+      and `/model <profile>` for a direct switch. Profile names are threaded
+      to the TUI (`App::new` → `tui::run` → `frontend::run` ← `main.rs`).
+- [x] Kept general so Phase 3's effort picker reuses `Choices`/`ChoiceRow`
+      (only the `ChoiceKind` and Enter mapping differ).
+- [x] Degraded-mode parity: line mode has no overlay, but `/model <profile>
+      [model]` switches there too (verified live); the picker overlay renders
+      with ASCII `▶`/`(current)` markers, no color-only meaning.
+- [x] Tests: open-marks-current, navigate+Enter→SwitchModel, no-args-opens,
+      empty-profiles notice, sidebar update on `ModelChanged`.
 
 ## 7. Tests  *(Tech Spec §14.5 offline; §14.4 live smoke)*
 

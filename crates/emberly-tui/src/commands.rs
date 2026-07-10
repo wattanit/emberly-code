@@ -28,6 +28,9 @@ pub enum AppCommand {
     /// The engine gates the auto tiers on active OS confinement and explains
     /// when it refuses (Requirements §6.4).
     CycleMode,
+    /// Open the model/provider picker (C-6). `/model <profile>` switches
+    /// directly; with no argument (or from the palette) it opens the picker.
+    Model,
     /// Cancel the in-flight turn.
     Cancel,
     /// Exit emberly.
@@ -87,6 +90,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: Some("Shift-Tab"),
         desc: "Cycle permission mode (normal / auto-accept edits / auto)",
         cmd: AppCommand::CycleMode,
+    },
+    CommandSpec {
+        name: "model",
+        key: None,
+        desc: "Switch the active provider/model",
+        cmd: AppCommand::Model,
     },
     CommandSpec {
         name: "sidebar",
