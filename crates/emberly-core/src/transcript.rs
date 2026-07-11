@@ -105,8 +105,10 @@ pub enum TranscriptEvent {
 
     /// The result handed back to the model. Records whether the result was
     /// truncated at ingestion and, if so, where the full output lives
-    /// (Requirements §8.1, Tech Spec §5.3). `ok` marks success vs a structured
-    /// failure payload (HC-6).
+    /// (Requirements §8.1, Tech Spec §5.3). `truncated` means the recorded
+    /// `output` is not the full output — whether by salient reduction (FR-2)
+    /// or the size backstop (§8.1); `full_output_ref` has the whole thing.
+    /// `ok` marks success vs a structured failure payload (HC-6).
     ToolResult {
         call_id: ToolCallId,
         ok: bool,

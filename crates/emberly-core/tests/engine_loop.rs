@@ -1830,3 +1830,230 @@ async fn disabled_guardrail_never_halts() {
         .any(|e| matches!(e, UiEvent::LoopHalted { .. })));
     assert_eq!(deltas(&events), "done");
 }
+
+// ── Phase 1 (FR-2): tool-result salient reduction integration tests ──
+
+/// Start a session with a custom `TruncateConfig` and a `FileTranscript` (so
+/// `sidecar()` writes real files we can inspect).
+fn start_with_truncate(
+    scripts: Vec<ScriptedResponse>,
+    root: PathBuf,
+    path: &Path,
+    truncate: TruncateConfig,
+) -> Harness {
+    let sink = match FileTranscript::open(path) {
+        Ok(sink) => sink,
+        Err(error) => panic!("open transcript {}: {error}", path.display()),
+    };
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(scripts)),
+        root,
+        Box::new(sink),
+    );
+    config.truncate = truncate;
+    spawn(config)
+}
+
+/// Extract the tool-result records from a transcript.
+fn tool_results(records: &[emberly_core::TranscriptRecord]) -> Vec<&TranscriptEvent> {
+    records
+        .iter()
+        .map(|r| &r.event)
+        .filter(|e| matches!(e, TranscriptEvent::ToolResult { .. }))
+        .collect()
+}
+
+#[tokio::test]
+async fn glob_reduction_writes_sidecar_with_full_output() {
+    // FR-2: a glob matching >50 paths is reduced in the model-visible content
+    // and the full output is preserved in the sidecar (HC-7).
+    let root = temp_project();
+    for i in 0..60 {
+        let _ = std::fs::write(root.join(format!("file_{i:02}.txt")), "x");
+    }
+    let path = root.join("session.jsonl");
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "glob", r#"{"pattern":"*.txt"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = start_with_truncate(scripts, root.clone(), &path, TruncateConfig::default());
+    h.send(Command::UserInput { text: "list".into() }).await;
+    let _ = h.collect(None).await;
+    drop(h);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let loaded = emberly_core::resume::read_records(&path).unwrap_or_else(|e| panic!("{e}"));
+    let tr = tool_results(&loaded.records);
+    assert_eq!(tr.len(), 1);
+    match tr[0] {
+        TranscriptEvent::ToolResult {
+            output,
+            truncated,
+            full_output_ref,
+            ..
+        } => {
+            // The model-visible content is reduced.
+            assert!(truncated, "should be flagged truncated (reduced)");
+            assert!(output.contains("[reduced:"), "reduction marker present");
+            assert!(output.contains("/view"), "marker offers /view");
+            assert!(!output.contains("file_30.txt"), "middle paths elided");
+
+            // The sidecar holds the complete output.
+            let ref_path = full_output_ref.as_ref().expect("full_output_ref set");
+            let sidecar = std::fs::read_to_string(ref_path).unwrap_or_default();
+            assert!(sidecar.contains("file_00.txt"), "head preserved in sidecar");
+            assert!(sidecar.contains("file_59.txt"), "tail preserved in sidecar");
+            assert!(sidecar.contains("file_30.txt"), "middle preserved in sidecar");
+        }
+        _ => panic!("expected ToolResult"),
+    }
+}
+
+#[tokio::test]
+async fn reduce_false_passes_output_through_unchanged() {
+    // `truncate.reduce = false` disables the reduction layer; only the size
+    // backstop may act (FR-2 toggle).
+    let root = temp_project();
+    for i in 0..60 {
+        let _ = std::fs::write(root.join(format!("file_{i:02}.txt")), "x");
+    }
+    let path = root.join("session.jsonl");
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "glob", r#"{"pattern":"*.txt"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let no_reduce = TruncateConfig {
+        reduce: false,
+        ..TruncateConfig::default()
+    };
+    let mut h = start_with_truncate(scripts, root, &path, no_reduce);
+    h.send(Command::UserInput { text: "list".into() }).await;
+    let _ = h.collect(None).await;
+    drop(h);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let loaded = emberly_core::resume::read_records(&path).unwrap_or_else(|e| panic!("{e}"));
+    let tr = tool_results(&loaded.records);
+    assert_eq!(tr.len(), 1);
+    match tr[0] {
+        TranscriptEvent::ToolResult {
+            output, truncated, ..
+        } => {
+            // 60 paths < 400 max_lines, so no truncation or reduction.
+            assert!(!truncated, "60 paths is under the size backstop");
+            assert!(
+                !output.contains("[reduced:"),
+                "no reduction marker when reduce=false"
+            );
+            assert!(output.contains("file_00.txt"));
+            assert!(output.contains("file_30.txt"));
+            assert!(output.contains("file_59.txt"));
+        }
+        _ => panic!("expected ToolResult"),
+    }
+}
+
+#[tokio::test]
+async fn bash_reduction_collapses_progress_in_context() {
+    // FR-2 bash reducer: a command producing near-identical progress lines is
+    // collapsed in the model-visible content; the sidecar holds the full output.
+    let root = temp_project();
+    let path = root.join("session.jsonl");
+    let cmd = "for i in $(seq 1 100); do echo 'Downloading '$i'%'; done; echo 'Done'";
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "bash", &format!(r#"{{"command":"{cmd}"}}"#)),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = start_with_truncate(scripts, root.clone(), &path, TruncateConfig::default());
+    h.send(Command::UserInput { text: "run".into() }).await;
+    let _ = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    drop(h);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let loaded = emberly_core::resume::read_records(&path).unwrap_or_else(|e| panic!("{e}"));
+    let tr = tool_results(&loaded.records);
+    assert_eq!(tr.len(), 1);
+    match tr[0] {
+        TranscriptEvent::ToolResult {
+            output,
+            truncated,
+            full_output_ref,
+            ..
+        } => {
+            assert!(truncated, "reduction fired");
+            assert!(output.contains("[reduced:"), "reduction marker present");
+            assert!(
+                output.contains("similar lines collapsed"),
+                "progress lines collapsed"
+            );
+            assert!(output.contains("Downloading 1%"), "first of run kept");
+            assert!(output.contains("Done"), "non-progress line kept");
+
+            // The sidecar has the complete output including all 100 lines.
+            let ref_path = full_output_ref.as_ref().expect("full_output_ref set");
+            let sidecar = std::fs::read_to_string(ref_path).unwrap_or_default();
+            assert!(sidecar.contains("Downloading 50%"), "middle preserved in sidecar");
+            assert!(sidecar.matches("Downloading").count() >= 100);
+        }
+        _ => panic!("expected ToolResult"),
+    }
+}
+
+#[tokio::test]
+async fn hc7_transcript_and_sidecar_preserve_full_result() {
+    // HC-7: the transcript record + sidecar together preserve the full result;
+    // nothing rewrites a prior transcript line. A glob of 60 files is reduced
+    // in context, but the sidecar holds every path and the transcript is
+    // append-only (one ToolResult, not rewritten).
+    let root = temp_project();
+    for i in 0..60 {
+        let _ = std::fs::write(root.join(format!("f{i:02}.rs")), "fn main() {}");
+    }
+    let path = root.join("session.jsonl");
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "glob", r#"{"pattern":"*.rs"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = start_with_truncate(scripts, root.clone(), &path, TruncateConfig::default());
+    h.send(Command::UserInput { text: "list".into() }).await;
+    let _ = h.collect(None).await;
+    drop(h);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let loaded = emberly_core::resume::read_records(&path).unwrap_or_else(|e| panic!("{e}"));
+
+    // Exactly one ToolResult — the transcript is append-only, never rewritten.
+    let tr = tool_results(&loaded.records);
+    assert_eq!(tr.len(), 1, "one ToolResult, transcript untouched");
+
+    // The resume view rebuilds from the model-visible (reduced) output, matching
+    // the live session — not the sidecar (HC-7).
+    let view = emberly_core::resume::rebuild_conversation(&loaded.records);
+    let tool_msg = view
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .expect("tool result in view");
+    match tool_msg.content.first() {
+        Some(ContentBlock::ToolResult { content, .. }) => {
+            assert!(
+                content.contains("[reduced:"),
+                "resume rebuilds the reduced view"
+            );
+        }
+        _ => panic!("expected ToolResult content block"),
+    }
+
+    // The sidecar holds the complete, unreduced output.
+    match tr[0] {
+        TranscriptEvent::ToolResult { full_output_ref, .. } => {
+            let ref_path = full_output_ref.as_ref().expect("sidecar ref set");
+            let sidecar = std::fs::read_to_string(ref_path).unwrap_or_default();
+            assert_eq!(
+                sidecar.matches("f").count(),
+                60,
+                "all 60 paths in sidecar"
+            );
+        }
+        _ => panic!("expected ToolResult"),
+    }
+}

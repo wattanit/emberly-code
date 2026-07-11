@@ -43,6 +43,9 @@ pub struct ConfigFile {
     /// `[loop]` guardrail settings (S-5). Threaded to the engine (Tech Spec §7).
     #[serde(default, rename = "loop")]
     pub loop_: LoopConfig,
+    /// `[truncate]` tool-result reduction + size backstop (FR-2, Tech Spec §8).
+    #[serde(default)]
+    pub truncate: TruncateConfigFile,
 }
 
 /// `[ui]` — presentation toggles that shape what the interface shows without
@@ -72,6 +75,23 @@ pub struct LoopConfig {
     pub enabled: Option<bool>,
     pub repeat_window: Option<u32>,
     pub max_no_progress_turns: Option<u32>,
+}
+
+/// `[truncate]` — tool-result reduction and size backstop at ingestion
+/// (FR-2, Requirements §8.1, Tech Spec §5.3/§8). All optional; the engine
+/// applies defaults when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct TruncateConfigFile {
+    /// Whether salient tool-result reduction runs (default `true`).
+    pub reduce: Option<bool>,
+    /// Truncate when output exceeds this many lines.
+    pub max_lines: Option<usize>,
+    /// …or this many bytes.
+    pub max_bytes: Option<usize>,
+    /// Lines of head to keep.
+    pub head_lines: Option<usize>,
+    /// Lines of tail to keep.
+    pub tail_lines: Option<usize>,
 }
 
 /// A `[providers.<name>]` profile: an adapter (wire format) plus the endpoint
@@ -251,6 +271,22 @@ impl ConfigFile {
         if higher.loop_.max_no_progress_turns.is_some() {
             self.loop_.max_no_progress_turns = higher.loop_.max_no_progress_turns;
         }
+        // `[truncate]` (FR-2) merges field-by-field.
+        if higher.truncate.reduce.is_some() {
+            self.truncate.reduce = higher.truncate.reduce;
+        }
+        if higher.truncate.max_lines.is_some() {
+            self.truncate.max_lines = higher.truncate.max_lines;
+        }
+        if higher.truncate.max_bytes.is_some() {
+            self.truncate.max_bytes = higher.truncate.max_bytes;
+        }
+        if higher.truncate.head_lines.is_some() {
+            self.truncate.head_lines = higher.truncate.head_lines;
+        }
+        if higher.truncate.tail_lines.is_some() {
+            self.truncate.tail_lines = higher.truncate.tail_lines;
+        }
         // `[trust]` is deliberately NOT merged — it is read only from the global
         // tier (FR-1); see `global_trust_dirs` and the project-[trust] notice.
     }
@@ -288,6 +324,8 @@ pub struct Resolved {
     pub tool_explanations: bool,
     /// Resolved loop-breaking guardrail tunables (S-5), ready for the engine.
     pub loop_config: emberly_core::LoopConfig,
+    /// Resolved truncation/reduction config (FR-2, §8.1), ready for the engine.
+    pub truncate: emberly_tools::TruncateConfig,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -424,6 +462,24 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         merged.ui.tool_explanations.is_some(),
     );
 
+    // Truncation/reduction (FR-2): record provenance when a user tier sets any
+    // `[truncate]` field (speech about deviations from the baked-in defaults).
+    if field(&project, |c| c.truncate.reduce.is_some())
+        || field(&global, |c| c.truncate.reduce.is_some())
+    {
+        record(
+            &mut provenance,
+            "truncate.reduce",
+            source_of(
+                false,
+                false,
+                field(&project, |c| c.truncate.reduce.is_some()),
+                field(&global, |c| c.truncate.reduce.is_some()),
+            ),
+            true,
+        );
+    }
+
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
     let mut notices = Vec::new();
@@ -472,6 +528,16 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
                     .loop_
                     .max_no_progress_turns
                     .map_or(d.max_no_progress_turns, |v| v as usize),
+            }
+        },
+        truncate: {
+            let d = emberly_tools::TruncateConfig::default();
+            emberly_tools::TruncateConfig {
+                reduce: merged.truncate.reduce.unwrap_or(d.reduce),
+                max_lines: merged.truncate.max_lines.unwrap_or(d.max_lines),
+                max_bytes: merged.truncate.max_bytes.unwrap_or(d.max_bytes),
+                head_lines: merged.truncate.head_lines.unwrap_or(d.head_lines),
+                tail_lines: merged.truncate.tail_lines.unwrap_or(d.tail_lines),
             }
         },
     })

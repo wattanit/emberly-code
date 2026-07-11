@@ -19,8 +19,8 @@ use emberly_providers::{
 };
 use emberly_sandbox::{Decision, Mode, Query, RuleEngine};
 use emberly_tools::{
-    truncate_output, AskUserOutcome, PermissionOutcome, PermissionRequest, Sandbox, ToolCtx,
-    ToolRegistry, TruncateConfig,
+    reduce_output, truncate_output, AskUserOutcome, PermissionOutcome, PermissionRequest, Reduction,
+    Sandbox, ToolCtx, ToolRegistry, TruncateConfig,
 };
 use futures::StreamExt;
 use time::OffsetDateTime;
@@ -1563,11 +1563,24 @@ impl Engine {
         if self.loop_config.enabled {
             self.turn_obs.result_content.push_str(&outcome.content);
         }
-        let truncation = truncate_output(&outcome.content, &self.truncate);
+        // Salient reduction (FR-2) runs before the size backstop (§5.3), gated
+        // on `truncate.reduce`. Both are deterministic, no-model-call transforms.
+        let reduced = if self.truncate.reduce {
+            reduce_output(&call.name, &outcome.content)
+        } else {
+            Reduction {
+                content: outcome.content.clone(),
+                reduced: false,
+                withheld: String::new(),
+            }
+        };
+        let truncation = truncate_output(&reduced.content, &self.truncate);
 
-        // Durable record: the model-visible (possibly truncated) output, plus a
-        // sidecar holding the full output when truncated (Requirements §8.1).
-        let full_output_ref = if truncation.truncated {
+        // Durable record: the model-visible (possibly reduced + truncated)
+        // output, plus a sidecar holding the full output when either layer
+        // withheld content (Requirements §8.1/§8.5, HC-7).
+        let withheld = reduced.reduced || truncation.truncated;
+        let full_output_ref = if withheld {
             self.transcript.sidecar(&call.id, &outcome.content)
         } else {
             None
@@ -1576,7 +1589,7 @@ impl Engine {
             call_id: call.id.clone(),
             ok: outcome.ok,
             output: truncation.content.clone(),
-            truncated: truncation.truncated,
+            truncated: withheld,
             full_output_ref,
         });
 
