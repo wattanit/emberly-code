@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::id::{PermissionId, SessionId, ToolCallId};
-use crate::types::{Mode, PermissionDecision, PermissionRendering, SandboxStatus};
+use crate::types::{Effort, Mode, PermissionDecision, PermissionRendering, SandboxStatus};
 
 /// Current transcript schema version. Present on every record from day one so
 /// a reader can detect and warn on newer schemas rather than crash (Tech Spec
@@ -86,8 +86,15 @@ pub enum TranscriptEvent {
         original_task: bool,
     },
 
-    /// A complete assistant message (post-stream).
-    AssistantMessage { text: String },
+    /// A complete assistant message (post-stream). `reasoning` holds the
+    /// model's thinking trail as a distinct field, never merged into `text`
+    /// (P-10, Tech Spec §4.7); recorded even when the view hides it. Additive —
+    /// older readers warn-skip it, so no `SCHEMA_VERSION` bump.
+    AssistantMessage {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
+    },
 
     /// A tool invocation the model requested.
     ToolCall {
@@ -126,8 +133,45 @@ pub enum TranscriptEvent {
         executed: Option<String>,
     },
 
+    /// The workspace-trust decision for this session's root (FR-1, Tech Spec
+    /// §3.2, §6.7). Written when trust was newly granted at startup; a declined
+    /// root never starts a session, so only `trusted: true` reaches a transcript.
+    /// Additive — older readers warn-skip it, so no `SCHEMA_VERSION` bump.
+    TrustDecision { path: String, trusted: bool },
+
+    /// The loop guardrail halted a non-progressing loop (S-5, Tech Spec §3.2,
+    /// §7): the reason and the user's chosen resolution (`resume`/`stop`/`steer`,
+    /// `None` until resolved). Additive — older readers warn-skip it, no
+    /// `SCHEMA_VERSION` bump.
+    LoopHalt {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution: Option<String>,
+    },
+
+    /// The model asked the user a question and it was resolved (T-8, Tech Spec
+    /// §3.2): the question, any options offered, and the user's answer — or
+    /// `None` when they declined. Additive — older readers warn-skip it, so no
+    /// `SCHEMA_VERSION` bump (like `ModelSwitch`/`EffortChange`).
+    AskUser {
+        question: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<String>,
+    },
+
     /// The auto-accept mode changed (Requirements §6.4).
     ModeChange { mode: Mode },
+
+    /// The active provider profile / model was switched in-session (C-6). An
+    /// audit record (HC-7); the conversation view is unaffected.
+    ModelSwitch { provider: String, model: String },
+
+    /// The reasoning-effort level was changed in-session (C-6/P-9). An audit
+    /// record (HC-7); the conversation view is unaffected. Additive — older
+    /// readers warn-skip it, so no `SCHEMA_VERSION` bump (like `ModelSwitch`).
+    EffortChange { effort: Effort },
 
     /// A `/compact` occurred: the summary text and the range of view turns it
     /// replaced (Requirements §8.3). The JSONL log itself is untouched.

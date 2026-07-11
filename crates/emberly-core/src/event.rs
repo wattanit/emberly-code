@@ -9,8 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::{PermissionId, SessionId, ToolCallId};
-use crate::types::{Mode, PermissionRendering, SandboxStatus, TokenUsage};
+use crate::id::{AskId, PermissionId, SessionId, ToolCallId};
+use crate::types::{Effort, Mode, PermissionRendering, SandboxStatus, TokenUsage};
 
 /// An event emitted by the engine for a frontend to render.
 ///
@@ -23,6 +23,10 @@ use crate::types::{Mode, PermissionRendering, SandboxStatus, TokenUsage};
 pub enum UiEvent {
     /// A chunk of streaming assistant text. High-frequency.
     AssistantDelta { text: String },
+    /// A chunk of the model's reasoning/thinking, distinct from the answer
+    /// (P-10, Design §4.4). The frontend streams it into the collapsed thinking
+    /// trail; it is never rendered as the answer. High-frequency.
+    ReasoningDelta { text: String },
     /// The assistant's turn finished streaming (no more deltas for this turn).
     AssistantDone,
 
@@ -37,6 +41,10 @@ pub enum UiEvent {
         tool: String,
         /// One-line human summary (e.g. `read src/main.rs`).
         summary: String,
+        /// The model's optional caption for a non-obvious call (T-9, §5.4,
+        /// Design §4.5). `None` when the model gave none — the UI shows no
+        /// placeholder.
+        explanation: Option<String>,
     },
     /// A tool finished. `ok` distinguishes a success payload from a structured
     /// failure payload — both are normal data to the model (HC-6), never a
@@ -59,6 +67,25 @@ pub enum UiEvent {
         rendering: PermissionRendering,
     },
 
+    /// The model is asking the user a question and the loop is blocked until
+    /// they answer (T-8, Tech Spec §5.2, Design §5.1). The frontend renders the
+    /// question (and `options` as a selectable list when non-empty) with a
+    /// free-text answer always available, then replies with an
+    /// [`AskUserAnswer`](crate::command::Command::AskUserAnswer) carrying the
+    /// same `id`. Calm styling, never the safety band; no unsafe default.
+    AskUserRequest {
+        id: AskId,
+        question: String,
+        options: Vec<String>,
+    },
+
+    /// The loop-breaking guardrail halted a non-progressing loop (S-5, Tech Spec
+    /// §7, Design §8.5). A **harness-world** moment — rendered in the harness's
+    /// own out-of-band voice, not as model output, and distinct from the question
+    /// prompt. The frontend offers resume / stop / steer and replies with
+    /// [`Command::ResolveLoop`](crate::command::Command::ResolveLoop).
+    LoopHalted { reason: String },
+
     /// Context-window usage against the budget (Requirements §8.4). Always
     /// visible in the UI; invisible exhaustion is a defect.
     ContextUsage { pct: u8, tokens: u64 },
@@ -78,6 +105,26 @@ pub enum UiEvent {
 
     /// The auto-accept mode changed (Requirements §6.4). Emitted from Phase 2.
     ModeChanged { mode: Mode },
+
+    /// The active provider profile / model changed in-session (C-6, Design
+    /// §3.1). The sidebar updates; the switch is also announced via a
+    /// [`Notice`](UiEvent::Notice) — never silent.
+    ModelChanged { provider: String, model: String },
+
+    /// The configured provider profiles changed after a `/config` reload (C-5),
+    /// so the frontend refreshes its model picker.
+    ProfilesChanged { profiles: Vec<String> },
+
+    /// The active reasoning-effort level and the levels this model offers
+    /// (C-6/P-9, Design §3.1). Emitted at startup, on a set, and on a model
+    /// switch, so the sidebar shows the current level and the picker offers the
+    /// right options. `effort` is `None` and `available` empty when the model
+    /// has no effort control (the sidebar hides the line, the picker declines).
+    /// A user-driven change is also announced via a [`Notice`] — never silent.
+    EffortChanged {
+        effort: Option<Effort>,
+        available: Vec<Effort>,
+    },
 
     /// A plain-language, harness-voice notice for the timeline (Design §6.1):
     /// a persisted permission grant's written line (§6.6), a refused auto-mode

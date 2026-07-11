@@ -28,6 +28,19 @@ pub enum AppCommand {
     /// The engine gates the auto tiers on active OS confinement and explains
     /// when it refuses (Requirements §6.4).
     CycleMode,
+    /// Open the model/provider picker (C-6). `/model <profile>` switches
+    /// directly; with no argument (or from the palette) it opens the picker.
+    Model,
+    /// Open the reasoning-effort picker (P-9). `/effort <level>` sets it
+    /// directly; with no argument (or from the palette) it opens the picker.
+    Effort,
+    /// Edit the project `.agents/config.toml` in `$EDITOR` (C-5).
+    Config,
+    /// Edit a prompt file in `$EDITOR` (C-5). `/prompt [system|compact]`.
+    Prompt,
+    /// Re-read config + prompts from disk and apply them (C-5) — useful after
+    /// editing a file outside emberly.
+    Reload,
     /// Cancel the in-flight turn.
     Cancel,
     /// Exit emberly.
@@ -87,6 +100,36 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: Some("Shift-Tab"),
         desc: "Cycle permission mode (normal / auto-accept edits / auto)",
         cmd: AppCommand::CycleMode,
+    },
+    CommandSpec {
+        name: "model",
+        key: None,
+        desc: "Switch the active provider/model",
+        cmd: AppCommand::Model,
+    },
+    CommandSpec {
+        name: "effort",
+        key: None,
+        desc: "Set the reasoning-effort level (/effort low|medium|high|max)",
+        cmd: AppCommand::Effort,
+    },
+    CommandSpec {
+        name: "config",
+        key: None,
+        desc: "Edit .agents/config.toml in $EDITOR",
+        cmd: AppCommand::Config,
+    },
+    CommandSpec {
+        name: "prompt",
+        key: None,
+        desc: "Edit a prompt file in $EDITOR (/prompt system|compact)",
+        cmd: AppCommand::Prompt,
+    },
+    CommandSpec {
+        name: "reload",
+        key: None,
+        desc: "Re-read config & prompts from disk and apply them",
+        cmd: AppCommand::Reload,
     },
     CommandSpec {
         name: "sidebar",

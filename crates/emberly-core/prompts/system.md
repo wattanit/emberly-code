@@ -21,6 +21,14 @@ smallest footprint that does the job well.
   
 # Using tools
  
+- Prefer the first-party tools over their shell equivalents: use
+  built-in `grep` not bash `grep`, built-in `glob` not bash `find`, and 
+  build-in `read_file` not bash`cat`/`sed`.
+  These run without a permission prompt inside the project root; a bare
+  `bash` invocation for the same job asks the user every time.
+- `read_file` takes optional `start_line`/`end_line` (1-based, inclusive)
+  to read a slice of a file with line numbers — use it instead of
+  `sed -n 'M,Np'`, which always prompts.
 - Edit with `edit_file` using exact strings copied from what you read,
   including whitespace and indentation. If an edit fails, re-read the
   file before retrying — do not retry blind.

@@ -21,6 +21,55 @@ impl std::fmt::Display for ProviderId {
     }
 }
 
+/// A normalized reasoning-effort level (Requirements P-9, Tech Spec §4.6).
+/// Ordered low→max so a UI presents the levels in order. Each adapter maps
+/// this to its provider's native control (a thinking-budget token count, a
+/// `reasoning_effort` field) or drops it — a model without such a control
+/// ignores the setting, which is never an error (P-9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+impl Effort {
+    /// The levels in ascending order — for a UI that offers "all supported".
+    pub const ALL: [Effort; 4] = [Effort::Low, Effort::Medium, Effort::High, Effort::Max];
+
+    /// A stable lowercase token for logs, the transcript, and CLI parsing.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::Max => "max",
+        }
+    }
+
+    /// Parse a level from a lowercase token (CLI/`/effort` arg). `None` for an
+    /// unrecognized value — the caller turns that into a calm notice.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Effort> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(Effort::Low),
+            "medium" => Some(Effort::Medium),
+            "high" => Some(Effort::High),
+            "max" => Some(Effort::Max),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Effort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// What the engine needs to know about the active model: its window (for the
 /// context budget, Requirements §8.4) and optional pricing (for the cost
 /// estimate, P-6). Populated from provider defaults and config.
@@ -35,6 +84,15 @@ pub struct ModelInfo {
     /// Per-model pricing, when known. Cost figures are always labeled "est."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<Pricing>,
+    /// The reasoning-effort levels this model exposes, ascending (P-9,
+    /// Tech Spec §4.6). Empty ⇒ the model has no effort control and the UI
+    /// hides the picker. `default`s to empty for older `ModelInfo` values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effort_levels: Vec<Effort>,
+    /// The effort level to use when the user has not chosen one. `None` ⇒ send
+    /// no effort (the provider's own default). `default`s to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<Effort>,
 }
 
 /// Per-model pricing in USD per million tokens (Tech Spec §4.4). Sourced from
@@ -77,4 +135,69 @@ impl TokenUsage {
 pub struct TokenEstimate {
     pub tokens: u64,
     pub approximate: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn to_json<T: Serialize>(value: &T) -> String {
+        match serde_json::to_string(value) {
+            Ok(s) => s,
+            Err(e) => panic!("serialize: {e}"),
+        }
+    }
+
+    fn from_json<T: for<'de> Deserialize<'de>>(json: &str) -> T {
+        match serde_json::from_str(json) {
+            Ok(v) => v,
+            Err(e) => panic!("deserialize: {e}"),
+        }
+    }
+
+    #[test]
+    fn effort_round_trips_through_serde_snake_case() {
+        for level in Effort::ALL {
+            let json = to_json(&level);
+            assert_eq!(json, format!("\"{}\"", level.as_str()));
+            assert_eq!(from_json::<Effort>(&json), level);
+        }
+    }
+
+    #[test]
+    fn effort_parses_case_insensitively_and_rejects_unknown() {
+        assert_eq!(Effort::parse("HIGH"), Some(Effort::High));
+        assert_eq!(Effort::parse("  max "), Some(Effort::Max));
+        assert_eq!(Effort::parse("turbo"), None);
+    }
+
+    #[test]
+    fn effort_is_ordered_low_to_max() {
+        assert!(Effort::Low < Effort::Medium);
+        assert!(Effort::Medium < Effort::High);
+        assert!(Effort::High < Effort::Max);
+    }
+
+    #[test]
+    fn model_info_without_effort_fields_deserializes_to_empty() {
+        // A ModelInfo serialized before Phase 3 has no effort keys.
+        let json = r#"{"model":"m","context_window":1000,"max_output_tokens":100}"#;
+        let info: ModelInfo = from_json(json);
+        assert!(info.effort_levels.is_empty());
+        assert_eq!(info.default_effort, None);
+    }
+
+    #[test]
+    fn model_info_effort_fields_round_trip() {
+        let info = ModelInfo {
+            model: "m".into(),
+            context_window: 1000,
+            max_output_tokens: 100,
+            pricing: None,
+            effort_levels: vec![Effort::Low, Effort::High],
+            default_effort: Some(Effort::Low),
+        };
+        let json = to_json(&info);
+        assert_eq!(from_json::<ModelInfo>(&json), info);
+    }
 }

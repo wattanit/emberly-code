@@ -13,12 +13,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use emberly_core::{
-    channel, CaptureSink, Command, Engine, EngineConfig, FileTranscript, Mode, PermissionDecision,
-    RetryPolicy, RuleEngine, RuleSource, SandboxStatus, SessionId, TranscriptEvent, TranscriptSink,
-    UiEvent,
+    channel, AskAnswer, CaptureSink, Command, Engine, EngineConfig, FileTranscript, LoopConfig,
+    LoopResolution, Mode, PermissionDecision, RetryPolicy, RuleEngine, RuleSource, SandboxStatus,
+    SessionId, TranscriptEvent, TranscriptSink, UiEvent,
 };
 use emberly_providers::{
-    ContentBlock, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
+    ContentBlock, Effort, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
     ScriptOutcome, ScriptedResponse, StopReason, StreamEvent, TokenUsage,
 };
 use emberly_tools::{default_registry, TruncateConfig};
@@ -55,6 +55,16 @@ fn make_config(
         project_root: root,
         model: "fake-1".into(),
         system: None,
+        // Off by default here so existing tests see byte-identical requests;
+        // the T-9 tests flip this field on the returned config explicitly.
+        tool_explanations: false,
+        trust_granted: false,
+        // Guardrail off by default so existing multi-turn tests are unaffected;
+        // the S-5 tests enable it explicitly on the returned config.
+        loop_config: LoopConfig {
+            enabled: false,
+            ..LoopConfig::default()
+        },
         truncate: TruncateConfig::default(),
         // Fast retries so retry tests don't wait on real backoff.
         retry: RetryPolicy {
@@ -80,6 +90,8 @@ fn make_config(
         initial_conversation: Vec::new(),
         resuming: false,
         summary_prompt: None,
+        provider_factory: None,
+        config_reloader: None,
     }
 }
 
@@ -115,8 +127,8 @@ fn start_with_file_transcript(
 
 fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
-    let (engine, asks_rx) = Engine::new(config, engine_ports.events_tx);
-    tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx));
+    let (engine, asks_rx, user_asks_rx) = Engine::new(config, engine_ports.events_tx);
+    tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx, user_asks_rx));
     Harness {
         commands_tx: frontend.commands_tx,
         events_rx: frontend.events_rx,
@@ -286,7 +298,7 @@ async fn transcript_records_the_durable_session() {
     // The closing assistant message is stored complete, not as deltas.
     assert!(events
         .iter()
-        .any(|e| matches!(e, TranscriptEvent::AssistantMessage { text } if text == "done")));
+        .any(|e| matches!(e, TranscriptEvent::AssistantMessage { text, .. } if text == "done")));
 
     // Closing the command channel ends the session cleanly.
     drop(h);
@@ -540,6 +552,8 @@ async fn cost_and_context_use_authoritative_usage() {
             input_per_mtok: 3.0,
             output_per_mtok: 15.0,
         }),
+        effort_levels: Vec::new(),
+        default_effort: None,
     };
     let response = ScriptedResponse {
         events: vec![
@@ -593,6 +607,8 @@ async fn usage_chunk_after_done_still_counts() {
             input_per_mtok: 3.0,
             output_per_mtok: 15.0,
         }),
+        effort_levels: Vec::new(),
+        default_effort: None,
     };
     // `drop_after` appends no terminal event, so this is exactly the wire
     // order: content delta → finish_reason (Done) → usage chunk → EOF.
@@ -936,5 +952,881 @@ async fn allow_for_session_covers_the_next_identical_command() {
         1,
         "only the first `make build` prompts; the session grant covers the second"
     );
+    assert_eq!(deltas(&events), "done");
+}
+
+/// A fake [`ProviderFactory`](emberly_core::ProviderFactory): every profile
+/// except `"unknown"` builds successfully (C-6 switch tests).
+struct FakeFactory;
+
+impl emberly_core::ProviderFactory for FakeFactory {
+    fn build(&self, profile: &str, model: &str) -> Result<emberly_core::ProviderChoice, String> {
+        if profile == "unknown" {
+            return Err("unknown provider profile 'unknown'".to_string());
+        }
+        Ok(emberly_core::ProviderChoice {
+            provider: Arc::new(FakeProvider::new(Vec::new())),
+            profile: profile.to_string(),
+            model: model.to_string(),
+        })
+    }
+
+    fn profiles(&self) -> Vec<String> {
+        vec!["zai".to_string()]
+    }
+}
+
+/// `SwitchModel` swaps the active provider/model, emits `ModelChanged` (never
+/// silent — a `Notice` too), and records a `ModelSwitch` audit event (C-6).
+#[tokio::test]
+async fn switch_model_swaps_emits_and_records() {
+    let sink = CaptureSink::new();
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        temp_project(),
+        Box::new(sink.clone()),
+    );
+    config.provider_factory = Some(Arc::new(FakeFactory));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await; // drain session_start / sandbox events
+
+    h.send(Command::SwitchModel {
+        profile: "zai".into(),
+        model: Some("glm-4.6".into()),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ModelChanged { provider, model } if provider == "zai" && model == "glm-4.6")),
+        "a ModelChanged is emitted"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message } if message.contains("switched to"))),
+        "the switch is announced, never silent"
+    );
+    assert!(
+        sink.records().iter().any(|r| matches!(&r.event,
+            TranscriptEvent::ModelSwitch { provider, model } if provider == "zai" && model == "glm-4.6")),
+        "a ModelSwitch audit record is written (HC-7)"
+    );
+}
+
+/// An unknown profile is a harness-world error; the current model stays active.
+#[tokio::test]
+async fn switch_model_unknown_profile_errors_without_switching() {
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        temp_project(),
+        EngineConfig::no_transcript(),
+    );
+    config.provider_factory = Some(Arc::new(FakeFactory));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await;
+
+    h.send(Command::SwitchModel {
+        profile: "unknown".into(),
+        model: None,
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::HarnessError { .. })),
+        "unknown profile surfaces a harness error"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ModelChanged { .. })),
+        "no ModelChanged on a failed switch"
+    );
+}
+
+/// A fake [`ConfigReloader`](emberly_core::ConfigReloader): reports a changed
+/// system prompt, a new profile set, and a restart-only change (C-5).
+struct FakeReloader;
+
+impl emberly_core::ConfigReloader for FakeReloader {
+    fn reload(&self) -> Result<emberly_core::ReloadedConfig, String> {
+        Ok(emberly_core::ReloadedConfig {
+            system: Some("new system prompt".to_string()),
+            summary_prompt: None,
+            provider_factory: Arc::new(FakeFactory),
+            profiles: vec!["new".to_string(), "zai".to_string()],
+            restart_notes: vec!["sandbox.require changed — restart to apply".to_string()],
+        })
+    }
+}
+
+/// `ReloadConfig` applies the live pieces and reports what changed + what needs
+/// a restart; a changed profile set emits `ProfilesChanged` for the picker.
+#[tokio::test]
+async fn reload_config_applies_and_reports() {
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        temp_project(),
+        EngineConfig::no_transcript(),
+    );
+    config.config_reloader = Some(Arc::new(FakeReloader));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await;
+
+    h.send(Command::ReloadConfig).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ProfilesChanged { profiles }
+                if profiles == &vec!["new".to_string(), "zai".to_string()])),
+        "the picker's profile set is refreshed"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message }
+            if message.contains("reloaded")
+                && message.contains("system prompt")
+                && message.contains("restart"))),
+        "the notice reports live changes and the restart-only one"
+    );
+}
+
+/// Without a reloader (offline placeholder), `ReloadConfig` is a calm notice.
+#[tokio::test]
+async fn reload_config_without_reloader_is_a_notice() {
+    let mut h = spawn(make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        temp_project(),
+        EngineConfig::no_transcript(),
+    ));
+    let _ = h.collect(None).await;
+
+    h.send(Command::ReloadConfig).await;
+    let events = h.collect(None).await;
+
+    assert!(events.iter().any(|e| matches!(e,
+        UiEvent::Notice { message } if message.contains("not available"))));
+}
+
+/// A factory whose built provider declares a different default effort, so a
+/// `SwitchModel` re-seeds the session effort to the new model's default (P-9).
+struct ReseedFactory;
+
+impl emberly_core::ProviderFactory for ReseedFactory {
+    fn build(&self, profile: &str, model: &str) -> Result<emberly_core::ProviderChoice, String> {
+        let info = ModelInfo {
+            model: model.to_string(),
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+            pricing: None,
+            effort_levels: Effort::ALL.to_vec(),
+            default_effort: Some(Effort::High),
+        };
+        Ok(emberly_core::ProviderChoice {
+            provider: Arc::new(FakeProvider::new(Vec::new()).with_model_info(info)),
+            profile: profile.to_string(),
+            model: model.to_string(),
+        })
+    }
+
+    fn profiles(&self) -> Vec<String> {
+        vec!["other".to_string()]
+    }
+}
+
+/// `SetEffort` threads the level into the next turn's request (P-9), announces
+/// the change (never silent), and records an `EffortChange` audit event (HC-7).
+#[tokio::test]
+async fn effort_threads_into_request_and_is_announced() {
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::text("one"),
+        ScriptedResponse::text("two"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let sink = CaptureSink::new();
+    let config = make_config(provider, temp_project(), Box::new(sink.clone()));
+    let mut h = spawn(config);
+
+    // First turn carries the model's default effort (fake ⇒ Medium).
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+    assert_eq!(fake.last_effort(), Some(Effort::Medium), "seeded default");
+
+    // Switch effort at idle: announced via EffortChanged + a Notice.
+    h.send(Command::SetEffort {
+        effort: Effort::High,
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::EffortChanged { effort: Some(l), .. } if *l == Effort::High)),
+        "EffortChanged is emitted"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message } if message.contains("effort"))),
+        "the change is announced, never silent"
+    );
+
+    // The next turn carries the new effort.
+    h.send(Command::UserInput {
+        text: "again".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+    assert_eq!(
+        fake.last_effort(),
+        Some(Effort::High),
+        "threaded into request"
+    );
+
+    assert!(
+        sink.records().iter().any(|r| matches!(&r.event,
+            TranscriptEvent::EffortChange { effort } if *effort == Effort::High)),
+        "an EffortChange audit record is written (HC-7)"
+    );
+}
+
+/// A model switch re-seeds the session effort to the new model's default and
+/// announces it via `EffortChanged` (P-9).
+#[tokio::test]
+async fn switch_model_reseeds_effort_to_new_default() {
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())), // default effort Medium
+        temp_project(),
+        EngineConfig::no_transcript(),
+    );
+    config.provider_factory = Some(Arc::new(ReseedFactory));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await; // drain startup events
+
+    h.send(Command::SwitchModel {
+        profile: "other".into(),
+        model: Some("m2".into()),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::EffortChanged { effort: Some(l), .. } if *l == Effort::High)),
+        "the switch re-seeds effort to the new model's default (Medium → High)"
+    );
+}
+
+/// Reasoning arrives as a distinct `ReasoningDelta` UiEvent and is recorded in
+/// the transcript as a distinct field — never merged into the answer (P-10).
+#[tokio::test]
+async fn reasoning_streams_distinctly_and_records_a_separate_field() {
+    let response = ScriptedResponse {
+        events: vec![
+            StreamEvent::ReasoningDelta {
+                text: "thinking…".into(),
+            },
+            StreamEvent::ReasoningSignature {
+                signature: "sig".into(),
+                redacted: false,
+            },
+            StreamEvent::TextDelta {
+                text: "the answer".into(),
+            },
+        ],
+        outcome: ScriptOutcome::Done(StopReason::EndTurn),
+    };
+    let (mut h, sink) = start_capturing(vec![response], temp_project());
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let events = h.collect(None).await;
+
+    // The reasoning surfaces as its own event, distinct from the answer deltas.
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ReasoningDelta { text } if text == "thinking…")),
+        "a ReasoningDelta UiEvent is emitted"
+    );
+    assert_eq!(deltas(&events), "the answer", "answer excludes reasoning");
+
+    // The transcript records reasoning as a distinct field (recorded regardless
+    // of any view choice — hidden is a view, not a discard).
+    assert!(
+        sink.records().iter().any(|r| matches!(&r.event,
+            TranscriptEvent::AssistantMessage { text, reasoning }
+                if text == "the answer" && reasoning.as_deref() == Some("thinking…"))),
+        "AssistantMessage carries reasoning distinct from text"
+    );
+}
+
+/// A turn with no reasoning leaves the transcript `reasoning` field `None`.
+#[tokio::test]
+async fn turn_without_reasoning_records_no_reasoning() {
+    let (mut h, sink) = start_capturing(vec![ScriptedResponse::text("plain")], temp_project());
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+    assert!(
+        sink.records().iter().any(|r| matches!(&r.event,
+            TranscriptEvent::AssistantMessage { text, reasoning }
+                if text == "plain" && reasoning.is_none())),
+        "no reasoning ⇒ reasoning field is None"
+    );
+}
+
+/// End-to-end (P-9 + P-10): with an effort set, a turn that emits reasoning
+/// sends the effort on the wire, streams the reasoning distinctly, and records
+/// it as a separate transcript field — the Phase 3 exit criterion in one turn.
+#[tokio::test]
+async fn effort_and_reasoning_round_trip_in_one_turn() {
+    let reasoning_turn = ScriptedResponse {
+        events: vec![
+            StreamEvent::ReasoningDelta {
+                text: "weighing options".into(),
+            },
+            StreamEvent::ReasoningSignature {
+                signature: "sig".into(),
+                redacted: false,
+            },
+            StreamEvent::TextDelta {
+                text: "final answer".into(),
+            },
+        ],
+        outcome: ScriptOutcome::Done(StopReason::EndTurn),
+    };
+    let fake = Arc::new(FakeProvider::new(vec![reasoning_turn]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let sink = CaptureSink::new();
+    let config = make_config(provider, temp_project(), Box::new(sink.clone()));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await; // startup events (incl. initial EffortChanged)
+
+    h.send(Command::SetEffort {
+        effort: Effort::High,
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    h.send(Command::UserInput {
+        text: "decide".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // P-9: the effort reached the wire.
+    assert_eq!(
+        fake.last_effort(),
+        Some(Effort::High),
+        "effort on the request"
+    );
+    // P-10: reasoning streamed distinctly from the answer.
+    assert!(events.iter().any(|e| matches!(e,
+        UiEvent::ReasoningDelta { text } if text == "weighing options")));
+    assert_eq!(deltas(&events), "final answer");
+    // P-10 + HC-7: recorded as a distinct transcript field.
+    assert!(sink.records().iter().any(|r| matches!(&r.event,
+        TranscriptEvent::AssistantMessage { text, reasoning }
+            if text == "final answer" && reasoning.as_deref() == Some("weighing options"))));
+}
+
+/// Setting effort on a model with no reasoning control is a calm no-op notice,
+/// never an error and never an announced change (P-9).
+#[tokio::test]
+async fn set_effort_on_a_model_without_a_control_declines_calmly() {
+    // A fake with no declared effort levels.
+    let info = ModelInfo {
+        model: "plain".into(),
+        context_window: 100,
+        max_output_tokens: 100,
+        pricing: None,
+        effort_levels: Vec::new(),
+        default_effort: None,
+    };
+    let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(Vec::new()).with_model_info(info));
+    let sink = CaptureSink::new();
+    let config = make_config(provider, temp_project(), Box::new(sink.clone()));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await;
+
+    h.send(Command::SetEffort {
+        effort: Effort::High,
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::Notice { message } if message.contains("no reasoning-effort control"))),
+        "declined with a calm notice"
+    );
+    // No transcript EffortChange is written.
+    assert!(
+        !sink
+            .records()
+            .iter()
+            .any(|r| matches!(&r.event, TranscriptEvent::EffortChange { .. })),
+        "no audit record for a declined change"
+    );
+}
+
+// --- T-9: tool-call explanation (Tech Spec §5.4) ------------------------------
+
+/// Build a harness from a retained `FakeProvider` handle with the T-9 toggle
+/// set, so a test can drive a turn and then inspect the request the engine sent.
+fn spawn_keeping_provider(
+    fake: Arc<FakeProvider>,
+    root: PathBuf,
+    tool_explanations: bool,
+) -> Harness {
+    let mut config = make_config(fake, root, EngineConfig::no_transcript());
+    config.tool_explanations = tool_explanations;
+    spawn(config)
+}
+
+#[tokio::test]
+async fn explanations_on_inject_schema_property_and_prompt_instruction() {
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("hi")]));
+    let mut h = spawn_keeping_provider(fake.clone(), temp_project(), true);
+    h.send(Command::UserInput {
+        text: "hello".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = match fake.last_request() {
+        Some(r) => r,
+        None => panic!("no request captured"),
+    };
+    // Every advertised tool gained the optional `explanation` property.
+    assert!(!req.tools.is_empty(), "built-ins are advertised");
+    assert!(
+        req.tools.iter().all(|t| t
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.get("explanation"))
+            .is_some()),
+        "explanation injected into every tool schema"
+    );
+    // The instruction is appended to the outgoing system prompt.
+    let system = req.system.unwrap_or_default();
+    assert!(
+        system.contains("Tool-call explanations"),
+        "prompt instructs the model to explain"
+    );
+}
+
+#[tokio::test]
+async fn explanations_off_omit_property_and_instruction() {
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("hi")]));
+    let mut h = spawn_keeping_provider(fake.clone(), temp_project(), false);
+    h.send(Command::UserInput {
+        text: "hello".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = match fake.last_request() {
+        Some(r) => r,
+        None => panic!("no request captured"),
+    };
+    assert!(
+        req.tools.iter().all(|t| t
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.get("explanation"))
+            .is_none()),
+        "no explanation property when the feature is off — no tokens spent"
+    );
+    // The test harness starts from `system: None`, so off → still no system.
+    assert!(
+        req.system.unwrap_or_default().is_empty(),
+        "no instruction appended when off"
+    );
+}
+
+#[tokio::test]
+async fn tool_started_surfaces_the_models_explanation() {
+    let root = temp_project();
+    // A non-obvious call the model captioned, then an obvious one it did not.
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "read_file",
+            r#"{"path":"a.txt","explanation":"peek at the config"}"#,
+        ),
+        ScriptedResponse::tool_call("c2", "read_file", r#"{"path":"b.txt"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = start(scripts, root);
+    h.send(Command::UserInput {
+        text: "look".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    let explanations: Vec<Option<String>> = events
+        .iter()
+        .filter_map(|e| match e {
+            UiEvent::ToolStarted { explanation, .. } => Some(explanation.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        explanations,
+        vec![Some("peek at the config".to_string()), None],
+        "captioned call carries the explanation; the obvious one carries none"
+    );
+}
+
+// --- T-8: ask_user round trip (Tech Spec §5.2) --------------------------------
+
+/// Drive a turn to completion, answering the first `AskUserRequest` with
+/// `answer`. Returns the collected events (the caller asserts on them and on
+/// the transcript).
+async fn drive_answering_ask(h: &mut Harness, answer: AskAnswer) -> Vec<UiEvent> {
+    let mut events = Vec::new();
+    let mut answered: Option<AskAnswer> = Some(answer);
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(500), h.events_rx.recv()).await
+    {
+        if let UiEvent::AskUserRequest { id, .. } = &event {
+            if let Some(answer) = answered.take() {
+                h.send(Command::AskUserAnswer { id: *id, answer }).await;
+            }
+        }
+        events.push(event);
+    }
+    events
+}
+
+#[tokio::test]
+async fn ask_user_blocks_then_resumes_with_the_answer() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "ask_user",
+            r#"{"question":"which environment?","options":["dev","prod"]}"#,
+        ),
+        ScriptedResponse::text("deploying to dev"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, root);
+    h.send(Command::UserInput {
+        text: "deploy".into(),
+    })
+    .await;
+    let events = drive_answering_ask(&mut h, AskAnswer::Answered("dev".into())).await;
+
+    assert!(events.iter().any(|e| matches!(
+        e,
+        UiEvent::AskUserRequest { question, options, .. }
+            if question == "which environment?"
+                && options == &["dev".to_string(), "prod".to_string()]
+    )));
+    assert_eq!(deltas(&events), "deploying to dev");
+    assert!(
+        sink.records().iter().any(|r| matches!(
+            &r.event,
+            TranscriptEvent::ToolResult { output, ok, .. }
+                if *ok && output.contains("The user answered: dev")
+        )),
+        "answer returned to the model as tool-result data"
+    );
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::AskUser { question, answer: Some(a), .. }
+            if question == "which environment?" && a == "dev"
+    )));
+}
+
+#[tokio::test]
+async fn ask_user_dismissed_returns_a_structured_decline() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "ask_user", r#"{"question":"proceed?"}"#),
+        ScriptedResponse::text("stopping, as you didn't say"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, root);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_answering_ask(&mut h, AskAnswer::Declined).await;
+
+    assert_eq!(deltas(&events), "stopping, as you didn't say");
+    assert!(
+        sink.records().iter().any(|r| matches!(
+            &r.event,
+            TranscriptEvent::ToolResult { output, ok, .. }
+                if *ok && output.contains("declined to answer")
+        )),
+        "decline returned to the model as data"
+    );
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::AskUser { answer: None, question, .. } if question == "proceed?"
+    )));
+}
+
+/// The plan's combined "Done when" in one offline session (Tech Spec §14.5):
+/// with explanations on, a captioned call surfaces its explanation, an
+/// `ask_user` call blocks and resumes with the answer, and the request the
+/// engine sent carried both the schema property and the prompt instruction.
+#[tokio::test]
+async fn explanation_and_ask_user_together() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "read_file",
+            r#"{"path":"cfg.txt","explanation":"peek at the config"}"#,
+        ),
+        ScriptedResponse::tool_call(
+            "c2",
+            "ask_user",
+            r#"{"question":"continue?","options":["yes","no"]}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let fake = Arc::new(FakeProvider::new(scripts));
+    let mut h = spawn_keeping_provider(fake.clone(), root, true);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_answering_ask(&mut h, AskAnswer::Answered("yes".into())).await;
+
+    // T-9: the captioned call surfaced its explanation.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        UiEvent::ToolStarted { explanation: Some(x), .. } if x == "peek at the config"
+    )));
+    // T-8: the question was asked and the loop resumed with the answer.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::AskUserRequest { .. })));
+    assert_eq!(deltas(&events), "done");
+
+    // T-9: the request advertised the schema property and the instruction.
+    let req = match fake.last_request() {
+        Some(r) => r,
+        None => panic!("no request captured"),
+    };
+    assert!(req.tools.iter().all(|t| t
+        .input_schema
+        .get("properties")
+        .and_then(|p| p.get("explanation"))
+        .is_some()));
+    assert!(req
+        .system
+        .unwrap_or_default()
+        .contains("Tool-call explanations"));
+}
+
+// --- FR-1: trust decision recorded at session start ---------------------------
+
+#[tokio::test]
+async fn newly_granted_trust_is_recorded_once() {
+    let root = temp_project();
+    let sink = CaptureSink::new();
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(vec![ScriptedResponse::text("hi")])),
+        root,
+        Box::new(sink.clone()),
+    );
+    config.trust_granted = true;
+    let mut h = spawn(config);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let _ = h.collect(None).await;
+
+    let trust_records = sink
+        .records()
+        .iter()
+        .filter(|r| {
+            matches!(
+                &r.event,
+                TranscriptEvent::TrustDecision { trusted: true, .. }
+            )
+        })
+        .count();
+    assert_eq!(trust_records, 1, "trust decision recorded exactly once");
+}
+
+#[tokio::test]
+async fn already_trusted_session_records_no_trust_decision() {
+    let root = temp_project();
+    // Default config has trust_granted = false (already-trusted / silent).
+    let (mut h, sink) = start_capturing(vec![ScriptedResponse::text("hi")], root);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let _ = h.collect(None).await;
+    assert!(
+        !sink
+            .records()
+            .iter()
+            .any(|r| matches!(&r.event, TranscriptEvent::TrustDecision { .. })),
+        "no trust record when trust was not newly granted"
+    );
+}
+
+// --- S-5: loop-breaking guardrail (Tech Spec §7) ------------------------------
+
+fn spawn_with_loop(
+    scripts: Vec<ScriptedResponse>,
+    root: PathBuf,
+    loop_config: LoopConfig,
+) -> (Harness, CaptureSink) {
+    let sink = CaptureSink::new();
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(scripts)),
+        root,
+        Box::new(sink.clone()),
+    );
+    config.loop_config = loop_config;
+    (spawn(config), sink)
+}
+
+/// Drive a turn to completion, answering the first `LoopHalted` with `resolution`.
+async fn drive_resolving_loop(h: &mut Harness, resolution: LoopResolution) -> Vec<UiEvent> {
+    let mut events = Vec::new();
+    let mut pending = Some(resolution);
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(500), h.events_rx.recv()).await
+    {
+        if matches!(event, UiEvent::LoopHalted { .. }) {
+            if let Some(r) = pending.take() {
+                h.send(Command::ResolveLoop { resolution: r }).await;
+            }
+        }
+        events.push(event);
+    }
+    events
+}
+
+/// A tiny window so a re-treading loop trips quickly: read the same missing file
+/// each turn (deterministic identical failure = no progress, same signature).
+fn tiny_loop() -> LoopConfig {
+    LoopConfig {
+        enabled: true,
+        repeat_window: 2,
+        max_no_progress_turns: 99,
+    }
+}
+
+fn read_missing(id: &str) -> ScriptedResponse {
+    ScriptedResponse::tool_call(id, "read_file", r#"{"path":"nope.txt"}"#)
+}
+
+#[tokio::test]
+async fn re_treading_loop_halts_and_resume_continues() {
+    let root = temp_project();
+    let scripts = vec![
+        read_missing("c1"),
+        read_missing("c2"),
+        read_missing("c3"),
+        ScriptedResponse::text("done after resume"),
+    ];
+    let (mut h, sink) = spawn_with_loop(scripts, root, tiny_loop());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_resolving_loop(&mut h, LoopResolution::Resume).await;
+
+    // The guardrail halted exactly once, then resumed to completion.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, UiEvent::LoopHalted { .. }))
+            .count(),
+        1,
+        "halts once, not every turn"
+    );
+    assert_eq!(deltas(&events), "done after resume");
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::LoopHalt { resolution: Some(res), .. } if res == "resume"
+    )));
+}
+
+#[tokio::test]
+async fn re_treading_loop_stop_ends_the_turn() {
+    let root = temp_project();
+    let scripts = vec![read_missing("c1"), read_missing("c2"), read_missing("c3")];
+    let (mut h, sink) = spawn_with_loop(scripts, root, tiny_loop());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_resolving_loop(&mut h, LoopResolution::Stop).await;
+
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::LoopHalted { .. })));
+    assert!(
+        events.iter().any(|e| matches!(e, UiEvent::TurnEnded)),
+        "stop ends the turn cleanly"
+    );
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::LoopHalt { resolution: Some(res), .. } if res == "stop"
+    )));
+}
+
+#[tokio::test]
+async fn re_treading_loop_steer_injects_and_continues() {
+    let root = temp_project();
+    let scripts = vec![
+        read_missing("c1"),
+        read_missing("c2"),
+        read_missing("c3"),
+        ScriptedResponse::text("ok, steering"),
+    ];
+    let (mut h, sink) = spawn_with_loop(scripts, root, tiny_loop());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events =
+        drive_resolving_loop(&mut h, LoopResolution::Steer("read a.txt instead".into())).await;
+
+    assert_eq!(deltas(&events), "ok, steering");
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::LoopHalt { resolution: Some(res), .. } if res == "steer"
+    )));
+}
+
+#[tokio::test]
+async fn progressing_loop_never_halts() {
+    let root = temp_project();
+    // Each turn reads a *different* missing file → different result each time →
+    // genuine (if failing) progress → the guardrail must not trip.
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "read_file", r#"{"path":"a.txt"}"#),
+        ScriptedResponse::tool_call("c2", "read_file", r#"{"path":"b.txt"}"#),
+        ScriptedResponse::tool_call("c3", "read_file", r#"{"path":"c.txt"}"#),
+        ScriptedResponse::tool_call("c4", "read_file", r#"{"path":"d.txt"}"#),
+        ScriptedResponse::text("all read"),
+    ];
+    let (mut h, _sink) = spawn_with_loop(scripts, root, tiny_loop());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = h.collect(None).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::LoopHalted { .. })),
+        "a loop that changes state each turn is progress, never halted"
+    );
+    assert_eq!(deltas(&events), "all read");
+}
+
+#[tokio::test]
+async fn disabled_guardrail_never_halts() {
+    let root = temp_project();
+    let scripts = vec![
+        read_missing("c1"),
+        read_missing("c2"),
+        read_missing("c3"),
+        read_missing("c4"),
+        ScriptedResponse::text("done"),
+    ];
+    let off = LoopConfig {
+        enabled: false,
+        ..LoopConfig::default()
+    };
+    let (mut h, _sink) = spawn_with_loop(scripts, root, off);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = h.collect(None).await;
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, UiEvent::LoopHalted { .. })));
     assert_eq!(deltas(&events), "done");
 }

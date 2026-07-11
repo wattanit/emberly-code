@@ -66,8 +66,41 @@ impl PermissionDecision {
     }
 }
 
+/// The user's reply to an `ask_user` question (T-8). Unlike a permission
+/// decision, this carries data and has no unsafe default: there is no keypress
+/// that answers for the user; a dismissal is an explicit
+/// [`Declined`](AskAnswer::Declined) (Design §5.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskAnswer {
+    /// The user's answer: free text, or the label of a chosen option.
+    Answered(String),
+    /// The user dismissed the question without answering.
+    Declined,
+}
+
+/// The user's decision after the loop-breaking guardrail halts a non-progressing
+/// loop (S-5, Design §8.5). The guardrail never resumes or abandons on its own —
+/// the user always chooses one of these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopResolution {
+    /// Keep going — continue the loop from where it halted.
+    Resume,
+    /// Stop here — end the turn cleanly.
+    Stop,
+    /// Hand a steer back to the model: push this text as a user message and
+    /// continue.
+    Steer(String),
+}
+
 /// Provider-reported or estimated token counts for a completion
 /// (Requirements P-6, Tech Spec §4.4). Drives the context indicator and the
 /// cost estimate. Defined in `emberly-providers` and re-exported so the two
 /// crates agree on the accounting unit.
 pub use emberly_providers::TokenUsage;
+
+/// The reasoning-effort level (Requirements P-9, Tech Spec §4.6). Defined in
+/// `emberly-providers` (it rides on `CompletionRequest`/`ModelInfo`) and
+/// re-exported so commands, events, and the transcript share one type.
+pub use emberly_providers::Effort;

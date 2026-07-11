@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use emberly_tools::{
-    BashTool, EditFileTool, GlobTool, GrepTool, PermissionGate, PermissionOutcome,
-    PermissionRequest, PlainSandbox, ReadFileTool, Sandbox, Tool, ToolCtx, TruncateConfig,
-    WriteFileTool,
+    AskUserGate, AskUserOutcome, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool,
+    PermissionGate, PermissionOutcome, PermissionRequest, PlainSandbox, ReadFileTool, Sandbox,
+    Tool, ToolCtx, TruncateConfig, WriteFileTool,
 };
 use serde_json::json;
 
@@ -94,6 +94,44 @@ async fn read_missing_file_is_a_failure_not_a_crash() {
         .await;
     assert!(!outcome.ok);
     assert!(outcome.content.contains("nope.txt"));
+}
+
+#[tokio::test]
+async fn read_line_range_returns_numbered_slice() {
+    let root = temp_project();
+    write_file(&root, "many.txt", "one\ntwo\nthree\nfour\nfive\n");
+    let outcome = ReadFileTool
+        .execute(
+            json!({ "path": "many.txt", "start_line": 2, "end_line": 4 }),
+            &ctx(&root, true),
+        )
+        .await;
+    assert!(outcome.ok);
+    // 1-based inclusive, line-numbered — the prompt-free `sed -n` equivalent.
+    assert_eq!(outcome.content, "     2\ttwo\n     3\tthree\n     4\tfour\n");
+    assert!(outcome.summary.contains("lines 2-4 of 5"));
+}
+
+#[tokio::test]
+async fn read_line_range_start_only_reads_to_eof() {
+    let root = temp_project();
+    write_file(&root, "many.txt", "one\ntwo\nthree\n");
+    let outcome = ReadFileTool
+        .execute(json!({ "path": "many.txt", "start_line": 2 }), &ctx(&root, true))
+        .await;
+    assert!(outcome.ok);
+    assert_eq!(outcome.content, "     2\ttwo\n     3\tthree\n");
+}
+
+#[tokio::test]
+async fn read_line_range_past_end_is_a_failure() {
+    let root = temp_project();
+    write_file(&root, "short.txt", "only\n");
+    let outcome = ReadFileTool
+        .execute(json!({ "path": "short.txt", "start_line": 50 }), &ctx(&root, true))
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("past the end"));
 }
 
 // ---- write ---------------------------------------------------------------
@@ -432,4 +470,65 @@ async fn grep_invalid_regex_is_a_failure_not_a_crash() {
         .await;
     assert!(!outcome.ok);
     assert!(outcome.summary.contains("bad pattern"));
+}
+
+// ---- ask_user (T-8) ------------------------------------------------------
+
+/// A gate that echoes a fixed answer, capturing what it was asked.
+struct FixedAskGate {
+    answer: AskUserOutcome,
+    seen: std::sync::Mutex<Option<(String, Vec<String>)>>,
+}
+#[async_trait]
+impl AskUserGate for FixedAskGate {
+    async fn ask(&self, question: String, options: Vec<String>) -> AskUserOutcome {
+        if let Ok(mut g) = self.seen.lock() {
+            *g = Some((question, options));
+        }
+        self.answer.clone()
+    }
+}
+
+#[tokio::test]
+async fn ask_user_returns_the_answer_as_data() {
+    let root = temp_project();
+    let gate = Arc::new(FixedAskGate {
+        answer: AskUserOutcome::Answered("dev".into()),
+        seen: std::sync::Mutex::new(None),
+    });
+    let ctx = ToolCtx::new(
+        root,
+        TruncateConfig::default(),
+        Arc::new(AllowGate),
+        Arc::new(PlainSandbox) as Arc<dyn Sandbox>,
+    )
+    .with_ask_gate(gate.clone());
+
+    let outcome = AskUserTool
+        .execute(
+            json!({ "question": "which env?", "options": ["dev", "prod"] }),
+            &ctx,
+        )
+        .await;
+    assert!(outcome.ok);
+    assert!(outcome.content.contains("dev"));
+    // The tool passed the question and options through to the gate.
+    let seen = gate.seen.lock().ok().and_then(|g| g.clone());
+    assert_eq!(
+        seen,
+        Some(("which env?".to_string(), vec!["dev".into(), "prod".into()]))
+    );
+}
+
+#[tokio::test]
+async fn ask_user_default_gate_declines() {
+    let root = temp_project();
+    // A ctx built without `with_ask_gate` declines by default (safe no-op).
+    let ctx = ctx(&root, true);
+    let outcome = AskUserTool
+        .execute(json!({ "question": "proceed?" }), &ctx)
+        .await;
+    // A decline is structured data, not a failure (HC-6).
+    assert!(outcome.ok);
+    assert!(outcome.content.contains("declined"));
 }

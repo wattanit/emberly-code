@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+pub mod ask_user;
 pub mod builtin;
 pub mod ctx;
 pub mod diff;
@@ -21,8 +22,10 @@ pub mod sandbox;
 pub mod tool;
 pub mod truncate;
 
+pub use ask_user::{AskUserGate, AskUserOutcome};
 pub use builtin::{
-    default_registry, BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool, WriteFileTool,
+    default_registry, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool,
+    WriteFileTool,
 };
 pub use ctx::{ToolCtx, TruncateConfig};
 pub use permission::{PermissionGate, PermissionOutcome, PermissionRequest};

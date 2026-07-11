@@ -9,32 +9,77 @@
 //! lines and [`UiEvent`]s to the engine's channels.
 
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use emberly_core::{
-    Command, FrontendPorts, Mode, PermissionDecision, PermissionId, PermissionRendering,
-    SandboxStatus, UiEvent,
+    AskAnswer, AskId, Command, FrontendPorts, LoopResolution, Mode, PermissionDecision,
+    PermissionId, PermissionRendering, SandboxStatus, UiEvent,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
-/// Renders [`UiEvent`]s as append-only lines. Stateless; holds no color or
-/// cursor state (degraded mode, Design §7).
-pub struct LineRenderer;
+use crate::app::ReasoningView;
+
+/// Renders [`UiEvent`]s as append-only lines. Holds no color or cursor state
+/// (degraded mode, Design §7); the only state is the reasoning-block toggle so
+/// the plain `--- reasoning ---` block is labeled once (Design §4.4).
+pub struct LineRenderer {
+    reasoning_view: ReasoningView,
+    /// True while streaming a reasoning block, so the answer that follows gets a
+    /// separating label.
+    in_reasoning: bool,
+}
 
 impl LineRenderer {
     #[must_use]
-    pub fn new() -> Self {
-        Self
+    pub fn new(reasoning_view: ReasoningView) -> Self {
+        Self {
+            reasoning_view,
+            in_reasoning: false,
+        }
     }
 
     /// Write one event to `out`. Assistant deltas stream without a trailing
     /// newline; `AssistantDone` closes the line.
-    pub fn render(&self, event: &UiEvent, out: &mut impl Write) -> io::Result<()> {
+    pub fn render(&mut self, event: &UiEvent, out: &mut impl Write) -> io::Result<()> {
         match event {
-            UiEvent::AssistantDelta { text } => write!(out, "{text}")?,
-            UiEvent::AssistantDone => writeln!(out)?,
-            UiEvent::ToolStarted { tool, summary, .. } => {
+            UiEvent::AssistantDelta { text } => {
+                // Close a preceding reasoning block with a plain label so the
+                // answer is never confused with the thinking (Design §4.4, §7).
+                if self.in_reasoning {
+                    writeln!(out, "\n--- answer ---")?;
+                    self.in_reasoning = false;
+                }
+                write!(out, "{text}")?;
+            }
+            UiEvent::ReasoningDelta { text } => {
+                // `hidden` suppresses the trail in the view; the trace is still
+                // recorded by the engine (P-10).
+                if self.reasoning_view != ReasoningView::Hidden {
+                    if !self.in_reasoning {
+                        writeln!(out, "--- reasoning ---")?;
+                        self.in_reasoning = true;
+                    }
+                    write!(out, "{text}")?;
+                }
+            }
+            UiEvent::AssistantDone => {
+                self.in_reasoning = false;
+                writeln!(out)?;
+            }
+            UiEvent::ToolStarted {
+                tool,
+                summary,
+                explanation,
+                ..
+            } => {
                 writeln!(out, "\n> {tool}: {summary}")?;
+                // The model's caption (T-9), indented under the call. ASCII
+                // lead so degraded mode carries it without a glyph or colour
+                // (Design §4.5/§7); absent → nothing.
+                if let Some(explanation) = explanation {
+                    writeln!(out, "    - {explanation}")?;
+                }
             }
             UiEvent::ToolFinished {
                 ok,
@@ -62,6 +107,10 @@ impl LineRenderer {
             UiEvent::PermissionRequest { rendering, .. } => {
                 self.render_permission(rendering, out)?
             }
+            UiEvent::AskUserRequest {
+                question, options, ..
+            } => self.render_ask(question, options, out)?,
+            UiEvent::LoopHalted { reason } => self.render_loop_halt(reason, out)?,
             UiEvent::HarnessError { what, why, next } => {
                 writeln!(out, "\nerror: {what}")?;
                 writeln!(out, "  why:  {why}")?;
@@ -159,11 +208,47 @@ impl LineRenderer {
         )?;
         Ok(())
     }
+
+    /// The `ask_user` question prompt in degraded form (T-8, Design §5.1, §7):
+    /// calm — **no** capitals safety banner (this is not a safety prompt) — the
+    /// question, numbered options if any, and a plain instruction. There is no
+    /// unsafe default: an empty line declines, a number picks an option, any
+    /// other text is a free-form answer.
+    fn render_ask(
+        &self,
+        question: &str,
+        options: &[String],
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        use crate::strings::ask_user as a;
+        writeln!(out)?;
+        writeln!(out, "{}: {}", a::HEADING, question)?;
+        for (i, opt) in options.iter().enumerate() {
+            writeln!(out, "  {}. {}", i + 1, opt)?;
+        }
+        if options.is_empty() {
+            writeln!(out, "{}", a::DECLINE_HINT)?;
+        } else {
+            writeln!(out, "answer, or an option number; {}", a::DECLINE_HINT)?;
+        }
+        Ok(())
+    }
+
+    /// The loop-halt surface in degraded form (S-5, Design §8.5, §7): the
+    /// harness voice, calm — what happened, then the choices. No alarm styling.
+    fn render_loop_halt(&self, reason: &str, out: &mut impl Write) -> io::Result<()> {
+        use crate::strings::loop_halt as s;
+        writeln!(out)?;
+        writeln!(out, "{}", s::HEADING)?;
+        writeln!(out, "  {reason}")?;
+        writeln!(out, "{}", s::LINE_PROMPT)?;
+        Ok(())
+    }
 }
 
 impl Default for LineRenderer {
     fn default() -> Self {
-        Self::new()
+        Self::new(ReasoningView::default())
     }
 }
 
@@ -190,13 +275,62 @@ pub fn parse_permission_answer(line: &str) -> PermissionDecision {
     }
 }
 
+/// Interpret an `ask_user` answer line (T-8, Design §5.1). No unsafe default:
+/// an empty line declines; a bare 1-based number selects an offered option;
+/// anything else is a free-form answer.
+#[must_use]
+pub fn parse_ask_answer(line: &str, options: &[String]) -> AskAnswer {
+    let text = line.trim();
+    if text.is_empty() {
+        return AskAnswer::Declined;
+    }
+    if let Ok(n) = text.parse::<usize>() {
+        if let Some(opt) = n.checked_sub(1).and_then(|i| options.get(i)) {
+            return AskAnswer::Answered(opt.clone());
+        }
+    }
+    AskAnswer::Answered(text.to_string())
+}
+
+/// Interpret a loop-halt answer line (S-5, Design §8.5). `keep`/`go`/`resume`/
+/// `1` → resume; `stop`/`2` → stop; an empty line → stop (never keep spending
+/// unattended); anything else is a steer message handed back to the model.
+#[must_use]
+pub fn parse_loop_resolution(line: &str) -> LoopResolution {
+    let text = line.trim();
+    match text.to_lowercase().as_str() {
+        "keep" | "go" | "resume" | "keep going" | "1" => LoopResolution::Resume,
+        "stop" | "2" | "" => LoopResolution::Stop,
+        _ => LoopResolution::Steer(text.to_string()),
+    }
+}
+
+/// A decision prompt awaiting the next stdin line. Only one is ever open at a
+/// time (the engine serializes tool calls), but keeping them in one enum makes
+/// it impossible for a permission answer and a question answer to cross wires.
+enum Pending {
+    Permission(PermissionId),
+    Ask { id: AskId, options: Vec<String> },
+    Loop,
+}
+
 /// Run the line-mode frontend: render events to stdout, forward stdin lines to
 /// the engine as commands. Returns when either channel closes.
 ///
 /// While a permission prompt is open, the next input line is its answer; a
 /// `/cancel` line cancels the current turn; anything else is a user message.
-pub async fn run(ports: FrontendPorts) -> io::Result<()> {
-    let renderer = LineRenderer::new();
+pub async fn run(
+    ports: FrontendPorts,
+    sessions_dir: PathBuf,
+    config_template: String,
+    reasoning_view: ReasoningView,
+) -> io::Result<()> {
+    // `.agents/` is the parent of the sessions dir; `/config` and `/prompt`
+    // resolve their targets under it (C-5).
+    let agents_dir = sessions_dir
+        .parent()
+        .map_or(sessions_dir.clone(), Path::to_path_buf);
+    let mut renderer = LineRenderer::new(reasoning_view);
     let mut stdout = io::stdout();
     let mut events_rx = ports.events_rx;
     // Held in an Option so stdin EOF can drop it, signaling the engine to
@@ -213,7 +347,7 @@ pub async fn run(ports: FrontendPorts) -> io::Result<()> {
         }
     });
 
-    let mut pending: Option<PermissionId> = None;
+    let mut pending: Option<Pending> = None;
     // Track the current tier so `/mode` can cycle it (the engine gates the auto
     // tiers on confinement and echoes a ModeChanged / Notice back).
     let mut mode = Mode::default();
@@ -227,20 +361,94 @@ pub async fn run(ports: FrontendPorts) -> io::Result<()> {
                     if let UiEvent::ModeChanged { mode: changed } = &event {
                         mode = *changed;
                     }
-                    if let UiEvent::PermissionRequest { id, .. } = event {
-                        pending = Some(id);
+                    match event {
+                        UiEvent::PermissionRequest { id, .. } => {
+                            pending = Some(Pending::Permission(id));
+                        }
+                        UiEvent::AskUserRequest { id, options, .. } => {
+                            pending = Some(Pending::Ask { id, options });
+                        }
+                        UiEvent::LoopHalted { .. } => {
+                            pending = Some(Pending::Loop);
+                        }
+                        _ => {}
                     }
                 }
                 None => break, // engine finished and closed its events
             },
             line = lines_rx.recv(), if stdin_open => match (line, commands_tx.as_ref()) {
                 (Some(line), Some(tx)) => {
-                    if let Some(id) = pending.take() {
-                        let _ = tx.send(Command::PermissionAnswer { id, decision: parse_permission_answer(&line) }).await;
+                    if let Some(p) = pending.take() {
+                        match p {
+                            Pending::Permission(id) => {
+                                let _ = tx.send(Command::PermissionAnswer { id, decision: parse_permission_answer(&line) }).await;
+                            }
+                            Pending::Ask { id, options } => {
+                                let _ = tx.send(Command::AskUserAnswer { id, answer: parse_ask_answer(&line, &options) }).await;
+                            }
+                            Pending::Loop => {
+                                let _ = tx.send(Command::ResolveLoop { resolution: parse_loop_resolution(&line) }).await;
+                            }
+                        }
                     } else if line.trim() == "/cancel" {
                         let _ = tx.send(Command::Cancel).await;
                     } else if line.trim() == "/mode" {
                         let _ = tx.send(Command::SetMode { mode: next_mode(mode) }).await;
+                    } else if let Some(args) = line
+                        .trim()
+                        .strip_prefix("/model")
+                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+                    {
+                        // Degraded mode has no picker, so `/model` needs a
+                        // profile argument (C-6); the engine validates it.
+                        let mut parts = args.split_whitespace();
+                        if let Some(profile) = parts.next() {
+                            let model = parts.next().map(str::to_string);
+                            let _ = tx.send(Command::SwitchModel { profile: profile.to_string(), model }).await;
+                        } else {
+                            println!("usage: /model <profile> [model]");
+                        }
+                    } else if line.trim() == "/reload" {
+                        let _ = tx.send(Command::ReloadConfig).await;
+                    } else if line.trim() == "/config" {
+                        // Line mode does not launch $EDITOR (stdin is the line
+                        // reader / often a pipe): seed + point at the file, then
+                        // the user edits it and runs /reload (C-5, degraded §7).
+                        match crate::edit::config_target(&agents_dir, &config_template) {
+                            Ok((path, existed)) => println!(
+                                "{} {} — edit it, then /reload to apply",
+                                if existed { "editing" } else { "created" },
+                                path.display()
+                            ),
+                            Err(e) => println!("could not prepare config: {e}"),
+                        }
+                    } else if let Some(rest) = line
+                        .trim()
+                        .strip_prefix("/prompt")
+                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+                    {
+                        match crate::edit::prompt_target(&agents_dir, rest.trim()) {
+                            Ok((path, existed)) => println!(
+                                "{} {} — edit it, then /reload to apply",
+                                if existed { "editing" } else { "created" },
+                                path.display()
+                            ),
+                            Err(msg) => println!("{msg}"),
+                        }
+                    } else if let Some(rest) = line
+                        .trim()
+                        .strip_prefix("/effort")
+                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+                    {
+                        // Degraded mode has no picker, so `/effort` needs a level
+                        // argument (P-9); the engine drops it if the model has no
+                        // control.
+                        match emberly_core::Effort::parse(rest.trim()) {
+                            Some(effort) => {
+                                let _ = tx.send(Command::SetEffort { effort }).await;
+                            }
+                            None => println!("usage: /effort <low|medium|high|max>"),
+                        }
                     } else if !line.trim().is_empty() {
                         let _ = tx.send(Command::UserInput { text: line }).await;
                     }
@@ -265,9 +473,18 @@ mod tests {
     use emberly_core::{PermissionRendering, ToolCallId};
 
     fn render_to_string(event: &UiEvent) -> String {
+        render_with(ReasoningView::Collapsed, &[event])
+    }
+
+    /// Render a sequence of events through one renderer (state carries across
+    /// events, e.g. the reasoning→answer transition).
+    fn render_with(view: ReasoningView, events: &[&UiEvent]) -> String {
+        let mut renderer = LineRenderer::new(view);
         let mut buf: Vec<u8> = Vec::new();
-        let ok = LineRenderer::new().render(event, &mut buf).is_ok();
-        assert!(ok, "render should not fail writing to a Vec");
+        for event in events {
+            let ok = renderer.render(event, &mut buf).is_ok();
+            assert!(ok, "render should not fail writing to a Vec");
+        }
         String::from_utf8(buf).unwrap_or_default()
     }
 
@@ -281,6 +498,44 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_renders_a_labeled_block_then_the_answer() {
+        let out = render_with(
+            ReasoningView::Collapsed,
+            &[
+                &UiEvent::ReasoningDelta {
+                    text: "let me think".into(),
+                },
+                &UiEvent::AssistantDelta {
+                    text: "answer".into(),
+                },
+                &UiEvent::AssistantDone,
+            ],
+        );
+        assert!(out.contains("--- reasoning ---"), "labeled block: {out:?}");
+        assert!(out.contains("let me think"));
+        assert!(out.contains("--- answer ---"), "answer separated: {out:?}");
+        assert!(out.contains("answer"));
+    }
+
+    #[test]
+    fn hidden_view_suppresses_reasoning_in_plain_mode() {
+        let out = render_with(
+            ReasoningView::Hidden,
+            &[
+                &UiEvent::ReasoningDelta {
+                    text: "secret".into(),
+                },
+                &UiEvent::AssistantDelta {
+                    text: "answer".into(),
+                },
+            ],
+        );
+        assert!(!out.contains("reasoning"), "no trail when hidden: {out:?}");
+        assert!(!out.contains("secret"));
+        assert!(out.contains("answer"));
+    }
+
+    #[test]
     fn file_diff_shows_plus_minus_prefixes() {
         let out = render_to_string(&UiEvent::FileDiff {
             path: "a.rs".into(),
@@ -291,6 +546,108 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_explanation_renders_indented_under_the_call() {
+        let out = render_to_string(&UiEvent::ToolStarted {
+            call_id: ToolCallId::new("c"),
+            tool: "bash".into(),
+            summary: "run: sed -i s/debug/info/ log.conf".into(),
+            explanation: Some("raise the log level to info".into()),
+        });
+        assert!(
+            out.contains("run: sed"),
+            "the call stays the headline: {out:?}"
+        );
+        assert!(
+            out.contains("- raise the log level to info"),
+            "caption indented under the call, ASCII lead (Design §4.5/§7): {out:?}"
+        );
+    }
+
+    #[test]
+    fn no_explanation_renders_no_caption_line() {
+        let out = render_to_string(&UiEvent::ToolStarted {
+            call_id: ToolCallId::new("c"),
+            tool: "read_file".into(),
+            summary: "read src/main.rs".into(),
+            explanation: None,
+        });
+        // Only the call line — no dangling indented caption (no placeholder).
+        assert_eq!(out.trim(), "> read_file: read src/main.rs");
+    }
+
+    #[test]
+    fn ask_user_prompt_is_calm_and_numbers_options() {
+        let out = render_to_string(&UiEvent::AskUserRequest {
+            id: AskId(1),
+            question: "which environment?".into(),
+            options: vec!["dev".into(), "prod".into()],
+        });
+        assert!(out.contains("QUESTION"), "calm heading: {out:?}");
+        assert!(out.contains("which environment?"));
+        assert!(
+            out.contains("1. dev") && out.contains("2. prod"),
+            "numbered options"
+        );
+        // Not a safety prompt — no capitals banner (Design §5.1).
+        assert!(!out.contains("!!"));
+        assert!(!out.contains("OUTSIDE"));
+    }
+
+    #[test]
+    fn loop_halt_renders_harness_voice_no_alarm() {
+        let out = render_to_string(&UiEvent::LoopHalted {
+            reason: "read nope.txt repeatedly".into(),
+        });
+        assert!(out.contains("Stopped"), "harness heading: {out:?}");
+        assert!(out.contains("read nope.txt repeatedly"));
+        assert!(
+            out.contains("keep going") && out.contains("stop"),
+            "choices offered"
+        );
+        // Not a safety prompt.
+        assert!(!out.contains("!!"));
+    }
+
+    #[test]
+    fn parse_loop_resolution_maps_keep_stop_empty_and_steer() {
+        assert_eq!(parse_loop_resolution("keep"), LoopResolution::Resume);
+        assert_eq!(parse_loop_resolution("1"), LoopResolution::Resume);
+        assert_eq!(parse_loop_resolution("stop"), LoopResolution::Stop);
+        // Empty stops — never keep spending unattended.
+        assert_eq!(parse_loop_resolution("   "), LoopResolution::Stop);
+        // Anything else is a steer message handed back to the model.
+        assert_eq!(
+            parse_loop_resolution("focus on the parser"),
+            LoopResolution::Steer("focus on the parser".into())
+        );
+    }
+
+    #[test]
+    fn parse_ask_answer_handles_number_text_and_empty() {
+        let options = vec!["dev".to_string(), "prod".to_string()];
+        assert_eq!(
+            parse_ask_answer("2", &options),
+            AskAnswer::Answered("prod".into()),
+            "a bare number picks that option"
+        );
+        assert_eq!(
+            parse_ask_answer("staging", &options),
+            AskAnswer::Answered("staging".into()),
+            "free text passes through"
+        );
+        assert_eq!(
+            parse_ask_answer("   ", &options),
+            AskAnswer::Declined,
+            "an empty line declines — no unsafe default"
+        );
+        // An out-of-range number is treated as free text, not a panic.
+        assert_eq!(
+            parse_ask_answer("9", &options),
+            AskAnswer::Answered("9".into())
+        );
+    }
+
+    #[test]
     fn degraded_output_has_no_ansi_escapes() {
         // Degraded mode is colourless and append-only: no ANSI/cursor control
         // ever reaches the stream (Design §7).
@@ -298,10 +655,20 @@ mod tests {
             UiEvent::AssistantDelta {
                 text: "สวัสดี".into(),
             },
+            UiEvent::AskUserRequest {
+                id: AskId(1),
+                question: "ตกลงไหม?".into(),
+                options: vec!["ใช่".into(), "ไม่".into()],
+            },
+            UiEvent::LoopHalted {
+                reason: "no progress".into(),
+            },
             UiEvent::ToolStarted {
                 call_id: ToolCallId::new("c"),
                 tool: "bash".into(),
                 summary: "run: ls".into(),
+                // Exercise the caption path in the no-ANSI sweep too.
+                explanation: Some("list the working tree".into()),
             },
             UiEvent::ToolFinished {
                 call_id: ToolCallId::new("c"),

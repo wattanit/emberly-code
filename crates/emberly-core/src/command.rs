@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::{PermissionId, SessionId};
-use crate::types::{Mode, PermissionDecision};
+use crate::id::{AskId, PermissionId, SessionId};
+use crate::types::{AskAnswer, Effort, LoopResolution, Mode, PermissionDecision};
 
 /// A command issued to the engine. `#[non_exhaustive]` so new commands are not
 /// a breaking change.
@@ -26,9 +26,42 @@ pub enum Command {
         decision: PermissionDecision,
     },
 
+    /// The user's answer to a pending `ask_user` question (T-8), correlated by
+    /// `id` with the [`UiEvent::AskUserRequest`](crate::event::UiEvent::AskUserRequest)
+    /// that raised it. Carries the typed answer or an explicit
+    /// [`Declined`](crate::types::AskAnswer::Declined); Enter never auto-answers
+    /// (Design §5.1).
+    AskUserAnswer { id: AskId, answer: AskAnswer },
+
+    /// The user's decision after the loop guardrail halted a non-progressing
+    /// loop (S-5, Design §8.5): resume, stop, or steer. The engine is parked on
+    /// this after emitting [`UiEvent::LoopHalted`](crate::event::UiEvent::LoopHalted).
+    ResolveLoop { resolution: LoopResolution },
+
     /// Change the auto-accept mode (Requirements §6.4). Handled from Phase 2;
     /// the engine validates the transition against the sandbox status.
     SetMode { mode: Mode },
+
+    /// Switch the active provider profile — and optionally the model — for
+    /// subsequent turns (C-6). `model` `None` keeps the current model id.
+    /// Issued at idle (the frontend gates it while a turn runs); applies to the
+    /// next turn and never rewrites prior turns.
+    SwitchModel {
+        profile: String,
+        model: Option<String>,
+    },
+
+    /// Set the reasoning-effort level for subsequent turns (C-6, P-9). Issued at
+    /// idle (the frontend gates it while a turn runs); applies to the next turn
+    /// and never rewrites prior turns. A model without an effort control accepts
+    /// the setting silently — it just never reaches the wire (P-9).
+    SetEffort { effort: Effort },
+
+    /// Re-read config + prompts from disk and apply them to the running session
+    /// (C-5) — sent by the frontend after an in-app edit. Live pieces (prompts,
+    /// provider profiles) take effect on the next turn; restart-only changes are
+    /// named, not applied.
+    ReloadConfig,
 
     /// Request manual compaction (Requirements §8.3). Handled from Phase 5;
     /// queued until a clean message boundary if invoked mid-run.

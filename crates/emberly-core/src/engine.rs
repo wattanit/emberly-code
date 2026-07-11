@@ -8,17 +8,19 @@
 //! ingestion, and handle cancellation. Sandbox rules (Phase 2), retries
 //! (Phase 3), and transcript persistence (Phase 5) layer on later.
 
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use emberly_providers::{
-    CompletionRequest, CompletionStream, ContentBlock, Message, Provider, ProviderError,
+    CompletionRequest, CompletionStream, ContentBlock, Effort, Message, Provider, ProviderError,
     RetryPolicy, Role, StreamEvent, ToolCallId, ToolSchema,
 };
 use emberly_sandbox::{Decision, Mode, Query, RuleEngine};
 use emberly_tools::{
-    truncate_output, PermissionOutcome, PermissionRequest, Sandbox, ToolCtx, ToolRegistry,
-    TruncateConfig,
+    truncate_output, AskUserOutcome, PermissionOutcome, PermissionRequest, Sandbox, ToolCtx,
+    ToolRegistry, TruncateConfig,
 };
 use futures::StreamExt;
 use time::OffsetDateTime;
@@ -26,12 +28,13 @@ use tokio::sync::mpsc;
 
 use crate::command::Command;
 use crate::event::UiEvent;
-use crate::gate::{ChannelGate, PermissionAsk};
-use crate::id::{PermissionId, SessionId};
+use crate::factory::{ConfigReloader, ProviderFactory};
+use crate::gate::{AskGate, AskUserAsk, ChannelGate, PermissionAsk};
+use crate::id::{AskId, PermissionId, SessionId};
 use crate::transcript::{
     ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord, TranscriptSink,
 };
-use crate::types::{PermissionRendering, SandboxStatus, TokenUsage};
+use crate::types::{LoopResolution, PermissionRendering, SandboxStatus, TokenUsage};
 
 /// The session title is the first user message, clipped to this many chars
 /// (Tech Spec §16 — the heuristic v1 title).
@@ -45,6 +48,29 @@ const KEEP_RECENT: usize = 6;
 /// or the model's max output, whichever is smaller (Tech Spec §7).
 const OUTPUT_RESERVE: u64 = 8_000;
 
+/// The loop-breaking guardrail's tunables (S-5, Tech Spec §7). Defaults are
+/// initial — tune with use. `enabled = false` turns the guardrail off entirely.
+#[derive(Debug, Clone, Copy)]
+pub struct LoopConfig {
+    pub enabled: bool,
+    /// Trip when this many consecutive turns repeat the *same* tool-call
+    /// signature with no progress (default 3).
+    pub repeat_window: usize,
+    /// Trip when this many consecutive turns make no progress, even if the calls
+    /// vary (an absolute cap; default 6).
+    pub max_no_progress_turns: usize,
+}
+
+impl Default for LoopConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            repeat_window: 3,
+            max_no_progress_turns: 6,
+        }
+    }
+}
+
 /// Everything needed to construct an [`Engine`].
 pub struct EngineConfig {
     pub provider: Arc<dyn Provider>,
@@ -52,6 +78,18 @@ pub struct EngineConfig {
     pub project_root: PathBuf,
     pub model: String,
     pub system: Option<String>,
+    /// Tool-call explanations (T-9, Tech Spec §5.4). When true, an optional
+    /// `explanation` property is injected into every tool's schema and the
+    /// prompt instruction is appended; when false, both are omitted so the model
+    /// is never prompted and no tokens are spent (Requirements T-9). Fixed for
+    /// the engine's life (a live config reload does not change it).
+    pub tool_explanations: bool,
+    /// True when workspace trust was *newly* granted at startup this launch
+    /// (FR-1) — the engine records a `trust_decision` at session start. A
+    /// silently-already-trusted session leaves this false.
+    pub trust_granted: bool,
+    /// Loop-breaking guardrail tunables (S-5, Tech Spec §7).
+    pub loop_config: LoopConfig,
     pub truncate: TruncateConfig,
     /// Retry policy for retryable provider failures and mid-stream drops.
     pub retry: RetryPolicy,
@@ -92,6 +130,12 @@ pub struct EngineConfig {
     /// A `/compact` summarization-prompt override (P-7); `None` uses the
     /// built-in default.
     pub summary_prompt: Option<String>,
+    /// Builds a provider for a profile name on an in-session switch (C-6).
+    /// `None` disables switching (e.g. the offline placeholder session).
+    pub provider_factory: Option<Arc<dyn ProviderFactory>>,
+    /// Re-reads config + prompts from disk on an in-app edit (C-5). `None`
+    /// disables live reload (the edit still lands on disk for the next session).
+    pub config_reloader: Option<Arc<dyn ConfigReloader>>,
 }
 
 impl EngineConfig {
@@ -122,10 +166,90 @@ enum StreamEnd {
     Dropped,
 }
 
+/// The assistant output accumulated while draining one completion stream: the
+/// answer text and, distinct from it, the reasoning trail (P-10) plus the
+/// opaque signature to replay it on later turns.
+#[derive(Default)]
+struct TurnOutput {
+    text: String,
+    /// Reasoning/thinking text as streamed (for display + the transcript).
+    reasoning: String,
+    /// `(signature, redacted)` for the reasoning block, when the provider sent
+    /// one. `redacted` blocks carry opaque `data` here and have no replay text.
+    reasoning_signature: Option<(String, bool)>,
+}
+
 /// Outcome of running one tool call.
 enum ToolCallResult {
     Completed(emberly_tools::ToolOutcome),
     Canceled,
+}
+
+/// Inject the optional `explanation` string property into a tool's JSON schema
+/// (T-9, Tech Spec §5.4). Additive and **never** added to `required`, so a call
+/// that omits it is valid; tools ignore it (no `deny_unknown_fields`). Only
+/// touches object schemas with a `properties` map — a schema without one is
+/// left untouched.
+fn inject_explanation_property(schema: &mut serde_json::Value) {
+    let Some(props) = schema.get_mut("properties").and_then(|p| p.as_object_mut()) else {
+        return;
+    };
+    props.entry("explanation").or_insert_with(|| {
+        serde_json::json!({
+            "type": "string",
+            "description": "Optional: one short line on what this call does and \
+                            why, only when the intent is not self-evident.",
+        })
+    });
+}
+
+/// Extract the model's tool-call explanation from the call arguments (T-9).
+/// Returns `None` when absent or blank so the UI shows no empty caption.
+fn explanation_from_args(args: &serde_json::Value) -> Option<String> {
+    let text = args.get("explanation")?.as_str()?.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// What one tool-call turn did, for the loop guardrail's signature (S-5). Reset
+/// each turn; consumed at the turn boundary by [`Engine::evaluate_loop`].
+#[derive(Default)]
+struct TurnObservation {
+    /// `(tool_name, normalized-args)` per call, order-independent (sorted before
+    /// hashing).
+    calls: Vec<(String, String)>,
+    /// Concatenated tool-result content, hashed to detect identical results.
+    result_content: String,
+    /// Project-relative paths modified this turn.
+    files: Vec<String>,
+}
+
+/// Normalize a tool call's args for the loop signature (S-5): drop the
+/// T-9-injected `explanation` (a caption change is not progress and must not
+/// mask a repeat), then serialize. `serde_json`'s map is key-sorted, so equal
+/// args hash equal regardless of the model's key order.
+fn normalize_args(args: &serde_json::Value) -> String {
+    let mut a = args.clone();
+    if let Some(obj) = a.as_object_mut() {
+        obj.remove("explanation");
+    }
+    a.to_string()
+}
+
+/// A stable within-process hash (S-5 signature). Deterministic across a session,
+/// which is all the guardrail compares.
+fn stable_hash(s: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// The audit label for a loop resolution (S-5, Tech Spec §3.2).
+fn resolution_label(r: &LoopResolution) -> String {
+    match r {
+        LoopResolution::Resume => "resume".into(),
+        LoopResolution::Stop => "stop".into(),
+        LoopResolution::Steer(_) => "steer".into(),
+    }
 }
 
 /// A permission ask awaiting the user's answer: the id shown to the frontend,
@@ -137,16 +261,53 @@ struct PendingAsk {
     request: PermissionRequest,
 }
 
+/// An `ask_user` question awaiting the user's answer (T-8): the id shown to the
+/// frontend, the question/options (kept for the transcript record written on
+/// resolution), and the oneshot the blocked tool waits on.
+struct PendingUserAsk {
+    id: AskId,
+    question: String,
+    options: Vec<String>,
+    reply: tokio::sync::oneshot::Sender<AskUserOutcome>,
+}
+
 /// The agent engine.
 pub struct Engine {
     provider: Arc<dyn Provider>,
     tools: ToolRegistry,
     project_root: PathBuf,
     model: String,
+    /// The active reasoning-effort level for subsequent turns (C-6/P-9). Seeded
+    /// from the model's `default_effort`, changed by `SetEffort`, re-seeded on a
+    /// model switch. `None` sends no effort (the provider's own default).
+    effort: Option<Effort>,
     system: Option<String>,
+    /// Whether tool-call explanations are enabled (T-9); see [`EngineConfig`].
+    tool_explanations: bool,
+    /// Newly-granted workspace trust to record at session start (FR-1).
+    trust_granted: bool,
+    /// Loop-breaking guardrail state (S-5, Tech Spec §7).
+    loop_config: LoopConfig,
+    /// What the in-flight tool-call turn did (reset per turn).
+    turn_obs: TurnObservation,
+    /// Cumulative modified-file paths across the session (progress if a turn
+    /// adds a new one).
+    loop_seen_files: HashSet<String>,
+    /// Cumulative distinct tool-result hashes (progress if a turn adds a new
+    /// one).
+    loop_seen_results: HashSet<u64>,
+    /// Tool signature of the previous no-progress turn.
+    loop_last_sig: Option<u64>,
+    /// Consecutive no-progress turns with the *same* tool signature.
+    loop_same_sig_streak: usize,
+    /// Consecutive no-progress turns (any signature).
+    loop_no_progress_streak: usize,
     truncate: TruncateConfig,
     retry: RetryPolicy,
     gate: Arc<ChannelGate>,
+    /// The ask-user gate (T-8), installed into every `ToolCtx` so the
+    /// `ask_user` tool can block on a frontend round trip.
+    ask_gate: Arc<AskGate>,
     events_tx: mpsc::Sender<UiEvent>,
     conversation: Vec<Message>,
     /// Cumulative billed tokens this session (summed per request — each
@@ -159,6 +320,8 @@ pub struct Engine {
     /// `None` until the first provider `Usage`; then it drives the context %.
     context_tokens_authoritative: Option<u64>,
     next_permission_id: u64,
+    /// Monotonic id source for `ask_user` questions (T-8).
+    next_ask_id: u64,
     /// Durable transcript sink (HC-7). Written per event; a `NoopSink` when no
     /// session file is configured.
     transcript: Box<dyn TranscriptSink>,
@@ -189,18 +352,27 @@ pub struct Engine {
     compact_requested: bool,
     /// Optional `/compact` prompt override (P-7).
     summary_prompt: Option<String>,
+    /// Builds a provider on an in-session model switch (C-6); `None` disables it.
+    provider_factory: Option<Arc<dyn ProviderFactory>>,
+    /// Re-reads config on an in-app edit (C-5); `None` disables live reload.
+    config_reloader: Option<Arc<dyn ConfigReloader>>,
 }
 
 impl Engine {
-    /// Build an engine and the receiver for its internal permission-ask
-    /// channel. The caller passes that receiver straight back into
-    /// [`run`](Engine::run); it is opaque otherwise.
+    /// Build an engine and the receivers for its internal permission-ask and
+    /// ask-user channels. The caller passes both straight back into
+    /// [`run`](Engine::run); they are opaque otherwise.
     #[must_use]
     pub fn new(
         config: EngineConfig,
         events_tx: mpsc::Sender<UiEvent>,
-    ) -> (Self, mpsc::Receiver<PermissionAsk>) {
+    ) -> (
+        Self,
+        mpsc::Receiver<PermissionAsk>,
+        mpsc::Receiver<AskUserAsk>,
+    ) {
         let (asks_tx, asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        let (user_asks_tx, user_asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         // Capture before `config.sandbox` is moved into the struct below.
         let sandbox_spawn: Arc<dyn Sandbox> = config.sandbox_spawn.unwrap_or_else(|| {
             // Fallback (no explicit spawner): confine from the status, but with
@@ -212,21 +384,36 @@ impl Engine {
                 String::new(),
             ))
         });
+        // Seed the session effort from the model's declared default before the
+        // provider is moved into the struct (P-9, Tech Spec §4.6).
+        let seed_effort = config.provider.model_info().default_effort;
         let engine = Self {
             provider: config.provider,
             tools: config.tools,
             project_root: config.project_root,
             model: config.model,
+            effort: seed_effort,
             system: config.system,
+            tool_explanations: config.tool_explanations,
+            trust_granted: config.trust_granted,
+            loop_config: config.loop_config,
+            turn_obs: TurnObservation::default(),
+            loop_seen_files: HashSet::new(),
+            loop_seen_results: HashSet::new(),
+            loop_last_sig: None,
+            loop_same_sig_streak: 0,
+            loop_no_progress_streak: 0,
             truncate: config.truncate,
             retry: config.retry,
             gate: Arc::new(ChannelGate { asks: asks_tx }),
+            ask_gate: Arc::new(AskGate { asks: user_asks_tx }),
             events_tx,
             conversation: config.initial_conversation,
             session_usage: TokenUsage::default(),
             session_cost_usd: 0.0,
             context_tokens_authoritative: None,
             next_permission_id: 0,
+            next_ask_id: 0,
             transcript: config.transcript,
             session_id: config.session_id,
             sessions_dir: config.sessions_dir,
@@ -242,8 +429,10 @@ impl Engine {
             resuming: config.resuming,
             compact_requested: false,
             summary_prompt: config.summary_prompt,
+            provider_factory: config.provider_factory,
+            config_reloader: config.config_reloader,
         };
-        (engine, asks_rx)
+        (engine, asks_rx, user_asks_rx)
     }
 
     /// Run the engine until the command channel closes. Idle between turns,
@@ -253,6 +442,7 @@ impl Engine {
         mut self,
         mut commands_rx: mpsc::Receiver<Command>,
         mut asks_rx: mpsc::Receiver<PermissionAsk>,
+        mut user_asks_rx: mpsc::Receiver<AskUserAsk>,
     ) {
         if self.resuming {
             // Continuing an existing transcript: no fresh session_start, but
@@ -269,6 +459,14 @@ impl Engine {
                 prompts_version: crate::prompts::VERSION,
             });
         }
+        // Record a newly-granted workspace-trust decision right after session
+        // start (FR-1, Tech Spec §3.2). Already-trusted launches record nothing.
+        if self.trust_granted {
+            self.write_transcript(TranscriptEvent::TrustDecision {
+                path: self.project_root.display().to_string(),
+                trusted: true,
+            });
+        }
 
         // Sandbox status is always-visible state (Requirements §6.7): surface it
         // at session start, and — when confinement is unavailable — explain the
@@ -283,6 +481,9 @@ impl Engine {
             })
             .await;
         }
+        // Surface the initial reasoning-effort state so the sidebar and picker
+        // start correct (P-9).
+        self.emit_effort().await;
 
         while let Some(command) = commands_rx.recv().await {
             match command {
@@ -290,7 +491,8 @@ impl Engine {
                     self.record_user_message(&text);
                     self.conversation.push(Message::user_text(text));
                     self.emit_context_usage().await;
-                    self.run_turn(&mut commands_rx, &mut asks_rx).await;
+                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx)
+                        .await;
                     // The engine is idle again; let the frontend stop its
                     // "working" affordance (Design §6.3).
                     self.emit(UiEvent::TurnEnded).await;
@@ -301,7 +503,10 @@ impl Engine {
                     }
                 }
                 // No turn is running while idle; these are strays or no-ops here.
-                Command::Cancel | Command::PermissionAnswer { .. } => {}
+                Command::Cancel
+                | Command::PermissionAnswer { .. }
+                | Command::AskUserAnswer { .. }
+                | Command::ResolveLoop { .. } => {}
                 // Idle is already a clean boundary — compact immediately.
                 Command::Compact => self.compact().await,
                 // Session switches are only issued at idle (the frontend gates
@@ -309,6 +514,11 @@ impl Engine {
                 Command::NewSession { session_id } => self.start_new_session(session_id).await,
                 Command::ResumeSession { session_id } => self.resume_session(session_id).await,
                 Command::SetMode { mode } => self.set_mode(mode).await,
+                Command::SwitchModel { profile, model } => {
+                    self.switch_model(profile, model).await;
+                }
+                Command::SetEffort { effort } => self.set_effort(effort).await,
+                Command::ReloadConfig => self.reload_config().await,
             }
         }
 
@@ -509,6 +719,9 @@ impl Engine {
             tools: Vec::new(),
             max_output_tokens: Some(self.provider.model_info().max_output_tokens),
             temperature: None,
+            // Summarization is a fixed internal task; it does not carry the
+            // session's reasoning effort.
+            effort: None,
         };
         let mut stream = self.provider.stream_completion(request).await?;
         let mut text = String::new();
@@ -526,6 +739,7 @@ impl Engine {
         &mut self,
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
+        user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
     ) {
         let mut drop_attempts = 0u32;
         loop {
@@ -537,27 +751,42 @@ impl Engine {
                 }
             };
 
-            let (end, text) = self.consume_stream(stream, commands_rx).await;
+            let (end, out) = self.consume_stream(stream, commands_rx).await;
             match end {
                 StreamEnd::Done { tool_calls } => {
-                    self.push_assistant_message(&text, &tool_calls);
+                    self.push_assistant_message(&out, &tool_calls);
                     self.emit_context_usage().await;
                     self.emit(UiEvent::AssistantDone).await;
                     if tool_calls.is_empty() {
                         return; // model finished its turn
                     }
                     if self
-                        .run_tool_calls(tool_calls, commands_rx, asks_rx)
+                        .run_tool_calls(tool_calls, commands_rx, asks_rx, user_asks_rx)
                         .await
                         .is_canceled()
                     {
                         return;
                     }
+                    // S-5: before issuing the next provider call, check whether
+                    // the loop is re-treading without progress. On a trip, hand
+                    // control to the user (resume / stop / steer) — never spin on.
+                    if let Some(reason) = self.evaluate_loop() {
+                        match self.await_loop_resolution(commands_rx, reason).await {
+                            LoopResolution::Resume => self.reset_loop_window(),
+                            LoopResolution::Stop => return,
+                            LoopResolution::Steer(text) => {
+                                self.reset_loop_window();
+                                self.record_user_message(&text);
+                                self.conversation.push(Message::user_text(text));
+                                self.emit_context_usage().await;
+                            }
+                        }
+                    }
                     // Loop: send the tool results back for another completion.
                 }
                 StreamEnd::Interrupted => {
                     // Keep the partial text visible in the conversation.
-                    self.push_assistant_message(&text, &[]);
+                    self.push_assistant_message(&out, &[]);
                     self.emit_context_usage().await;
                     self.emit(UiEvent::AssistantDone).await;
                     return;
@@ -637,8 +866,8 @@ impl Engine {
         &mut self,
         mut stream: CompletionStream,
         commands_rx: &mut mpsc::Receiver<Command>,
-    ) -> (StreamEnd, String) {
-        let mut text = String::new();
+    ) -> (StreamEnd, TurnOutput) {
+        let mut out = TurnOutput::default();
         let mut tool_calls: Vec<PendingToolCall> = Vec::new();
         let mut saw_done = false;
 
@@ -646,7 +875,7 @@ impl Engine {
             tokio::select! {
                 item = stream.next() => match item {
                     Some(Ok(event)) => {
-                        self.handle_stream_event(event, &mut text, &mut tool_calls, &mut saw_done)
+                        self.handle_stream_event(event, &mut out, &mut tool_calls, &mut saw_done)
                             .await;
                     }
                     Some(Err(error)) => break StreamEnd::Errored(error),
@@ -668,7 +897,7 @@ impl Engine {
 
         // The caller commits the assistant message: on Done/Interrupted it is
         // kept; on a retryable Dropped it is discarded (not stitched, §4.3).
-        (end, text)
+        (end, out)
     }
 
     /// Apply one stream event. Terminal events (`Done`) only set `saw_done`;
@@ -678,14 +907,26 @@ impl Engine {
     async fn handle_stream_event(
         &mut self,
         event: StreamEvent,
-        text: &mut String,
+        out: &mut TurnOutput,
         tool_calls: &mut Vec<PendingToolCall>,
         saw_done: &mut bool,
     ) {
         match event {
             StreamEvent::TextDelta { text: delta } => {
-                text.push_str(&delta);
+                out.text.push_str(&delta);
                 self.emit(UiEvent::AssistantDelta { text: delta }).await;
+            }
+            StreamEvent::ReasoningDelta { text: delta } => {
+                out.reasoning.push_str(&delta);
+                self.emit(UiEvent::ReasoningDelta { text: delta }).await;
+            }
+            StreamEvent::ReasoningSignature {
+                signature,
+                redacted,
+            } => {
+                // Opaque replay token for the reasoning block (P-1); kept to
+                // echo back on later tool-use turns.
+                out.reasoning_signature = Some((signature, redacted));
             }
             StreamEvent::ToolCallStart { id, name } => {
                 tool_calls.push(PendingToolCall {
@@ -731,10 +972,16 @@ impl Engine {
         tool_calls: Vec<PendingToolCall>,
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
+        user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
     ) -> ToolCallResult {
+        // Start a fresh loop-signature observation for this turn (S-5).
+        self.turn_obs = TurnObservation::default();
         let mut iter = tool_calls.into_iter();
         while let Some(call) = iter.next() {
-            match self.run_one_tool_call(&call, commands_rx, asks_rx).await {
+            match self
+                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx)
+                .await
+            {
                 ToolCallResult::Completed(outcome) => self.ingest_tool_result(&call, outcome).await,
                 ToolCallResult::Canceled => {
                     self.push_canceled_result(&call).await;
@@ -748,6 +995,105 @@ impl Engine {
         ToolCallResult::Completed(emberly_tools::ToolOutcome::success("", ""))
     }
 
+    /// Fold the just-completed tool-call turn into the loop-guardrail state and
+    /// decide whether to halt (S-5, Tech Spec §7). Returns the halt reason when
+    /// the loop is re-treading without progress, else `None`. Consumes the
+    /// turn's observation.
+    fn evaluate_loop(&mut self) -> Option<String> {
+        if !self.loop_config.enabled {
+            return None;
+        }
+        let obs = std::mem::take(&mut self.turn_obs);
+        // A turn with no tool calls can't loop; treat it as progress-neutral.
+        if obs.calls.is_empty() {
+            return None;
+        }
+        // Order-independent tool signature.
+        let mut parts: Vec<String> = obs
+            .calls
+            .iter()
+            .map(|(name, args)| format!("{name}\u{0}{args}"))
+            .collect();
+        parts.sort();
+        let tool_sig = stable_hash(&parts.join("\n"));
+        let result_hash = stable_hash(&obs.result_content);
+
+        // Progress = a newly-modified file OR a not-seen-before result.
+        let new_file = obs.files.iter().any(|f| !self.loop_seen_files.contains(f));
+        let new_result = !self.loop_seen_results.contains(&result_hash);
+        for f in obs.files {
+            self.loop_seen_files.insert(f);
+        }
+        self.loop_seen_results.insert(result_hash);
+
+        if new_file || new_result {
+            self.reset_loop_window();
+            self.loop_last_sig = Some(tool_sig);
+            return None;
+        }
+
+        // No progress this turn.
+        self.loop_no_progress_streak += 1;
+        if self.loop_last_sig == Some(tool_sig) {
+            self.loop_same_sig_streak += 1;
+        } else {
+            self.loop_same_sig_streak = 1;
+        }
+        self.loop_last_sig = Some(tool_sig);
+
+        let cfg = self.loop_config;
+        if self.loop_same_sig_streak >= cfg.repeat_window {
+            Some("the last few steps repeated without progress".into())
+        } else if self.loop_no_progress_streak >= cfg.max_no_progress_turns {
+            Some("several steps in a row made no progress".into())
+        } else {
+            None
+        }
+    }
+
+    /// Reset the no-progress counters (S-5). Called on genuine progress and when
+    /// the user chooses to resume, so "keep going" doesn't instantly re-trip.
+    fn reset_loop_window(&mut self) {
+        self.loop_same_sig_streak = 0;
+        self.loop_no_progress_streak = 0;
+        self.loop_last_sig = None;
+    }
+
+    /// Surface the halt (harness voice) and park until the user decides
+    /// (S-5, Design §8.5): resume / stop / steer. Cancel or a departed frontend
+    /// resolves to stop — the guardrail never quietly resumes. Records one
+    /// `loop_halt` transcript event with the chosen resolution.
+    async fn await_loop_resolution(
+        &mut self,
+        commands_rx: &mut mpsc::Receiver<Command>,
+        reason: String,
+    ) -> LoopResolution {
+        self.emit(UiEvent::LoopHalted {
+            reason: reason.clone(),
+        })
+        .await;
+        let resolution = loop {
+            match commands_rx.recv().await {
+                Some(Command::ResolveLoop { resolution }) => break resolution,
+                // Esc/Ctrl-C while halted = stop here.
+                Some(Command::Cancel) => break LoopResolution::Stop,
+                // A mode toggle applies immediately; keep waiting for a decision.
+                Some(Command::SetMode { mode }) => self.set_mode(mode).await,
+                // Queue a compaction for after we resume (if we do).
+                Some(Command::Compact) => self.compact_requested = true,
+                // Strays (permission/ask answers with no pending prompt): ignore.
+                Some(_) => {}
+                // Frontend gone: stop, fail-safe (never spin unattended).
+                None => break LoopResolution::Stop,
+            }
+        };
+        self.write_transcript(TranscriptEvent::LoopHalt {
+            reason,
+            resolution: Some(resolution_label(&resolution)),
+        });
+        resolution
+    }
+
     /// Run one tool call, driving its execution concurrently with permission
     /// asks and cancellation.
     async fn run_one_tool_call(
@@ -755,8 +1101,17 @@ impl Engine {
         call: &PendingToolCall,
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
+        user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
     ) -> ToolCallResult {
         let args = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
+
+        // Record the (tool, normalized-args) for the loop signature (S-5),
+        // including unknown-tool attempts (a loop can re-tread those too).
+        if self.loop_config.enabled {
+            self.turn_obs
+                .calls
+                .push((call.name.clone(), normalize_args(&args)));
+        }
 
         let Some(tool) = self.tools.get(&call.name) else {
             return ToolCallResult::Completed(emberly_tools::ToolOutcome::failure(
@@ -769,25 +1124,34 @@ impl Engine {
         // `read src/main.rs`) so the activity line says what is happening, not
         // just the tool name (Design §6.3).
         let summary = tool.describe(&args).unwrap_or_else(|| call.name.clone());
+        // T-9: the model's caption for a non-obvious call rides in `args`
+        // (§5.4); surface it to the frontend. Absent/empty → None (no caption).
+        let explanation = explanation_from_args(&args);
         self.emit(UiEvent::ToolStarted {
             call_id: call.id.clone(),
             tool: call.name.clone(),
             summary,
+            explanation,
         })
         .await;
 
         let ctx = self.make_ctx();
         let mut exec = Box::pin(tool.execute(args, &ctx));
         let mut pending: Vec<PendingAsk> = Vec::new();
+        let mut pending_user: Vec<PendingUserAsk> = Vec::new();
         let mut commands_open = true;
 
         loop {
             tokio::select! {
                 outcome = &mut exec => return ToolCallResult::Completed(outcome),
                 Some(ask) = asks_rx.recv() => self.on_permission_ask(ask, &mut pending).await,
+                Some(ask) = user_asks_rx.recv() => self.on_user_ask(ask, &mut pending_user).await,
                 command = commands_rx.recv(), if commands_open => match command {
                     Some(Command::PermissionAnswer { id, decision }) => {
                         self.answer_permission(id, decision, &mut pending).await;
+                    }
+                    Some(Command::AskUserAnswer { id, answer }) => {
+                        self.answer_user_ask(id, answer, &mut pending_user).await;
                     }
                     Some(Command::Cancel) => return ToolCallResult::Canceled,
                     // Queue a compaction for the clean boundary (Tech Spec §7).
@@ -796,12 +1160,17 @@ impl Engine {
                     Some(Command::SetMode { mode }) => self.set_mode(mode).await,
                     Some(_) => {}
                     None => {
-                        // No more input (frontend gone): deny anything pending
-                        // as the safe default and stop watching commands, so we
-                        // never hang on an answer that cannot arrive.
+                        // No more input (frontend gone): resolve anything pending
+                        // as the safe default (deny / decline) and stop watching
+                        // commands, so we never hang on an answer that cannot
+                        // arrive.
                         commands_open = false;
                         for p in pending.drain(..) {
                             let _ = p.reply.send(PermissionOutcome::Deny);
+                        }
+                        for p in pending_user.drain(..) {
+                            self.record_ask(&p.question, &p.options, None);
+                            let _ = p.reply.send(AskUserOutcome::Declined);
                         }
                     }
                 },
@@ -853,6 +1222,69 @@ impl Engine {
         let _ = reply.send(outcome);
     }
 
+    /// Handle an `ask_user` question from the tool (T-8): mint an id, surface it
+    /// to the frontend, and stash the pending question. The transcript record is
+    /// written on resolution (question + answer together), so an unanswered
+    /// question that is later declined is still recorded once.
+    async fn on_user_ask(&mut self, ask: AskUserAsk, pending: &mut Vec<PendingUserAsk>) {
+        let AskUserAsk {
+            question,
+            options,
+            reply,
+        } = ask;
+        let id = self.take_ask_id();
+        self.emit(UiEvent::AskUserRequest {
+            id,
+            question: question.clone(),
+            options: options.clone(),
+        })
+        .await;
+        pending.push(PendingUserAsk {
+            id,
+            question,
+            options,
+            reply,
+        });
+    }
+
+    /// Resolve the user's answer to a pending `ask_user` question: record it and
+    /// reply to the blocked tool. Unknown ids are ignored (a stray or
+    /// already-answered question).
+    async fn answer_user_ask(
+        &mut self,
+        id: AskId,
+        answer: crate::types::AskAnswer,
+        pending: &mut Vec<PendingUserAsk>,
+    ) {
+        let Some(pos) = pending.iter().position(|p| p.id == id) else {
+            return;
+        };
+        let PendingUserAsk {
+            question,
+            options,
+            reply,
+            ..
+        } = pending.swap_remove(pos);
+
+        let (recorded, outcome) = match answer {
+            crate::types::AskAnswer::Answered(text) => {
+                (Some(text.clone()), AskUserOutcome::Answered(text))
+            }
+            crate::types::AskAnswer::Declined => (None, AskUserOutcome::Declined),
+        };
+        self.record_ask(&question, &options, recorded);
+        let _ = reply.send(outcome);
+    }
+
+    /// Write the durable `ask_user` record (HC-7). `answer` is `None` on decline.
+    fn record_ask(&mut self, question: &str, options: &[String], answer: Option<String>) {
+        self.write_transcript(TranscriptEvent::AskUser {
+            question: question.to_string(),
+            options: options.to_vec(),
+            answer,
+        });
+    }
+
     /// Change the auto-accept mode (Requirements §6.4, §6.7). Auto tiers are
     /// gated on active confinement by [`Mode::resolve`]; a refused escalation
     /// leaves the mode unchanged and explains why (the type system, not this
@@ -878,6 +1310,165 @@ impl Engine {
                 .await;
             }
         }
+    }
+
+    /// Switch the active provider/model for subsequent turns (C-6). Runs at
+    /// this clean boundary (idle) and never rewrites prior turns; a failure to
+    /// build (unknown profile, missing key) is a harness-world error and the
+    /// current model stays active.
+    async fn switch_model(&mut self, profile: String, model: Option<String>) {
+        let Some(factory) = self.provider_factory.clone() else {
+            self.emit(UiEvent::Notice {
+                message: "switching models is not available in this session".into(),
+            })
+            .await;
+            return;
+        };
+        let model = model.unwrap_or_else(|| self.model.clone());
+        match factory.build(&profile, &model) {
+            Ok(choice) => {
+                if choice.profile == self.provider_label && choice.model == self.model {
+                    return; // no-op: already active
+                }
+                self.provider = choice.provider;
+                self.provider_label = choice.profile.clone();
+                self.model = choice.model.clone();
+                self.write_transcript(TranscriptEvent::ModelSwitch {
+                    provider: choice.profile.clone(),
+                    model: choice.model.clone(),
+                });
+                self.emit(UiEvent::ModelChanged {
+                    provider: choice.profile.clone(),
+                    model: choice.model.clone(),
+                })
+                .await;
+                self.emit(UiEvent::Notice {
+                    message: format!("switched to {} / {}", choice.profile, choice.model),
+                })
+                .await;
+                // Re-seed the reasoning effort to the new model's default — its
+                // available levels and default differ per model (P-9). Always
+                // re-emit so the sidebar/picker track the new model's levels
+                // even when the default happens to match.
+                self.effort = self.provider.model_info().default_effort;
+                self.emit_effort().await;
+            }
+            Err(why) => {
+                self.emit(UiEvent::HarnessError {
+                    what: format!("could not switch to '{profile}'"),
+                    why,
+                    next: format!("staying on {} / {}", self.provider_label, self.model),
+                })
+                .await;
+            }
+        }
+    }
+
+    /// Set the session reasoning effort for subsequent turns (C-6/P-9). Logged
+    /// to the transcript (HC-7) and announced — never silent. A model with no
+    /// effort control still accepts the setting; the adapter drops it at the
+    /// wire (P-9), so setting it is never an error.
+    async fn set_effort(&mut self, effort: Effort) {
+        // The engine is the authority on what a model supports (P-9): decline
+        // (calmly, never an error) when the model has no control or the level
+        // isn't offered, so no frontend can announce a change that won't happen.
+        let levels = self.provider.model_info().effort_levels;
+        if levels.is_empty() {
+            self.emit(UiEvent::Notice {
+                message: "this model has no reasoning-effort control".into(),
+            })
+            .await;
+            return;
+        }
+        if !levels.contains(&effort) {
+            self.emit(UiEvent::Notice {
+                message: format!("this model does not offer '{effort}' reasoning effort"),
+            })
+            .await;
+            return;
+        }
+        if self.effort == Some(effort) {
+            return; // no-op: already active
+        }
+        self.effort = Some(effort);
+        self.write_transcript(TranscriptEvent::EffortChange { effort });
+        self.emit_effort().await;
+        self.emit(UiEvent::Notice {
+            message: format!("reasoning effort set to {effort}"),
+        })
+        .await;
+    }
+
+    /// Emit the current effort and the active model's available levels (P-9), so
+    /// the sidebar and the effort picker stay in sync with the model.
+    async fn emit_effort(&self) {
+        self.emit(UiEvent::EffortChanged {
+            effort: self.effort,
+            available: self.provider.model_info().effort_levels,
+        })
+        .await;
+    }
+
+    /// Re-read config + prompts from disk and apply the live pieces to the
+    /// running session (C-5): the system/compact prompts and the provider
+    /// profile set (so a newly-added profile is switchable and shows in the
+    /// picker). The active provider/model is left as-is — use `/model` to
+    /// switch. Restart-only changes are named, not applied. Applies to
+    /// subsequent turns; never rewrites prior turns or the transcript.
+    async fn reload_config(&mut self) {
+        let Some(reloader) = self.config_reloader.clone() else {
+            self.emit(UiEvent::Notice {
+                message: "config reload is not available in this session".into(),
+            })
+            .await;
+            return;
+        };
+        let reloaded = match reloader.reload() {
+            Ok(reloaded) => reloaded,
+            Err(why) => {
+                self.emit(UiEvent::HarnessError {
+                    what: "could not reload config".into(),
+                    why,
+                    next: "keeping the current config".into(),
+                })
+                .await;
+                return;
+            }
+        };
+
+        let mut changed = Vec::new();
+        if reloaded.system != self.system {
+            self.system = reloaded.system;
+            changed.push("system prompt");
+        }
+        if reloaded.summary_prompt != self.summary_prompt {
+            self.summary_prompt = reloaded.summary_prompt;
+            changed.push("compact prompt");
+        }
+        let old_profiles = self
+            .provider_factory
+            .as_ref()
+            .map(|factory| factory.profiles())
+            .unwrap_or_default();
+        if reloaded.profiles != old_profiles {
+            changed.push("provider profiles");
+            self.emit(UiEvent::ProfilesChanged {
+                profiles: reloaded.profiles.clone(),
+            })
+            .await;
+        }
+        self.provider_factory = Some(reloaded.provider_factory);
+
+        let mut message = if changed.is_empty() {
+            "reloaded config — no live changes".to_string()
+        } else {
+            format!("reloaded: {}", changed.join(", "))
+        };
+        for note in &reloaded.restart_notes {
+            message.push_str("; ");
+            message.push_str(note);
+        }
+        self.emit(UiEvent::Notice { message }).await;
     }
 
     /// Add an in-memory session grant from an approved request (Requirements
@@ -967,6 +1558,11 @@ impl Engine {
         call: &PendingToolCall,
         outcome: emberly_tools::ToolOutcome,
     ) {
+        // Accumulate this result into the turn's loop signature (S-5): identical
+        // repeated results are a no-progress signal.
+        if self.loop_config.enabled {
+            self.turn_obs.result_content.push_str(&outcome.content);
+        }
         let truncation = truncate_output(&outcome.content, &self.truncate);
 
         // Durable record: the model-visible (possibly truncated) output, plus a
@@ -999,6 +1595,10 @@ impl Engine {
         .await;
 
         if let Some(change) = outcome.file_change {
+            // A newly-modified file is the strongest progress signal (S-5).
+            if self.loop_config.enabled {
+                self.turn_obs.files.push(change.path.clone());
+            }
             self.emit(UiEvent::FileModified {
                 path: change.path.clone(),
                 adds: change.adds,
@@ -1037,19 +1637,44 @@ impl Engine {
         .await;
     }
 
-    /// Build the assistant message for the turn: text plus any tool-use blocks.
-    /// Records the complete assistant message and each requested tool call to
-    /// the transcript (Tech Spec §3.2).
-    fn push_assistant_message(&mut self, text: &str, tool_calls: &[PendingToolCall]) {
-        if text.is_empty() && tool_calls.is_empty() {
+    /// Build the assistant message for the turn: reasoning (P-10), then text,
+    /// then any tool-use blocks. Records the complete assistant message — with
+    /// reasoning as a distinct field, never merged into the answer — and each
+    /// requested tool call to the transcript (Tech Spec §3.2, §4.7).
+    fn push_assistant_message(&mut self, out: &TurnOutput, tool_calls: &[PendingToolCall]) {
+        let text = out.text.as_str();
+        let has_reasoning = !out.reasoning.is_empty() || out.reasoning_signature.is_some();
+        if text.is_empty() && tool_calls.is_empty() && !has_reasoning {
             return;
         }
-        if !text.is_empty() {
+        if !text.is_empty() || has_reasoning {
             self.write_transcript(TranscriptEvent::AssistantMessage {
                 text: text.to_string(),
+                // Recorded whatever the view key: `hidden` is a view choice, not
+                // a discard (P-10, Design §4.4).
+                reasoning: (!out.reasoning.is_empty()).then(|| out.reasoning.clone()),
             });
         }
         let mut content = Vec::new();
+        // Reasoning must precede text/tool_use so a provider that requires the
+        // thinking block echoed back accepts the turn (Anthropic ordering).
+        if has_reasoning {
+            let (signature, redacted) = match &out.reasoning_signature {
+                Some((sig, red)) => (Some(sig.clone()), *red),
+                None => (None, false),
+            };
+            content.push(ContentBlock::Reasoning {
+                // A redacted block has no replayable text; a normal one replays
+                // the exact reasoning it streamed.
+                text: if redacted {
+                    String::new()
+                } else {
+                    out.reasoning.clone()
+                },
+                signature,
+                redacted,
+            });
+        }
         if !text.is_empty() {
             content.push(ContentBlock::Text {
                 text: text.to_string(),
@@ -1079,19 +1704,49 @@ impl Engine {
             .tools
             .specs()
             .into_iter()
-            .map(|spec| ToolSchema {
-                name: spec.name,
-                description: spec.description,
-                input_schema: spec.input_schema,
+            .map(|spec| {
+                let mut input_schema = spec.input_schema;
+                // T-9: inject the optional `explanation` property at the single
+                // ToolSpec→provider point, so both wire adapters get it without
+                // any per-adapter code (Tech Spec §5.4). Off → nothing added.
+                if self.tool_explanations {
+                    inject_explanation_property(&mut input_schema);
+                }
+                ToolSchema {
+                    name: spec.name,
+                    description: spec.description,
+                    input_schema,
+                }
             })
             .collect();
         CompletionRequest {
             model: self.model.clone(),
-            system: self.system.clone(),
+            // T-9: append the explanation instruction only when the feature is
+            // on, so with it off the model is never asked and no tokens are
+            // spent. Kept out of the stored `self.system` so a config reload
+            // (which replaces it) stays orthogonal to this toggle.
+            system: self.effective_system(),
             messages: self.conversation.clone(),
             tools,
             max_output_tokens: Some(self.provider.model_info().max_output_tokens),
             temperature: None,
+            // The session's active reasoning effort (P-9). The adapter maps it
+            // to the provider's control or drops it when unsupported.
+            effort: self.effort,
+        }
+    }
+
+    /// The outgoing system prompt: the stored base (base prompt + project
+    /// instructions) with the tool-call explanation instruction appended when
+    /// enabled (T-9).
+    fn effective_system(&self) -> Option<String> {
+        if !self.tool_explanations {
+            return self.system.clone();
+        }
+        let instruction = crate::prompts::tool_explanation();
+        match &self.system {
+            Some(base) => Some(format!("{base}\n\n{instruction}")),
+            None => Some(instruction.to_string()),
         }
     }
 
@@ -1102,11 +1757,18 @@ impl Engine {
             self.gate.clone(),
             self.sandbox_spawn.clone(),
         )
+        .with_ask_gate(self.ask_gate.clone())
     }
 
     fn take_permission_id(&mut self) -> PermissionId {
         let id = PermissionId(self.next_permission_id);
         self.next_permission_id += 1;
+        id
+    }
+
+    fn take_ask_id(&mut self) -> AskId {
+        let id = AskId(self.next_ask_id);
+        self.next_ask_id += 1;
         id
     }
 
@@ -1177,6 +1839,9 @@ impl Engine {
                         count(name).saturating_add(count(&input.to_string()))
                     }
                     ContentBlock::ToolResult { content, .. } => count(content),
+                    // Replayed reasoning is sent back on the wire, so it counts
+                    // toward the context budget (P-10).
+                    ContentBlock::Reasoning { text, .. } => count(text),
                 });
             }
         }
@@ -1217,6 +1882,9 @@ fn render_for_summary(messages: &[Message]) -> String {
                 ContentBlock::Text { text } => text.clone(),
                 ContentBlock::ToolUse { name, input, .. } => format!("[tool call: {name} {input}]"),
                 ContentBlock::ToolResult { content, .. } => format!("[tool result: {content}]"),
+                // Reasoning is the model's private scratch, not conversation
+                // content; the summary is built from the answer, so skip it.
+                ContentBlock::Reasoning { .. } => String::new(),
             };
             if !piece.is_empty() {
                 out.push_str(role);
@@ -1337,4 +2005,59 @@ fn append_rule_block(path: &std::path::Path, block: &str) -> std::io::Result<()>
     writeln!(file)?;
     write!(file, "{block}")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{explanation_from_args, inject_explanation_property, normalize_args};
+    use serde_json::json;
+
+    #[test]
+    fn normalize_args_strips_explanation_so_a_caption_is_not_progress() {
+        // Same call, different T-9 caption → identical loop signature (S-5): a
+        // caption change must neither fake progress nor mask a repeat.
+        let a = normalize_args(&json!({ "path": "x", "explanation": "first try" }));
+        let b = normalize_args(&json!({ "path": "x", "explanation": "second try" }));
+        assert_eq!(a, b);
+        assert!(!a.contains("explanation"));
+        // A genuinely different arg changes the signature.
+        let c = normalize_args(&json!({ "path": "y" }));
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn injects_optional_explanation_never_required() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } },
+            "required": ["path"],
+        });
+        inject_explanation_property(&mut schema);
+        assert_eq!(schema["properties"]["explanation"]["type"], "string");
+        // Never added to `required` — a call omitting it stays valid (§5.4).
+        assert_eq!(schema["required"], json!(["path"]));
+    }
+
+    #[test]
+    fn injection_is_idempotent_and_skips_schemas_without_properties() {
+        // A model that already sent an `explanation` property is not clobbered.
+        let mut has = json!({ "properties": { "explanation": { "type": "number" } } });
+        inject_explanation_property(&mut has);
+        assert_eq!(has["properties"]["explanation"]["type"], "number");
+        // A schema with no `properties` map is left untouched (no panic).
+        let mut bare = json!({ "type": "string" });
+        inject_explanation_property(&mut bare);
+        assert_eq!(bare, json!({ "type": "string" }));
+    }
+
+    #[test]
+    fn explanation_extracted_only_when_present_and_nonblank() {
+        assert_eq!(
+            explanation_from_args(&json!({ "explanation": "raise log level" })),
+            Some("raise log level".to_string())
+        );
+        assert_eq!(explanation_from_args(&json!({ "explanation": "  " })), None);
+        assert_eq!(explanation_from_args(&json!({ "path": "x" })), None);
+        assert_eq!(explanation_from_args(&serde_json::Value::Null), None);
+    }
 }

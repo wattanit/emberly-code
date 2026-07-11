@@ -51,6 +51,7 @@ fn ui_event_variants_roundtrip() -> serde_json::Result<()> {
             call_id: ToolCallId("call_1".into()),
             tool: "read_file".into(),
             summary: "read src/main.rs".into(),
+            explanation: None,
         },
         UiEvent::ToolFinished {
             call_id: ToolCallId("call_1".into()),
@@ -155,6 +156,7 @@ fn transcript_event_variants_roundtrip() -> serde_json::Result<()> {
         },
         TranscriptEvent::AssistantMessage {
             text: "on it".into(),
+            reasoning: None,
         },
         TranscriptEvent::ToolCall {
             call_id: ToolCallId("c1".into()),
@@ -202,7 +204,10 @@ fn transcript_event_variants_roundtrip() -> serde_json::Result<()> {
 fn transcript_record_wire_shape() -> serde_json::Result<()> {
     let rec = TranscriptRecord::new(
         OffsetDateTime::UNIX_EPOCH,
-        TranscriptEvent::AssistantMessage { text: "hi".into() },
+        TranscriptEvent::AssistantMessage {
+            text: "hi".into(),
+            reasoning: None,
+        },
     );
     let value: serde_json::Value = serde_json::to_value(&rec)?;
     assert_eq!(value["v"], serde_json::json!(emberly_core::SCHEMA_VERSION));

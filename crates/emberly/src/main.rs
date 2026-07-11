@@ -31,6 +31,7 @@ mod config;
 mod init;
 mod placeholder;
 mod provider_setup;
+mod trust;
 use placeholder::PlaceholderProvider;
 
 /// The active session's transcript path — a shared handle the engine updates on
@@ -228,6 +229,8 @@ enum Cli {
     Init,
     ConfigShow,
     Sessions,
+    TrustList,
+    TrustRevoke(String),
     Run(RunOpts),
 }
 
@@ -255,6 +258,18 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
                 Some("show") => return Ok(Cli::ConfigShow),
                 other => anyhow::bail!(
                     "unknown config subcommand: {} (try `config show`)",
+                    other.unwrap_or("(none)")
+                ),
+            },
+            // Workspace-trust management (FR-1, Tech Spec §10).
+            "trust" => match args.next().as_deref() {
+                Some("list") => return Ok(Cli::TrustList),
+                Some("revoke") => {
+                    let path = args.next().context("trust revoke needs a <path>")?;
+                    return Ok(Cli::TrustRevoke(path));
+                }
+                other => anyhow::bail!(
+                    "unknown trust subcommand: {} (try `trust list` or `trust revoke <path>`)",
                     other.unwrap_or("(none)")
                 ),
             },
@@ -302,6 +317,14 @@ async fn run() -> anyhow::Result<()> {
             list_sessions(&sessions_dir);
             return Ok(());
         }
+        Cli::TrustList => {
+            trust::list()?;
+            return Ok(());
+        }
+        Cli::TrustRevoke(path) => {
+            trust::revoke(&path)?;
+            return Ok(());
+        }
         Cli::Run(opts) => opts,
     };
     let force_plain = opts.force_plain;
@@ -317,6 +340,18 @@ async fn run() -> anyhow::Result<()> {
     // First run without any project config still just works on defaults; point
     // at `emberly init` (Design §8.1).
     let initialized = project_root.join(".agents").join("config.toml").exists();
+
+    // Workspace-trust gate (FR-1, Tech Spec §6.7): before any project file is
+    // read into a prompt and before any session exists, confirm the user trusts
+    // this folder. Decline exits cleanly with no session created. Canonicalize
+    // first so the store is keyed by real path and subtree trust works.
+    let canonical_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.clone());
+    let trust_granted = match trust::gate(&canonical_root)? {
+        trust::Gate::Declined => return Ok(()),
+        trust::Gate::Proceed { newly_trusted } => newly_trusted,
+    };
 
     // Resolve config (files + env + CLI + keys), then select a live provider or
     // fall back to the offline placeholder when none is configured.
@@ -454,12 +489,23 @@ async fn run() -> anyhow::Result<()> {
         emberly_core::spawn::HostSandbox::new(sandbox.is_confined(), git_binary, path_env),
     );
 
+    // Re-resolves config + prompts on an in-app `/config` / `/prompt` edit (C-5).
+    let config_reloader: Arc<dyn emberly_core::ConfigReloader> =
+        Arc::new(provider_setup::ConfiguredReloader::new(
+            project_root.clone(),
+            &cli_overrides,
+            resolved.sandbox_require,
+        ));
+
     let config = EngineConfig {
         provider,
         tools: default_registry(),
         project_root,
         model,
         system: resolved.system_prompt.clone(),
+        tool_explanations: resolved.tool_explanations,
+        trust_granted,
+        loop_config: resolved.loop_config,
         truncate: TruncateConfig::default(),
         retry: emberly_core::RetryPolicy::default(),
         session_id,
@@ -477,17 +523,39 @@ async fn run() -> anyhow::Result<()> {
         initial_conversation,
         resuming,
         summary_prompt: resolved.summary_prompt.clone(),
+        // Lets `/model` switch provider/model in-session (C-6); resolves any
+        // configured profile, so it works even from the offline placeholder.
+        provider_factory: Some(Arc::new(provider_setup::ConfiguredProviders::new(
+            &resolved,
+        ))),
+        config_reloader: Some(config_reloader),
     };
 
     let (engine_ports, frontend_ports) = channel();
-    let (engine, asks_rx) = Engine::new(config, engine_ports.events_tx);
-    let engine_task = tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx));
+    let (engine, asks_rx, user_asks_rx) = Engine::new(config, engine_ports.events_tx);
+    let engine_task = tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx, user_asks_rx));
 
     // Drive the session until the user quits or the engine closes its events.
     // The frontend drops its command sender on quit, the engine finishes, and
     // its events channel closes. The terminal is restored by the TUI's guard
     // (HC-3) on every exit path, including panics.
-    frontend::run(kind, frontend_ports, session, history, sessions_dir.clone()).await?;
+    // Profile names for the in-app model picker (C-6), sorted for a stable list.
+    let profiles = {
+        let mut names: Vec<String> = resolved.providers.keys().cloned().collect();
+        names.sort();
+        names
+    };
+    frontend::run(
+        kind,
+        frontend_ports,
+        session,
+        history,
+        sessions_dir.clone(),
+        profiles,
+        init::CONFIG_TEMPLATE.to_string(),
+        resolved.reasoning.clone(),
+    )
+    .await?;
 
     match engine_task.await {
         Ok(()) => {}
@@ -530,6 +598,16 @@ mod tests {
         assert_eq!(parse(&["init"]).unwrap(), Cli::Init);
         assert_eq!(parse(&["config", "show"]).unwrap(), Cli::ConfigShow);
         assert_eq!(parse(&["sessions"]).unwrap(), Cli::Sessions);
+        assert_eq!(parse(&["trust", "list"]).unwrap(), Cli::TrustList);
+        assert_eq!(
+            parse(&["trust", "revoke", "/a/b"]).unwrap(),
+            Cli::TrustRevoke("/a/b".into())
+        );
+        assert!(parse(&["trust"]).is_err(), "bare trust needs a subcommand");
+        assert!(
+            parse(&["trust", "revoke"]).is_err(),
+            "revoke needs a <path>"
+        );
     }
 
     #[test]

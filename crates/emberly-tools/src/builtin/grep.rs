@@ -37,7 +37,9 @@ impl Tool for GrepTool {
         ToolSpec {
             name: "grep".into(),
             description: "Search file contents under the project root for a regular expression, \
-                          reporting `path:line:text`. Skips .git/ and gitignored files."
+                          reporting `path:line:text`. Skips .git/ and gitignored files. \
+                          Read-only and root-scoped, so it runs without a permission prompt — \
+                          prefer it over shelling out to `grep`/`rg` via bash."
                 .into(),
             input_schema: json!({
                 "type": "object",

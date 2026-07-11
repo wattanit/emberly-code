@@ -35,7 +35,9 @@ impl Tool for GlobTool {
         ToolSpec {
             name: "glob".into(),
             description: "Find files under the project root whose path matches a glob pattern \
-                          (e.g. `**/*.rs`, `src/**/mod.rs`). Skips .git/ and gitignored files."
+                          (e.g. `**/*.rs`, `src/**/mod.rs`). Skips .git/ and gitignored files. \
+                          Read-only and root-scoped, so it runs without a permission prompt — \
+                          prefer it over `find` via bash."
                 .into(),
             input_schema: json!({
                 "type": "object",

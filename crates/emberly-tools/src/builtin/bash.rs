@@ -150,7 +150,11 @@ impl Tool for BashTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash".into(),
-            description: "Run a shell command from the project root under a timeout.".into(),
+            description: "Run a shell command from the project root under a timeout. Most \
+                          commands require a permission prompt; prefer the first-party tools \
+                          (`read_file`, `grep`, `glob`) for reading and searching, which run \
+                          without prompting."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

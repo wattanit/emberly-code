@@ -40,6 +40,8 @@ impl Provider for PlaceholderProvider {
             context_window: 8_192,
             max_output_tokens: 1_024,
             pricing: None,
+            effort_levels: Vec::new(),
+            default_effort: None,
         }
     }
 

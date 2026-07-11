@@ -7,7 +7,9 @@
 //! mutex (Tech Spec §2).
 
 use async_trait::async_trait;
-use emberly_tools::{PermissionGate, PermissionOutcome, PermissionRequest};
+use emberly_tools::{
+    AskUserGate, AskUserOutcome, PermissionGate, PermissionOutcome, PermissionRequest,
+};
 use tokio::sync::{mpsc, oneshot};
 
 /// A permission request in flight from a tool to the engine, carrying the
@@ -41,5 +43,43 @@ impl PermissionGate for ChannelGate {
             return PermissionOutcome::Deny;
         }
         reply_rx.await.unwrap_or(PermissionOutcome::Deny)
+    }
+}
+
+/// An `ask_user` question in flight from a tool to the engine, carrying the
+/// oneshot the engine replies on (T-8). Like [`PermissionAsk`], opaque to
+/// callers of the engine — they only route the receiver back into
+/// [`Engine::run`](crate::engine::Engine::run).
+pub struct AskUserAsk {
+    pub(crate) question: String,
+    pub(crate) options: Vec<String>,
+    pub(crate) reply: oneshot::Sender<AskUserOutcome>,
+}
+
+/// The ask-user gate installed into every [`ToolCtx`](emberly_tools::ToolCtx).
+/// Fails closed: if the engine is gone, or the reply is dropped, the answer is
+/// [`AskUserOutcome::Declined`] (the safe default — no unsafe answer, Design
+/// §5.1).
+pub(crate) struct AskGate {
+    pub(crate) asks: mpsc::Sender<AskUserAsk>,
+}
+
+#[async_trait]
+impl AskUserGate for AskGate {
+    async fn ask(&self, question: String, options: Vec<String>) -> AskUserOutcome {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .asks
+            .send(AskUserAsk {
+                question,
+                options,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return AskUserOutcome::Declined;
+        }
+        reply_rx.await.unwrap_or(AskUserOutcome::Declined)
     }
 }

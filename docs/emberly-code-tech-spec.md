@@ -1,11 +1,11 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.2 
+**Version:** 0.6 
 **Status:** approved 
-**Date:** 2026-07-09
+**Date:** 2026-07-11
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.4 (upstream contract),
-Design Guideline v0.4 (upstream for all UI/UX decisions)
+**Companion documents:** Requirements Document v0.5 (upstream contract),
+Design Guideline v0.5 (upstream for all UI/UX decisions)
 
 This document defines HOW Emberly Code is built. Requirements-level
 identifiers (HC-n, P-n, T-n, C-n, S-n, A-n) refer to the Requirements
@@ -73,11 +73,23 @@ vs UI streaming have incompatible granularity):
 ### 3.1 `UiEvent` (ephemeral, high-frequency)
 
 Non-exhaustive enum, serializable (A-3):
-`AssistantDelta(String)`, `AssistantDone`, `ToolStarted{..}`,
+`AssistantDelta(String)`, `ReasoningDelta(String)` (P-10), `AssistantDone`,
+`ToolStarted{.., explanation: Option<String>}` (the T-9 line, §5.4),
 `ToolFinished{..}`, `PermissionRequest{id, rendering}`,
-`ContextUsage{pct, tokens}`, `CostEstimate{..}`, `SandboxStatus(..)`,
-`ModeChanged(..)`, `HarnessError{..}`, `SessionMeta{..}`,
+`AskUserRequest{id, question, options}` (T-8), `LoopHalted{reason}` (S-5),
+`ContextUsage{pct, tokens}`, `CostEstimate{..}`,
+`SandboxStatus(..)`, `ModeChanged(..)`, `ModelChanged{provider, model}` and
+`EffortChanged{effort: Option<Effort>, available: Vec<Effort>}` (C-6/P-9 —
+carries the model's offered levels so the picker knows its options and the
+sidebar the current one; `effort`/`available` empty when the model has no
+control), `HarnessError{..}`, `SessionMeta{..}`,
 `FileModified{path, adds, dels}`, `CompactionStatus(..)`.
+
+Workspace trust (FR-1) is **not** a `UiEvent`: it is a pre-engine gate in the
+binary (§6.7), resolved before the engine loop starts and before any project
+file is read into a prompt, so it never crosses the engine↔frontend channel.
+(v0.5 listed a `TrustRequest{path}` UiEvent; the pre-engine gate supersedes it —
+withdrawn in v0.6, see §16.)
 
 ### 3.2 `TranscriptEvent` (durable, append-only JSONL)
 
@@ -90,12 +102,20 @@ One JSON object per line in
 
 - `v` — schema version, present from day one (HC-7 longevity).
 - Event types: `session_start` (model, provider, config provenance,
-  sandbox status), `user_message`, `assistant_message` (complete, not
-  deltas), `tool_call`, `tool_result` (with `truncated: bool` and, when
+  sandbox status), `trust_decision` (path + trusted — FR-1, §6.7; written on
+  **accept only**, since a decline starts no session and so has no transcript to
+  record into — the trust store's absence of the path is the durable record of a
+  non-grant), `user_message`, `assistant_message` (complete, not deltas;
+  carries a distinct `reasoning` field when the model produced one —
+  P-10, §4.7), `tool_call` (with the model's `explanation` when present —
+  T-9, §5.4), `tool_result` (with `truncated: bool` and, when
   truncated, `full_output_ref` pointing to a sidecar file under
-  `.agents/sessions/<id>-outputs/`), `permission_request`,
+  `.agents/sessions/<id>-outputs/`), `ask_user` (question + options and
+  the user's answer or decline — T-8), `loop_halt` (reason + the user's
+  chosen resolution — S-5), `permission_request`,
   `permission_decision` (what was asked, what the user answered, what
-  actually ran — Requirements §6.6), `mode_change`, `compaction`
+  actually ran — Requirements §6.6), `mode_change`, `model_switch` /
+  `effort_change` (C-6/P-9), `compaction`
   (summary text + replaced range), `session_title`, `session_end`,
   `abnormal_exit` (written by the supervisor when possible).
 - The transcript is ground truth; the in-context conversation is rebuilt
@@ -117,20 +137,25 @@ replays the transcript: conversation view is reconstructed by applying
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn id(&self) -> ProviderId;
-    fn model_info(&self) -> ModelInfo; // context window, pricing table
+    fn model_info(&self) -> ModelInfo; // context window, pricing, effort levels
     async fn stream_completion(
         &self,
-        req: CompletionRequest,   // normalized messages + tool schemas
+        req: CompletionRequest,   // messages + tool schemas + reasoning effort
     ) -> Result<CompletionStream, ProviderError>;
     fn count_tokens(&self, text: &str) -> TokenEstimate; // may be approx
 }
 ```
 
 `CompletionStream` yields normalized `StreamEvent`s: `TextDelta`,
+`ReasoningDelta` (model thinking, distinct from the answer — P-10),
+`ReasoningSignature{signature, redacted}` (emitted once when a reasoning
+block closes — the opaque provider token to replay it verbatim on later
+tool-use turns, §4.7; a provider without one never emits it),
 `ToolCallStart/Delta/End`, `Usage`, `Done`, `Err`. No provider wire
-type crosses this boundary (P-1).
+type crosses this boundary (P-1). A provider that does not stream
+reasoning simply never emits `ReasoningDelta`.
 
-### 4.2 Implementations (v1)
+### 4.2 Implementations
 
 - **Anthropic Messages API** — content blocks, `tool_use`/`tool_result`
   mapping, SSE streaming.
@@ -140,7 +165,7 @@ type crosses this boundary (P-1).
 
 Both are thin first-party clients on `reqwest` (default features off,
 `rustls-tls`, `json`, `stream` on) — no vendor SDK crates (P-4). Two
-live implementations before v1 ship (P-3).
+live implementations before release (P-3).
 
 ### 4.3 Streaming, retries, failures
 
@@ -162,6 +187,59 @@ live implementations before v1 ship (P-3).
 - Cost: per-model pricing table in config
   (`[pricing."model-id"] input=…, output=…` per MTok), estimate =
   Σ(usage × price), always labeled "est." in UI (Design §3.1).
+
+### 4.5 Provider profiles and endpoint configuration (P-8)
+
+The two implementations in §4.2 are **wire-format parsers**; the endpoint
+each talks to is data, not code. A provider is a config profile:
+
+```toml
+[providers.<name>]
+adapter  = "anthropic" | "openai"            # which §4.2 wire-format parser
+base_url = "https://…"
+auth     = { scheme = "bearer" | "x-api-key" | "header", header = "…", key = "<ref>" }
+models   = ["model-id", …]
+# optional [providers.<name>.pricing."model-id"] input=…, output=…
+```
+
+- Adding a service that speaks a wire format we already parse is a new
+  profile and **zero code** (P-1's normalization paying rent, P-8). Only a
+  genuinely new wire format needs a new `Provider` impl.
+- Auth `key` is a reference resolved from env / `keys.toml` (§8), never an
+  inline secret; the `header`/`scheme` set covers bearer tokens, API-key
+  headers, and arbitrary custom headers — enough for common endpoints.
+- *Example (non-normative):* the Z.ai coding plan is a profile selecting
+  whichever wire format it speaks, its base URL, and its auth. The harness
+  carries no Z.ai-specific code.
+
+### 4.6 Reasoning effort (P-9)
+
+- `CompletionRequest` carries `effort: Option<Effort>`, a normalized enum
+  (`Low | Medium | High | Max`). Each adapter maps it to the provider's
+  native control — the `anthropic` adapter to a thinking-budget token count,
+  the `openai` adapter to the `reasoning_effort` field — or drops it when the
+  model has no such control (a no-op, never an error — P-9).
+- `ModelInfo` declares the levels a model offers and its default; the UI
+  (Design §3.1) offers exactly those. Effort is engine state, changed by
+  `Command::SetEffort`, transcript-logged like mode (§6.6).
+
+### 4.7 Reasoning trace (P-10)
+
+- Adapters translate provider-native thinking parts into `ReasoningDelta`;
+  the engine records them in the `assistant_message` transcript event as a
+  **distinct field**, never concatenated into the answer text.
+- Where a provider requires reasoning blocks (and their opaque signatures)
+  to be echoed back on subsequent tool-use turns for multi-turn thinking to
+  work, the adapter preserves the signature and replays it per that
+  provider's rule. The signature travels as a `ReasoningSignature` stream
+  event (§4.1) and is held in the normalized conversation as a
+  `ContentBlock::Reasoning{text, signature, redacted}` — an opaque token the
+  engine never interprets, so no wire *type* crosses the boundary (P-1). The
+  engine places that block ahead of the turn's text/tool-use so a provider
+  that demands the ordering (e.g. Anthropic extended thinking) accepts the
+  replay; a provider with no such requirement ignores the block. Resume does
+  not reconstruct reasoning blocks — the signature is not persisted, and only
+  the live turn needs replay.
 
 ## 5. Tool Layer (`emberly-tools`)
 
@@ -187,12 +265,13 @@ proxying JSON-RPC (T-7); nothing else in the engine changes.
 
 | Tool | Notes |
 |---|---|
-| `read_file` | Path-normalized (symlinks resolved, `..` collapsed) then root-checked. Output truncation per §7. |
+| `read_file` | Path-normalized (symlinks resolved, `..` collapsed) then root-checked. Optional `start_line`/`end_line` (1-based, inclusive) read a numbered slice — the prompt-free alternative to `sed -n`. Output truncation per §7. |
 | `write_file` | Refuses `.git/` (HC-5). Creates parent dirs inside root only. |
 | `edit_file` | Exact string match-and-replace. Failure messages distinguish *no match* vs *N matches found* and, for no-match, include the closest fuzzy region as a hint (T-3 — model recovery quality depends on this). |
 | `bash` | See §6. Timeout default 120s, configurable per-call by the model up to a config ceiling. Env is a scrubbed allowlist (PATH, HOME, LANG, TERM + config additions) — secrets in the user's env are not inherited by default. |
 | `glob` | Root-confined; ignores `.git/` and honors `.gitignore` by default. |
 | `grep` | First-party wrapper over the `grep-searcher`/`ignore` crates (the ripgrep libraries — pure Rust, same author). Root-confined. |
+| `ask_user` | Presents a question and optional discrete options to the user and blocks the agent loop until answered (T-8). Returns the typed answer, or a structured `{declined: true}` if dismissed, so the model can proceed or stop. Touches no filesystem or network — a pure engine↔frontend round-trip — so it bypasses the sandbox but still flows through the `Tool` trait; it is a `Command`/`UiEvent` pair under the hood (§3). |
 
 ### 5.3 Truncation at ingestion (Requirements §8.1)
 
@@ -203,6 +282,21 @@ insert `[... N lines elided — /view to open full output ...]`, write the
 full output to the sidecar file, and record `full_output_ref` in the
 transcript event. Deterministic, no model call. The `/view` handoff
 (Design §4.3) opens the sidecar read-only in `$VISUAL`/`$EDITOR`.
+
+### 5.4 Tool-call explanation (T-9)
+
+- An optional `explanation` string property is injected into every tool's
+  `input_schema` at the single `ToolSpec → provider` serialization point;
+  the system prompt instructs the model to fill it briefly and only for
+  calls whose intent is not self-evident (bump the prompt version). No tool
+  declares `deny_unknown_fields`, so the field rides in `args` and tools
+  ignore it — and because the transcript already records full `args`, the
+  explanation persists with **no transcript schema-version bump**.
+- The UI renders it per Design §4.5 (`explanation: Option<String>` on the
+  `ToolStarted` UiEvent, §3.1).
+- `ui.tool_explanations = true|false` (§8): when off, the schema property is
+  omitted entirely so the model is never prompted for it and no tokens are
+  spent (Requirements T-9).
 
 ## 6. Sandbox & Permissions (`emberly-sandbox`)
 
@@ -221,10 +315,14 @@ decides *when to ask*; the sandbox layer decides *what is possible*.
   written line shown to the user).
 - Every request/decision/execution is a transcript event (HC-7).
 - Default bash allowlist (initial; user-extensible): `ls`, `cat`,
-  `head`, `tail`, `wc`, `rg`, `find`, `pwd`, `echo`, `which`,
+  `head`, `tail`, `wc`, `grep`, `rg`, `find`, `pwd`, `echo`, `which`,
   `git status`, `git diff`, `git log`, `git show`, `git branch`,
   `cargo check`, `cargo tree`, `cargo metadata`. (Resolves the
   Requirements §13 open item; final list is a living config default.)
+  Note: `sed` is intentionally absent — a prefix rule would match the
+  destructive `sed -i`/`sed >` forms too, and §6.5 forbids flag-parsing
+  as a matching mechanism. Use `read_file` with `start_line`/`end_line`
+  for a prompt-free ranged read instead.
 
 ### 6.2 OS confinement — Linux (Landlock)
 
@@ -308,6 +406,42 @@ Auto modes are constructible only when `SandboxStatus` is fully or
 acceptably-partially confined (§6.5); the type system enforces this
 (mode transitions take the sandbox status as a parameter).
 
+### 6.7 Workspace trust (FR-1)
+
+Model mirrors the established harnesses (Claude Code's user-global
+`~/.claude.json` keyed by canonical path; VS Code Workspace Trust's
+subtree trust and explicit manage surface): **user-global, keyed by
+canonical path, subtree-trusted**, with an optional pre-trust allowlist.
+
+- **Store:** `~/.config/emberly/trust.toml` (XDG), `0600`, **global only** —
+  never a project key, so a repository cannot pre-declare itself trusted
+  (Requirements FR-1). Entries are canonical paths with an accepted flag and
+  timestamp.
+- **Membership (subtree trust):** a project root is trusted if it *or any
+  ancestor directory* is in the store — trusting a folder trusts its
+  subtree, as VS Code and Claude Code do, so a trusted repo does not
+  re-prompt per subdirectory.
+- **Pre-trust allowlist:** `trust.trusted_dirs = [..]` in **global** config
+  auto-trusts matching roots at startup without a prompt (adopts the
+  `trustedDirectories` pattern requested for Claude Code). Project config
+  cannot contribute here (FR-1).
+- **Checked in the binary at startup** (§10), before the engine begins the
+  loop *and before any project file is read into a prompt*: canonicalize the
+  root, test membership (store ∪ allowlist). A miss raises the trust gate — a
+  plain pre-engine prompt printed before either frontend takes the terminal, so
+  it reads the same in rich and plain mode and needs no engine event (Design
+  §8.4); a non-interactive launch declines cleanly. On decline the
+  process exits cleanly with no session started; on accept the canonical
+  path is written to the store and the session proceeds. The decision is a
+  transcript event (`trust_decision`, §3.2).
+- **Revocation:** `emberly trust list` / `emberly trust revoke <path>` —
+  an explicit surface, so revoking never means hand-editing a file (the
+  documented pain point in the harnesses we are following).
+- This is a **session-start gate, not containment** (Requirements FR-1
+  honesty clause): it lives outside `emberly-sandbox`, changes no ruleset,
+  and never widens HC-4/HC-5 or relaxes a prompt. It decides *whether* the
+  agent runs here, never *what* it may do.
+
 ## 7. Context Management (`emberly-core`)
 
 - Budget: `window − reserved_output` (default reserve 8k tokens or the
@@ -316,7 +450,7 @@ acceptably-partially confined (§6.5); the type system enforces this
 - **Pinned, never compacted:** system prompt, project instructions
   (AGENTS.md/CLAUDE.md per C-1), original task statement (first user
   message of the session, tagged in the transcript).
-- **`/compact`** (manual, v1): valid only at clean boundaries (every
+- **`/compact`** (manual): valid only at clean boundaries (every
   `tool_use` has its `tool_result`; if invoked mid-run, queued until
   the boundary). Summarization request uses the *current provider* with
   a purpose-built prompt (from the prompts directory, overridable per
@@ -329,7 +463,21 @@ acceptably-partially confined (§6.5); the type system enforces this
   oldest non-pinned turns to 50% budget with a visible warning — a full
   context never produces a stuck session.
 - Auto-compaction: designed-for (the trigger is one threshold check in
-  the accounting path) but not enabled in v1 (Requirements §2.2).
+  the accounting path) but not enabled in current scope (Requirements §2.2).
+- **Loop-breaking guardrail (S-5).** The engine keeps a rolling signature
+  of recent steps: for each turn, the multiset of `(tool_name,
+  normalized-args)` tuples plus a hash of the resulting `tool_result`
+  content and the set of files modified. No-progress heuristic (initial;
+  tune with use): trip when the last `loop.repeat_window` turns (default 3)
+  repeat tool-call signatures **and** produce no new modified files and no
+  new distinct tool-result hashes — i.e. the loop is re-treading, not
+  advancing. On trip: stop issuing provider calls, emit `LoopHalted{reason}`
+  (UiEvent + transcript event, §3), and await a user `Command` (resume /
+  stop / steer, Design §8.5). Config `[loop] enabled, repeat_window,
+  max_no_progress_turns`. The guardrail never trips while files change or
+  tool results differ (genuine progress); it is a heuristic (Requirements
+  S-5), and the guarantee is termination-into-a-decision, not perfect
+  classification.
 
 ## 8. Configuration & Prompts
 
@@ -349,6 +497,27 @@ acceptably-partially confined (§6.5); the type system enforces this
   keys file `~/.config/emberly/keys.toml` with `0600` perms enforced
   (warn+refuse on group/world-readable). Never in project config, never
   in transcripts (requests are logged with auth headers redacted).
+- **In-app editing (C-5).** The TUI edits `.agents/config.toml` and prompt
+  files via the editable overlay or `$EDITOR` handoff (Design §4.6). Writes
+  target the project tier (Requirements C-1); the value's provenance
+  (`config show`, C-3) is shown before the edit. Prompts and most config
+  live-reload on save; keys that require a restart are a static list in the
+  config module, and the editor names them at save time — the type carries
+  a `reload: Live | RestartRequired` flag per key so "does this need a
+  restart" is not a guess.
+- **In-app model/provider/effort switching (C-6).** `Command::SwitchModel
+  {profile}` and `Command::SetEffort{level}` swap the active `Provider` /
+  effort for subsequent turns; both are transcript events and never rewrite
+  prior turns. The picker (Design §3.1) lists the `[providers.*]` profiles
+  (§4.5) and the active model's effort levels (§4.6).
+- **New config keys** (initial; tune with use): `[providers.<name>]`
+  (§4.5); per-model effort default (§4.6); `reasoning = collapsed |
+  expanded | hidden` view default, **default `collapsed`** (Design §4.4);
+  `ui.tool_explanations = bool`, **default `true`** (§5.4); `[loop] enabled,
+  repeat_window, max_no_progress_turns` (§7).
+- **Trust:** store at `~/.config/emberly/trust.toml`, `0600`, global only;
+  optional `trust.trusted_dirs` pre-trust allowlist in global config
+  (§6.7) — neither is ever a project key (Requirements FR-1).
 
 ## 9. TUI (`emberly-tui`)
 
@@ -373,6 +542,22 @@ acceptably-partially confined (§6.5); the type system enforces this
   Emacs-style basics, multi-line via Shift+Enter, bracketed paste.
 - **Command palette:** Ctrl+P, fuzzy match over the command registry
   (single source of truth also serving `/commands` and help).
+- **Reasoning trail (Design §4.4):** collapsed dim line with expand
+  affordance, driven by `ReasoningDelta`; streams in place while thinking,
+  settles to the collapsed line on answer; `reasoning` view key sets the
+  default; `hidden` still records to the transcript.
+- **Tool-call explanation (Design §4.5):** a single dim caption line under
+  the call from `ToolStarted.explanation`; absent when the model gave none,
+  never a placeholder.
+- **In-app editor & pickers (Design §3.1, §4.6):** editable overlay reusing
+  the §4.2 overlay machinery, plus `$EDITOR` handoff; model/provider and
+  effort pickers as overlays fed by `[providers.*]` and `ModelInfo`.
+- **Question prompt (Design §5.1):** the `ask_user` surface — neutral
+  styling, never the reserved safety band, selectable options + free-text,
+  no unsafe default; Esc returns a structured decline.
+- **Trust gate (Design §8.4)** at startup and **loop-break surface
+  (Design §8.5)** in harness voice — both keep full degraded-mode
+  guarantees (ASCII, capitalized choices, deliberate key).
 - **Motion (Design §6.4):** ember-pulse spinner, streaming accent
   glow, overlay ease-in, sidebar settle — all driven by a single
   animation ticker (~12fps) that is *skipped entirely* when
@@ -390,8 +575,12 @@ acceptably-partially confined (§6.5); the type system enforces this
 ## 10. Binary & Supervisor (`emberly`)
 
 - CLI: `emberly` (start/attach in cwd project), `emberly init`,
-  `emberly resume [id]`, `emberly config show`, `--plain`, `--model`,
-  `--provider`, `--version`.
+  `emberly resume [id]`, `emberly config show`, `emberly trust
+  [list|revoke <path>]` (FR-1, §6.7), `--plain`, `--model`, `--provider`,
+  `--effort`, `--version`.
+- Startup runs the workspace-trust check (§6.7) before the engine starts
+  the loop: an untrusted root raises the trust gate and, on decline, exits
+  cleanly with no session created.
 - Supervisor (HC-3, S-2): the binary installs a top-level catch
   (panic hook + supervising the engine/TUI tasks). On any abnormal
   path: restore the terminal (always — a corrupted terminal is a
@@ -425,17 +614,24 @@ system API (no third-party crate if avoidable).
 TUI: `ratatui`, `crossterm`, `unicode-segmentation`, `unicode-width`,
 `syntect` (fancy-regex backend), `nucleo-matcher` (palette fuzzy match).
 
+The 0.2 feature set adds **no new dependencies**: endpoint-configurable
+provider profiles, reasoning effort/trace, the ask-user tool, tool-call
+explanation, workspace trust, in-app editing/pickers, and the loop
+guardrail are all engine, config, and TUI logic over the existing crate
+set. `emberly-sandbox`'s frozen dependency list is untouched (the trust
+gate lives outside it, §6.7).
+
 Policy (Requirements §10): additions require `cargo vet` acceptance;
 `cargo deny` (licenses, duplicates, advisories) + `cargo geiger` report
 in CI; `emberly-sandbox` additions require explicit owner sign-off.
 
 ## 13. Build & Release
 
-- **Release targets (v1):** `x86_64-unknown-linux-musl`,
+- **Release targets:** `x86_64-unknown-linux-musl`,
   `aarch64-unknown-linux-musl` (fully static, HC-2),
   `aarch64-apple-darwin`. Best-effort: `x86_64-apple-darwin`.
   **Windows: deferred** — no Landlock/Seatbelt equivalent; shipping a
-  weaker safety tier is declined for v1. (Resolves Requirements §13.)
+  weaker safety tier is declined (current scope). (Resolves Requirements §13.)
 - CI gates per PR: fmt, clippy (with the lint policy of §1 as errors),
   test suite incl. degraded-mode and Thai-fixture tests, `cargo deny`,
   `cargo vet`, musl static build check.
@@ -463,9 +659,17 @@ in CI; `emberly-sandbox` additions require explicit owner sign-off.
 4. **Live smoke suite.** Small real-provider script (one tool-use
    round trip per provider), manual/nightly only, never in the merge
    path.
+5. **0.2 feature coverage** (offline via `FakeProvider` where possible):
+   `FakeProvider` scripts emitting `ReasoningDelta` (P-10) and an effort
+   parameter round-trip (P-9); an `ask_user` round trip asserting the loop
+   blocks then resumes with the answer (T-8); a scripted re-treading loop
+   that must trip `LoopHalted` and a progressing loop that must not (S-5);
+   a provider profile pointed at a fake endpoint proving a new provider is
+   config-only (P-8); trust-gate tests — untrusted root prompts and decline
+   exits with no session, project-local trust key is ignored (FR-1).
 
 Agent *quality* evaluation (does it code well) is explicitly out of
-scope for this spec — post-v1 discipline with separate tooling.
+scope for this spec — post-release discipline with separate tooling.
 
 ## 15. Milestones
 
@@ -478,15 +682,44 @@ token/cost accounting. *Proves P-1..P-6.*
 M4 — full TUI: panes, sidebar, palette, diff overlay, Thai input
 fixtures, degraded mode parity. *Proves the design guideline.*
 M5 — sessions: transcript, resume, `/compact`, `init`/config
-provenance, macOS Seatbelt, release pipeline. *Proves v1.*
+provenance, macOS Seatbelt, release pipeline. *Proves the initial release.*
+M6 — 0.2 feature set: endpoint-configurable provider profiles (P-8) incl.
+the Z.ai profile, reasoning effort (P-9) and reasoning trail (P-10),
+ask-user tool (T-8), tool-call explanation (T-9), workspace trust (FR-1),
+in-app config/prompt editor and model/effort pickers (C-5, C-6), and the
+loop-breaking guardrail (S-5). *Proves the 0.2 scope.*
 
 ## 16. Open Items
+
+**Resolved in v0.6 (2026-07-11, M6 close — Phase 5).** Workspace trust (FR-1) is
+realized as a **pre-engine binary gate** (§6.7), not an engine event: the v0.5
+`TrustRequest{path}` UiEvent (§3.1) is **withdrawn** — trust is decided before
+the engine loop and before project files are read, so it never crosses the
+engine↔frontend channel. `trust_decision` (§3.2) is written on accept only (a
+decline starts no session). The loop-breaking guardrail (S-5) landed as
+specified: `LoopHalted`/`loop_halt` events plus a `ResolveLoop{resume|stop|
+steer}` command. Minor, additive bump; Requirements/Design unchanged (pins
+refreshed to Spec v0.6).
 
 - First-party SSE vs `eventsource-stream` (decide in M3 by reading the
   crate; bias first-party).
 - `truncate.*` and `context.keep_recent_turns` defaults — placeholders
   above; tune with real use.
 - Session-title generation: heuristic in M5 (first user message,
-  clipped); model-generated title as post-v1 nicety.
+  clipped); model-generated title as post-release nicety.
 - macOS Seatbelt profile details (M5 spike; public API is old and
   thinly documented — budget investigation time).
+- `[loop]` default thresholds (§7) — placeholders; tune with real use so
+  the guardrail catches runaways without cutting off genuine progress.
+- Provider auth-scheme coverage (§4.5): confirm bearer / x-api-key /
+  custom-header suffices for target endpoints; extend the set only if a
+  real profile needs it (M6).
+- Effort enum granularity (§4.6): the four-level → thinking-budget ladder is
+  implemented and owner-approved (2026-07-11: Low 2k / Medium 8k / High 16k /
+  Max 32k, clamped to the model's output allowance; openai maps to
+  `reasoning_effort` with Max→high). Still to do: validate against each live
+  provider's native control in M6; collapse or extend if the mapping is lossy.
+- Reasoning-signature replay (§4.7): the mechanism ships (a `ReasoningSignature`
+  stream event + `ContentBlock::Reasoning` carrier); confirm per-provider echo
+  requirements against live endpoints in M6 so multi-turn thinking is correct.
+  Redacted-thinking replay is implemented but untested against a live endpoint.

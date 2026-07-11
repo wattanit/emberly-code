@@ -26,6 +26,17 @@ use crate::model::TokenUsage;
 pub enum StreamEvent {
     /// A chunk of assistant text.
     TextDelta { text: String },
+    /// A chunk of the model's reasoning/thinking, distinct from the answer
+    /// (P-10). The engine records it in a separate field and the UI renders it
+    /// in its own register — never concatenated with [`TextDelta`]. A provider
+    /// that does not expose reasoning simply never emits this.
+    ReasoningDelta { text: String },
+    /// The opaque provider token for the just-completed reasoning block, to be
+    /// replayed verbatim on later tool-use turns so multi-turn thinking works
+    /// (Anthropic's `signature`, or a `redacted_thinking` `data` blob). Emitted
+    /// once when the reasoning block closes; never interpreted by the engine
+    /// (P-1). `redacted` marks an encrypted block whose text was withheld.
+    ReasoningSignature { signature: String, redacted: bool },
     /// A tool call began; `name` is the tool, `id` correlates its parts.
     ToolCallStart { id: ToolCallId, name: String },
     /// A fragment of the tool call's JSON arguments, to be concatenated in

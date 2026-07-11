@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, ConvItem, Overlay, OverlayContent, SessionRow};
+use crate::app::{App, ChoiceRow, ConvItem, Overlay, OverlayContent, SessionRow};
 use crate::text;
 use crate::theme::Theme;
 use crate::{strings, strings::markers};
@@ -53,10 +53,15 @@ pub fn frame(f: &mut Frame, app: &App) {
         (body, None)
     };
 
-    // A pending permission prompt takes over the whole main area — no input box
-    // is shown, so nothing can be typed into a decision (Design §5).
+    // A pending permission prompt or question prompt takes over the whole main
+    // area — no input box is shown, so nothing can be typed into a decision
+    // (Design §5, §5.1). The permission prompt wins if somehow both are set.
     if app.pending_permission.is_some() {
         render_permission(f, app, main);
+    } else if app.pending_ask.is_some() {
+        render_ask(f, app, main);
+    } else if app.pending_loop_halt.is_some() {
+        render_loop_halt(f, app, main);
     } else {
         // Conversation over the input box.
         let input_rows = app.editor.line_count().clamp(1, MAX_INPUT_ROWS);
@@ -195,6 +200,10 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
             let (lines, sel_line) = session_picker_lines(rows, *selected, theme);
             (lines, Some(sel_line), " Enter resume · ↑↓ move · Esc close")
         }
+        OverlayContent::Choices { rows, selected, .. } => {
+            let (lines, sel_line) = choice_picker_lines(rows, *selected, theme);
+            (lines, Some(sel_line), " Enter select · ↑↓ move · Esc close")
+        }
     };
 
     let total = lines.len();
@@ -274,6 +283,38 @@ fn session_picker_lines(
     (lines, sel_line)
 }
 
+/// Render a generic choice picker (`/model`, C-6) as selectable rows, returning
+/// the lines and the selected line index (to scroll it into view). The active
+/// choice is marked; the selected one is accented.
+fn choice_picker_lines(
+    rows: &[ChoiceRow],
+    selected: usize,
+    theme: &crate::theme::Theme,
+) -> (Vec<Line<'static>>, usize) {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut sel_line = 0;
+    for (i, row) in rows.iter().enumerate() {
+        if i == selected {
+            sel_line = lines.len();
+        }
+        let marker = if i == selected { "▶ " } else { "  " };
+        let style = if i == selected {
+            theme.strong()
+        } else {
+            theme.primary()
+        };
+        let mut spans = vec![
+            Span::styled(marker.to_string(), theme.accent()),
+            Span::styled(row.label.clone(), style),
+        ];
+        if row.current {
+            spans.push(Span::styled("  (current)".to_string(), theme.success()));
+        }
+        lines.push(Line::from(spans));
+    }
+    (lines, sel_line)
+}
+
 /// A rectangle centered in `area` at the given width/height percentages.
 fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
     let [h] = Layout::horizontal([Constraint::Percentage(pct_w)])
@@ -342,8 +383,38 @@ fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 // inline code, lists, headings; everything else plain (§4.1).
                 out.extend(crate::markdown::render_message(text, theme, w));
             }
+            ConvItem::Reasoning { text, expanded } => {
+                // A quiet register, one visual step below the answer (Design
+                // §4.4): a dim summary line, and — when expanded — the reasoning
+                // in chrome colour so it never reads as the conclusion.
+                let lines = text.lines().count().max(1);
+                let (mark, label) = if *expanded {
+                    (markers::REASONING_EXPANDED, "reasoning".to_string())
+                } else {
+                    (
+                        markers::REASONING_COLLAPSED,
+                        format!("reasoning ({lines} lines)"),
+                    )
+                };
+                out.push(Line::from(vec![Span::styled(
+                    format!("{mark} {label}"),
+                    theme.chrome(),
+                )]));
+                if *expanded {
+                    for row in text
+                        .split('\n')
+                        .flat_map(|l| text::wrap(l, w.saturating_sub(2)))
+                    {
+                        out.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(row, theme.chrome()),
+                        ]));
+                    }
+                }
+            }
             ConvItem::Tool {
                 summary,
+                explanation,
                 done,
                 result,
                 preview,
@@ -364,6 +435,29 @@ fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                     spans.push(Span::styled(format!(" — {result}"), theme.chrome()));
                 }
                 out.push(Line::from(spans));
+
+                // The model's caption (T-9, Design §4.5): a single dim line
+                // directly under the call, led by a marker so it reads as an
+                // annotation, not tool output. Absent → nothing (no placeholder).
+                // Dim + marker + position carry it — never styled as a result or
+                // error, never meaning-by-colour (Design §4.5/§7).
+                if let Some(explanation) = explanation {
+                    let lead = format!("    {} ", markers::EXPLANATION);
+                    for (i, row) in text::wrap(explanation, w.saturating_sub(6))
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let prefix = if i == 0 {
+                            lead.clone()
+                        } else {
+                            "      ".into()
+                        };
+                        out.push(Line::from(vec![
+                            Span::raw(prefix),
+                            Span::styled(row, theme.chrome()),
+                        ]));
+                    }
+                }
 
                 // Result preview: a few indented, dimmed lines of the output so
                 // the user sees what the tool produced (Design §6.1).
@@ -487,6 +581,17 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
         format!("{}/{}", app.session.provider, app.session.model)
     };
     lines.push(labeled(theme, strings::status::MODEL_LABEL, &model, w));
+    // Effort line: shown only when the active model exposes a control (P-9,
+    // Design §3.1); hidden otherwise so it never implies a knob that does
+    // nothing.
+    if let Some(effort) = app.effort {
+        lines.push(labeled(
+            theme,
+            strings::status::EFFORT_LABEL,
+            effort.as_str(),
+            w,
+        ));
+    }
     lines.push(Line::from(vec![
         Span::styled(
             format!("{} ", strings::status::CONTEXT_ABBR),
@@ -658,6 +763,14 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
     let theme = &app.theme;
     let hints = if app.pending_permission.is_some() {
         strings::hints::PERMISSION
+    } else if app.pending_ask.is_some() {
+        strings::ask_user::HINT
+    } else if let Some(halt) = &app.pending_loop_halt {
+        if halt.steering {
+            strings::loop_halt::STEER_HINT
+        } else {
+            strings::loop_halt::HINT
+        }
     } else {
         strings::hints::NORMAL
     };
@@ -680,10 +793,13 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
             .spinner_elapsed()
             .map(|s| format!(" {s}s"))
             .unwrap_or_default();
-        spans.push(Span::styled(
-            format!(" {} ", app.spinner_glyph()),
-            theme.accent(),
-        ));
+        // The spinner breathes in lockstep with the wordmark glow (Design
+        // §6.4): a single steady glyph whose accent brightness rises and falls
+        // on the same raised-cosine cycle — one ember pulse, not two.
+        let glyph_style = ratatui::style::Style::default()
+            .fg(glow(theme.palette().accent, glow_pct(app.anim_frame())))
+            .add_modifier(ratatui::style::Modifier::BOLD);
+        spans.push(Span::styled(format!(" {} ", app.spinner_glyph()), glyph_style));
         spans.push(Span::styled(format!("{verb}{elapsed}  "), theme.chrome()));
     } else {
         spans.push(Span::raw(" "));
@@ -804,6 +920,174 @@ fn render_permission(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(visible), body_area);
     f.render_widget(
         Paragraph::new(footer_lines(theme, hidden_below)),
+        footer_area,
+    );
+}
+
+// ---- question prompt — the model asking your opinion (Design §5.1) --------
+
+/// Render the `ask_user` question prompt (T-8). **Calm and neutral** — the same
+/// routine styling as a non-outside-root permission prompt (`dim_accent`
+/// border), **never** the reserved safety band (Design §5.1/§2). The question,
+/// any options as a selectable list, and a free-text answer that is always
+/// available. There is no default selection and Enter never auto-answers — see
+/// `App::on_ask_key`.
+fn render_ask(f: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
+    let Some(p) = &app.pending_ask else {
+        return;
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.dim_accent())
+        .title(Span::styled(
+            format!(" {} ", strings::ask_user::TITLE),
+            theme.accent(),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 3 || inner.width == 0 {
+        return;
+    }
+    let width = usize::from(inner.width);
+
+    let mut lines: Vec<Line> = Vec::new();
+    // The question, wrapped — the first row carries the emphasis.
+    for (i, row) in text::wrap(&p.question, width).into_iter().enumerate() {
+        let style = if i == 0 {
+            theme.strong()
+        } else {
+            theme.primary()
+        };
+        lines.push(Line::from(Span::styled(row, style)));
+    }
+    lines.push(Line::from(""));
+
+    // Options as a selectable list. No highlight until the user moves to one
+    // (no default selection — Design §5.1).
+    for (i, opt) in p.options.iter().enumerate() {
+        let selected = p.selected == Some(i);
+        let (marker, style) = if selected {
+            (markers::USER_PROMPT, theme.accent())
+        } else {
+            (" ", theme.primary())
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker} "), theme.accent()),
+            Span::styled(format!("{}. {}", i + 1, opt), style),
+        ]));
+    }
+    if !p.options.is_empty() {
+        lines.push(Line::from(""));
+    }
+
+    // The free-text answer field, always available, with a caret.
+    lines.push(Line::from(Span::styled(
+        strings::ask_user::ANSWER_LABEL,
+        theme.chrome(),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled(format!("{} ", markers::USER_PROMPT), theme.accent()),
+        Span::styled(p.editor.text().to_string(), theme.primary()),
+        Span::styled("▏", theme.accent()),
+    ]));
+
+    let footer_h = 1u16;
+    let body_h = inner.height.saturating_sub(footer_h).max(1);
+    let body_area = Rect {
+        height: body_h,
+        ..inner
+    };
+    let footer_area = Rect {
+        y: inner.y + inner.height - footer_h,
+        height: footer_h,
+        ..inner
+    };
+    f.render_widget(Paragraph::new(lines), body_area);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            strings::ask_user::HINT,
+            theme.chrome(),
+        ))),
+        footer_area,
+    );
+}
+
+// ---- loop-halt surface — the harness stepping in (Design §8.5) ------------
+
+/// Render the loop-halt surface (S-5). The **harness voice**, calm and
+/// out-of-band — not model output, and deliberately distinct from the question
+/// prompt (that is the model asking; this is the harness stepping in when the
+/// model stopped progressing). No alarm styling, never the safety band; the
+/// user always chooses keep-going / stop / say-something.
+fn render_loop_halt(f: &mut Frame, app: &App, area: Rect) {
+    use strings::loop_halt as s;
+    let theme = &app.theme;
+    let Some(halt) = &app.pending_loop_halt else {
+        return;
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.chrome())
+        .title(Span::styled(format!(" {} ", s::TITLE), theme.warning()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 3 || inner.width == 0 {
+        return;
+    }
+    let width = usize::from(inner.width);
+
+    let mut lines: Vec<Line> = Vec::new();
+    // The calm harness line, then the specific reason.
+    lines.push(Line::from(Span::styled(s::HEADING, theme.strong())));
+    for row in text::wrap(&halt.reason, width) {
+        lines.push(Line::from(Span::styled(row, theme.chrome())));
+    }
+    lines.push(Line::from(""));
+
+    if halt.steering {
+        // The steer field (hand a message back to the model).
+        lines.push(Line::from(Span::styled(s::STEER_LABEL, theme.chrome())));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", markers::USER_PROMPT), theme.accent()),
+            Span::styled(halt.editor.text().to_string(), theme.primary()),
+            Span::styled("▏", theme.accent()),
+        ]));
+    } else {
+        // The three choices.
+        for (key, label) in [
+            ("g", s::KEEP_GOING),
+            ("s", s::STOP),
+            ("t", s::SAY_SOMETHING),
+        ] {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  [{key}] "), theme.accent()),
+                Span::styled(label, theme.primary()),
+            ]));
+        }
+    }
+
+    let footer_h = 1u16;
+    let body_h = inner.height.saturating_sub(footer_h).max(1);
+    let body_area = Rect {
+        height: body_h,
+        ..inner
+    };
+    let footer_area = Rect {
+        y: inner.y + inner.height - footer_h,
+        height: footer_h,
+        ..inner
+    };
+    let hint = if halt.steering {
+        s::STEER_HINT
+    } else {
+        s::HINT
+    };
+    f.render_widget(Paragraph::new(lines), body_area);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(hint, theme.chrome()))),
         footer_area,
     );
 }
@@ -981,7 +1265,12 @@ mod tests {
 
     #[test]
     fn permission_prompt_shows_full_content_and_deny_default() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
         pending(&mut app, false, "rm -rf build");
         let screen = draw(&app, 100, 24);
         assert!(screen.contains("PERMISSION REQUIRED"));
@@ -994,7 +1283,12 @@ mod tests {
 
     #[test]
     fn outside_root_prompt_is_loud() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
         pending(&mut app, true, "rm -rf /etc/x");
         let screen = draw(&app, 100, 24);
         assert!(
@@ -1005,7 +1299,12 @@ mod tests {
 
     #[test]
     fn long_content_reports_more_below() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
         let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
         pending(&mut app, false, &long);
         // A short screen forces the content to overflow the prompt body.
@@ -1018,12 +1317,18 @@ mod tests {
 
     #[test]
     fn tool_call_shows_what_and_result_and_output() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
         let id = emberly_core::ToolCallId::new("c1");
         app.apply_event(UiEvent::ToolStarted {
             call_id: id.clone(),
             tool: "bash".into(),
             summary: "run: ls -la".into(),
+            explanation: None,
         });
         app.apply_event(UiEvent::ToolFinished {
             call_id: id,
@@ -1041,10 +1346,113 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_explanation_renders_as_a_dim_caption() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.apply_event(UiEvent::ToolStarted {
+            call_id: emberly_core::ToolCallId::new("c1"),
+            tool: "bash".into(),
+            summary: "run: sed -i s/debug/info/ log.conf".into(),
+            explanation: Some("raise the log level to info".into()),
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(
+            screen.contains("raise the log level to info"),
+            "caption shown under the call"
+        );
+        assert!(
+            screen.contains(crate::strings::markers::EXPLANATION),
+            "caption led by the annotation marker — meaning without colour (Design §4.5)"
+        );
+    }
+
+    #[test]
+    fn no_explanation_shows_no_caption() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.apply_event(UiEvent::ToolStarted {
+            call_id: emberly_core::ToolCallId::new("c1"),
+            tool: "read_file".into(),
+            summary: "read src/main.rs".into(),
+            explanation: None,
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(
+            !screen.contains(crate::strings::markers::EXPLANATION),
+            "no caption marker when the model gave none — no placeholder (Design §4.5)"
+        );
+    }
+
+    #[test]
+    fn question_prompt_is_calm_not_a_permission_prompt() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.apply_event(UiEvent::AskUserRequest {
+            id: emberly_core::AskId(1),
+            question: "which environment?".into(),
+            options: vec!["dev".into(), "prod".into()],
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(screen.contains("which environment?"), "question shown");
+        assert!(
+            screen.contains("dev") && screen.contains("prod"),
+            "options shown"
+        );
+        assert!(screen.contains("question"), "calm title");
+        // It must NOT borrow the permission prompt's loud safety vocabulary
+        // (Design §5.1/§2 — the safety band stays rare).
+        assert!(!screen.contains("PERMISSION REQUIRED"));
+        assert!(!screen.contains("OUTSIDE YOUR PROJECT"));
+    }
+
+    #[test]
+    fn loop_halt_is_harness_voice_not_a_prompt() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.apply_event(UiEvent::LoopHalted {
+            reason: "read_file nope.txt three times".into(),
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(screen.contains("Stopped"), "harness voice heading");
+        assert!(
+            screen.contains("read_file nope.txt three times"),
+            "the reason"
+        );
+        assert!(
+            screen.contains("keep going") && screen.contains("stop here"),
+            "the choices"
+        );
+        // Neither a permission prompt nor a question prompt.
+        assert!(!screen.contains("PERMISSION REQUIRED"));
+        assert!(!screen.contains("OUTSIDE YOUR PROJECT"));
+    }
+
+    #[test]
     fn thai_content_renders_in_the_conversation() {
         // A stacked-mark Thai word must survive into the rendered buffer intact
         // (grapheme-correct wrap, §2.1).
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
         app.apply_event(UiEvent::AssistantDelta {
             text: "สวัสดี ที่".into(),
         });
@@ -1056,7 +1464,12 @@ mod tests {
 
     #[test]
     fn sidebar_hides_below_the_collapse_threshold() {
-        let app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
         // Sidebar-only chrome present when wide, absent when narrow.
         assert!(draw(&app, 120, 20).contains("modified files"));
         assert!(!draw(&app, 80, 20).contains("modified files"));
@@ -1064,7 +1477,12 @@ mod tests {
 
     #[test]
     fn sidebar_shows_session_token_total() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
         app.apply_event(UiEvent::SessionUsage {
             usage: emberly_core::TokenUsage {
                 input: 12_000,
@@ -1085,7 +1503,12 @@ mod tests {
 
     #[test]
     fn context_percent_only_on_status_bar_when_sidebar_hidden() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
         app.apply_event(UiEvent::ContextUsage {
             pct: 42,
             tokens: 100,
@@ -1105,7 +1528,12 @@ mod tests {
 
     #[test]
     fn edit_prompt_renders_its_diff() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
         pending(
             &mut app,
             false,
@@ -1141,7 +1569,12 @@ mod tests {
 
     #[test]
     fn conversation_wraps_and_counts_rows() {
-        let mut app = App::new(SessionInfo::default(), std::env::temp_dir());
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
         app.apply_event(emberly_core::UiEvent::AssistantDelta {
             text: "aaaa bbbb cccc".into(),
         });

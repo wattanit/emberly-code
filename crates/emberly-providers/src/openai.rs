@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use crate::auth::Auth;
 use crate::error::ProviderError;
 use crate::message::{CompletionRequest, ContentBlock, Message, Role};
-use crate::model::{ModelInfo, ProviderId, TokenEstimate, TokenUsage};
+use crate::model::{Effort, ModelInfo, ProviderId, TokenEstimate, TokenUsage};
 use crate::provider::Provider;
 use crate::sse::SseEvent;
 use crate::stream::{CompletionStream, StopReason, StreamEvent};
@@ -20,7 +21,7 @@ use crate::ToolCallId;
 /// A client for any OpenAI-compatible `/chat/completions` endpoint.
 pub struct OpenAiProvider {
     client: reqwest::Client,
-    api_key: String,
+    auth: Auth,
     /// API base including the version segment, e.g. `https://api.openai.com/v1`
     /// (or an Ollama/vLLM base). `/chat/completions` is appended.
     base_url: String,
@@ -31,13 +32,13 @@ impl OpenAiProvider {
     #[must_use]
     pub fn new(
         client: reqwest::Client,
-        api_key: impl Into<String>,
+        auth: Auth,
         base_url: impl Into<String>,
         model_info: ModelInfo,
     ) -> Self {
         Self {
             client,
-            api_key: api_key.into(),
+            auth,
             base_url: base_url.into(),
             model_info,
         }
@@ -58,15 +59,14 @@ impl Provider for OpenAiProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionStream, ProviderError> {
-        let body = build_body(&request);
-        let mut builder = self
+        let body = build_body(&request, &self.model_info.effort_levels);
+        let builder = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
             .json(&body);
-        if !self.api_key.is_empty() {
-            builder = builder.bearer_auth(&self.api_key);
-        }
-        let response = builder
+        let response = self
+            .auth
+            .apply(builder)
             .send()
             .await
             .map_err(|e| ProviderError::Connect(e.to_string()))?;
@@ -83,7 +83,20 @@ impl Provider for OpenAiProvider {
     }
 }
 
-fn build_body(request: &CompletionRequest) -> Value {
+/// The OpenAI `reasoning_effort` value for an effort level. The field tops out
+/// at `high`, so `Max` maps to it (Tech Spec §4.6).
+fn reasoning_effort_value(effort: Effort) -> &'static str {
+    match effort {
+        Effort::Low => "low",
+        Effort::Medium => "medium",
+        Effort::High | Effort::Max => "high",
+    }
+}
+
+/// Build the Chat Completions body. `effort_levels` is the active model's
+/// declared support (empty ⇒ no reasoning control, so an `effort` on the
+/// request is silently ignored — P-9).
+fn build_body(request: &CompletionRequest, effort_levels: &[Effort]) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     if let Some(system) = &request.system {
         messages.push(json!({ "role": "system", "content": system }));
@@ -114,6 +127,11 @@ fn build_body(request: &CompletionRequest) -> Value {
     }
     if let Some(temp) = request.temperature {
         body["temperature"] = json!(temp);
+    }
+    // Reasoning effort → `reasoning_effort`, only if the model declares support
+    // (P-9, Tech Spec §4.6).
+    if let Some(effort) = request.effort.filter(|_| !effort_levels.is_empty()) {
+        body["reasoning_effort"] = json!(reasoning_effort_value(effort));
     }
     body
 }
@@ -236,6 +254,22 @@ impl SseMapper for OpenAiMapper {
             }
         }
 
+        // Reasoning, where the server exposes it distinctly (P-10). OpenAI-
+        // compatible endpoints are inconsistent here — `reasoning_content`
+        // (DeepSeek) and `reasoning` are both seen — so accept either. No
+        // signature echo is required on this wire.
+        if let Some(reasoning) = delta
+            .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"))
+            .and_then(Value::as_str)
+        {
+            if !reasoning.is_empty() {
+                out.push(Ok(StreamEvent::ReasoningDelta {
+                    text: reasoning.to_string(),
+                }));
+            }
+        }
+
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in tool_calls {
                 let index = call.get("index").and_then(Value::as_u64).unwrap_or(0);
@@ -276,5 +310,77 @@ impl SseMapper for OpenAiMapper {
         }
 
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req_with_effort(effort: Option<Effort>) -> CompletionRequest {
+        let mut r = CompletionRequest::new("gpt-x");
+        r.effort = effort;
+        r
+    }
+
+    fn effort_field(body: &Value) -> Option<&str> {
+        body.get("reasoning_effort").and_then(Value::as_str)
+    }
+
+    #[test]
+    fn maps_each_level_when_supported_max_folds_to_high() {
+        let levels = Effort::ALL.to_vec();
+        for (effort, want) in [
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
+            (Effort::Max, "high"),
+        ] {
+            let body = build_body(&req_with_effort(Some(effort)), &levels);
+            assert_eq!(effort_field(&body), Some(want), "level {effort}");
+        }
+    }
+
+    #[test]
+    fn omits_reasoning_effort_when_no_effort() {
+        let body = build_body(&req_with_effort(None), &Effort::ALL);
+        assert_eq!(body.get("reasoning_effort"), None);
+    }
+
+    #[test]
+    fn unsupported_model_is_a_noop_even_with_effort() {
+        // Empty effort_levels ⇒ the model has no reasoning control (P-9).
+        let body = build_body(&req_with_effort(Some(Effort::High)), &[]);
+        assert_eq!(body.get("reasoning_effort"), None);
+    }
+
+    fn map_one(data: &str) -> Vec<StreamEvent> {
+        let mut mapper = OpenAiMapper::default();
+        mapper
+            .map(SseEvent {
+                event: None,
+                data: data.to_string(),
+            })
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect()
+    }
+
+    #[test]
+    fn reasoning_content_delta_maps_to_reasoning_delta() {
+        let events =
+            map_one(r#"{"choices":[{"delta":{"reasoning_content":"pondering"},"index":0}]}"#);
+        assert_eq!(
+            events,
+            vec![StreamEvent::ReasoningDelta {
+                text: "pondering".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn plain_content_delta_emits_no_reasoning() {
+        let events = map_one(r#"{"choices":[{"delta":{"content":"hi"},"index":0}]}"#);
+        assert_eq!(events, vec![StreamEvent::TextDelta { text: "hi".into() }]);
     }
 }

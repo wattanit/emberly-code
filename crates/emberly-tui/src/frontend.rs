@@ -55,18 +55,39 @@ pub fn detect(force_plain: bool) -> FrontendKind {
 
 /// Run the selected frontend to completion over `ports`. `history` seeds the
 /// timeline when resuming (Tech Spec §3.3); it is empty for a fresh session.
+// Threads several independent session inputs; a bundle struct would only move
+// the argument list elsewhere.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     kind: FrontendKind,
     ports: FrontendPorts,
     session: SessionInfo,
     history: Vec<TranscriptRecord>,
     sessions_dir: std::path::PathBuf,
+    profiles: Vec<String>,
+    config_template: String,
+    reasoning: Option<String>,
 ) -> io::Result<()> {
+    let reasoning_view = crate::app::ReasoningView::parse(reasoning.as_deref().unwrap_or(""));
     match kind {
-        FrontendKind::Rich => tui::run(ports, session, history, sessions_dir).await,
+        FrontendKind::Rich => {
+            tui::run(
+                ports,
+                session,
+                history,
+                sessions_dir,
+                profiles,
+                config_template,
+                reasoning_view,
+            )
+            .await
+        }
         // Line mode notes the resumed-event count in its banner (see the
-        // binary); it does not replay the timeline or offer the picker.
-        FrontendKind::Plain => line::run(ports).await,
+        // binary); it does not replay the timeline or offer the picker, but it
+        // supports `/config`, `/prompt`, `/reload`, and `/effort` (C-5, P-9).
+        FrontendKind::Plain => {
+            line::run(ports, sessions_dir, config_template, reasoning_view).await
+        }
     }
 }
 

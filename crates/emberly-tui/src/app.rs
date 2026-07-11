@@ -10,12 +10,13 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use emberly_core::{
-    resume, Command, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus,
-    SessionId, TokenUsage, ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
+    resume, AskAnswer, AskId, Command, Effort, LoopResolution, Mode, PermissionDecision,
+    PermissionId, PermissionRendering, SandboxStatus, SessionId, TokenUsage, ToolCallId,
+    TranscriptEvent, TranscriptRecord, UiEvent,
 };
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::commands::{self, AppCommand};
 use crate::editor::LineEditor;
@@ -26,9 +27,10 @@ const SCROLL_STEP: usize = 5;
 
 /// Animation ticker rate (Design §6.4 — a handful of cells at ~12fps).
 pub const ANIM_FPS: usize = 12;
-/// The ember-pulse spinner: a dot that swells and fades, in the accent — an
-/// ember glowing, not a generic line spinner (Design §6.4).
-const SPINNER: [&str; 4] = ["·", "•", "●", "•"];
+/// The ember-pulse spinner: a single steady dot whose accent brightness
+/// breathes in lockstep with the wordmark glow (Design §6.4) — one ember
+/// pulse, not a separate glyph-cycling animation.
+const SPINNER: [&str; 1] = ["●"];
 /// Elapsed time appears only after this many seconds (Design §6.3).
 const ELAPSED_AFTER_SECS: usize = 5;
 /// Frames an overlay eases in over (one or two frames of expansion, not a slide
@@ -45,6 +47,10 @@ pub enum ConvItem {
     User(String),
     /// Accumulated assistant text for one turn (deltas append to it).
     Assistant(String),
+    /// The model's reasoning trail for one turn (P-10, Design §4.4), distinct
+    /// from the answer. Collapsed to a dim one-line summary by default;
+    /// `expanded` shows the full text. Deltas append while thinking.
+    Reasoning { text: String, expanded: bool },
     /// A tool invocation and its outcome.
     Tool {
         call_id: ToolCallId,
@@ -52,6 +58,9 @@ pub enum ConvItem {
         /// What the call is doing (from `describe`) — e.g. `run: cargo test`.
         /// Set at start and kept; the result status is separate.
         summary: String,
+        /// The model's caption for a non-obvious call (T-9, Design §4.5).
+        /// `None` when the model gave none — rendered as nothing, no placeholder.
+        explanation: Option<String>,
         /// `None` while running; `Some(ok)` once finished.
         done: Option<bool>,
         /// The finished one-line status (e.g. `exit 0`, `read foo.rs (12 lines)`).
@@ -90,6 +99,64 @@ pub enum OverlayContent {
         rows: Vec<SessionRow>,
         selected: usize,
     },
+    /// A generic single-choice picker (Design §3.1): the model/provider picker
+    /// now (C-6), the reasoning-effort picker in Phase 3. Enter applies the
+    /// highlighted choice; `kind` decides which command it becomes.
+    Choices {
+        kind: ChoiceKind,
+        rows: Vec<ChoiceRow>,
+        selected: usize,
+    },
+}
+
+/// What a [`OverlayContent::Choices`] picker selects, so Enter knows which
+/// command to issue. Reused by the effort picker in Phase 3 and the mode
+/// picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoiceKind {
+    /// Switch the active provider profile (C-6). The row label is the profile
+    /// name; the current model is kept.
+    Model,
+    /// Set the reasoning-effort level (P-9). The row label is the level name.
+    Effort,
+    /// Set the permission mode (§6.4). The row label is the mode name; auto
+    /// tiers are marked unavailable when OS confinement is not active.
+    Mode,
+}
+
+/// How the reasoning trail is shown by default (Design §4.4). A view choice
+/// only — the trace is always recorded to the transcript regardless (P-10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReasoningView {
+    /// One dim summary line, expandable. The default.
+    #[default]
+    Collapsed,
+    /// The full reasoning text, always shown.
+    Expanded,
+    /// Not shown in the view (still recorded to the transcript).
+    Hidden,
+}
+
+impl ReasoningView {
+    /// Parse the `reasoning` config key; unknown values fall back to the
+    /// default (`collapsed`) so a typo is never fatal.
+    #[must_use]
+    pub fn parse(s: &str) -> ReasoningView {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "expanded" => ReasoningView::Expanded,
+            "hidden" => ReasoningView::Hidden,
+            _ => ReasoningView::Collapsed,
+        }
+    }
+}
+
+/// One row in a [`OverlayContent::Choices`] picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceRow {
+    /// The value (e.g. a profile name) and the displayed label.
+    pub label: String,
+    /// True for the currently-active choice (marked, not re-applied).
+    pub current: bool,
 }
 
 /// The command palette's state (Design §3.3): the fuzzy query and which match
@@ -149,6 +216,56 @@ pub enum Action {
     /// Resume the saved session with this id (picker selection). The frontend
     /// reads its transcript, tells the engine, and reseeds the view.
     ResumeSession(SessionId),
+    /// Open this file in `$EDITOR` (C-5). The frontend suspends the TUI, runs
+    /// the editor, restores, and reports the outcome.
+    EditFile(PathBuf),
+}
+
+/// A pending `ask_user` question and the state of the user's reply-in-progress
+/// (T-8, Design §5.1). Options are selectable and a free-text answer is always
+/// available; `selected` starts `None` so Enter never auto-answers.
+pub struct AskPrompt {
+    pub id: AskId,
+    pub question: String,
+    pub options: Vec<String>,
+    /// The highlighted option, or `None` until the user moves to one — there is
+    /// no default selection (Design §5.1: no unsafe default).
+    pub selected: Option<usize>,
+    /// The free-text answer buffer, always available alongside any options.
+    pub editor: LineEditor,
+}
+
+impl AskPrompt {
+    fn new(id: AskId, question: String, options: Vec<String>) -> Self {
+        Self {
+            id,
+            question,
+            options,
+            selected: None,
+            editor: LineEditor::new(),
+        }
+    }
+}
+
+/// A pending loop-halt decision (S-5, Design §8.5). The **harness** stepping in
+/// when the model stopped progressing — rendered in the harness voice, distinct
+/// from the question prompt. The user picks keep-going / stop / say-something;
+/// choosing to steer opens the free-text field.
+pub struct LoopHaltPrompt {
+    pub reason: String,
+    /// False = the three-choice menu; true = typing a steer message.
+    pub steering: bool,
+    pub editor: LineEditor,
+}
+
+impl LoopHaltPrompt {
+    fn new(reason: String) -> Self {
+        Self {
+            reason,
+            steering: false,
+            editor: LineEditor::new(),
+        }
+    }
 }
 
 /// The complete view-model the renderer reads.
@@ -157,9 +274,25 @@ pub struct App {
     /// Where session transcripts live, so the picker can list them and a
     /// resume can read one (`/session`, `/resume`).
     pub sessions_dir: PathBuf,
+    /// Configured provider-profile names, for the model picker (`/model`, C-6).
+    /// Sorted; empty when no factory/profiles are available.
+    pub profiles: Vec<String>,
+    /// The `.agents/config.toml` starter written by `/config` when the project
+    /// has none yet — same content `emberly init` materializes (C-5, single
+    /// source in the binary).
+    pub config_template: String,
     pub conversation: Vec<ConvItem>,
     /// True between the first `AssistantDelta` and `AssistantDone` of a turn.
     pub streaming: bool,
+    /// How the reasoning trail is displayed (Design §4.4); from the `reasoning`
+    /// config key. `Hidden` suppresses the trail in the view only.
+    pub reasoning_view: ReasoningView,
+    /// The active reasoning-effort level, for the sidebar (P-9). `None` when the
+    /// model has no effort control (the line is hidden). Set by `EffortChanged`.
+    pub effort: Option<Effort>,
+    /// The levels the active model offers, for the `/effort` picker. Empty ⇒ no
+    /// control. Set by `EffortChanged`.
+    pub effort_levels: Vec<Effort>,
     /// The grapheme-aware input editor (multi-line, history, Thai-correct
     /// cursor motion). See [`crate::editor`].
     pub editor: LineEditor,
@@ -180,6 +313,13 @@ pub struct App {
     /// Scroll offset (rows from top) into the current permission prompt's
     /// content, so long commands/diffs can be reviewed in full (Design §5).
     pub permission_scroll: usize,
+    /// The `ask_user` question currently awaiting an answer, if any (T-8). While
+    /// set, the question prompt owns the screen and normal input is suspended
+    /// (Design §5.1). Never the permission prompt's safety styling.
+    pub pending_ask: Option<AskPrompt>,
+    /// A pending loop-halt decision (S-5, Design §8.5) — the harness stepping in.
+    /// While set it owns the screen; harness voice, not the question prompt.
+    pub pending_loop_halt: Option<LoopHaltPrompt>,
     pub sidebar_visible: bool,
     /// Conversation scrollback offset in rows *from the bottom*: 0 follows the
     /// latest output; larger values scroll up into history. Clamped to content
@@ -215,12 +355,22 @@ pub struct App {
 
 impl App {
     #[must_use]
-    pub fn new(session: SessionInfo, sessions_dir: PathBuf) -> Self {
+    pub fn new(
+        session: SessionInfo,
+        sessions_dir: PathBuf,
+        profiles: Vec<String>,
+        config_template: String,
+    ) -> Self {
         Self {
             session,
             sessions_dir,
+            profiles,
+            config_template,
             conversation: Vec::new(),
             streaming: false,
+            reasoning_view: ReasoningView::default(),
+            effort: None,
+            effort_levels: Vec::new(),
             editor: LineEditor::new(),
             context_pct: 0,
             context_tokens: 0,
@@ -231,6 +381,8 @@ impl App {
             mode: emberly_core::Mode::default(),
             modified_files: Vec::new(),
             pending_permission: None,
+            pending_ask: None,
+            pending_loop_halt: None,
             permission_scroll: 0,
             sidebar_visible: true,
             scroll: 0,
@@ -257,8 +409,20 @@ impl App {
                 TranscriptEvent::UserMessage { text, .. } => {
                     self.conversation.push(ConvItem::User(text.clone()));
                 }
-                TranscriptEvent::AssistantMessage { text } => {
-                    self.conversation.push(ConvItem::Assistant(text.clone()));
+                TranscriptEvent::AssistantMessage { text, reasoning } => {
+                    // Replay a recorded reasoning trail (collapsed) unless the
+                    // view hides it (P-10, Design §4.4).
+                    if let Some(reasoning) = reasoning {
+                        if self.reasoning_view != ReasoningView::Hidden {
+                            self.conversation.push(ConvItem::Reasoning {
+                                text: reasoning.clone(),
+                                expanded: self.reasoning_view == ReasoningView::Expanded,
+                            });
+                        }
+                    }
+                    if !text.is_empty() {
+                        self.conversation.push(ConvItem::Assistant(text.clone()));
+                    }
                 }
                 TranscriptEvent::ToolCall {
                     call_id,
@@ -276,10 +440,19 @@ impl App {
                                 .map(|p| format!("{tool} {p}"))
                         })
                         .unwrap_or_else(|| tool.clone());
+                    // The explanation (T-9) rides in the recorded args, so a
+                    // replayed session shows the same caption a live one did.
+                    let explanation = args
+                        .get("explanation")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
                     self.conversation.push(ConvItem::Tool {
                         call_id: call_id.clone(),
                         tool: tool.clone(),
                         summary,
+                        explanation,
                         done: None,
                         result: None,
                         preview: None,
@@ -319,8 +492,34 @@ impl App {
                         return;
                     }
                 }
+                // The answer is starting: settle the just-streamed reasoning
+                // trail to its collapsed line unless the view pins it open
+                // (Design §4.4).
+                if self.reasoning_view == ReasoningView::Collapsed {
+                    if let Some(ConvItem::Reasoning { expanded, .. }) = self.conversation.last_mut()
+                    {
+                        *expanded = false;
+                    }
+                }
                 self.streaming = true;
                 self.conversation.push(ConvItem::Assistant(text));
+            }
+            UiEvent::ReasoningDelta { text } => {
+                // `hidden` is a view choice: skip the trail but the engine still
+                // records the trace to the transcript (P-10, Design §4.4).
+                if self.reasoning_view == ReasoningView::Hidden {
+                    return;
+                }
+                if let Some(ConvItem::Reasoning { text: buf, .. }) = self.conversation.last_mut() {
+                    buf.push_str(&text);
+                } else {
+                    // Stream in place while thinking; expanded until the answer
+                    // begins (then settled), or always when the view pins it.
+                    self.conversation.push(ConvItem::Reasoning {
+                        text,
+                        expanded: true,
+                    });
+                }
             }
             UiEvent::AssistantDone => self.streaming = false,
             UiEvent::TurnEnded => {
@@ -331,12 +530,14 @@ impl App {
                 call_id,
                 tool,
                 summary,
+                explanation,
             } => {
                 self.streaming = false;
                 self.conversation.push(ConvItem::Tool {
                     call_id,
                     tool,
                     summary,
+                    explanation,
                     done: None,
                     result: None,
                     preview: None,
@@ -366,6 +567,18 @@ impl App {
                 self.pending_permission = Some((id, rendering));
                 self.permission_scroll = 0; // start every prompt at the top
             }
+            UiEvent::AskUserRequest {
+                id,
+                question,
+                options,
+            } => {
+                self.streaming = false;
+                self.pending_ask = Some(AskPrompt::new(id, question, options));
+            }
+            UiEvent::LoopHalted { reason } => {
+                self.streaming = false;
+                self.pending_loop_halt = Some(LoopHaltPrompt::new(reason));
+            }
             UiEvent::ContextUsage { pct, tokens } => {
                 self.context_pct = pct;
                 self.context_tokens = tokens;
@@ -377,6 +590,21 @@ impl App {
             UiEvent::SessionUsage { usage } => self.session_usage = usage,
             UiEvent::SandboxStatus { status } => self.sandbox = Some(status),
             UiEvent::ModeChanged { mode } => self.mode = mode,
+            UiEvent::ModelChanged { provider, model } => {
+                // Sidebar reflects the new provider/model; the engine also emits
+                // a Notice, so the switch is never silent (Design §3.1).
+                self.session.provider = provider;
+                self.session.model = model;
+            }
+            UiEvent::EffortChanged { effort, available } => {
+                self.effort = effort;
+                self.effort_levels = available;
+            }
+            UiEvent::ProfilesChanged { profiles } => {
+                // A `/config` reload changed the provider set; refresh the
+                // picker's list (C-5).
+                self.profiles = profiles;
+            }
             UiEvent::Notice { message } => self.conversation.push(ConvItem::Notice(message)),
             UiEvent::HarnessError { what, why, next } => {
                 self.conversation
@@ -470,6 +698,16 @@ impl App {
         if let Some(id) = self.pending_permission.as_ref().map(|(i, _)| *i) {
             return self.on_permission_key(id, key);
         }
+        // The question prompt also owns the keyboard while open (Design §5.1),
+        // but with opposite semantics: no unsafe default, Esc declines.
+        if self.pending_ask.is_some() {
+            return self.on_ask_key(key);
+        }
+        // The loop-halt surface owns the keyboard too (Design §8.5) — the
+        // harness stepping in; the user always decides what happens next.
+        if self.pending_loop_halt.is_some() {
+            return self.on_loop_halt_key(key);
+        }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -511,6 +749,11 @@ impl App {
             // Open the most-recently-modified file's diff in an overlay.
             KeyCode::Char('o') if ctrl => {
                 self.open_last_diff();
+                Action::None
+            }
+            // Toggle the most recent reasoning trail open/closed (Design §4.4).
+            KeyCode::Char('r') if ctrl => {
+                self.toggle_reasoning();
                 Action::None
             }
             // Emacs-style line editing.
@@ -585,23 +828,32 @@ impl App {
     // ---- motion (Design §6.4) --------------------------------------------
 
     /// Whether the model is actively working — drives the spinner and the
-    /// streaming accent glow. Off during a permission prompt and when motion is
-    /// disabled (that screen is perfectly still).
+    /// streaming accent glow. Off during a permission prompt or a question
+    /// prompt, and when motion is disabled (those screens are perfectly still).
     #[must_use]
     pub fn is_working(&self) -> bool {
-        self.motion && self.busy && self.pending_permission.is_none()
+        self.motion && self.busy && !self.is_deciding()
     }
 
     /// Whether *anything* is animating right now — the working spinner/glow, or
     /// a transient effect (overlay ease-in, sidebar settle). The ticker redraws
     /// only while this is true, so idle screens stay quiet. Always false during
-    /// a permission prompt or with motion off.
+    /// a decision prompt or with motion off.
     #[must_use]
     pub fn is_animating(&self) -> bool {
-        if !self.motion || self.pending_permission.is_some() {
+        if !self.motion || self.is_deciding() {
             return false;
         }
         self.busy || self.overlay_ease > 0 || self.sidebar_settle > 0
+    }
+
+    /// Whether a decision prompt (permission, question, or loop halt) is open —
+    /// those screens are perfectly still (Design §5, §5.1, §6.4, §8.5).
+    #[must_use]
+    fn is_deciding(&self) -> bool {
+        self.pending_permission.is_some()
+            || self.pending_ask.is_some()
+            || self.pending_loop_halt.is_some()
     }
 
     /// Advance one animation frame. Called by the ticker only while
@@ -698,7 +950,7 @@ impl App {
     /// prompt or overlay is open — nothing may be typed into a decision, and an
     /// overlay is read-only (Design §5, §4.2).
     pub fn on_paste(&mut self, text: &str) {
-        if self.pending_permission.is_none() && self.overlays.is_empty() && self.palette.is_none() {
+        if !self.is_deciding() && self.overlays.is_empty() && self.palette.is_none() {
             self.editor.insert_str(text);
         }
     }
@@ -752,6 +1004,127 @@ impl App {
         Action::Command(Command::PermissionAnswer { id, decision })
     }
 
+    /// Keys while a question prompt is open (T-8, Design §5.1). Typing edits the
+    /// free-text answer; ↑/↓ move the option selection; Enter submits the typed
+    /// text if any, else the highlighted option, else **nothing** — Enter never
+    /// auto-answers. Esc declines (a real answer). No key silently decides.
+    fn on_ask_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(prompt) = self.pending_ask.as_mut() else {
+            return Action::None;
+        };
+        match key.code {
+            // Dismiss = an explicit decline returned to the model (Design §5.1).
+            KeyCode::Esc => self.answer_ask(AskAnswer::Declined),
+            KeyCode::Up => {
+                prompt.selected = match prompt.selected {
+                    None | Some(0) => None,
+                    Some(i) => Some(i - 1),
+                };
+                Action::None
+            }
+            KeyCode::Down if !prompt.options.is_empty() => {
+                let last = prompt.options.len() - 1;
+                prompt.selected = Some(prompt.selected.map_or(0, |i| (i + 1).min(last)));
+                Action::None
+            }
+            KeyCode::Enter => {
+                let text = prompt.editor.text().trim().to_string();
+                if !text.is_empty() {
+                    return self.answer_ask(AskAnswer::Answered(text));
+                }
+                if let Some(option) = prompt.selected.and_then(|i| prompt.options.get(i)) {
+                    let answer = AskAnswer::Answered(option.clone());
+                    return self.answer_ask(answer);
+                }
+                // Nothing typed, nothing chosen: ignored (no unsafe default).
+                Action::None
+            }
+            // A literal newline in the free-text answer (multi-line), matching
+            // the main input's Ctrl+J affordance.
+            KeyCode::Char('j') if ctrl => {
+                prompt.editor.newline();
+                Action::None
+            }
+            KeyCode::Backspace => {
+                prompt.editor.backspace();
+                Action::None
+            }
+            KeyCode::Char(c) if !ctrl => {
+                prompt.editor.insert_char(c);
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn answer_ask(&mut self, answer: AskAnswer) -> Action {
+        let Some(prompt) = self.pending_ask.take() else {
+            return Action::None;
+        };
+        Action::Command(Command::AskUserAnswer {
+            id: prompt.id,
+            answer,
+        })
+    }
+
+    /// Keys while the loop-halt surface is open (S-5, Design §8.5). The menu:
+    /// `g` keep going, `s` stop, `t`/Enter say something. In the steer field:
+    /// type a message, Enter sends it, Esc goes back to the menu. Esc on the menu
+    /// stops (the conservative choice — the loop halted to avoid wasted spend).
+    fn on_loop_halt_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(prompt) = self.pending_loop_halt.as_mut() else {
+            return Action::None;
+        };
+        if prompt.steering {
+            return match key.code {
+                KeyCode::Esc => {
+                    prompt.steering = false;
+                    prompt.editor.clear();
+                    Action::None
+                }
+                KeyCode::Enter => {
+                    let text = prompt.editor.text().trim().to_string();
+                    if text.is_empty() {
+                        Action::None
+                    } else {
+                        self.resolve_loop(LoopResolution::Steer(text))
+                    }
+                }
+                KeyCode::Char('j') if ctrl => {
+                    prompt.editor.newline();
+                    Action::None
+                }
+                KeyCode::Backspace => {
+                    prompt.editor.backspace();
+                    Action::None
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    prompt.editor.insert_char(c);
+                    Action::None
+                }
+                _ => Action::None,
+            };
+        }
+        match key.code {
+            KeyCode::Char('g') | KeyCode::Char('G') => self.resolve_loop(LoopResolution::Resume),
+            KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Esc => {
+                self.resolve_loop(LoopResolution::Stop)
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Enter => {
+                prompt.steering = true;
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn resolve_loop(&mut self, resolution: LoopResolution) -> Action {
+        self.pending_loop_halt = None;
+        Action::Command(Command::ResolveLoop { resolution })
+    }
+
     // ---- overlays ---------------------------------------------------------
 
     /// Open the diff overlay for the most-recently-modified file, if any.
@@ -777,6 +1150,262 @@ impl App {
         });
     }
 
+    /// Open the model/provider picker (`/model` with no args, the palette, or a
+    /// keybinding — C-6). Rows are the configured profiles, the active one
+    /// marked; Enter issues a `SwitchModel`.
+    fn open_model_picker(&mut self) {
+        if self.profiles.is_empty() {
+            self.conversation.push(ConvItem::Notice(
+                "no provider profiles configured — add one in .agents/config.toml".into(),
+            ));
+            return;
+        }
+        let active = self.session.provider.clone();
+        let rows: Vec<ChoiceRow> = self
+            .profiles
+            .iter()
+            .map(|name| ChoiceRow {
+                label: name.clone(),
+                current: *name == active,
+            })
+            .collect();
+        let selected = rows.iter().position(|r| r.current).unwrap_or(0);
+        self.push_overlay(Overlay {
+            title: "switch model".into(),
+            content: OverlayContent::Choices {
+                kind: ChoiceKind::Model,
+                rows,
+                selected,
+            },
+            scroll: 0,
+        });
+    }
+
+    /// Open the reasoning-effort picker (`/effort`, P-9): the active model's
+    /// levels, current one marked; Enter issues a `SetEffort`. A model with no
+    /// effort control declines with a calm notice.
+    fn open_effort_picker(&mut self) {
+        if self.effort_levels.is_empty() {
+            self.conversation.push(ConvItem::Notice(
+                "this model has no reasoning-effort control".into(),
+            ));
+            return;
+        }
+        let rows: Vec<ChoiceRow> = self
+            .effort_levels
+            .iter()
+            .map(|level| ChoiceRow {
+                label: level.as_str().to_string(),
+                current: self.effort == Some(*level),
+            })
+            .collect();
+        let selected = rows.iter().position(|r| r.current).unwrap_or(0);
+        self.push_overlay(Overlay {
+            title: "reasoning effort".into(),
+            content: OverlayContent::Choices {
+                kind: ChoiceKind::Effort,
+                rows,
+                selected,
+            },
+            scroll: 0,
+        });
+    }
+
+    /// Open the permission-mode picker (`/mode` with no args or the palette).
+    /// Rows are the three tiers, the current one marked; the auto tiers are
+    /// marked unavailable (and not selectable) when OS confinement is not
+    /// active — the engine would refuse them anyway, so the picker says so up
+    /// front (Requirements §6.4, §6.7).
+    fn open_mode_picker(&mut self) {
+        let auto_ok = self
+            .sandbox
+            .as_ref()
+            .is_some_and(SandboxStatus::allows_auto_modes);
+        let rows: Vec<ChoiceRow> = [Mode::Normal, Mode::AutoAcceptEdits, Mode::Auto]
+            .iter()
+            .map(|&m| {
+                let label = mode_label(m, auto_ok);
+                ChoiceRow {
+                    label,
+                    current: m == self.mode,
+                }
+            })
+            .collect();
+        let selected = rows.iter().position(|r| r.current).unwrap_or(0);
+        self.push_overlay(Overlay {
+            title: "permission mode".into(),
+            content: OverlayContent::Choices {
+                kind: ChoiceKind::Mode,
+                rows,
+                selected,
+            },
+            scroll: 0,
+        });
+    }
+
+    /// Handle `/mode [name]`: no arg opens the picker; an arg sets the mode
+    /// directly, validated against confinement (the auto tiers need an active
+    /// sandbox — Requirements §6.4).
+    fn mode_command(&mut self, arg: &str) -> Action {
+        let arg = arg.trim();
+        if arg.is_empty() {
+            self.open_mode_picker();
+            return Action::None;
+        }
+        match parse_mode(arg) {
+            Some(Mode::Normal) => Action::Command(Command::SetMode { mode: Mode::Normal }),
+            Some(requested) => {
+                let auto_ok = self
+                    .sandbox
+                    .as_ref()
+                    .is_some_and(SandboxStatus::allows_auto_modes);
+                if auto_ok {
+                    Action::Command(Command::SetMode { mode: requested })
+                } else {
+                    self.conversation.push(ConvItem::Notice(
+                        "auto-accept modes are unavailable without OS confinement".into(),
+                    ));
+                    Action::None
+                }
+            }
+            None => {
+                self.conversation.push(ConvItem::Notice(format!(
+                    "unknown mode '{arg}' — try: normal, auto-accept-edits, auto"
+                )));
+                Action::None
+            }
+        }
+    }
+
+    /// Handle `/effort [level]`: no arg opens the picker; an arg sets the level
+    /// directly, validated against the model's declared levels (P-9).
+    fn effort_command(&mut self, arg: &str) -> Action {
+        let arg = arg.trim();
+        if arg.is_empty() {
+            self.open_effort_picker();
+            return Action::None;
+        }
+        match Effort::parse(arg) {
+            Some(level) if self.effort_levels.contains(&level) => {
+                Action::Command(Command::SetEffort { effort: level })
+            }
+            Some(level) if self.effort_levels.is_empty() => {
+                self.conversation.push(ConvItem::Notice(format!(
+                    "this model has no reasoning-effort control (ignoring '{level}')"
+                )));
+                Action::None
+            }
+            Some(level) => {
+                let offered = self
+                    .effort_levels
+                    .iter()
+                    .map(Effort::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.conversation.push(ConvItem::Notice(format!(
+                    "this model does not offer '{level}' — try: {offered}"
+                )));
+                Action::None
+            }
+            None => {
+                self.conversation.push(ConvItem::Notice(format!(
+                    "unknown effort '{arg}' — try low, medium, high, or max"
+                )));
+                Action::None
+            }
+        }
+    }
+
+    /// Toggle the most recent reasoning trail open/closed (the expand
+    /// affordance, Design §4.4).
+    fn toggle_reasoning(&mut self) {
+        for item in self.conversation.iter_mut().rev() {
+            if let ConvItem::Reasoning { expanded, .. } = item {
+                *expanded = !*expanded;
+                return;
+            }
+        }
+    }
+
+    /// The project's `.agents/` directory, derived from the sessions dir
+    /// (`<root>/.agents/sessions`).
+    fn agents_dir(&self) -> PathBuf {
+        self.sessions_dir
+            .parent()
+            .map_or_else(|| self.sessions_dir.clone(), Path::to_path_buf)
+    }
+
+    /// `/config` — edit the project `.agents/config.toml` in `$EDITOR` (C-5).
+    /// Seeds it from the init template (same content `emberly init` writes) if
+    /// the project has none yet (C-1/C-2); the write lands in the project tier.
+    fn edit_config(&mut self) -> Action {
+        match crate::edit::config_target(&self.agents_dir(), &self.config_template) {
+            Ok((path, existed)) => {
+                // Provenance before the edit (C-3): existing project value vs a
+                // fresh override seeded from the defaults. Edits land here (C-1).
+                self.conversation.push(ConvItem::Notice(if existed {
+                    format!("editing your project config — {}", path.display())
+                } else {
+                    format!(
+                        "no project config yet — created {} from the template; \
+                         your edits override the defaults",
+                        path.display()
+                    )
+                }));
+                Action::EditFile(path)
+            }
+            Err(e) => {
+                self.conversation
+                    .push(ConvItem::Notice(format!("could not prepare config: {e}")));
+                Action::None
+            }
+        }
+    }
+
+    /// `/prompt [name]` — edit a prompt file (`system` | `compact`, default
+    /// `system`) in `$EDITOR` (C-5). Seeds from the baked-in default (C-1) if
+    /// the project has no override yet.
+    fn edit_prompt(&mut self, name: &str) -> Action {
+        match crate::edit::prompt_target(&self.agents_dir(), name.trim()) {
+            Ok((path, existed)) => {
+                let shown = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("prompt");
+                // Provenance before the edit (C-3): an existing project override
+                // vs a fresh copy of the baked-in default. Edits land here (C-1).
+                self.conversation.push(ConvItem::Notice(if existed {
+                    format!("editing your project '{shown}' prompt — {}", path.display())
+                } else {
+                    format!(
+                        "no project '{shown}' prompt yet — created {} from the baked-in \
+                         default; your edits override it",
+                        path.display()
+                    )
+                }));
+                Action::EditFile(path)
+            }
+            Err(msg) => {
+                self.conversation.push(ConvItem::Notice(msg));
+                Action::None
+            }
+        }
+    }
+
+    /// Report an `$EDITOR` handoff's outcome as a timeline notice (C-5).
+    pub fn note_edit(&mut self, path: &Path, status: crate::edit::EditStatus) {
+        use crate::edit::EditStatus;
+        let message = match status {
+            // A ReloadConfig follows (C-5), which reports what actually changed.
+            EditStatus::Edited => format!("edited {}", path.display()),
+            EditStatus::NoEditor => {
+                "no editor configured — set $EDITOR or $VISUAL, then try again".to_string()
+            }
+            EditStatus::Failed(why) => format!("editor failed: {why}"),
+        };
+        self.conversation.push(ConvItem::Notice(message));
+    }
+
     /// Push an overlay and start its brief ease-in (Design §6.4).
     fn push_overlay(&mut self, overlay: Overlay) {
         self.overlays.push(overlay);
@@ -796,6 +1425,36 @@ impl App {
     /// Run a typed `/name` command; unknown names surface a calm notice.
     fn run_slash(&mut self, name: &str) -> Action {
         let name = name.trim();
+        // `/model <profile> [model]` takes arguments, so it is parsed before the
+        // argument-less command registry (C-6). `modelx` is not a match.
+        if let Some(rest) = name
+            .strip_prefix("model")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return self.run_model_command(rest.trim());
+        }
+        // `/prompt [name]` takes an optional argument (system|compact).
+        if let Some(rest) = name
+            .strip_prefix("prompt")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return self.edit_prompt(rest.trim());
+        }
+        // `/effort [level]` takes an optional argument (low|medium|high|max).
+        if let Some(rest) = name
+            .strip_prefix("effort")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return self.effort_command(rest.trim());
+        }
+        // `/mode [name]` opens the picker with no arg, or sets the mode
+        // directly (Shift-Tab still cycles — the quick-toggle keybinding).
+        if let Some(rest) = name
+            .strip_prefix("mode")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return self.mode_command(rest.trim());
+        }
         match commands::by_name(name) {
             Some(cmd) => self.run_command(cmd),
             None => {
@@ -805,6 +1464,29 @@ impl App {
                 Action::None
             }
         }
+    }
+
+    /// `/model <profile> [model]` — switch the active provider profile (and
+    /// optionally the model) for subsequent turns (C-6). Gated at idle, like
+    /// `/new`: a switch applies to the next turn.
+    fn run_model_command(&mut self, args: &str) -> Action {
+        let mut parts = args.split_whitespace();
+        // No arguments → open the picker (browsing is fine even mid-turn).
+        let Some(profile) = parts.next() else {
+            self.open_model_picker();
+            return Action::None;
+        };
+        if self.busy {
+            self.conversation.push(ConvItem::Notice(
+                "finish or cancel the current turn before switching models".into(),
+            ));
+            return Action::None;
+        }
+        let model = parts.next().map(str::to_string);
+        Action::Command(Command::SwitchModel {
+            profile: profile.to_string(),
+            model,
+        })
     }
 
     /// Execute a command from the palette, a slash command, or a keybinding.
@@ -867,6 +1549,17 @@ impl App {
                 };
                 Action::Command(Command::SetMode { mode: next })
             }
+            AppCommand::Model => {
+                self.open_model_picker();
+                Action::None
+            }
+            AppCommand::Effort => {
+                self.open_effort_picker();
+                Action::None
+            }
+            AppCommand::Config => self.edit_config(),
+            AppCommand::Prompt => self.edit_prompt("system"),
+            AppCommand::Reload => Action::Command(Command::ReloadConfig),
             AppCommand::Cancel => Action::Command(Command::Cancel),
             AppCommand::Quit => Action::Quit,
         }
@@ -976,7 +1669,10 @@ impl App {
                     .and_then(|p| filtered.get(p.selected).copied());
                 self.palette = None;
                 match chosen {
-                    Some(i) => self.run_command(commands::COMMANDS[i].cmd),
+                    // Dispatch by name so argument-taking commands (`/mode`,
+                    // `/model`, `/effort`) open their picker from the palette,
+                    // just as their no-arg slash forms do.
+                    Some(i) => self.run_slash(commands::COMMANDS[i].name),
                     None => Action::None,
                 }
             }
@@ -1024,6 +1720,12 @@ impl App {
             Some(OverlayContent::Sessions { .. })
         ) {
             return self.on_session_picker_key(key);
+        }
+        if matches!(
+            self.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::Choices { .. })
+        ) {
+            return self.on_choice_picker_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
@@ -1106,6 +1808,111 @@ impl App {
         }
     }
 
+    /// Keys for the generic choice picker (`/model` now): ↑/↓ move, Enter
+    /// applies the highlighted choice via the command its `kind` maps to,
+    /// Esc/q dismiss.
+    fn on_choice_picker_key(&mut self, key: KeyEvent) -> Action {
+        let (kind, len, selected, chosen) = match self.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::Choices {
+                kind,
+                rows,
+                selected,
+            }) => (*kind, rows.len(), *selected, rows.get(*selected).cloned()),
+            _ => return Action::None,
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+                Action::None
+            }
+            KeyCode::Up => {
+                self.set_choice_selection(selected.saturating_sub(1));
+                Action::None
+            }
+            KeyCode::Down => {
+                self.set_choice_selection((selected + 1).min(len.saturating_sub(1)));
+                Action::None
+            }
+            KeyCode::Enter => {
+                let Some(row) = chosen else {
+                    return Action::None;
+                };
+                self.overlays.pop();
+                match kind {
+                    ChoiceKind::Model => {
+                        if row.current {
+                            self.conversation
+                                .push(ConvItem::Notice(format!("already using {}", row.label)));
+                            Action::None
+                        } else if self.busy {
+                            self.conversation.push(ConvItem::Notice(
+                                "finish or cancel the current turn before switching models".into(),
+                            ));
+                            Action::None
+                        } else {
+                            Action::Command(Command::SwitchModel {
+                                profile: row.label,
+                                model: None,
+                            })
+                        }
+                    }
+                    ChoiceKind::Effort => {
+                        if row.current {
+                            Action::None // already at this level
+                        } else {
+                            match Effort::parse(&row.label) {
+                                Some(effort) => Action::Command(Command::SetEffort { effort }),
+                                None => Action::None,
+                            }
+                        }
+                    }
+                    ChoiceKind::Mode => {
+                        if row.current {
+                            Action::None // already in this mode
+                        } else {
+                            // The label is the mode name, possibly with a
+                            // `(needs OS confinement)` suffix when the auto
+                            // tier is unavailable — parse the leading name.
+                            let name = row.label.split_whitespace().next().unwrap_or("");
+                            match parse_mode(name) {
+                                Some(mode) if mode == Mode::Normal => {
+                                    Action::Command(Command::SetMode { mode })
+                                }
+                                Some(mode) => {
+                                    let auto_ok = self
+                                        .sandbox
+                                        .as_ref()
+                                        .is_some_and(SandboxStatus::allows_auto_modes);
+                                    if auto_ok {
+                                        Action::Command(Command::SetMode { mode })
+                                    } else {
+                                        self.conversation.push(ConvItem::Notice(
+                                            "auto-accept modes are unavailable without OS confinement"
+                                                .into(),
+                                        ));
+                                        Action::None
+                                    }
+                                }
+                                None => Action::None,
+                            }
+                        }
+                    }
+                }
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn set_choice_selection(&mut self, next: usize) {
+        if let Some(Overlay {
+            content: OverlayContent::Choices { selected, .. },
+            ..
+        }) = self.overlays.last_mut()
+        {
+            *selected = next;
+        }
+    }
+
     fn scroll_overlay(&mut self, delta: isize) {
         if let Some(o) = self.overlays.last_mut() {
             o.scroll = o.scroll.saturating_add_signed(delta);
@@ -1115,12 +1922,43 @@ impl App {
 
 /// The `/help` body: every command with its keybinding and description, from
 /// the single registry (Design §3.3).
+/// The display label for a mode row in the picker. Auto tiers are annotated
+/// `(needs OS confinement)` when the sandbox is not active, so the picker is
+/// honest about why they can't be chosen (Requirements §6.4, §6.7).
+fn mode_label(mode: Mode, auto_ok: bool) -> String {
+    let name = match mode {
+        Mode::Normal => crate::strings::mode::NORMAL,
+        Mode::AutoAcceptEdits => crate::strings::mode::AUTO_ACCEPT_EDITS,
+        Mode::Auto => crate::strings::mode::AUTO,
+    };
+    if mode.is_auto() && !auto_ok {
+        format!("{name}  (needs OS confinement)")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Parse a `/mode <name>` argument; unknown values return `None`. Accepts the
+/// `strings::mode` names and a couple of common shorthands.
+fn parse_mode(s: &str) -> Option<Mode> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some(Mode::Normal),
+        "auto-accept-edits" | "auto-accept" | "edits" => Some(Mode::AutoAcceptEdits),
+        "auto" => Some(Mode::Auto),
+        _ => None,
+    }
+}
+
 fn help_text() -> String {
     let mut out = String::from("Commands — run via Ctrl-P, /name, or a keybinding.\n\n");
     for spec in commands::COMMANDS {
         let key = spec.key.map(|k| format!("  [{k}]")).unwrap_or_default();
         out.push_str(&format!("/{:<9}{}\n    {}\n", spec.name, key, spec.desc));
     }
+    // `/model` also accepts arguments for a direct switch (C-6).
+    out.push_str("  (also: /model <profile> [model] to switch directly)\n");
+    // `/mode` and `/effort` also take a direct argument.
+    out.push_str("  (also: /mode <normal|auto-accept-edits|auto>, /effort <level>)\n");
     out
 }
 
@@ -1130,7 +1968,299 @@ mod tests {
     use emberly_core::ToolCallId;
 
     fn app() -> App {
-        App::new(SessionInfo::default(), std::env::temp_dir())
+        App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            vec!["anthropic".into(), "openai".into(), "zai".into()],
+            "# test config\n".to_string(),
+        )
+    }
+
+    #[test]
+    fn slash_model_switches_provider_and_model() {
+        let mut a = app();
+        assert_eq!(
+            a.run_slash("model zai glm-4.6"),
+            Action::Command(Command::SwitchModel {
+                profile: "zai".into(),
+                model: Some("glm-4.6".into()),
+            })
+        );
+        // Profile only → keep-current-model (None).
+        assert_eq!(
+            a.run_slash("model openai"),
+            Action::Command(Command::SwitchModel {
+                profile: "openai".into(),
+                model: None,
+            })
+        );
+    }
+
+    #[test]
+    fn slash_model_without_args_opens_the_picker() {
+        let mut a = app();
+        assert_eq!(a.run_slash("model"), Action::None);
+        assert!(
+            matches!(
+                a.overlays.last().map(|o| &o.content),
+                Some(OverlayContent::Choices {
+                    kind: ChoiceKind::Model,
+                    ..
+                })
+            ),
+            "no-arg /model opens the model picker"
+        );
+    }
+
+    #[test]
+    fn model_picker_marks_current_and_enter_switches() {
+        let mut a = app();
+        a.session.provider = "anthropic".into();
+        a.open_model_picker();
+        // The active profile is preselected and marked current.
+        let Some(OverlayContent::Choices { rows, selected, .. }) =
+            a.overlays.last().map(|o| &o.content)
+        else {
+            panic!("expected a choices overlay");
+        };
+        assert!(rows[*selected].current && rows[*selected].label == "anthropic");
+        // Move to a different profile and press Enter → SwitchModel (keep model).
+        let down = KeyEvent::from(KeyCode::Down);
+        let _ = a.on_choice_picker_key(down);
+        let enter = KeyEvent::from(KeyCode::Enter);
+        assert!(matches!(
+            a.on_choice_picker_key(enter),
+            Action::Command(Command::SwitchModel { model: None, .. })
+        ));
+    }
+
+    #[test]
+    fn model_picker_reports_when_no_profiles() {
+        let mut a = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        a.open_model_picker();
+        assert!(a.overlays.is_empty(), "no overlay without profiles");
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("no provider profiles"))));
+    }
+
+    #[test]
+    fn slash_modelx_is_not_the_model_command() {
+        // A command whose name merely starts with "model" is not `/model`.
+        let mut a = app();
+        assert_eq!(a.run_slash("modelx"), Action::None);
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown command"))));
+    }
+
+    #[test]
+    fn slash_mode_without_args_opens_the_picker() {
+        let mut a = app();
+        assert_eq!(a.run_slash("mode"), Action::None);
+        assert!(
+            matches!(
+                a.overlays.last().map(|o| &o.content),
+                Some(OverlayContent::Choices {
+                    kind: ChoiceKind::Mode,
+                    ..
+                })
+            ),
+            "no-arg /mode opens the mode picker"
+        );
+    }
+
+    #[test]
+    fn mode_picker_marks_current_and_marks_auto_unavailable_without_sandbox() {
+        let mut a = app(); // sandbox: None → auto tiers unavailable
+        a.open_mode_picker();
+        let Some(OverlayContent::Choices { rows, selected, .. }) =
+            a.overlays.last().map(|o| &o.content)
+        else {
+            panic!("expected a choices overlay");
+        };
+        // Normal is current (the default) and preselected.
+        assert!(rows[*selected].current);
+        assert_eq!(rows[*selected].label, "normal");
+        // Auto tiers are annotated as needing confinement.
+        assert!(rows
+            .iter()
+            .any(|r| r.label.starts_with("auto-accept-edits") && r.label.contains("OS confinement")));
+        assert!(rows
+            .iter()
+            .any(|r| r.label == "auto  (needs OS confinement)" || r.label.starts_with("auto  (")));
+    }
+
+    #[test]
+    fn mode_picker_switches_to_normal_on_enter() {
+        let mut a = app();
+        a.mode = Mode::Auto;
+        a.sandbox = Some(SandboxStatus::Confined { backend: "landlock".into() });
+        a.open_mode_picker();
+        // Current is Auto; move up to AutoAcceptEdits, then up to Normal.
+        let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Up));
+        let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Up));
+        assert!(matches!(
+            a.on_choice_picker_key(KeyEvent::from(KeyCode::Enter)),
+            Action::Command(Command::SetMode { mode: Mode::Normal })
+        ));
+    }
+
+    #[test]
+    fn mode_picker_refuses_auto_without_confinement() {
+        let mut a = app(); // sandbox: None
+        a.open_mode_picker();
+        // The auto tier row carries the unavailability suffix; selecting it and
+        // pressing Enter declines with a notice rather than emitting SetMode.
+        // Move down to the auto-accept-edits row (index 1).
+        let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Down));
+        let action = a.on_choice_picker_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(action, Action::None);
+        assert!(a.conversation.iter().any(|i| matches!(
+            i,
+            ConvItem::Notice(n) if n.contains("unavailable without OS confinement")
+        )));
+    }
+
+    #[test]
+    fn slash_mode_arg_sets_directly_and_validates() {
+        let mut a = app();
+        a.sandbox = Some(SandboxStatus::Confined { backend: "landlock".into() });
+        // A direct arg with confinement active → SetMode.
+        assert_eq!(
+            a.run_slash("mode auto"),
+            Action::Command(Command::SetMode { mode: Mode::Auto })
+        );
+        // Normal is always allowed.
+        assert_eq!(
+            a.run_slash("mode normal"),
+            Action::Command(Command::SetMode { mode: Mode::Normal })
+        );
+        // Unknown mode → a notice, not a command.
+        assert_eq!(a.run_slash("mode bogus"), Action::None);
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown mode"))));
+    }
+
+    #[test]
+    fn slash_mode_arg_refuses_auto_without_confinement() {
+        let mut a = app(); // sandbox: None
+        assert_eq!(a.run_slash("mode auto-accept-edits"), Action::None);
+        assert!(a.conversation.iter().any(|i| matches!(
+            i,
+            ConvItem::Notice(n) if n.contains("unavailable without OS confinement")
+        )));
+        // Normal is still allowed without confinement.
+        assert_eq!(
+            a.run_slash("mode normal"),
+            Action::Command(Command::SetMode { mode: Mode::Normal })
+        );
+    }
+
+    #[test]
+    fn slash_config_seeds_then_edits_without_clobbering() {
+        let root = std::env::temp_dir().join(format!("emberly-cfgedit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sessions = root.join(".agents").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("mkdir");
+        let mut a = App::new(
+            SessionInfo::default(),
+            sessions,
+            Vec::new(),
+            "# seeded config\n".to_string(),
+        );
+
+        let cfg = root.join(".agents").join("config.toml");
+        let action = a.run_slash("config");
+        assert!(cfg.exists(), "config.toml is seeded when absent");
+        assert!(matches!(action, Action::EditFile(ref p) if *p == cfg));
+
+        // A second /config must not overwrite the (now user-edited) file.
+        std::fs::write(&cfg, "user edits").expect("write");
+        let _ = a.run_slash("config");
+        assert_eq!(std::fs::read_to_string(&cfg).expect("read"), "user edits");
+    }
+
+    #[test]
+    fn slash_prompt_seeds_from_default_and_rejects_unknown() {
+        let root = std::env::temp_dir().join(format!("emberly-promptedit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sessions = root.join(".agents").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("mkdir");
+        let mut a = App::new(SessionInfo::default(), sessions, Vec::new(), String::new());
+
+        let p = root.join(".agents").join("prompts").join("system.md");
+        let action = a.run_slash("prompt system");
+        assert!(p.exists(), "prompt seeded from the baked-in default");
+        assert!(matches!(action, Action::EditFile(ref pp) if *pp == p));
+        assert!(!std::fs::read_to_string(&p).expect("read").is_empty());
+
+        // An unknown prompt name is a notice, not an edit.
+        assert_eq!(a.run_slash("prompt bogus"), Action::None);
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown prompt"))));
+    }
+
+    #[test]
+    fn edit_provenance_distinguishes_new_override_from_existing() {
+        let root = std::env::temp_dir().join(format!("emberly-prov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sessions = root.join(".agents").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("mkdir");
+        let mut a = App::new(
+            SessionInfo::default(),
+            sessions,
+            Vec::new(),
+            "# t\n".to_string(),
+        );
+
+        // First edit: no project config yet → seeded, told it overrides defaults.
+        a.run_slash("config");
+        assert!(matches!(
+            a.conversation.last(),
+            Some(ConvItem::Notice(n)) if n.contains("no project config yet")
+        ));
+        // Second edit: the file exists → editing an existing project value.
+        a.run_slash("config");
+        assert!(matches!(
+            a.conversation.last(),
+            Some(ConvItem::Notice(n)) if n.contains("editing your project config")
+        ));
+    }
+
+    #[test]
+    fn note_edit_reports_no_editor() {
+        let mut a = app();
+        a.note_edit(
+            Path::new("/x/config.toml"),
+            crate::edit::EditStatus::NoEditor,
+        );
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("no editor configured"))));
+    }
+
+    #[test]
+    fn model_changed_updates_the_sidebar() {
+        let mut a = app();
+        a.apply_event(UiEvent::ModelChanged {
+            provider: "zai".into(),
+            model: "glm-4.6".into(),
+        });
+        assert_eq!(a.session.provider, "zai");
+        assert_eq!(a.session.model, "glm-4.6");
     }
 
     #[test]
@@ -1151,6 +2281,7 @@ mod tests {
             call_id: id.clone(),
             tool: "bash".into(),
             summary: "run: ls".into(),
+            explanation: None,
         });
         a.apply_event(UiEvent::ToolFinished {
             call_id: id.clone(),
@@ -1171,6 +2302,23 @@ mod tests {
                 assert_eq!(summary, "run: ls");
                 assert_eq!(result.as_deref(), Some("exit 0"));
                 assert_eq!(preview.as_deref(), Some("hello\nworld"));
+            }
+            other => panic!("expected a tool item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_started_carries_the_explanation_onto_the_item() {
+        let mut a = app();
+        a.apply_event(UiEvent::ToolStarted {
+            call_id: ToolCallId::new("c1"),
+            tool: "bash".into(),
+            summary: "run: sed …".into(),
+            explanation: Some("raise the log level".into()),
+        });
+        match &a.conversation[0] {
+            ConvItem::Tool { explanation, .. } => {
+                assert_eq!(explanation.as_deref(), Some("raise the log level"));
             }
             other => panic!("expected a tool item, got {other:?}"),
         }
@@ -1331,9 +2479,10 @@ mod tests {
     }
 
     #[test]
-    fn slash_mode_and_shift_tab_reach_the_same_command() {
-        // The registry wires `/mode` and the Shift-Tab hint to one action, so
-        // the palette, slash parser, and keybinding stay in sync.
+    fn shift_tab_cycles_via_the_cycle_mode_command() {
+        // The registry wires `Shift-Tab` to `CycleMode`. `/mode` (slash and
+        // palette) is intercepted earlier in `run_slash` to open the picker, so
+        // this registry entry now serves only the quick-toggle keybinding.
         assert_eq!(
             crate::commands::by_name("mode"),
             Some(crate::commands::AppCommand::CycleMode)
@@ -1434,6 +2583,189 @@ mod tests {
             })
         );
         assert!(a.pending_permission.is_none());
+    }
+
+    // ---- ask_user question prompt (T-8, Design §5.1) ---------------------
+
+    fn ask(a: &mut App, options: &[&str]) {
+        a.apply_event(UiEvent::AskUserRequest {
+            id: AskId(7),
+            question: "which environment?".into(),
+            options: options.iter().map(|s| (*s).to_string()).collect(),
+        });
+    }
+
+    #[test]
+    fn ask_enter_never_auto_answers() {
+        let mut a = app();
+        ask(&mut a, &["dev", "prod"]);
+        // Nothing typed, no option chosen: Enter must not answer (Design §5.1).
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(action, Action::None);
+        assert!(a.pending_ask.is_some(), "the question is still waiting");
+    }
+
+    #[test]
+    fn ask_esc_declines() {
+        let mut a = app();
+        ask(&mut a, &["dev", "prod"]);
+        let action = a.on_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(
+            action,
+            Action::Command(Command::AskUserAnswer {
+                id: AskId(7),
+                answer: AskAnswer::Declined,
+            })
+        );
+        assert!(a.pending_ask.is_none());
+    }
+
+    #[test]
+    fn ask_arrow_then_enter_picks_the_selected_option() {
+        let mut a = app();
+        ask(&mut a, &["dev", "prod"]);
+        a.on_key(KeyEvent::from(KeyCode::Down)); // select "dev" (index 0)
+        a.on_key(KeyEvent::from(KeyCode::Down)); // select "prod" (index 1)
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            action,
+            Action::Command(Command::AskUserAnswer {
+                id: AskId(7),
+                answer: AskAnswer::Answered("prod".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn ask_free_text_submits_and_beats_a_selection() {
+        let mut a = app();
+        ask(&mut a, &["dev", "prod"]);
+        a.on_key(KeyEvent::from(KeyCode::Down)); // highlight an option…
+        for c in "staging".chars() {
+            a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        // …but typed text wins on Enter.
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            action,
+            Action::Command(Command::AskUserAnswer {
+                id: AskId(7),
+                answer: AskAnswer::Answered("staging".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn ask_free_text_works_without_options() {
+        let mut a = app();
+        ask(&mut a, &[]);
+        for c in "yes".chars() {
+            a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            action,
+            Action::Command(Command::AskUserAnswer {
+                id: AskId(7),
+                answer: AskAnswer::Answered("yes".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn ask_prompt_stills_motion() {
+        let mut a = app();
+        a.busy = true;
+        a.motion = true;
+        assert!(a.is_working(), "working before the question");
+        ask(&mut a, &["dev"]);
+        assert!(
+            !a.is_working(),
+            "no spinner while a question is up (Design §6.4)"
+        );
+        assert!(!a.is_animating());
+    }
+
+    // ---- loop-halt surface (S-5, Design §8.5) ----------------------------
+
+    fn halt(a: &mut App) {
+        a.apply_event(UiEvent::LoopHalted {
+            reason: "the last few steps repeated without progress".into(),
+        });
+    }
+
+    #[test]
+    fn loop_halt_keep_going_resumes() {
+        let mut a = app();
+        halt(&mut a);
+        let action = a.on_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(
+            action,
+            Action::Command(Command::ResolveLoop {
+                resolution: LoopResolution::Resume
+            })
+        );
+        assert!(a.pending_loop_halt.is_none());
+    }
+
+    #[test]
+    fn loop_halt_stop_and_esc_both_stop() {
+        for key in [KeyCode::Char('s'), KeyCode::Esc] {
+            let mut a = app();
+            halt(&mut a);
+            let action = a.on_key(KeyEvent::from(key));
+            assert_eq!(
+                action,
+                Action::Command(Command::ResolveLoop {
+                    resolution: LoopResolution::Stop
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn loop_halt_say_something_then_steer() {
+        let mut a = app();
+        halt(&mut a);
+        a.on_key(KeyEvent::from(KeyCode::Char('t')));
+        assert!(a.pending_loop_halt.as_ref().is_some_and(|h| h.steering));
+        for c in "read a.txt".chars() {
+            a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            action,
+            Action::Command(Command::ResolveLoop {
+                resolution: LoopResolution::Steer("read a.txt".into())
+            })
+        );
+    }
+
+    #[test]
+    fn loop_halt_steer_esc_returns_to_menu() {
+        let mut a = app();
+        halt(&mut a);
+        a.on_key(KeyEvent::from(KeyCode::Char('t')));
+        a.on_key(KeyEvent::from(KeyCode::Char('x')));
+        a.on_key(KeyEvent::from(KeyCode::Esc)); // back to menu, not a decision
+        assert!(a.pending_loop_halt.as_ref().is_some_and(|h| !h.steering));
+        let action = a.on_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(
+            action,
+            Action::Command(Command::ResolveLoop {
+                resolution: LoopResolution::Resume
+            })
+        );
+    }
+
+    #[test]
+    fn loop_halt_stills_motion() {
+        let mut a = app();
+        a.busy = true;
+        a.motion = true;
+        halt(&mut a);
+        assert!(!a.is_working(), "the halt screen is perfectly still");
+        assert!(!a.is_animating());
     }
 
     #[test]
@@ -1623,5 +2955,127 @@ mod tests {
             .conversation
             .iter()
             .any(|i| matches!(i, ConvItem::User(t) if t == "old")));
+    }
+
+    #[test]
+    fn reasoning_delta_builds_a_trail_that_settles_on_the_answer() {
+        let mut a = app();
+        a.apply_event(UiEvent::ReasoningDelta {
+            text: "think ".into(),
+        });
+        a.apply_event(UiEvent::ReasoningDelta {
+            text: "more".into(),
+        });
+        // While thinking, the trail streams expanded.
+        assert!(matches!(
+            a.conversation.last(),
+            Some(ConvItem::Reasoning { text, expanded: true }) if text == "think more"
+        ));
+        // The answer begins → the trail settles to collapsed (default view).
+        a.apply_event(UiEvent::AssistantDelta {
+            text: "answer".into(),
+        });
+        assert!(matches!(
+            a.conversation.first(),
+            Some(ConvItem::Reasoning {
+                expanded: false,
+                ..
+            })
+        ));
+        assert!(matches!(a.conversation.last(), Some(ConvItem::Assistant(t)) if t == "answer"));
+    }
+
+    #[test]
+    fn hidden_view_drops_the_trail_but_keeps_the_answer() {
+        let mut a = app();
+        a.reasoning_view = ReasoningView::Hidden;
+        a.apply_event(UiEvent::ReasoningDelta {
+            text: "secret".into(),
+        });
+        a.apply_event(UiEvent::AssistantDelta {
+            text: "answer".into(),
+        });
+        assert!(!a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Reasoning { .. })));
+        assert!(matches!(a.conversation.last(), Some(ConvItem::Assistant(t)) if t == "answer"));
+    }
+
+    #[test]
+    fn expanded_view_keeps_the_trail_open_after_the_answer() {
+        let mut a = app();
+        a.reasoning_view = ReasoningView::Expanded;
+        a.apply_event(UiEvent::ReasoningDelta { text: "why".into() });
+        a.apply_event(UiEvent::AssistantDelta { text: "a".into() });
+        assert!(matches!(
+            a.conversation.first(),
+            Some(ConvItem::Reasoning { expanded: true, .. })
+        ));
+    }
+
+    #[test]
+    fn ctrl_r_toggles_the_reasoning_trail() {
+        let mut a = app();
+        a.apply_event(UiEvent::ReasoningDelta { text: "hmm".into() });
+        a.apply_event(UiEvent::AssistantDelta { text: "a".into() }); // settle → collapsed
+        a.toggle_reasoning();
+        assert!(matches!(
+            a.conversation.first(),
+            Some(ConvItem::Reasoning { expanded: true, .. })
+        ));
+    }
+
+    #[test]
+    fn effort_picker_offers_levels_and_declines_when_none() {
+        let mut a = app();
+        // No effort control ⇒ a calm notice, no overlay.
+        assert_eq!(a.run_slash("effort"), Action::None);
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("no reasoning-effort"))));
+        assert!(a.overlays.is_empty());
+
+        // With levels available, `/effort` opens the picker.
+        a.effort_levels = vec![Effort::Low, Effort::High];
+        a.effort = Some(Effort::Low);
+        a.run_slash("effort");
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::Choices {
+                kind: ChoiceKind::Effort,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn effort_arg_sets_a_supported_level_and_rejects_others() {
+        let mut a = app();
+        a.effort_levels = vec![Effort::Low, Effort::High];
+        assert_eq!(
+            a.run_slash("effort high"),
+            Action::Command(Command::SetEffort {
+                effort: Effort::High
+            })
+        );
+        // A level the model doesn't offer is a notice, not a command.
+        assert_eq!(a.run_slash("effort medium"), Action::None);
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("does not offer"))));
+    }
+
+    #[test]
+    fn effort_changed_updates_sidebar_state() {
+        let mut a = app();
+        a.apply_event(UiEvent::EffortChanged {
+            effort: Some(Effort::High),
+            available: vec![Effort::Low, Effort::High],
+        });
+        assert_eq!(a.effort, Some(Effort::High));
+        assert_eq!(a.effort_levels, vec![Effort::Low, Effort::High]);
     }
 }

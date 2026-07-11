@@ -52,14 +52,15 @@ install -m 0755 target/release/emberly ~/.local/bin/emberly
    export ANTHROPIC_API_KEY=sk-...
    ```
 
-   Or point at any OpenAI-compatible endpoint (OpenAI, Ollama, vLLM,
-   OpenRouter, …):
+   Emberly ships baked-in profiles — `anthropic`, `openai`, `zai` (the Z.ai
+   coding plan), and `local` (a keyless `http://localhost:11434/v1` for
+   Ollama/vLLM). Selecting one is just its name plus a key; each profile's key
+   comes from `<PROFILE-REF>_API_KEY` (or `keys.toml`):
 
    ```sh
-   export EMBERLY_PROVIDER=openai
-   export EMBERLY_MODEL=gpt-5.2
-   export EMBERLY_BASE_URL=http://localhost:11434/v1   # e.g. Ollama
-   export OPENAI_API_KEY=...                            # if the endpoint needs one
+   export EMBERLY_PROVIDER=zai
+   export EMBERLY_MODEL=glm-4.6
+   export ZAI_API_KEY=...
    ```
 
 2. **Run it in your project directory:**
@@ -98,32 +99,101 @@ overwritten.
 **`.agents/config.toml`:**
 
 ```toml
-provider = "anthropic"          # or "openai" (covers Ollama/vLLM/OpenRouter)
-model    = "claude-sonnet-5"
-# base_url = "http://localhost:11434/v1"   # for openai-compatible endpoints
-# context_window = 200000
-# max_output     = 8192
-
-# Optional per-model pricing → live session cost estimate.
-# [pricing."claude-sonnet-5"]
-# input  = 3.0     # USD per million input tokens
-# output = 15.0
+provider = "zai"                # a baked-in profile, or one you define below
+model    = "glm-4.6"
 ```
 
-**API keys** are read from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, or from
-`~/.config/emberly/keys.toml` (which must be mode `0600`). Keys are never read
-from project files, so they don't get committed.
+**Adding a provider is configuration, not code.** A provider is a *profile*
+naming a wire-format `adapter` (`anthropic` or `openai`), an endpoint, and a
+key *reference*. Any service that speaks a format Emberly already parses is
+reachable this way — no rebuild:
+
+```toml
+[providers.myserver]
+adapter  = "openai"                          # or "anthropic"
+base_url = "https://my-endpoint.example/v1"
+auth     = { scheme = "bearer", key = "myserver" }   # → MYSERVER_API_KEY
+
+# Optional per-model metadata → live session cost estimate:
+# [providers.myserver.models."my-model"]
+# context_window = 128000
+# max_output     = 8192
+# pricing = { input = 1.0, output = 2.0 }    # USD per million tokens
+```
+
+Baked-in profiles (`anthropic`, `openai`, `zai`, `local`) can be tweaked the
+same way — set just the field you want to change; the rest is kept.
+
+**API keys** are read from `<REF>_API_KEY` (e.g. `ANTHROPIC_API_KEY`,
+`ZAI_API_KEY`) or from `~/.config/emberly/keys.toml` — a flat `ref = "secret"`
+table that must be mode `0600`. Keys are never read from project files, so they
+don't get committed.
 
 **Project instructions:** an `AGENTS.md` (or `CLAUDE.md`) at your project root
 is picked up automatically and given to the agent as standing context.
 
-**Environment variables:** `EMBERLY_PROVIDER`, `EMBERLY_MODEL`,
-`EMBERLY_BASE_URL`, `EMBERLY_CONTEXT_WINDOW`, `EMBERLY_MAX_OUTPUT`. For display,
-`NO_COLOR` or `TERM=dumb` force plain mode and `EMBERLY_MOTION=0` disables
-animation.
+**Environment variables:** `EMBERLY_PROVIDER` (active profile) and
+`EMBERLY_MODEL`. For display, `NO_COLOR` or `TERM=dumb` force plain mode and
+`EMBERLY_MOTION=0` disables animation.
 
 Run **`emberly config show`** to see the resolved settings and where each value
 came from.
+
+**Editing config and prompts from a session.** You don't have to leave Emberly
+to tune it:
+
+- **`/config`** opens `.agents/config.toml` in your `$EDITOR` (`$VISUAL` is
+  tried first). If the project has none yet, it's created from the template.
+- **`/prompt [system|compact]`** opens a prompt file, seeded from the baked-in
+  default if you have no override yet. Edits are written to the **project
+  tier** (`.agents/`), never to the global config or the built-in defaults,
+  and Emberly tells you whether you're editing an existing value or creating a
+  new override.
+- On save, the change is **applied to the running session** — a new system
+  prompt takes effect on your next message, and a newly-added provider profile
+  shows up in the `/model` picker right away. Startup-only settings (e.g.
+  `sandbox.require`) are named as needing a restart rather than applied
+  silently. **`/reload`** re-reads everything on demand (handy if you edited a
+  file outside Emberly).
+- In plain/`--plain` mode there's no editor handoff: `/config` and `/prompt`
+  print the file path to edit with your own tools, and `/reload` applies it.
+
+**Reasoning effort and the thinking trail.** For models that expose a
+reasoning control, you own the latency/cost/quality trade per task:
+
+- Enable it per model in config with an `effort` default (and optionally an
+  `effort_levels` subset) — see `.agents/config.toml`. A model with no such
+  control ignores the setting; it's never an error.
+- **`/effort [low|medium|high|max]`** sets the level for your next message —
+  no argument opens a picker. The engine maps it to the provider's native
+  knob (Anthropic's thinking budget, OpenAI's `reasoning_effort`). The active
+  level shows in the sidebar; switching model re-seeds it to that model's
+  default. Every change is announced and recorded to the transcript.
+- When a provider streams its **reasoning** distinctly from the answer, it
+  renders as a quiet, collapsed trail — `▸ reasoning (N lines)` — one step
+  below the answer, never mistaken for it. **Ctrl-R** toggles it open. Set the
+  default view with the **`reasoning`** config key: `collapsed` (default),
+  `expanded`, or `hidden`. `hidden` only hides it from view — the trace is
+  still recorded to the transcript. In plain mode the trail is a labeled
+  `--- reasoning ---` block.
+
+**Asking you a question, and tool-call explanations.** Two touches that make
+the agent's work legible without getting in the way:
+
+- **The agent can ask you.** When it genuinely needs your decision or
+  information it can't get itself, it puts a calm question on screen and waits
+  — offering choices when it has them, with a free-text answer always
+  available. It is deliberately *not* the permission prompt: there is no
+  "safe default" keypress, so **Enter never answers for you**; you pick an
+  option or type a reply, and **Esc** declines (the agent is told you declined,
+  so it can proceed or stop). In plain mode the same question appears with
+  numbered options; an empty line declines.
+- **Non-obvious tool calls get a one-line caption.** When what a call does
+  isn't self-evident (an opaque `bash` command, a subtle edit), the model
+  writes a short dim line under it — `↳ raise the log level to info`. Obvious
+  calls get none (no clutter). It's **on by default**; set
+  `ui.tool_explanations = false` to turn it off entirely — with it off the
+  model is never asked for one, so no tokens are spent on it.
 
 ## Using a session
 
@@ -150,7 +220,7 @@ usage, cost, and changed files.
 | `/files` | | List files changed this session |
 | `/session` | | List saved sessions and switch to one |
 | `/new` (`/clear`) | | Start a fresh session (the current one is saved) |
-| `/mode` | `Shift-Tab` | Cycle permission mode (normal → auto-accept edits → auto) |
+| `/mode` | `Shift-Tab` | Pick a permission mode (`Shift-Tab` cycles) |
 | `/sidebar` | `Ctrl-B` | Toggle the sidebar |
 | `/cancel` | | Cancel the in-flight turn |
 | `/quit` | `Ctrl-D` | Exit |
@@ -162,12 +232,15 @@ going. "Allow for this session" grants until you quit; "always allow in this
 project" writes a line to `.agents/permissions.toml` (shown to you) so the rule
 sticks next time.
 
-**Permission modes.** `Shift-Tab` (or `/mode`) cycles how much the agent may do
-without asking: **normal** (ask per the rules), **auto-accept edits** (file
-writes inside the project auto-apply; commands still ask), and **auto** (all
-tools auto-run inside the project root). The two auto tiers require active OS
-confinement — without a kernel fence they simply aren't offered, and the app
-tells you why. The current mode shows in the status bar.
+**Permission modes.** `Shift-Tab` cycles how much the agent may do without
+asking, and `/mode` (or the palette) opens a picker listing all three tiers:
+**normal** (ask per the rules), **auto-accept edits** (file writes inside the
+project auto-apply; commands still ask), and **auto** (all tools auto-run
+inside the project root). You can also set one directly with
+`/mode <normal|auto-accept-edits|auto>`. The two auto tiers require active OS
+confinement — without a kernel fence they aren't offered (the picker marks them
+and tells you why), and the app tells you why. The current mode shows in the
+status bar.
 
 **Sessions never disappear.** Every session is written to
 `.agents/sessions/<id>.jsonl` as it happens (durably, line by line). If Emberly
@@ -193,7 +266,7 @@ emberly init                Scaffold .agents/ (config, prompts, permissions)
 emberly config show         Show the resolved configuration and its sources
 emberly --version           Print the version
 
-  --provider <name>         Override the provider for this run (anthropic|openai)
+  --provider <name>         Select the active provider profile for this run
   --model <name>            Override the model for this run
 ```
 
@@ -224,10 +297,29 @@ Emberly is built around auditability and bounded action, in two layers — a
 - **`.git` protection.** Belt and braces: the file tools refuse `.git/` writes
   regardless of the sandbox, and the sandbox enforces it at the kernel when
   active.
+- **Workspace trust.** The first time you run Emberly in a folder it hasn't
+  seen, it asks — in plain language, before reading any project file or starting
+  the agent — whether you trust the code there. The safe default is *decline*
+  (declining starts no session); trusting is a deliberate choice. Trust is
+  remembered per folder and **extends to its subtree**, so you're asked once per
+  project, not once per directory. It is stored globally
+  (`~/.config/emberly/trust.toml`, `0600`) — a repository can never pre-declare
+  itself trusted. Pre-approve folders with `trust.trusted_dirs` in your *global*
+  config; manage grants with **`emberly trust list`** and **`emberly trust
+  revoke <path>`**. Trust is a *consent gate, not containment*: it decides
+  whether Emberly runs here, never what it may do — every permission prompt and
+  sandbox rule still applies.
+- **Loop-breaking guardrail.** If the agent starts spinning — repeating the same
+  steps without changing anything — Emberly halts it and hands the decision back
+  to you rather than burning tokens indefinitely: **keep going**, **stop**, or
+  **say something** to steer. It never quietly resumes or quietly gives up. It
+  only trips on genuine no-progress (a loop that keeps changing files or getting
+  new results is left alone), and it's tunable — `[loop]` `enabled`,
+  `repeat_window`, `max_no_progress_turns`.
 - **Complete audit trail.** The append-only JSONL transcript is the ground
   truth — never rewritten — recording prompts, model output, every tool call
-  and result, and every permission decision. A crashed or killed session is
-  offered for resume on next launch.
+  and result, every permission decision, the trust decision, and any loop halt.
+  A crashed or killed session is offered for resume on next launch.
 
 ## For developers
 

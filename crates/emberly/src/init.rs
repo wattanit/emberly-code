@@ -11,20 +11,46 @@ use anyhow::Context;
 
 /// A commented `config.toml` — everything works without it, so the template is
 /// mostly guidance (Requirements C-1).
-const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/config.toml)
-# Everything here is optional — emberly runs on baked-in defaults. Values set
-# here override the global config; EMBERLY_* env vars override these.
+pub const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/config.toml)
+# Everything here is optional — emberly ships baked-in provider profiles:
+#   anthropic  (Anthropic Messages API)
+#   openai     (OpenAI Chat Completions)
+#   zai        (Z.ai coding plan — OpenAI-compatible)
+#   local      (http://localhost:11434/v1 — Ollama/vLLM, keyless)
+# Values here override the global config; EMBERLY_* env vars override these.
 
-# provider = "anthropic"        # or "openai" (covers Ollama/vLLM/OpenRouter)
-# model    = "claude-sonnet-5"
-# base_url = "https://api.openai.com/v1"   # for openai-compatible endpoints
+# Pick the active profile and model. Keys are never stored here — put them in
+# ~/.config/emberly/keys.toml (a flat `ref = "secret"` table) or the
+# <REF>_API_KEY env var, e.g. ZAI_API_KEY for the `zai` profile.
+# provider = "zai"
+# model    = "glm-4.6"
+
+# Adding your own provider is configuration, not code: pick an `adapter` (the
+# wire format — "anthropic" or "openai"), an endpoint, and a key *reference*.
+# [providers.myserver]
+# adapter  = "openai"
+# base_url = "https://my-endpoint.example/v1"
+# auth     = { scheme = "bearer", key = "myserver" }   # needs MYSERVER_API_KEY
+
+# Optional per-model metadata (context window, max output, pricing → cost est.):
+# Set `effort` to enable the reasoning-effort control (/effort, low|medium|
+# high|max); it maps to the provider's native knob or is ignored if none.
+# [providers.anthropic.models."claude-sonnet-5"]
 # context_window = 200000
 # max_output     = 8192
+# pricing = { input = 3.0, output = 15.0 }   # USD per million tokens
+# effort  = "medium"                         # default level; enables /effort
+# effort_levels = ["low", "medium", "high"]  # optional subset (default: all)
 
-# Per-model pricing (USD per million tokens) → session cost estimate.
-# [pricing."claude-sonnet-5"]
-# input  = 3.0
-# output = 15.0
+# Reasoning-trail view: how the model's thinking is shown (collapsed|expanded|
+# hidden). Default collapsed; hidden still records the trace to the transcript.
+# reasoning = "collapsed"
+
+# [ui]
+# Tool-call explanations: a dim caption under non-obvious tool calls, authored
+# by the model. On by default. Set false to defeat it — the schema property and
+# the prompt instruction are both dropped, so no tokens are spent on it.
+# tool_explanations = true
 "#;
 
 /// A documented `permissions.toml`. The rule engine is Phase 2; this reserves

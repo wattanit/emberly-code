@@ -36,6 +36,39 @@ pub mod permission {
     pub const MORE_BELOW: &str = "more below — scroll to review before allowing";
 }
 
+/// The `ask_user` question prompt (T-8, Design §5.1). Deliberately its **own**
+/// module, not shared with `permission`: this prompt is calm and neutral, has
+/// no safety vocabulary, and never uses the reserved safety band. Shared
+/// verbatim by both frontends for parity.
+pub mod ask_user {
+    pub const TITLE: &str = "question";
+    /// Leads the free-text answer field.
+    pub const ANSWER_LABEL: &str = "your answer";
+    /// Status/footer hint. No "safe default" language — Esc declines, and Enter
+    /// never auto-answers (Design §5.1).
+    pub const HINT: &str = "type answer · ↑↓ choose · Enter send · Esc decline";
+    /// Degraded-mode heading + decline hint (line frontend).
+    pub const HEADING: &str = "QUESTION";
+    pub const DECLINE_HINT: &str = "[Enter] send · empty = declined";
+}
+
+/// The loop-halt surface (S-5, Design §8.5). The **harness** stepping in — its
+/// own out-of-band voice, calm, no blame, no alarm styling. Distinct from the
+/// question prompt (that is the model asking). Shared by both frontends.
+pub mod loop_halt {
+    pub const TITLE: &str = "stopped";
+    /// The calm one-liner (Design §8.5). The specific reason follows on its line.
+    pub const HEADING: &str = "Stopped — the last few steps repeated without progress.";
+    pub const KEEP_GOING: &str = "keep going";
+    pub const STOP: &str = "stop here";
+    pub const SAY_SOMETHING: &str = "say something";
+    pub const HINT: &str = "g keep going · s stop · t say something";
+    pub const STEER_HINT: &str = "type a steer · Enter send · Esc back";
+    pub const STEER_LABEL: &str = "your steer";
+    /// Degraded-mode prompt line.
+    pub const LINE_PROMPT: &str = "[keep] keep going · [stop] stop · or type a message to steer";
+}
+
 /// Status-bar and sidebar chrome (Design §3).
 pub mod status {
     pub const CONTEXT_ABBR: &str = "ctx";
@@ -49,6 +82,7 @@ pub mod status {
     pub const SANDBOX_UNKNOWN: &str = "—";
     pub const MODIFIED_FILES_TITLE: &str = "modified files";
     pub const MODEL_LABEL: &str = "model";
+    pub const EFFORT_LABEL: &str = "effort";
     pub const ROOT_LABEL: &str = "root";
 }
 
@@ -74,6 +108,12 @@ pub mod markers {
     pub const RUNNING: &str = "…";
     pub const OK: &str = "ok";
     pub const FAILED: &str = "FAILED";
+    /// Reasoning trail: collapsed (expandable) vs expanded (Design §4.4).
+    pub const REASONING_COLLAPSED: &str = "▸";
+    pub const REASONING_EXPANDED: &str = "▾";
+    /// Leads the dim tool-call explanation caption (T-9, Design §4.5) so it
+    /// reads as an annotation of the call above, not as tool output.
+    pub const EXPLANATION: &str = "↳";
 }
 
 /// One-line orientation shown on clean exit (Design §8.3). The richer summary
