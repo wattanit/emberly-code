@@ -71,7 +71,7 @@ Design translation, stated as principles:
     indicator, the spinner, key highlights. Used sparingly; if more than
     ~5% of a screen is accent-colored, something is wrong.
   - *Primary text* — `#EDE6DB` warm off-white.
-  - *Secondary/chrome* — `#857C6F` dimmed warm gray. Labels, dividers,
+  - *Secondary/chrome* — `#9D968C` dimmed warm gray. Labels, dividers,
     hints, metadata.
   - *Semantic colors* — success/allow `#8FB573`, error/deny `#D96C5F`,
     warning/caution `#DBA94D`, used only for their semantic meaning,
