@@ -79,6 +79,21 @@ pub enum AskAnswer {
     Declined,
 }
 
+/// The user's decision after the loop-breaking guardrail halts a non-progressing
+/// loop (S-5, Design §8.5). The guardrail never resumes or abandons on its own —
+/// the user always chooses one of these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopResolution {
+    /// Keep going — continue the loop from where it halted.
+    Resume,
+    /// Stop here — end the turn cleanly.
+    Stop,
+    /// Hand a steer back to the model: push this text as a user message and
+    /// continue.
+    Steer(String),
+}
+
 /// Provider-reported or estimated token counts for a completion
 /// (Requirements P-6, Tech Spec §4.4). Drives the context indicator and the
 /// cost estimate. Defined in `emberly-providers` and re-exported so the two

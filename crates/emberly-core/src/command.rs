@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::{AskId, PermissionId, SessionId};
-use crate::types::{AskAnswer, Effort, Mode, PermissionDecision};
+use crate::types::{AskAnswer, Effort, LoopResolution, Mode, PermissionDecision};
 
 /// A command issued to the engine. `#[non_exhaustive]` so new commands are not
 /// a breaking change.
@@ -32,6 +32,11 @@ pub enum Command {
     /// [`Declined`](crate::types::AskAnswer::Declined); Enter never auto-answers
     /// (Design §5.1).
     AskUserAnswer { id: AskId, answer: AskAnswer },
+
+    /// The user's decision after the loop guardrail halted a non-progressing
+    /// loop (S-5, Design §8.5): resume, stop, or steer. The engine is parked on
+    /// this after emitting [`UiEvent::LoopHalted`](crate::event::UiEvent::LoopHalted).
+    ResolveLoop { resolution: LoopResolution },
 
     /// Change the auto-accept mode (Requirements §6.4). Handled from Phase 2;
     /// the engine validates the transition against the sandbox status.

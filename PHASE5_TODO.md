@@ -30,11 +30,11 @@ explicitly *not* containment).
 |---|---|---|
 | 1. Workspace trust — store, config, CLI (FR-1 data layer) | [x] | Done 2026-07-11; `trust.rs` store (0600, global-only) + subtree membership; `[trust] trusted_dirs` read only from global tier (project ignored w/ notice); `emberly trust list`/`revoke`; 10 tests |
 | 2. Workspace trust — the startup gate + prompt (FR-1 gate) | [x] | Done 2026-07-11; pre-engine gate (canonicalize → check → prompt); decline `return Ok(())` (no session); accept writes store + engine records `TrustDecision`; non-tty declines cleanly; honesty line in-prompt; 2 engine tests |
-| 3. Loop guardrail — detection + halt/await in the engine (S-5 core) | [ ] | per-turn signature (normalized tool-args multiset + result hash + modified-file set); trip on `repeat_window` no-progress turns; `LoopHalted` + park on resume/stop/steer; `[loop]` config |
+| 3. Loop guardrail — detection + halt/await in the engine (S-5 core) | [x] | Done 2026-07-11; per-turn signature (normalized args—strips T-9 caption—+ result hash + modified-file set); trips on repeat_window/max_no_progress; `LoopHalted`+`ResolveLoop{Resume/Stop/Steer}`; `LoopHalt` transcript; `[loop]` config→engine; 6 tests |
 | 4. Loop guardrail — the halt surface (S-5 UI, both frontends) | [ ] | harness-voice, out-of-band (not model output, not the question prompt); keep-going / stop / say-something; degraded parity; motion stilled |
 | 5. End-to-end, exit criterion, docs & SFD bookkeeping | [ ] | combined offline tests; README; **Spec bump decision (owner)** — trust realized as a pre-engine gate refines §3.1 `TrustRequest`; memory |
 
-**Overall Phase 5: IN PROGRESS** (2 / 5 groups). Branch `phase5/trust-and-loop-guardrail` off
+**Overall Phase 5: IN PROGRESS** (3 / 5 groups). Branch `phase5/trust-and-loop-guardrail` off
 `version0.2` (Phase 4 merged).
 
 ---
@@ -159,43 +159,43 @@ the prompt and **before** any session exists.
 The engine detects a non-progressing loop at the turn boundary and hands control
 back to the user.
 
-- [ ] **`[loop]` config → engine.** `LoopConfig { enabled (default true),
+- [x] **`[loop]` config → engine.** `LoopConfig { enabled (default true),
       repeat_window (default 3), max_no_progress_turns }` in config.rs
       (`#[serde(rename = "loop")]`, `loop` is reserved); merge per-field; resolve;
       thread to `EngineConfig.loop_config` and into `Engine` (mirror the
       `tool_explanations` path exactly). Defaults labeled "initial; tune with
       use" (Tech Spec §7).
-- [ ] **Per-turn signature** (Tech Spec §7): for the completed turn, the multiset
+- [x] **Per-turn signature** (Tech Spec §7): for the completed turn, the multiset
       of `(tool_name, normalized-args)` tuples + a hash of the concatenated
       tool-result content + the set of modified-file paths. **Normalize args**:
       strip the T-9-injected `explanation` property and canonicalize key order,
       so a caption change never looks like progress *or* masks a repeat.
       Accumulate in `run_tool_calls`/`ingest_tool_result` (where `outcome.content`
       and `outcome.file_change.path` are in hand).
-- [ ] **No-progress check** at the turn boundary (the "loop back for another
+- [x] **No-progress check** at the turn boundary (the "loop back for another
       completion" point, *before* the next `open_stream_with_retry`): a rolling
       `VecDeque` of the last `repeat_window` signatures; **trip when** they repeat
       tool-call signatures **AND** contribute no new modified file **AND** no new
       distinct result hash (cumulative sets). Never trip while `enabled == false`
       or while progress continues.
-- [ ] **On trip:** stop issuing provider calls; emit `UiEvent::LoopHalted {
+- [x] **On trip:** stop issuing provider calls; emit `UiEvent::LoopHalted {
       reason }` + write `TranscriptEvent::LoopHalt { reason, resolution: None }`;
       then **park `run_turn` on `commands_rx`** awaiting a resolution (mirror the
       `ask_user` await, but no oneshot — nothing is blocked, the turn simply waits
       for the user's decision).
-- [ ] **Resolution** (Design §8.5): a `LoopResolution { Resume, Stop, Steer(
+- [x] **Resolution** (Design §8.5): a `LoopResolution { Resume, Stop, Steer(
       String) }` type + `Command::ResolveLoop { resolution }`. **Resume** →
       continue the loop (reset the no-progress window so it doesn't instantly
       re-trip). **Stop** → end the turn cleanly. **Steer(text)** → push the text
       as a user message and continue. Update the `LoopHalt` transcript record with
       the chosen resolution (Tech Spec §3.2 "reason + the user's chosen
       resolution").
-- [ ] Tests (`FakeProvider`): a script of `repeat_window` identical no-progress
+- [x] Tests (`FakeProvider`): a script of `repeat_window` identical no-progress
       tool-call turns trips `LoopHalted` exactly once; a progressing loop (a new
       `file_change` each turn, or differing result content) does **not** trip;
       `Resume` continues; `Stop` ends; `Steer` injects and continues; `enabled =
       false` never trips.
-- [ ] `cargo fmt` + `clippy` + `test` green; commit.
+- [x] `cargo fmt` + `clippy` + `test` green; commit.
 
 ---
 

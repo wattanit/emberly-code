@@ -286,6 +286,8 @@ pub struct Resolved {
     /// `true`; when `false` the schema property and prompt instruction are both
     /// omitted (no tokens spent).
     pub tool_explanations: bool,
+    /// Resolved loop-breaking guardrail tunables (S-5), ready for the engine.
+    pub loop_config: emberly_core::LoopConfig,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -456,6 +458,22 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         sandbox_require: merged.sandbox.require.unwrap_or(false),
         reasoning: merged.reasoning,
         tool_explanations: merged.ui.tool_explanations.unwrap_or(true),
+        loop_config: {
+            // Override only the fields the user set; the engine owns the
+            // defaults (S-5, Tech Spec §7 — "initial; tune with use").
+            let d = emberly_core::LoopConfig::default();
+            emberly_core::LoopConfig {
+                enabled: merged.loop_.enabled.unwrap_or(d.enabled),
+                repeat_window: merged
+                    .loop_
+                    .repeat_window
+                    .map_or(d.repeat_window, |v| v as usize),
+                max_no_progress_turns: merged
+                    .loop_
+                    .max_no_progress_turns
+                    .map_or(d.max_no_progress_turns, |v| v as usize),
+            }
+        },
     })
 }
 

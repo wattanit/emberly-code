@@ -505,6 +505,7 @@ async fn run() -> anyhow::Result<()> {
         system: resolved.system_prompt.clone(),
         tool_explanations: resolved.tool_explanations,
         trust_granted,
+        loop_config: resolved.loop_config,
         truncate: TruncateConfig::default(),
         retry: emberly_core::RetryPolicy::default(),
         session_id,
