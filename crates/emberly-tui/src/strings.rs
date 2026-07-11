@@ -52,6 +52,23 @@ pub mod ask_user {
     pub const DECLINE_HINT: &str = "[Enter] send · empty = declined";
 }
 
+/// The loop-halt surface (S-5, Design §8.5). The **harness** stepping in — its
+/// own out-of-band voice, calm, no blame, no alarm styling. Distinct from the
+/// question prompt (that is the model asking). Shared by both frontends.
+pub mod loop_halt {
+    pub const TITLE: &str = "stopped";
+    /// The calm one-liner (Design §8.5). The specific reason follows on its line.
+    pub const HEADING: &str = "Stopped — the last few steps repeated without progress.";
+    pub const KEEP_GOING: &str = "keep going";
+    pub const STOP: &str = "stop here";
+    pub const SAY_SOMETHING: &str = "say something";
+    pub const HINT: &str = "g keep going · s stop · t say something";
+    pub const STEER_HINT: &str = "type a steer · Enter send · Esc back";
+    pub const STEER_LABEL: &str = "your steer";
+    /// Degraded-mode prompt line.
+    pub const LINE_PROMPT: &str = "[keep] keep going · [stop] stop · or type a message to steer";
+}
+
 /// Status-bar and sidebar chrome (Design §3).
 pub mod status {
     pub const CONTEXT_ABBR: &str = "ctx";

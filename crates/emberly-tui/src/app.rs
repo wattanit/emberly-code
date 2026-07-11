@@ -10,7 +10,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use emberly_core::{
-    resume, AskAnswer, AskId, Command, Effort, PermissionDecision, PermissionId,
+    resume, AskAnswer, AskId, Command, Effort, LoopResolution, PermissionDecision, PermissionId,
     PermissionRendering, SandboxStatus, SessionId, TokenUsage, ToolCallId, TranscriptEvent,
     TranscriptRecord, UiEvent,
 };
@@ -242,6 +242,27 @@ impl AskPrompt {
     }
 }
 
+/// A pending loop-halt decision (S-5, Design §8.5). The **harness** stepping in
+/// when the model stopped progressing — rendered in the harness voice, distinct
+/// from the question prompt. The user picks keep-going / stop / say-something;
+/// choosing to steer opens the free-text field.
+pub struct LoopHaltPrompt {
+    pub reason: String,
+    /// False = the three-choice menu; true = typing a steer message.
+    pub steering: bool,
+    pub editor: LineEditor,
+}
+
+impl LoopHaltPrompt {
+    fn new(reason: String) -> Self {
+        Self {
+            reason,
+            steering: false,
+            editor: LineEditor::new(),
+        }
+    }
+}
+
 /// The complete view-model the renderer reads.
 pub struct App {
     pub session: SessionInfo,
@@ -291,6 +312,9 @@ pub struct App {
     /// set, the question prompt owns the screen and normal input is suspended
     /// (Design §5.1). Never the permission prompt's safety styling.
     pub pending_ask: Option<AskPrompt>,
+    /// A pending loop-halt decision (S-5, Design §8.5) — the harness stepping in.
+    /// While set it owns the screen; harness voice, not the question prompt.
+    pub pending_loop_halt: Option<LoopHaltPrompt>,
     pub sidebar_visible: bool,
     /// Conversation scrollback offset in rows *from the bottom*: 0 follows the
     /// latest output; larger values scroll up into history. Clamped to content
@@ -353,6 +377,7 @@ impl App {
             modified_files: Vec::new(),
             pending_permission: None,
             pending_ask: None,
+            pending_loop_halt: None,
             permission_scroll: 0,
             sidebar_visible: true,
             scroll: 0,
@@ -545,6 +570,10 @@ impl App {
                 self.streaming = false;
                 self.pending_ask = Some(AskPrompt::new(id, question, options));
             }
+            UiEvent::LoopHalted { reason } => {
+                self.streaming = false;
+                self.pending_loop_halt = Some(LoopHaltPrompt::new(reason));
+            }
             UiEvent::ContextUsage { pct, tokens } => {
                 self.context_pct = pct;
                 self.context_tokens = tokens;
@@ -668,6 +697,11 @@ impl App {
         // but with opposite semantics: no unsafe default, Esc declines.
         if self.pending_ask.is_some() {
             return self.on_ask_key(key);
+        }
+        // The loop-halt surface owns the keyboard too (Design §8.5) — the
+        // harness stepping in; the user always decides what happens next.
+        if self.pending_loop_halt.is_some() {
+            return self.on_loop_halt_key(key);
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -808,11 +842,13 @@ impl App {
         self.busy || self.overlay_ease > 0 || self.sidebar_settle > 0
     }
 
-    /// Whether a decision prompt (permission or question) is open — those
-    /// screens are perfectly still (Design §5, §5.1, §6.4).
+    /// Whether a decision prompt (permission, question, or loop halt) is open —
+    /// those screens are perfectly still (Design §5, §5.1, §6.4, §8.5).
     #[must_use]
     fn is_deciding(&self) -> bool {
-        self.pending_permission.is_some() || self.pending_ask.is_some()
+        self.pending_permission.is_some()
+            || self.pending_ask.is_some()
+            || self.pending_loop_halt.is_some()
     }
 
     /// Advance one animation frame. Called by the ticker only while
@@ -1025,6 +1061,63 @@ impl App {
             id: prompt.id,
             answer,
         })
+    }
+
+    /// Keys while the loop-halt surface is open (S-5, Design §8.5). The menu:
+    /// `g` keep going, `s` stop, `t`/Enter say something. In the steer field:
+    /// type a message, Enter sends it, Esc goes back to the menu. Esc on the menu
+    /// stops (the conservative choice — the loop halted to avoid wasted spend).
+    fn on_loop_halt_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(prompt) = self.pending_loop_halt.as_mut() else {
+            return Action::None;
+        };
+        if prompt.steering {
+            return match key.code {
+                KeyCode::Esc => {
+                    prompt.steering = false;
+                    prompt.editor.clear();
+                    Action::None
+                }
+                KeyCode::Enter => {
+                    let text = prompt.editor.text().trim().to_string();
+                    if text.is_empty() {
+                        Action::None
+                    } else {
+                        self.resolve_loop(LoopResolution::Steer(text))
+                    }
+                }
+                KeyCode::Char('j') if ctrl => {
+                    prompt.editor.newline();
+                    Action::None
+                }
+                KeyCode::Backspace => {
+                    prompt.editor.backspace();
+                    Action::None
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    prompt.editor.insert_char(c);
+                    Action::None
+                }
+                _ => Action::None,
+            };
+        }
+        match key.code {
+            KeyCode::Char('g') | KeyCode::Char('G') => self.resolve_loop(LoopResolution::Resume),
+            KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Esc => {
+                self.resolve_loop(LoopResolution::Stop)
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Enter => {
+                prompt.steering = true;
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn resolve_loop(&mut self, resolution: LoopResolution) -> Action {
+        self.pending_loop_halt = None;
+        Action::Command(Command::ResolveLoop { resolution })
     }
 
     // ---- overlays ---------------------------------------------------------
@@ -2342,6 +2435,88 @@ mod tests {
             !a.is_working(),
             "no spinner while a question is up (Design §6.4)"
         );
+        assert!(!a.is_animating());
+    }
+
+    // ---- loop-halt surface (S-5, Design §8.5) ----------------------------
+
+    fn halt(a: &mut App) {
+        a.apply_event(UiEvent::LoopHalted {
+            reason: "the last few steps repeated without progress".into(),
+        });
+    }
+
+    #[test]
+    fn loop_halt_keep_going_resumes() {
+        let mut a = app();
+        halt(&mut a);
+        let action = a.on_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(
+            action,
+            Action::Command(Command::ResolveLoop {
+                resolution: LoopResolution::Resume
+            })
+        );
+        assert!(a.pending_loop_halt.is_none());
+    }
+
+    #[test]
+    fn loop_halt_stop_and_esc_both_stop() {
+        for key in [KeyCode::Char('s'), KeyCode::Esc] {
+            let mut a = app();
+            halt(&mut a);
+            let action = a.on_key(KeyEvent::from(key));
+            assert_eq!(
+                action,
+                Action::Command(Command::ResolveLoop {
+                    resolution: LoopResolution::Stop
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn loop_halt_say_something_then_steer() {
+        let mut a = app();
+        halt(&mut a);
+        a.on_key(KeyEvent::from(KeyCode::Char('t')));
+        assert!(a.pending_loop_halt.as_ref().is_some_and(|h| h.steering));
+        for c in "read a.txt".chars() {
+            a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            action,
+            Action::Command(Command::ResolveLoop {
+                resolution: LoopResolution::Steer("read a.txt".into())
+            })
+        );
+    }
+
+    #[test]
+    fn loop_halt_steer_esc_returns_to_menu() {
+        let mut a = app();
+        halt(&mut a);
+        a.on_key(KeyEvent::from(KeyCode::Char('t')));
+        a.on_key(KeyEvent::from(KeyCode::Char('x')));
+        a.on_key(KeyEvent::from(KeyCode::Esc)); // back to menu, not a decision
+        assert!(a.pending_loop_halt.as_ref().is_some_and(|h| !h.steering));
+        let action = a.on_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(
+            action,
+            Action::Command(Command::ResolveLoop {
+                resolution: LoopResolution::Resume
+            })
+        );
+    }
+
+    #[test]
+    fn loop_halt_stills_motion() {
+        let mut a = app();
+        a.busy = true;
+        a.motion = true;
+        halt(&mut a);
+        assert!(!a.is_working(), "the halt screen is perfectly still");
         assert!(!a.is_animating());
     }
 

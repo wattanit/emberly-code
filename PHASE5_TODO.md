@@ -31,10 +31,10 @@ explicitly *not* containment).
 | 1. Workspace trust — store, config, CLI (FR-1 data layer) | [x] | Done 2026-07-11; `trust.rs` store (0600, global-only) + subtree membership; `[trust] trusted_dirs` read only from global tier (project ignored w/ notice); `emberly trust list`/`revoke`; 10 tests |
 | 2. Workspace trust — the startup gate + prompt (FR-1 gate) | [x] | Done 2026-07-11; pre-engine gate (canonicalize → check → prompt); decline `return Ok(())` (no session); accept writes store + engine records `TrustDecision`; non-tty declines cleanly; honesty line in-prompt; 2 engine tests |
 | 3. Loop guardrail — detection + halt/await in the engine (S-5 core) | [x] | Done 2026-07-11; per-turn signature (normalized args—strips T-9 caption—+ result hash + modified-file set); trips on repeat_window/max_no_progress; `LoopHalted`+`ResolveLoop{Resume/Stop/Steer}`; `LoopHalt` transcript; `[loop]` config→engine; 6 tests |
-| 4. Loop guardrail — the halt surface (S-5 UI, both frontends) | [ ] | harness-voice, out-of-band (not model output, not the question prompt); keep-going / stop / say-something; degraded parity; motion stilled |
+| 4. Loop guardrail — the halt surface (S-5 UI, both frontends) | [x] | Done 2026-07-11; `LoopHaltPrompt` (menu + steer field), harness-voice `render_loop_halt` (chrome/warning, no safety band); g/s/t + Esc=stop; degraded `parse_loop_resolution`; motion stilled; 10 tests |
 | 5. End-to-end, exit criterion, docs & SFD bookkeeping | [ ] | combined offline tests; README; **Spec bump decision (owner)** — trust realized as a pre-engine gate refines §3.1 `TrustRequest`; memory |
 
-**Overall Phase 5: IN PROGRESS** (3 / 5 groups). Branch `phase5/trust-and-loop-guardrail` off
+**Overall Phase 5: IN PROGRESS** (4 / 5 groups). Branch `phase5/trust-and-loop-guardrail` off
 `version0.2` (Phase 4 merged).
 
 ---
@@ -205,7 +205,7 @@ The halt is a **harness-world** moment — the harness's own out-of-band voice,
 not model output, and distinct from the question prompt (that is the *model*
 asking; this is the *harness* stepping in).
 
-- [ ] **Rich TUI:** a `pending_loop_halt` state on `App`, set on
+- [x] **Rich TUI:** a `pending_loop_halt` state on `App`, set on
       `UiEvent::LoopHalted`; a surface that owns the keyboard like a decision
       prompt but in the **harness voice** (Design §6.1) — one calm line ("Stopped:
       the last few steps repeated without progress.") + three choices: **keep
@@ -214,15 +214,15 @@ asking; this is the *harness* stepping in).
       blame, no alarm styling; **not** the reserved safety band and **not** the
       question-prompt styling. Motion stilled while it is up (extend `is_
       deciding`).
-- [ ] **Line mode:** a plain harness-voice block + a prompt mapping input to
+- [x] **Line mode:** a plain harness-voice block + a prompt mapping input to
       resume/stop/steer (e.g. empty = resume? no — the user must choose; a small
       keyed menu, deliberate). Full degraded parity, no ANSI.
-- [ ] **Strings:** a `strings::loop_halt` module (harness-voice wording), shared
+- [x] **Strings:** a `strings::loop_halt` module (harness-voice wording), shared
       by both frontends.
-- [ ] Tests: rich render (harness voice, three choices, not safety band); keys →
+- [x] Tests: rich render (harness voice, three choices, not safety band); keys →
       the right `ResolveLoop` commands; steer opens the text field; line-mode
       parse + no-ANSI.
-- [ ] `cargo fmt` + `clippy` + `test` green; commit.
+- [x] `cargo fmt` + `clippy` + `test` green; commit.
 
 ---
 
