@@ -96,6 +96,44 @@ async fn read_missing_file_is_a_failure_not_a_crash() {
     assert!(outcome.content.contains("nope.txt"));
 }
 
+#[tokio::test]
+async fn read_line_range_returns_numbered_slice() {
+    let root = temp_project();
+    write_file(&root, "many.txt", "one\ntwo\nthree\nfour\nfive\n");
+    let outcome = ReadFileTool
+        .execute(
+            json!({ "path": "many.txt", "start_line": 2, "end_line": 4 }),
+            &ctx(&root, true),
+        )
+        .await;
+    assert!(outcome.ok);
+    // 1-based inclusive, line-numbered — the prompt-free `sed -n` equivalent.
+    assert_eq!(outcome.content, "     2\ttwo\n     3\tthree\n     4\tfour\n");
+    assert!(outcome.summary.contains("lines 2-4 of 5"));
+}
+
+#[tokio::test]
+async fn read_line_range_start_only_reads_to_eof() {
+    let root = temp_project();
+    write_file(&root, "many.txt", "one\ntwo\nthree\n");
+    let outcome = ReadFileTool
+        .execute(json!({ "path": "many.txt", "start_line": 2 }), &ctx(&root, true))
+        .await;
+    assert!(outcome.ok);
+    assert_eq!(outcome.content, "     2\ttwo\n     3\tthree\n");
+}
+
+#[tokio::test]
+async fn read_line_range_past_end_is_a_failure() {
+    let root = temp_project();
+    write_file(&root, "short.txt", "only\n");
+    let outcome = ReadFileTool
+        .execute(json!({ "path": "short.txt", "start_line": 50 }), &ctx(&root, true))
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("past the end"));
+}
+
 // ---- write ---------------------------------------------------------------
 
 #[tokio::test]

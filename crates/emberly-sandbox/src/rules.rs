@@ -319,6 +319,7 @@ pub const DEFAULT_BASH_ALLOWLIST: &[&str] = &[
     "head",
     "tail",
     "wc",
+    "grep",
     "rg",
     "find",
     "pwd",
@@ -493,6 +494,11 @@ mod tests {
         );
         assert_eq!(
             e.evaluate(&bash("cargo check"), Mode::Normal).decision,
+            Decision::Allow
+        );
+        assert_eq!(
+            e.evaluate(&bash("grep -n foo src/lib.rs"), Mode::Normal)
+                .decision,
             Decision::Allow
         );
         assert_eq!(

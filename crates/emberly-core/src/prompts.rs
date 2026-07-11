@@ -12,7 +12,7 @@
 
 /// The default prompt-set version. Bump on any prompt change and add a
 /// `prompts/CHANGELOG.md` entry. Recorded in `session_start` (Tech Spec §3.2).
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// The default agent system prompt.
 pub const SYSTEM: &str = include_str!("../prompts/system.md");
@@ -54,6 +54,6 @@ mod tests {
         assert!(system().contains("Emberly Code"));
         assert!(compact().contains("compact"));
         assert!(tool_explanation().contains("explanation"));
-        assert_eq!(VERSION, 3);
+        assert_eq!(VERSION, 4);
     }
 }

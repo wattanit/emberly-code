@@ -10,9 +10,9 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use emberly_core::{
-    resume, AskAnswer, AskId, Command, Effort, LoopResolution, PermissionDecision, PermissionId,
-    PermissionRendering, SandboxStatus, SessionId, TokenUsage, ToolCallId, TranscriptEvent,
-    TranscriptRecord, UiEvent,
+    resume, AskAnswer, AskId, Command, Effort, LoopResolution, Mode, PermissionDecision,
+    PermissionId, PermissionRendering, SandboxStatus, SessionId, TokenUsage, ToolCallId,
+    TranscriptEvent, TranscriptRecord, UiEvent,
 };
 
 use std::collections::HashMap;
@@ -110,7 +110,8 @@ pub enum OverlayContent {
 }
 
 /// What a [`OverlayContent::Choices`] picker selects, so Enter knows which
-/// command to issue. Reused by the effort picker in Phase 3.
+/// command to issue. Reused by the effort picker in Phase 3 and the mode
+/// picker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChoiceKind {
     /// Switch the active provider profile (C-6). The row label is the profile
@@ -118,6 +119,9 @@ pub enum ChoiceKind {
     Model,
     /// Set the reasoning-effort level (P-9). The row label is the level name.
     Effort,
+    /// Set the permission mode (§6.4). The row label is the mode name; auto
+    /// tiers are marked unavailable when OS confinement is not active.
+    Mode,
 }
 
 /// How the reasoning trail is shown by default (Design §4.4). A view choice
@@ -1207,6 +1211,72 @@ impl App {
         });
     }
 
+    /// Open the permission-mode picker (`/mode` with no args or the palette).
+    /// Rows are the three tiers, the current one marked; the auto tiers are
+    /// marked unavailable (and not selectable) when OS confinement is not
+    /// active — the engine would refuse them anyway, so the picker says so up
+    /// front (Requirements §6.4, §6.7).
+    fn open_mode_picker(&mut self) {
+        let auto_ok = self
+            .sandbox
+            .as_ref()
+            .is_some_and(SandboxStatus::allows_auto_modes);
+        let rows: Vec<ChoiceRow> = [Mode::Normal, Mode::AutoAcceptEdits, Mode::Auto]
+            .iter()
+            .map(|&m| {
+                let label = mode_label(m, auto_ok);
+                ChoiceRow {
+                    label,
+                    current: m == self.mode,
+                }
+            })
+            .collect();
+        let selected = rows.iter().position(|r| r.current).unwrap_or(0);
+        self.push_overlay(Overlay {
+            title: "permission mode".into(),
+            content: OverlayContent::Choices {
+                kind: ChoiceKind::Mode,
+                rows,
+                selected,
+            },
+            scroll: 0,
+        });
+    }
+
+    /// Handle `/mode [name]`: no arg opens the picker; an arg sets the mode
+    /// directly, validated against confinement (the auto tiers need an active
+    /// sandbox — Requirements §6.4).
+    fn mode_command(&mut self, arg: &str) -> Action {
+        let arg = arg.trim();
+        if arg.is_empty() {
+            self.open_mode_picker();
+            return Action::None;
+        }
+        match parse_mode(arg) {
+            Some(Mode::Normal) => Action::Command(Command::SetMode { mode: Mode::Normal }),
+            Some(requested) => {
+                let auto_ok = self
+                    .sandbox
+                    .as_ref()
+                    .is_some_and(SandboxStatus::allows_auto_modes);
+                if auto_ok {
+                    Action::Command(Command::SetMode { mode: requested })
+                } else {
+                    self.conversation.push(ConvItem::Notice(
+                        "auto-accept modes are unavailable without OS confinement".into(),
+                    ));
+                    Action::None
+                }
+            }
+            None => {
+                self.conversation.push(ConvItem::Notice(format!(
+                    "unknown mode '{arg}' — try: normal, auto-accept-edits, auto"
+                )));
+                Action::None
+            }
+        }
+    }
+
     /// Handle `/effort [level]`: no arg opens the picker; an arg sets the level
     /// directly, validated against the model's declared levels (P-9).
     fn effort_command(&mut self, arg: &str) -> Action {
@@ -1376,6 +1446,14 @@ impl App {
             .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
         {
             return self.effort_command(rest.trim());
+        }
+        // `/mode [name]` opens the picker with no arg, or sets the mode
+        // directly (Shift-Tab still cycles — the quick-toggle keybinding).
+        if let Some(rest) = name
+            .strip_prefix("mode")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return self.mode_command(rest.trim());
         }
         match commands::by_name(name) {
             Some(cmd) => self.run_command(cmd),
@@ -1591,7 +1669,10 @@ impl App {
                     .and_then(|p| filtered.get(p.selected).copied());
                 self.palette = None;
                 match chosen {
-                    Some(i) => self.run_command(commands::COMMANDS[i].cmd),
+                    // Dispatch by name so argument-taking commands (`/mode`,
+                    // `/model`, `/effort`) open their picker from the palette,
+                    // just as their no-arg slash forms do.
+                    Some(i) => self.run_slash(commands::COMMANDS[i].name),
                     None => Action::None,
                 }
             }
@@ -1785,6 +1866,37 @@ impl App {
                             }
                         }
                     }
+                    ChoiceKind::Mode => {
+                        if row.current {
+                            Action::None // already in this mode
+                        } else {
+                            // The label is the mode name, possibly with a
+                            // `(needs OS confinement)` suffix when the auto
+                            // tier is unavailable — parse the leading name.
+                            let name = row.label.split_whitespace().next().unwrap_or("");
+                            match parse_mode(name) {
+                                Some(mode) if mode == Mode::Normal => {
+                                    Action::Command(Command::SetMode { mode })
+                                }
+                                Some(mode) => {
+                                    let auto_ok = self
+                                        .sandbox
+                                        .as_ref()
+                                        .is_some_and(SandboxStatus::allows_auto_modes);
+                                    if auto_ok {
+                                        Action::Command(Command::SetMode { mode })
+                                    } else {
+                                        self.conversation.push(ConvItem::Notice(
+                                            "auto-accept modes are unavailable without OS confinement"
+                                                .into(),
+                                        ));
+                                        Action::None
+                                    }
+                                }
+                                None => Action::None,
+                            }
+                        }
+                    }
                 }
             }
             _ => Action::None,
@@ -1810,6 +1922,33 @@ impl App {
 
 /// The `/help` body: every command with its keybinding and description, from
 /// the single registry (Design §3.3).
+/// The display label for a mode row in the picker. Auto tiers are annotated
+/// `(needs OS confinement)` when the sandbox is not active, so the picker is
+/// honest about why they can't be chosen (Requirements §6.4, §6.7).
+fn mode_label(mode: Mode, auto_ok: bool) -> String {
+    let name = match mode {
+        Mode::Normal => crate::strings::mode::NORMAL,
+        Mode::AutoAcceptEdits => crate::strings::mode::AUTO_ACCEPT_EDITS,
+        Mode::Auto => crate::strings::mode::AUTO,
+    };
+    if mode.is_auto() && !auto_ok {
+        format!("{name}  (needs OS confinement)")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Parse a `/mode <name>` argument; unknown values return `None`. Accepts the
+/// `strings::mode` names and a couple of common shorthands.
+fn parse_mode(s: &str) -> Option<Mode> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some(Mode::Normal),
+        "auto-accept-edits" | "auto-accept" | "edits" => Some(Mode::AutoAcceptEdits),
+        "auto" => Some(Mode::Auto),
+        _ => None,
+    }
+}
+
 fn help_text() -> String {
     let mut out = String::from("Commands — run via Ctrl-P, /name, or a keybinding.\n\n");
     for spec in commands::COMMANDS {
@@ -1818,6 +1957,8 @@ fn help_text() -> String {
     }
     // `/model` also accepts arguments for a direct switch (C-6).
     out.push_str("  (also: /model <profile> [model] to switch directly)\n");
+    // `/mode` and `/effort` also take a direct argument.
+    out.push_str("  (also: /mode <normal|auto-accept-edits|auto>, /effort <level>)\n");
     out
 }
 
@@ -1918,6 +2059,111 @@ mod tests {
             .conversation
             .iter()
             .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown command"))));
+    }
+
+    #[test]
+    fn slash_mode_without_args_opens_the_picker() {
+        let mut a = app();
+        assert_eq!(a.run_slash("mode"), Action::None);
+        assert!(
+            matches!(
+                a.overlays.last().map(|o| &o.content),
+                Some(OverlayContent::Choices {
+                    kind: ChoiceKind::Mode,
+                    ..
+                })
+            ),
+            "no-arg /mode opens the mode picker"
+        );
+    }
+
+    #[test]
+    fn mode_picker_marks_current_and_marks_auto_unavailable_without_sandbox() {
+        let mut a = app(); // sandbox: None → auto tiers unavailable
+        a.open_mode_picker();
+        let Some(OverlayContent::Choices { rows, selected, .. }) =
+            a.overlays.last().map(|o| &o.content)
+        else {
+            panic!("expected a choices overlay");
+        };
+        // Normal is current (the default) and preselected.
+        assert!(rows[*selected].current);
+        assert_eq!(rows[*selected].label, "normal");
+        // Auto tiers are annotated as needing confinement.
+        assert!(rows
+            .iter()
+            .any(|r| r.label.starts_with("auto-accept-edits") && r.label.contains("OS confinement")));
+        assert!(rows
+            .iter()
+            .any(|r| r.label == "auto  (needs OS confinement)" || r.label.starts_with("auto  (")));
+    }
+
+    #[test]
+    fn mode_picker_switches_to_normal_on_enter() {
+        let mut a = app();
+        a.mode = Mode::Auto;
+        a.sandbox = Some(SandboxStatus::Confined { backend: "landlock".into() });
+        a.open_mode_picker();
+        // Current is Auto; move up to AutoAcceptEdits, then up to Normal.
+        let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Up));
+        let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Up));
+        assert!(matches!(
+            a.on_choice_picker_key(KeyEvent::from(KeyCode::Enter)),
+            Action::Command(Command::SetMode { mode: Mode::Normal })
+        ));
+    }
+
+    #[test]
+    fn mode_picker_refuses_auto_without_confinement() {
+        let mut a = app(); // sandbox: None
+        a.open_mode_picker();
+        // The auto tier row carries the unavailability suffix; selecting it and
+        // pressing Enter declines with a notice rather than emitting SetMode.
+        // Move down to the auto-accept-edits row (index 1).
+        let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Down));
+        let action = a.on_choice_picker_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(action, Action::None);
+        assert!(a.conversation.iter().any(|i| matches!(
+            i,
+            ConvItem::Notice(n) if n.contains("unavailable without OS confinement")
+        )));
+    }
+
+    #[test]
+    fn slash_mode_arg_sets_directly_and_validates() {
+        let mut a = app();
+        a.sandbox = Some(SandboxStatus::Confined { backend: "landlock".into() });
+        // A direct arg with confinement active → SetMode.
+        assert_eq!(
+            a.run_slash("mode auto"),
+            Action::Command(Command::SetMode { mode: Mode::Auto })
+        );
+        // Normal is always allowed.
+        assert_eq!(
+            a.run_slash("mode normal"),
+            Action::Command(Command::SetMode { mode: Mode::Normal })
+        );
+        // Unknown mode → a notice, not a command.
+        assert_eq!(a.run_slash("mode bogus"), Action::None);
+        assert!(a
+            .conversation
+            .iter()
+            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown mode"))));
+    }
+
+    #[test]
+    fn slash_mode_arg_refuses_auto_without_confinement() {
+        let mut a = app(); // sandbox: None
+        assert_eq!(a.run_slash("mode auto-accept-edits"), Action::None);
+        assert!(a.conversation.iter().any(|i| matches!(
+            i,
+            ConvItem::Notice(n) if n.contains("unavailable without OS confinement")
+        )));
+        // Normal is still allowed without confinement.
+        assert_eq!(
+            a.run_slash("mode normal"),
+            Action::Command(Command::SetMode { mode: Mode::Normal })
+        );
     }
 
     #[test]
@@ -2233,9 +2479,10 @@ mod tests {
     }
 
     #[test]
-    fn slash_mode_and_shift_tab_reach_the_same_command() {
-        // The registry wires `/mode` and the Shift-Tab hint to one action, so
-        // the palette, slash parser, and keybinding stay in sync.
+    fn shift_tab_cycles_via_the_cycle_mode_command() {
+        // The registry wires `Shift-Tab` to `CycleMode`. `/mode` (slash and
+        // palette) is intercepted earlier in `run_slash` to open the picker, so
+        // this registry entry now serves only the quick-toggle keybinding.
         assert_eq!(
             crate::commands::by_name("mode"),
             Some(crate::commands::AppCommand::CycleMode)

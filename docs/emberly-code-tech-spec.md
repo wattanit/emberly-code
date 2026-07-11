@@ -265,7 +265,7 @@ proxying JSON-RPC (T-7); nothing else in the engine changes.
 
 | Tool | Notes |
 |---|---|
-| `read_file` | Path-normalized (symlinks resolved, `..` collapsed) then root-checked. Output truncation per §7. |
+| `read_file` | Path-normalized (symlinks resolved, `..` collapsed) then root-checked. Optional `start_line`/`end_line` (1-based, inclusive) read a numbered slice — the prompt-free alternative to `sed -n`. Output truncation per §7. |
 | `write_file` | Refuses `.git/` (HC-5). Creates parent dirs inside root only. |
 | `edit_file` | Exact string match-and-replace. Failure messages distinguish *no match* vs *N matches found* and, for no-match, include the closest fuzzy region as a hint (T-3 — model recovery quality depends on this). |
 | `bash` | See §6. Timeout default 120s, configurable per-call by the model up to a config ceiling. Env is a scrubbed allowlist (PATH, HOME, LANG, TERM + config additions) — secrets in the user's env are not inherited by default. |
@@ -315,10 +315,14 @@ decides *when to ask*; the sandbox layer decides *what is possible*.
   written line shown to the user).
 - Every request/decision/execution is a transcript event (HC-7).
 - Default bash allowlist (initial; user-extensible): `ls`, `cat`,
-  `head`, `tail`, `wc`, `rg`, `find`, `pwd`, `echo`, `which`,
+  `head`, `tail`, `wc`, `grep`, `rg`, `find`, `pwd`, `echo`, `which`,
   `git status`, `git diff`, `git log`, `git show`, `git branch`,
   `cargo check`, `cargo tree`, `cargo metadata`. (Resolves the
   Requirements §13 open item; final list is a living config default.)
+  Note: `sed` is intentionally absent — a prefix rule would match the
+  destructive `sed -i`/`sed >` forms too, and §6.5 forbids flag-parsing
+  as a matching mechanism. Use `read_file` with `start_line`/`end_line`
+  for a prompt-free ranged read instead.
 
 ### 6.2 OS confinement — Linux (Landlock)
 

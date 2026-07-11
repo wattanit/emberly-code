@@ -246,7 +246,7 @@ Safety is enforced in two distinct layers with different jobs:
 - Writes and edits inside the project root: **ask**, with an
   "allow for this session" option offered at the prompt.
 - Bash: prefix-match against a default allowlist of harmless read-only
-  commands (`ls`, `cat`, `rg`, `git status`, `git diff`, `cargo check`,
+  commands (`ls`, `cat`, `grep`, `rg`, `git status`, `git diff`, `cargo check`,
   and similar), user-extensible in project config. Everything else: **ask**.
 - Any action affecting paths outside the project root: **ask**, always,
   per-action, regardless of rules or mode (HC-4).

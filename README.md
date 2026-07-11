@@ -220,7 +220,7 @@ usage, cost, and changed files.
 | `/files` | | List files changed this session |
 | `/session` | | List saved sessions and switch to one |
 | `/new` (`/clear`) | | Start a fresh session (the current one is saved) |
-| `/mode` | `Shift-Tab` | Cycle permission mode (normal → auto-accept edits → auto) |
+| `/mode` | `Shift-Tab` | Pick a permission mode (`Shift-Tab` cycles) |
 | `/sidebar` | `Ctrl-B` | Toggle the sidebar |
 | `/cancel` | | Cancel the in-flight turn |
 | `/quit` | `Ctrl-D` | Exit |
@@ -232,12 +232,15 @@ going. "Allow for this session" grants until you quit; "always allow in this
 project" writes a line to `.agents/permissions.toml` (shown to you) so the rule
 sticks next time.
 
-**Permission modes.** `Shift-Tab` (or `/mode`) cycles how much the agent may do
-without asking: **normal** (ask per the rules), **auto-accept edits** (file
-writes inside the project auto-apply; commands still ask), and **auto** (all
-tools auto-run inside the project root). The two auto tiers require active OS
-confinement — without a kernel fence they simply aren't offered, and the app
-tells you why. The current mode shows in the status bar.
+**Permission modes.** `Shift-Tab` cycles how much the agent may do without
+asking, and `/mode` (or the palette) opens a picker listing all three tiers:
+**normal** (ask per the rules), **auto-accept edits** (file writes inside the
+project auto-apply; commands still ask), and **auto** (all tools auto-run
+inside the project root). You can also set one directly with
+`/mode <normal|auto-accept-edits|auto>`. The two auto tiers require active OS
+confinement — without a kernel fence they aren't offered (the picker marks them
+and tells you why), and the app tells you why. The current mode shows in the
+status bar.
 
 **Sessions never disappear.** Every session is written to
 `.agents/sessions/<id>.jsonl` as it happens (durably, line by line). If Emberly
