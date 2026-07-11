@@ -27,9 +27,10 @@ const SCROLL_STEP: usize = 5;
 
 /// Animation ticker rate (Design §6.4 — a handful of cells at ~12fps).
 pub const ANIM_FPS: usize = 12;
-/// The ember-pulse spinner: a dot that swells and fades, in the accent — an
-/// ember glowing, not a generic line spinner (Design §6.4).
-const SPINNER: [&str; 4] = ["·", "•", "●", "•"];
+/// The ember-pulse spinner: a single steady dot whose accent brightness
+/// breathes in lockstep with the wordmark glow (Design §6.4) — one ember
+/// pulse, not a separate glyph-cycling animation.
+const SPINNER: [&str; 1] = ["●"];
 /// Elapsed time appears only after this many seconds (Design §6.3).
 const ELAPSED_AFTER_SECS: usize = 5;
 /// Frames an overlay eases in over (one or two frames of expansion, not a slide

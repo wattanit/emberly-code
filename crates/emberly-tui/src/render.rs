@@ -793,10 +793,13 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
             .spinner_elapsed()
             .map(|s| format!(" {s}s"))
             .unwrap_or_default();
-        spans.push(Span::styled(
-            format!(" {} ", app.spinner_glyph()),
-            theme.accent(),
-        ));
+        // The spinner breathes in lockstep with the wordmark glow (Design
+        // §6.4): a single steady glyph whose accent brightness rises and falls
+        // on the same raised-cosine cycle — one ember pulse, not two.
+        let glyph_style = ratatui::style::Style::default()
+            .fg(glow(theme.palette().accent, glow_pct(app.anim_frame())))
+            .add_modifier(ratatui::style::Modifier::BOLD);
+        spans.push(Span::styled(format!(" {} ", app.spinner_glyph()), glyph_style));
         spans.push(Span::styled(format!("{verb}{elapsed}  "), theme.chrome()));
     } else {
         spans.push(Span::raw(" "));
