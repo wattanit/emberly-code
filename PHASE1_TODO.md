@@ -28,14 +28,14 @@ existing size backstop and widens the sidecar trigger to cover reduction.
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. Reducer registry & signature (`emberly-tools`) | [ ] | |
+| 1. Reducer registry & signature (`emberly-tools`) | [x] | `reduce.rs` — `Reduction` type, `reduce_output` dispatch by tool name, passthrough, `reduction_marker` helper |
 | 2. Per-tool reducers: `bash`, `grep`, `glob` (`read_file` none) | [ ] | |
 | 3. Wire reduction into ingestion, before the size backstop | [ ] | |
 | 4. Sidecar on reduce-*or*-truncate; transcript honesty (HC-7) | [ ] | |
 | 5. Config: `truncate.reduce` + wire the `[truncate]` TOML section | [ ] | |
 | 6. Tests (offline, deterministic — §14.6) + exit criterion | [ ] | |
 
-**Overall Phase 1: NOT STARTED.**
+**Overall Phase 1: IN PROGRESS (Group 1 done).**
 
 ---
 
@@ -45,19 +45,19 @@ A reduction layer that mirrors how `truncate_output` is structured — a pure,
 deterministic function in `emberly-tools`, no I/O, no model call — so the engine
 calls it at ingestion exactly as it already calls `truncate_output`.
 
-- [ ] New module `crates/emberly-tools/src/reduce.rs`: a `Reduction` result type
+- [x] New module `crates/emberly-tools/src/reduce.rs`: a `Reduction` result type
       (`content: String`, `reduced: bool`, and enough to build the marker — e.g.
       what/how-much was withheld) and a `reduce_output(tool_name: &str, raw:
       &str) -> Reduction` entry point. Pure function, `#[must_use]`, no
       `unwrap`/`expect` (HC-3). Re-export from `lib.rs` beside `truncate_output`.
-- [ ] Registry keyed by **tool name** (the engine has the invoked tool's name at
+- [x] Registry keyed by **tool name** (the engine has the invoked tool's name at
       the `ingest_tool_result` call site via `call`/`PendingToolCall`, so keying
       by name avoids threading `ToolSpec` through the engine — §5.3's
       `(&ToolSpec, &raw)` shape realized as name-dispatch). A tool with no
       registered reducer **falls straight through** (returns `reduced: false`,
       content unchanged) to the size backstop — decision to record in the notes
       log if the signature diverges from the Spec's wording.
-- [ ] Reducers are **pure and deterministic** (Requirements §8.5: no model
+- [x] Reducers are **pure and deterministic** (Requirements §8.5: no model
       round-trip, no per-call latency). Collapsing "runs of near-identical
       lines" is a deterministic string transform, not a heuristic call.
 
