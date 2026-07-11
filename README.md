@@ -10,10 +10,13 @@ endpoint, including local models), keeps a **complete, resumable transcript** of
 every session, and is built to run reliably on standard and static (musl)
 deployments.
 
-> **Status:** v0.1 — feature-complete, install from source. The interactive
+> **Status:** v0.2 — feature-complete, install from source. The interactive
 > TUI, live providers, session persistence, the permission *rule engine*, the
 > auto-accept *modes*, and OS *confinement* (Linux Landlock, macOS Seatbelt) all
-> work today. Prebuilt binaries and Windows support are not yet shipped (see
+> work today, plus the 0.2 set: configurable provider profiles, in-app config
+> editing, reasoning effort + thinking trail, the ask-you-a-question tool and
+> tool-call explanations, workspace trust, and the loop-breaking guardrail.
+> Prebuilt binaries and Windows support are not yet shipped (see
 > [Safety](#safety--transparency)).
 
 ---
