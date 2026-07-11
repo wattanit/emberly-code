@@ -21,6 +21,9 @@ pub struct TruncateConfig {
     pub head_lines: usize,
     /// Lines of tail to keep.
     pub tail_lines: usize,
+    /// Whether salient tool-result reduction runs before the size backstop
+    /// (FR-2, Tech Spec §5.3/§8). Default `true`; set `false` for raw results.
+    pub reduce: bool,
 }
 
 impl Default for TruncateConfig {
@@ -30,6 +33,7 @@ impl Default for TruncateConfig {
             max_bytes: 64 * 1024,
             head_lines: 150,
             tail_lines: 100,
+            reduce: true,
         }
     }
 }

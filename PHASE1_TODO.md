@@ -30,12 +30,12 @@ existing size backstop and widens the sidecar trigger to cover reduction.
 |---|---|---|
 | 1. Reducer registry & signature (`emberly-tools`) | [x] | `reduce.rs` — `Reduction` type, `reduce_output` dispatch by tool name, passthrough, `reduction_marker` helper |
 | 2. Per-tool reducers: `bash`, `grep`, `glob` (`read_file` none) | [x] | `bash`: collapse near-identical progress lines + head/tail stdout; `grep`: passthrough (hits are the point); `glob`: head/tail >50 paths; `read_file`: unregistered passthrough; 18 unit tests |
-| 3. Wire reduction into ingestion, before the size backstop | [ ] | |
-| 4. Sidecar on reduce-*or*-truncate; transcript honesty (HC-7) | [ ] | |
+| 3. Wire reduction into ingestion, before the size backstop | [x] | `reduce_output` before `truncate_output` in `ingest_tool_result`, gated on `truncate.reduce`; loop-sig + `result_preview` on full content |
+| 4. Sidecar on reduce-*or*-truncate; transcript honesty (HC-7) | [~] | Sidecar trigger widened to `reduced \|\| truncated` (done in group 3); `truncated` flag + resume decision pending |
 | 5. Config: `truncate.reduce` + wire the `[truncate]` TOML section | [ ] | |
 | 6. Tests (offline, deterministic — §14.6) + exit criterion | [ ] | |
 
-**Overall Phase 1: IN PROGRESS (Groups 1–2 done).**
+**Overall Phase 1: IN PROGRESS (Groups 1–3 done).**
 
 ---
 
@@ -93,16 +93,16 @@ The initial reducer set (initial; tune with use — Requirements §13, Tech Spec
 does `truncate_output(&outcome.content, &self.truncate)`. Insert the reduction
 pass ahead of it so the order is **salient reduction → size backstop** (§5.3).
 
-- [ ] Run `reduce_output(tool_name, &outcome.content)` first (gated on the
+- [x] Run `reduce_output(tool_name, &outcome.content)` first (gated on the
       `truncate.reduce` flag, group 5), then `truncate_output(reduced.content,
       …)`. The model-visible content is the output of both passes, in that
       order.
-- [ ] The reduction adds no model call and no await that blocks the loop — it is
+- [x] The reduction adds no model call and no await that blocks the loop — it is
       a synchronous pure transform on the already-collected `outcome.content`
       (Requirements §8.5). Keep the S-5 loop-signature accumulation
       (`engine.rs:1564`) on the **full** `outcome.content` (unchanged), so
       reduction never weakens no-progress detection.
-- [ ] Leave `result_preview` (`engine.rs:1909`) on the full content unless the
+- [x] Leave `result_preview` (`engine.rs:1909`) on the full content unless the
       preview visibly regresses — the UI caption is not the context payload.
 
 ## 4. Sidecar on reduce-*or*-truncate; transcript honesty  *(FR-2; HC-7; Tech Spec §3.2)*
@@ -111,11 +111,12 @@ Today the sidecar/`full_output_ref` is written **only when size-truncated**
 (`engine.rs:1570–1574`). Reduction also withholds content, so the full output
 must be preserved whenever *either* pass fired.
 
-- [ ] Write the sidecar (`self.transcript.sidecar(&call.id, &outcome.content)` —
+- [x] Write the sidecar (`self.transcript.sidecar(&call.id, &outcome.content)` —
       always the **full** pre-reduction, pre-truncation content) whenever
       `reduced || truncated`, and set `full_output_ref` accordingly. The
       complete output is the durable record the marker points at; FR-2's
       "recoverable" is guaranteed by construction (the sidecar holds everything).
+      _Done alongside group 3 — the sidecar trigger is now `reduced.reduced || truncation.truncated`._
 - [ ] Decide and record: the transcript `ToolResult.truncated` flag
       (`transcript.rs:114`) now means "the recorded `output` is not the full
       output; `full_output_ref` has the whole thing" and is set on
@@ -134,10 +135,11 @@ must be preserved whenever *either* pass fired.
 (production hardcodes `TruncateConfig::default()` at `crates/emberly/src/config.rs`
 / `main.rs:509`). Adding the toggle means giving `[truncate]` a config home.
 
-- [ ] Add `reduce: bool` (**default `true`**, Tech Spec §8) to `TruncateConfig`
+- [x] Add `reduce: bool` (**default `true`**, Tech Spec §8) to `TruncateConfig`
       (`ctx.rs:14`) so the flag rides with the truncation config already carried
       into the engine (`EngineConfig.truncate`) and `ToolCtx`. `#[derive(Copy)]`
       stays valid.
+      _Done in group 3 — the engine gates reduction on `self.truncate.reduce`._
 - [ ] Wire a `[truncate]` section into `ConfigFile`
       (`crates/emberly/src/config.rs`) → build the engine's `TruncateConfig` from
       it instead of the hardcoded default (`main.rs:509`). Expose at least
