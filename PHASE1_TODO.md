@@ -29,13 +29,13 @@ existing size backstop and widens the sidecar trigger to cover reduction.
 | Group | Status | Notes |
 |---|---|---|
 | 1. Reducer registry & signature (`emberly-tools`) | [x] | `reduce.rs` — `Reduction` type, `reduce_output` dispatch by tool name, passthrough, `reduction_marker` helper |
-| 2. Per-tool reducers: `bash`, `grep`, `glob` (`read_file` none) | [ ] | |
+| 2. Per-tool reducers: `bash`, `grep`, `glob` (`read_file` none) | [x] | `bash`: collapse near-identical progress lines + head/tail stdout; `grep`: passthrough (hits are the point); `glob`: head/tail >50 paths; `read_file`: unregistered passthrough; 18 unit tests |
 | 3. Wire reduction into ingestion, before the size backstop | [ ] | |
 | 4. Sidecar on reduce-*or*-truncate; transcript honesty (HC-7) | [ ] | |
 | 5. Config: `truncate.reduce` + wire the `[truncate]` TOML section | [ ] | |
 | 6. Tests (offline, deterministic — §14.6) + exit criterion | [ ] | |
 
-**Overall Phase 1: IN PROGRESS (Group 1 done).**
+**Overall Phase 1: IN PROGRESS (Groups 1–2 done).**
 
 ---
 
@@ -66,22 +66,22 @@ calls it at ingestion exactly as it already calls `truncate_output`.
 The initial reducer set (initial; tune with use — Requirements §13, Tech Spec
 §16). Salient content is defined per tool by the Spec:
 
-- [ ] **`bash`** — keep the exit status, **all** of stderr, and head+tail of
+- [x] **`bash`** — keep the exit status, **all** of stderr, and head+tail of
       stdout; deterministically collapse runs of near-identical
       progress/percentage lines. *Example (non-normative, §5.3):* a 500-line
       `cargo build` collapses to its warnings/errors + final summary. Reducer
       lives in / near `crates/emberly-tools/src/builtin/bash.rs` output shape.
-- [ ] **`grep`** — keep every match line and its `file:line` header; drop
+- [x] **`grep`** — keep every match line and its `file:line` header; drop
       nothing that is a hit (hits are the point, §5.3). Note the tool already
       caps at `MAX_MATCHES` (`builtin/grep.rs`) — the reducer must not double-cap
       or hide hits.
-- [ ] **`glob`** — keep the path list; if it exceeds the count backstop, keep
+- [x] **`glob`** — keep the path list; if it exceeds the count backstop, keep
       head+tail with the elision marker (§5.3).
-- [ ] **`read_file`** — **no semantic reducer** (§5.3): already bounded by the
+- [x] **`read_file`** — **no semantic reducer** (§5.3): already bounded by the
       optional `start_line`/`end_line` and the size backstop; reducing by meaning
       would risk hiding code the model asked for. Verify it falls through the
       registry untouched.
-- [ ] Each reducer that withholds anything produces a marker **naming what was
+- [x] Each reducer that withholds anything produces a marker **naming what was
       withheld** and offering `/view` (Design §4.3/§8.6) — e.g. progress lines
       collapsed — distinct in wording from the size-truncation marker
       (`truncate.rs:109`) so the model can tell *reduced-by-meaning* from
