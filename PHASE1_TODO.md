@@ -31,11 +31,11 @@ existing size backstop and widens the sidecar trigger to cover reduction.
 | 1. Reducer registry & signature (`emberly-tools`) | [x] | `reduce.rs` — `Reduction` type, `reduce_output` dispatch by tool name, passthrough, `reduction_marker` helper |
 | 2. Per-tool reducers: `bash`, `grep`, `glob` (`read_file` none) | [x] | `bash`: collapse near-identical progress lines + head/tail stdout; `grep`: passthrough (hits are the point); `glob`: head/tail >50 paths; `read_file`: unregistered passthrough; 18 unit tests |
 | 3. Wire reduction into ingestion, before the size backstop | [x] | `reduce_output` before `truncate_output` in `ingest_tool_result`, gated on `truncate.reduce`; loop-sig + `result_preview` on full content |
-| 4. Sidecar on reduce-*or*-truncate; transcript honesty (HC-7) | [~] | Sidecar trigger widened to `reduced \|\| truncated` (done in group 3); `truncated` flag + resume decision pending |
-| 5. Config: `truncate.reduce` + wire the `[truncate]` TOML section | [ ] | |
-| 6. Tests (offline, deterministic — §14.6) + exit criterion | [ ] | |
+| 4. Sidecar on reduce-*or*-truncate; transcript honesty (HC-7) | [x] | `truncated` flag reused to mean “recorded output ≠ full”; sidecar fires on reduce-or-truncate; resume confirmed unaffected |
+| 5. Config: `truncate.reduce` + wire the `[truncate]` TOML section | [x] | `[truncate]` section in ConfigFile (reduce, max_lines, max_bytes, head/tail_lines); provenance tracked; `main.rs` uses `resolved.truncate` |
+| 6. Tests (offline, deterministic — §14.6) + exit criterion | [x] | 18 reducer unit tests + 4 engine integration tests (sidecar, toggle, bash collapse, HC-7); 182 total green, clippy-clean |
 
-**Overall Phase 1: IN PROGRESS (Groups 1–3 done).**
+**Overall Phase 1: COMPLETE.**
 
 ---
 
@@ -117,17 +117,22 @@ must be preserved whenever *either* pass fired.
       complete output is the durable record the marker points at; FR-2's
       "recoverable" is guaranteed by construction (the sidecar holds everything).
       _Done alongside group 3 — the sidecar trigger is now `reduced.reduced || truncation.truncated`._
-- [ ] Decide and record: the transcript `ToolResult.truncated` flag
+- [x] Decide and record: the transcript `ToolResult.truncated` flag
       (`transcript.rs:114`) now means "the recorded `output` is not the full
       output; `full_output_ref` has the whole thing" and is set on
       reduce-or-truncate — **or** add an additive `reduced: bool` field
       (serde-default, older readers warn-skip, no `SCHEMA_VERSION` bump, §3.2) if
       we want to distinguish the two in the audit trail. Pick one in the notes
       log; default to reusing `truncated` unless the distinction earns its keep.
-- [ ] Confirm resume (`resume.rs:95` `rebuild_conversation`) still rebuilds from
+      _Decision: reused `truncated` — it now means “recorded output ≠ full output;
+      see `full_output_ref`”, set on reduce-or-truncate. No SCHEMA_VERSION bump
+      (field semantics widened, not added). See notes log._
+- [x] Confirm resume (`resume.rs:95` `rebuild_conversation`) still rebuilds from
       `ToolResult.output` (the model-visible content) and is unaffected — the
       view it restores is the reduced/truncated one, matching the live session
       (HC-7: the log is untouched; the sidecar holds the full output).
+      _Confirmed: resume uses `..` to ignore `truncated`, rebuilds from `output`
+      verbatim. The `hc7` integration test proves this end-to-end._
 
 ## 5. Config: `truncate.reduce` + wire the `[truncate]` section  *(FR-2; Tech Spec §8)*
 
@@ -140,36 +145,37 @@ must be preserved whenever *either* pass fired.
       into the engine (`EngineConfig.truncate`) and `ToolCtx`. `#[derive(Copy)]`
       stays valid.
       _Done in group 3 — the engine gates reduction on `self.truncate.reduce`._
-- [ ] Wire a `[truncate]` section into `ConfigFile`
+- [x] Wire a `[truncate]` section into `ConfigFile`
       (`crates/emberly/src/config.rs`) → build the engine's `TruncateConfig` from
       it instead of the hardcoded default (`main.rs:509`). Expose at least
       `reduce`; exposing `max_lines`/`max_bytes`/`head_lines`/`tail_lines` here
       too is natural and retires part of the Tech Spec §16 "`truncate.*`
       defaults" open item — keep them optional with the current defaults.
-- [ ] `truncate.reduce = false` skips group 3's reduction pass entirely (raw
+- [x] `truncate.reduce = false` skips group 3's reduction pass entirely (raw
       results, then only the size backstop) — for users who want unreduced
       output. Provenance/`config show` (C-3) reports the tier as for any key.
 
 ## 6. Tests + exit criterion  *(Tech Spec §14.6 offline, deterministic)*
 
-- [ ] **Per-tool reducer unit tests** (`reduce.rs`): a noisy `bash` output
+- [x] **Per-tool reducer unit tests** (`reduce.rs`): a noisy `bash` output
       collapses its progress runs to warnings/errors + summary; `grep` keeps all
       hits + headers; `glob` head/tails an over-count list; `read_file` passes
       through untouched. Deterministic, no provider.
-- [ ] **Full output recoverable:** an engine ingestion test asserts that oversized
+- [x] **Full output recoverable:** an engine ingestion test asserts that oversized
       / noisy output is reduced in the context message **and** that the sidecar
       holds the complete output with a `full_output_ref` set (closes the
       end-to-end gap: no current test proves ingestion-time truncation writes a
       sidecar). Assert the model-visible marker offers `/view`.
-- [ ] **Toggle:** `truncate.reduce = false` passes output through the reduction
+- [x] **Toggle:** `truncate.reduce = false` passes output through the reduction
       layer unchanged (only the size backstop may act).
-- [ ] **HC-7:** the `tool_result` transcript record + sidecar together preserve
+- [x] **HC-7:** the `tool_result` transcript record + sidecar together preserve
       the full result; nothing rewrites a prior transcript line.
-- [ ] **Exit criterion (Phase 1 done when):** per-tool reducers reduce
+- [x] **Exit criterion (Phase 1 done when):** per-tool reducers reduce
       `bash`/`grep`/`glob` to salient content with the full output recoverable
       from the sidecar; `truncate.reduce = false` passes through; the transcript
       records the full result (via sidecar) untouched (Tech Spec §14.6, FR-2,
       HC-7). Workspace clippy-clean under the §1 lint policy; offline suite green.
+      _182 tests pass, clippy clean._
 
 ---
 
@@ -179,12 +185,25 @@ must be preserved whenever *either* pass fired.
 
 - Reducer dispatch is keyed by **tool name**, not by threading `&ToolSpec`
   through the engine — the Spec's `(&ToolSpec, &raw)` shape (§5.3) realized as
-  name-dispatch at the `ingest_tool_result` call site. _Confirm at
-  implementation; record here if it diverges from the Spec wording (feedback per
-  G-24 if the Spec should absorb it)._
-- `truncated` vs. a new `reduced` transcript field (group 4) — _decide at
-  implementation._ Default: reuse `truncated` to mean "recorded output ≠ full
-  output; see `full_output_ref`"; add `reduced` only if the audit trail needs to
-  tell size-trim from meaning-reduce apart.
+  name-dispatch at the `ingest_tool_result` call site. _Confirmed: works
+  cleanly — the engine already has `call.name` at the call site. If the Spec
+  should absorb this as feedback, it flows back as a version bump per G-24._
+- `truncated` vs. a new `reduced` transcript field (group 4) — **Decision:
+  reuse `truncated`** to mean "recorded output ≠ full output; see
+  `full_output_ref`", set on reduce-or-truncate. No `SCHEMA_VERSION` bump (the
+  field already exists; its semantics widened from "size-trimmed" to
+  "any-withheld"). No new `reduced` field — the distinction does not earn its
+  keep in the audit trail. The reduction marker text (`[reduced: …]`) already
+  distinguishes reduce-by-meaning from trim-by-size in the model-visible content.
 - Reduction runs **before** size truncation (§5.3, §8.4 layering); the size
   backstop always applies after, reducer or not.
+- `[truncate]` section exposes all five fields (`reduce`, `max_lines`,
+  `max_bytes`, `head_lines`, `tail_lines`) — retires the Tech Spec §16
+  “`truncate.*` defaults” open item partially (the defaults themselves remain
+  placeholder; they are now user-tunable).
+- The `truncated` transcript flag now fires on reduction-only outputs too. This
+  is a slight semantic widening of the existing `truncated` field: older
+  transcripts and code that reads `truncated: false` as “the output is complete”
+  must now also check `full_output_ref.is_none()`. This is the honest meaning
+  from day one — `truncated: false` meant “not size-trimmed”, which was never a
+  guarantee of completeness once reduction existed.

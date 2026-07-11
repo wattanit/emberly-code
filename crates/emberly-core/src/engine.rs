@@ -1589,7 +1589,7 @@ impl Engine {
             call_id: call.id.clone(),
             ok: outcome.ok,
             output: truncation.content.clone(),
-            truncated: truncation.truncated,
+            truncated: withheld,
             full_output_ref,
         });
 

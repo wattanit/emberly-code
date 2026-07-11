@@ -24,7 +24,7 @@ use emberly_core::{
     TranscriptRecord, TranscriptSink,
 };
 use emberly_providers::Provider;
-use emberly_tools::{default_registry, TruncateConfig};
+use emberly_tools::default_registry;
 use emberly_tui::{frontend, SessionInfo};
 
 mod config;
@@ -506,7 +506,7 @@ async fn run() -> anyhow::Result<()> {
         tool_explanations: resolved.tool_explanations,
         trust_granted,
         loop_config: resolved.loop_config,
-        truncate: TruncateConfig::default(),
+        truncate: resolved.truncate,
         retry: emberly_core::RetryPolicy::default(),
         session_id,
         sessions_dir: sessions_dir.clone(),
