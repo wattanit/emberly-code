@@ -35,6 +35,14 @@ pub struct ConfigFile {
     /// `[ui]` presentation toggles (Tech Spec §8).
     #[serde(default)]
     pub ui: UiConfig,
+    /// `[trust]` workspace-trust settings (FR-1). **Honored only from the global
+    /// tier** — a project `[trust]` is ignored (a repo cannot self-trust); see
+    /// [`global_trust_dirs`] and the notice in [`load`].
+    #[serde(default)]
+    pub trust: TrustConfig,
+    /// `[loop]` guardrail settings (S-5). Threaded to the engine (Tech Spec §7).
+    #[serde(default, rename = "loop")]
+    pub loop_: LoopConfig,
 }
 
 /// `[ui]` — presentation toggles that shape what the interface shows without
@@ -46,6 +54,24 @@ pub struct UiConfig {
     /// prompt instruction are both omitted so no tokens are spent. Default
     /// `true`.
     pub tool_explanations: Option<bool>,
+}
+
+/// `[trust]` — workspace trust (FR-1). `trusted_dirs` pre-declares folders
+/// trusted without a prompt. **Global-tier only**: project config cannot
+/// contribute here, so a repository can never pre-declare itself trusted.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct TrustConfig {
+    #[serde(default)]
+    pub trusted_dirs: Vec<String>,
+}
+
+/// `[loop]` — the loop-breaking guardrail (S-5, Tech Spec §7). All optional;
+/// the engine applies defaults. Wired to the engine in a later group.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct LoopConfig {
+    pub enabled: Option<bool>,
+    pub repeat_window: Option<u32>,
+    pub max_no_progress_turns: Option<u32>,
 }
 
 /// A `[providers.<name>]` profile: an adapter (wire format) plus the endpoint
@@ -215,6 +241,18 @@ impl ConfigFile {
         if higher.ui.tool_explanations.is_some() {
             self.ui.tool_explanations = higher.ui.tool_explanations;
         }
+        // `[loop]` (S-5) merges normally — a project may tune the guardrail.
+        if higher.loop_.enabled.is_some() {
+            self.loop_.enabled = higher.loop_.enabled;
+        }
+        if higher.loop_.repeat_window.is_some() {
+            self.loop_.repeat_window = higher.loop_.repeat_window;
+        }
+        if higher.loop_.max_no_progress_turns.is_some() {
+            self.loop_.max_no_progress_turns = higher.loop_.max_no_progress_turns;
+        }
+        // `[trust]` is deliberately NOT merged — it is read only from the global
+        // tier (FR-1); see `global_trust_dirs` and the project-[trust] notice.
     }
 }
 
@@ -248,6 +286,8 @@ pub struct Resolved {
     /// `true`; when `false` the schema property and prompt instruction are both
     /// omitted (no tokens spent).
     pub tool_explanations: bool,
+    /// Resolved loop-breaking guardrail tunables (S-5), ready for the engine.
+    pub loop_config: emberly_core::LoopConfig,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -387,6 +427,16 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
     let mut notices = Vec::new();
+    // A project `[trust]` is ignored — trust is global-only so a repo can't
+    // pre-declare itself trusted (FR-1). Say so rather than silently dropping it.
+    if project
+        .as_ref()
+        .is_some_and(|p| !p.trust.trusted_dirs.is_empty())
+    {
+        notices.push(
+            "ignoring [trust] in project config — workspace trust is global-only (FR-1)".into(),
+        );
+    }
     let mut system_prompt = system_base;
     if let Some((instructions, source, notice)) = load_project_instructions(project_root)? {
         system_prompt.push_str("\n\n# Project instructions\n\n");
@@ -408,6 +458,22 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         sandbox_require: merged.sandbox.require.unwrap_or(false),
         reasoning: merged.reasoning,
         tool_explanations: merged.ui.tool_explanations.unwrap_or(true),
+        loop_config: {
+            // Override only the fields the user set; the engine owns the
+            // defaults (S-5, Tech Spec §7 — "initial; tune with use").
+            let d = emberly_core::LoopConfig::default();
+            emberly_core::LoopConfig {
+                enabled: merged.loop_.enabled.unwrap_or(d.enabled),
+                repeat_window: merged
+                    .loop_
+                    .repeat_window
+                    .map_or(d.repeat_window, |v| v as usize),
+                max_no_progress_turns: merged
+                    .loop_
+                    .max_no_progress_turns
+                    .map_or(d.max_no_progress_turns, |v| v as usize),
+            }
+        },
     })
 }
 
@@ -645,9 +711,32 @@ fn global_keys_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("keys.toml"))
 }
 
-/// Refuse a secrets file readable by group/other (Tech Spec §8).
+/// The global workspace-trust store (FR-1, Tech Spec §6.7). Global-only by
+/// construction — `config_dir()` never consults the project root.
+#[must_use]
+pub fn global_trust_path() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("trust.toml"))
+}
+
+/// The `trust.trusted_dirs` pre-trust allowlist, read **only** from the global
+/// config tier (FR-1 — project config cannot contribute). Missing/unparyable
+/// global config yields an empty list; the gate then relies on the store alone.
+#[must_use]
+pub fn global_trust_dirs() -> Vec<String> {
+    let Some(path) = global_config_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    ConfigFile::parse(&text)
+        .map(|c| c.trust.trusted_dirs)
+        .unwrap_or_default()
+}
+
+/// Refuse a secrets/trust file readable by group/other (Tech Spec §8, §6.7).
 #[cfg(unix)]
-fn enforce_private_permissions(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn enforce_private_permissions(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(path)
         .with_context(|| format!("reading permissions of {}", path.display()))?
@@ -666,7 +755,7 @@ fn enforce_private_permissions(path: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn enforce_private_permissions(_path: &Path) -> anyhow::Result<()> {
+pub(crate) fn enforce_private_permissions(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -837,6 +926,33 @@ mod tests {
         let mut base = ConfigFile::parse("[ui]\ntool_explanations = true").expect("base");
         base.merge(off);
         assert_eq!(base.ui.tool_explanations, Some(false));
+    }
+
+    #[test]
+    fn trust_parses_but_is_not_merged_global_only() {
+        // A `[trust]` section parses into the file struct…
+        let cfg = ConfigFile::parse("[trust]\ntrusted_dirs = [\"/a\", \"~/code\"]").expect("trust");
+        assert_eq!(cfg.trust.trusted_dirs, vec!["/a", "~/code"]);
+        // …but merge does NOT carry it, so a project tier can never contribute
+        // trust (FR-1 — a repo can't self-trust). The gate reads global only.
+        let mut base = ConfigFile::default();
+        base.merge(cfg);
+        assert!(
+            base.trust.trusted_dirs.is_empty(),
+            "trust is never merged from a higher tier"
+        );
+    }
+
+    #[test]
+    fn loop_config_parses_and_merges() {
+        let cfg = ConfigFile::parse("[loop]\nenabled = false\nrepeat_window = 5").expect("loop");
+        assert_eq!(cfg.loop_.enabled, Some(false));
+        assert_eq!(cfg.loop_.repeat_window, Some(5));
+        // Unlike trust, [loop] merges (a project may tune the guardrail).
+        let mut base = ConfigFile::default();
+        base.merge(cfg);
+        assert_eq!(base.loop_.enabled, Some(false));
+        assert_eq!(base.loop_.repeat_window, Some(5));
     }
 
     #[cfg(unix)]

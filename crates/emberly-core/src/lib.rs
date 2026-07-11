@@ -31,7 +31,7 @@ pub use channels::{channel, channel_with_capacity, EnginePorts, FrontendPorts};
 pub use command::Command;
 pub use emberly_providers::{Message, RetryPolicy};
 pub use emberly_tools::AskUserOutcome;
-pub use engine::{Engine, EngineConfig};
+pub use engine::{Engine, EngineConfig, LoopConfig};
 pub use event::UiEvent;
 pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfig};
 pub use gate::{AskUserAsk, PermissionAsk};
@@ -41,7 +41,8 @@ pub use transcript::{
     TranscriptRecord, TranscriptSink, SCHEMA_VERSION,
 };
 pub use types::{
-    AskAnswer, Effort, Mode, PermissionDecision, PermissionRendering, SandboxStatus, TokenUsage,
+    AskAnswer, Effort, LoopResolution, Mode, PermissionDecision, PermissionRendering,
+    SandboxStatus, TokenUsage,
 };
 // The rule engine and confinement probe live in the security crate; re-export
 // the pieces the composition root (the binary) wires so it depends only on core.

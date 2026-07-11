@@ -294,10 +294,29 @@ Emberly is built around auditability and bounded action, in two layers — a
 - **`.git` protection.** Belt and braces: the file tools refuse `.git/` writes
   regardless of the sandbox, and the sandbox enforces it at the kernel when
   active.
+- **Workspace trust.** The first time you run Emberly in a folder it hasn't
+  seen, it asks — in plain language, before reading any project file or starting
+  the agent — whether you trust the code there. The safe default is *decline*
+  (declining starts no session); trusting is a deliberate choice. Trust is
+  remembered per folder and **extends to its subtree**, so you're asked once per
+  project, not once per directory. It is stored globally
+  (`~/.config/emberly/trust.toml`, `0600`) — a repository can never pre-declare
+  itself trusted. Pre-approve folders with `trust.trusted_dirs` in your *global*
+  config; manage grants with **`emberly trust list`** and **`emberly trust
+  revoke <path>`**. Trust is a *consent gate, not containment*: it decides
+  whether Emberly runs here, never what it may do — every permission prompt and
+  sandbox rule still applies.
+- **Loop-breaking guardrail.** If the agent starts spinning — repeating the same
+  steps without changing anything — Emberly halts it and hands the decision back
+  to you rather than burning tokens indefinitely: **keep going**, **stop**, or
+  **say something** to steer. It never quietly resumes or quietly gives up. It
+  only trips on genuine no-progress (a loop that keeps changing files or getting
+  new results is left alone), and it's tunable — `[loop]` `enabled`,
+  `repeat_window`, `max_no_progress_turns`.
 - **Complete audit trail.** The append-only JSONL transcript is the ground
   truth — never rewritten — recording prompts, model output, every tool call
-  and result, and every permission decision. A crashed or killed session is
-  offered for resume on next launch.
+  and result, every permission decision, the trust decision, and any loop halt.
+  A crashed or killed session is offered for resume on next launch.
 
 ## For developers
 

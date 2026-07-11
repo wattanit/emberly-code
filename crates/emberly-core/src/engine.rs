@@ -8,6 +8,8 @@
 //! ingestion, and handle cancellation. Sandbox rules (Phase 2), retries
 //! (Phase 3), and transcript persistence (Phase 5) layer on later.
 
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -32,7 +34,7 @@ use crate::id::{AskId, PermissionId, SessionId};
 use crate::transcript::{
     ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord, TranscriptSink,
 };
-use crate::types::{PermissionRendering, SandboxStatus, TokenUsage};
+use crate::types::{LoopResolution, PermissionRendering, SandboxStatus, TokenUsage};
 
 /// The session title is the first user message, clipped to this many chars
 /// (Tech Spec §16 — the heuristic v1 title).
@@ -45,6 +47,29 @@ const KEEP_RECENT: usize = 6;
 /// Reserve this many tokens for model output when computing context usage,
 /// or the model's max output, whichever is smaller (Tech Spec §7).
 const OUTPUT_RESERVE: u64 = 8_000;
+
+/// The loop-breaking guardrail's tunables (S-5, Tech Spec §7). Defaults are
+/// initial — tune with use. `enabled = false` turns the guardrail off entirely.
+#[derive(Debug, Clone, Copy)]
+pub struct LoopConfig {
+    pub enabled: bool,
+    /// Trip when this many consecutive turns repeat the *same* tool-call
+    /// signature with no progress (default 3).
+    pub repeat_window: usize,
+    /// Trip when this many consecutive turns make no progress, even if the calls
+    /// vary (an absolute cap; default 6).
+    pub max_no_progress_turns: usize,
+}
+
+impl Default for LoopConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            repeat_window: 3,
+            max_no_progress_turns: 6,
+        }
+    }
+}
 
 /// Everything needed to construct an [`Engine`].
 pub struct EngineConfig {
@@ -59,6 +84,12 @@ pub struct EngineConfig {
     /// is never prompted and no tokens are spent (Requirements T-9). Fixed for
     /// the engine's life (a live config reload does not change it).
     pub tool_explanations: bool,
+    /// True when workspace trust was *newly* granted at startup this launch
+    /// (FR-1) — the engine records a `trust_decision` at session start. A
+    /// silently-already-trusted session leaves this false.
+    pub trust_granted: bool,
+    /// Loop-breaking guardrail tunables (S-5, Tech Spec §7).
+    pub loop_config: LoopConfig,
     pub truncate: TruncateConfig,
     /// Retry policy for retryable provider failures and mid-stream drops.
     pub retry: RetryPolicy,
@@ -179,6 +210,48 @@ fn explanation_from_args(args: &serde_json::Value) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
+/// What one tool-call turn did, for the loop guardrail's signature (S-5). Reset
+/// each turn; consumed at the turn boundary by [`Engine::evaluate_loop`].
+#[derive(Default)]
+struct TurnObservation {
+    /// `(tool_name, normalized-args)` per call, order-independent (sorted before
+    /// hashing).
+    calls: Vec<(String, String)>,
+    /// Concatenated tool-result content, hashed to detect identical results.
+    result_content: String,
+    /// Project-relative paths modified this turn.
+    files: Vec<String>,
+}
+
+/// Normalize a tool call's args for the loop signature (S-5): drop the
+/// T-9-injected `explanation` (a caption change is not progress and must not
+/// mask a repeat), then serialize. `serde_json`'s map is key-sorted, so equal
+/// args hash equal regardless of the model's key order.
+fn normalize_args(args: &serde_json::Value) -> String {
+    let mut a = args.clone();
+    if let Some(obj) = a.as_object_mut() {
+        obj.remove("explanation");
+    }
+    a.to_string()
+}
+
+/// A stable within-process hash (S-5 signature). Deterministic across a session,
+/// which is all the guardrail compares.
+fn stable_hash(s: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// The audit label for a loop resolution (S-5, Tech Spec §3.2).
+fn resolution_label(r: &LoopResolution) -> String {
+    match r {
+        LoopResolution::Resume => "resume".into(),
+        LoopResolution::Stop => "stop".into(),
+        LoopResolution::Steer(_) => "steer".into(),
+    }
+}
+
 /// A permission ask awaiting the user's answer: the id shown to the frontend,
 /// the oneshot the blocked tool waits on, and the original request (kept so an
 /// "allow for session"/"always allow" answer can be turned into a grant).
@@ -211,6 +284,24 @@ pub struct Engine {
     system: Option<String>,
     /// Whether tool-call explanations are enabled (T-9); see [`EngineConfig`].
     tool_explanations: bool,
+    /// Newly-granted workspace trust to record at session start (FR-1).
+    trust_granted: bool,
+    /// Loop-breaking guardrail state (S-5, Tech Spec §7).
+    loop_config: LoopConfig,
+    /// What the in-flight tool-call turn did (reset per turn).
+    turn_obs: TurnObservation,
+    /// Cumulative modified-file paths across the session (progress if a turn
+    /// adds a new one).
+    loop_seen_files: HashSet<String>,
+    /// Cumulative distinct tool-result hashes (progress if a turn adds a new
+    /// one).
+    loop_seen_results: HashSet<u64>,
+    /// Tool signature of the previous no-progress turn.
+    loop_last_sig: Option<u64>,
+    /// Consecutive no-progress turns with the *same* tool signature.
+    loop_same_sig_streak: usize,
+    /// Consecutive no-progress turns (any signature).
+    loop_no_progress_streak: usize,
     truncate: TruncateConfig,
     retry: RetryPolicy,
     gate: Arc<ChannelGate>,
@@ -304,6 +395,14 @@ impl Engine {
             effort: seed_effort,
             system: config.system,
             tool_explanations: config.tool_explanations,
+            trust_granted: config.trust_granted,
+            loop_config: config.loop_config,
+            turn_obs: TurnObservation::default(),
+            loop_seen_files: HashSet::new(),
+            loop_seen_results: HashSet::new(),
+            loop_last_sig: None,
+            loop_same_sig_streak: 0,
+            loop_no_progress_streak: 0,
             truncate: config.truncate,
             retry: config.retry,
             gate: Arc::new(ChannelGate { asks: asks_tx }),
@@ -360,6 +459,14 @@ impl Engine {
                 prompts_version: crate::prompts::VERSION,
             });
         }
+        // Record a newly-granted workspace-trust decision right after session
+        // start (FR-1, Tech Spec §3.2). Already-trusted launches record nothing.
+        if self.trust_granted {
+            self.write_transcript(TranscriptEvent::TrustDecision {
+                path: self.project_root.display().to_string(),
+                trusted: true,
+            });
+        }
 
         // Sandbox status is always-visible state (Requirements §6.7): surface it
         // at session start, and — when confinement is unavailable — explain the
@@ -398,7 +505,8 @@ impl Engine {
                 // No turn is running while idle; these are strays or no-ops here.
                 Command::Cancel
                 | Command::PermissionAnswer { .. }
-                | Command::AskUserAnswer { .. } => {}
+                | Command::AskUserAnswer { .. }
+                | Command::ResolveLoop { .. } => {}
                 // Idle is already a clean boundary — compact immediately.
                 Command::Compact => self.compact().await,
                 // Session switches are only issued at idle (the frontend gates
@@ -659,6 +767,21 @@ impl Engine {
                     {
                         return;
                     }
+                    // S-5: before issuing the next provider call, check whether
+                    // the loop is re-treading without progress. On a trip, hand
+                    // control to the user (resume / stop / steer) — never spin on.
+                    if let Some(reason) = self.evaluate_loop() {
+                        match self.await_loop_resolution(commands_rx, reason).await {
+                            LoopResolution::Resume => self.reset_loop_window(),
+                            LoopResolution::Stop => return,
+                            LoopResolution::Steer(text) => {
+                                self.reset_loop_window();
+                                self.record_user_message(&text);
+                                self.conversation.push(Message::user_text(text));
+                                self.emit_context_usage().await;
+                            }
+                        }
+                    }
                     // Loop: send the tool results back for another completion.
                 }
                 StreamEnd::Interrupted => {
@@ -851,6 +974,8 @@ impl Engine {
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
     ) -> ToolCallResult {
+        // Start a fresh loop-signature observation for this turn (S-5).
+        self.turn_obs = TurnObservation::default();
         let mut iter = tool_calls.into_iter();
         while let Some(call) = iter.next() {
             match self
@@ -870,6 +995,105 @@ impl Engine {
         ToolCallResult::Completed(emberly_tools::ToolOutcome::success("", ""))
     }
 
+    /// Fold the just-completed tool-call turn into the loop-guardrail state and
+    /// decide whether to halt (S-5, Tech Spec §7). Returns the halt reason when
+    /// the loop is re-treading without progress, else `None`. Consumes the
+    /// turn's observation.
+    fn evaluate_loop(&mut self) -> Option<String> {
+        if !self.loop_config.enabled {
+            return None;
+        }
+        let obs = std::mem::take(&mut self.turn_obs);
+        // A turn with no tool calls can't loop; treat it as progress-neutral.
+        if obs.calls.is_empty() {
+            return None;
+        }
+        // Order-independent tool signature.
+        let mut parts: Vec<String> = obs
+            .calls
+            .iter()
+            .map(|(name, args)| format!("{name}\u{0}{args}"))
+            .collect();
+        parts.sort();
+        let tool_sig = stable_hash(&parts.join("\n"));
+        let result_hash = stable_hash(&obs.result_content);
+
+        // Progress = a newly-modified file OR a not-seen-before result.
+        let new_file = obs.files.iter().any(|f| !self.loop_seen_files.contains(f));
+        let new_result = !self.loop_seen_results.contains(&result_hash);
+        for f in obs.files {
+            self.loop_seen_files.insert(f);
+        }
+        self.loop_seen_results.insert(result_hash);
+
+        if new_file || new_result {
+            self.reset_loop_window();
+            self.loop_last_sig = Some(tool_sig);
+            return None;
+        }
+
+        // No progress this turn.
+        self.loop_no_progress_streak += 1;
+        if self.loop_last_sig == Some(tool_sig) {
+            self.loop_same_sig_streak += 1;
+        } else {
+            self.loop_same_sig_streak = 1;
+        }
+        self.loop_last_sig = Some(tool_sig);
+
+        let cfg = self.loop_config;
+        if self.loop_same_sig_streak >= cfg.repeat_window {
+            Some("the last few steps repeated without progress".into())
+        } else if self.loop_no_progress_streak >= cfg.max_no_progress_turns {
+            Some("several steps in a row made no progress".into())
+        } else {
+            None
+        }
+    }
+
+    /// Reset the no-progress counters (S-5). Called on genuine progress and when
+    /// the user chooses to resume, so "keep going" doesn't instantly re-trip.
+    fn reset_loop_window(&mut self) {
+        self.loop_same_sig_streak = 0;
+        self.loop_no_progress_streak = 0;
+        self.loop_last_sig = None;
+    }
+
+    /// Surface the halt (harness voice) and park until the user decides
+    /// (S-5, Design §8.5): resume / stop / steer. Cancel or a departed frontend
+    /// resolves to stop — the guardrail never quietly resumes. Records one
+    /// `loop_halt` transcript event with the chosen resolution.
+    async fn await_loop_resolution(
+        &mut self,
+        commands_rx: &mut mpsc::Receiver<Command>,
+        reason: String,
+    ) -> LoopResolution {
+        self.emit(UiEvent::LoopHalted {
+            reason: reason.clone(),
+        })
+        .await;
+        let resolution = loop {
+            match commands_rx.recv().await {
+                Some(Command::ResolveLoop { resolution }) => break resolution,
+                // Esc/Ctrl-C while halted = stop here.
+                Some(Command::Cancel) => break LoopResolution::Stop,
+                // A mode toggle applies immediately; keep waiting for a decision.
+                Some(Command::SetMode { mode }) => self.set_mode(mode).await,
+                // Queue a compaction for after we resume (if we do).
+                Some(Command::Compact) => self.compact_requested = true,
+                // Strays (permission/ask answers with no pending prompt): ignore.
+                Some(_) => {}
+                // Frontend gone: stop, fail-safe (never spin unattended).
+                None => break LoopResolution::Stop,
+            }
+        };
+        self.write_transcript(TranscriptEvent::LoopHalt {
+            reason,
+            resolution: Some(resolution_label(&resolution)),
+        });
+        resolution
+    }
+
     /// Run one tool call, driving its execution concurrently with permission
     /// asks and cancellation.
     async fn run_one_tool_call(
@@ -880,6 +1104,14 @@ impl Engine {
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
     ) -> ToolCallResult {
         let args = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
+
+        // Record the (tool, normalized-args) for the loop signature (S-5),
+        // including unknown-tool attempts (a loop can re-tread those too).
+        if self.loop_config.enabled {
+            self.turn_obs
+                .calls
+                .push((call.name.clone(), normalize_args(&args)));
+        }
 
         let Some(tool) = self.tools.get(&call.name) else {
             return ToolCallResult::Completed(emberly_tools::ToolOutcome::failure(
@@ -1326,6 +1558,11 @@ impl Engine {
         call: &PendingToolCall,
         outcome: emberly_tools::ToolOutcome,
     ) {
+        // Accumulate this result into the turn's loop signature (S-5): identical
+        // repeated results are a no-progress signal.
+        if self.loop_config.enabled {
+            self.turn_obs.result_content.push_str(&outcome.content);
+        }
         let truncation = truncate_output(&outcome.content, &self.truncate);
 
         // Durable record: the model-visible (possibly truncated) output, plus a
@@ -1358,6 +1595,10 @@ impl Engine {
         .await;
 
         if let Some(change) = outcome.file_change {
+            // A newly-modified file is the strongest progress signal (S-5).
+            if self.loop_config.enabled {
+                self.turn_obs.files.push(change.path.clone());
+            }
             self.emit(UiEvent::FileModified {
                 path: change.path.clone(),
                 adds: change.adds,
@@ -1768,8 +2009,21 @@ fn append_rule_block(path: &std::path::Path, block: &str) -> std::io::Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::{explanation_from_args, inject_explanation_property};
+    use super::{explanation_from_args, inject_explanation_property, normalize_args};
     use serde_json::json;
+
+    #[test]
+    fn normalize_args_strips_explanation_so_a_caption_is_not_progress() {
+        // Same call, different T-9 caption → identical loop signature (S-5): a
+        // caption change must neither fake progress nor mask a repeat.
+        let a = normalize_args(&json!({ "path": "x", "explanation": "first try" }));
+        let b = normalize_args(&json!({ "path": "x", "explanation": "second try" }));
+        assert_eq!(a, b);
+        assert!(!a.contains("explanation"));
+        // A genuinely different arg changes the signature.
+        let c = normalize_args(&json!({ "path": "y" }));
+        assert_ne!(a, c);
+    }
 
     #[test]
     fn injects_optional_explanation_never_required() {

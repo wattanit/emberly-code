@@ -133,6 +133,22 @@ pub enum TranscriptEvent {
         executed: Option<String>,
     },
 
+    /// The workspace-trust decision for this session's root (FR-1, Tech Spec
+    /// §3.2, §6.7). Written when trust was newly granted at startup; a declined
+    /// root never starts a session, so only `trusted: true` reaches a transcript.
+    /// Additive — older readers warn-skip it, so no `SCHEMA_VERSION` bump.
+    TrustDecision { path: String, trusted: bool },
+
+    /// The loop guardrail halted a non-progressing loop (S-5, Tech Spec §3.2,
+    /// §7): the reason and the user's chosen resolution (`resume`/`stop`/`steer`,
+    /// `None` until resolved). Additive — older readers warn-skip it, no
+    /// `SCHEMA_VERSION` bump.
+    LoopHalt {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution: Option<String>,
+    },
+
     /// The model asked the user a question and it was resolved (T-8, Tech Spec
     /// §3.2): the question, any options offered, and the user's answer — or
     /// `None` when they declined. Additive — older readers warn-skip it, so no

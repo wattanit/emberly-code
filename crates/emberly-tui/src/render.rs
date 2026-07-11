@@ -60,6 +60,8 @@ pub fn frame(f: &mut Frame, app: &App) {
         render_permission(f, app, main);
     } else if app.pending_ask.is_some() {
         render_ask(f, app, main);
+    } else if app.pending_loop_halt.is_some() {
+        render_loop_halt(f, app, main);
     } else {
         // Conversation over the input box.
         let input_rows = app.editor.line_count().clamp(1, MAX_INPUT_ROWS);
@@ -763,6 +765,12 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
         strings::hints::PERMISSION
     } else if app.pending_ask.is_some() {
         strings::ask_user::HINT
+    } else if let Some(halt) = &app.pending_loop_halt {
+        if halt.steering {
+            strings::loop_halt::STEER_HINT
+        } else {
+            strings::loop_halt::HINT
+        }
     } else {
         strings::hints::NORMAL
     };
@@ -999,6 +1007,84 @@ fn render_ask(f: &mut Frame, app: &App, area: Rect) {
             strings::ask_user::HINT,
             theme.chrome(),
         ))),
+        footer_area,
+    );
+}
+
+// ---- loop-halt surface — the harness stepping in (Design §8.5) ------------
+
+/// Render the loop-halt surface (S-5). The **harness voice**, calm and
+/// out-of-band — not model output, and deliberately distinct from the question
+/// prompt (that is the model asking; this is the harness stepping in when the
+/// model stopped progressing). No alarm styling, never the safety band; the
+/// user always chooses keep-going / stop / say-something.
+fn render_loop_halt(f: &mut Frame, app: &App, area: Rect) {
+    use strings::loop_halt as s;
+    let theme = &app.theme;
+    let Some(halt) = &app.pending_loop_halt else {
+        return;
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.chrome())
+        .title(Span::styled(format!(" {} ", s::TITLE), theme.warning()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 3 || inner.width == 0 {
+        return;
+    }
+    let width = usize::from(inner.width);
+
+    let mut lines: Vec<Line> = Vec::new();
+    // The calm harness line, then the specific reason.
+    lines.push(Line::from(Span::styled(s::HEADING, theme.strong())));
+    for row in text::wrap(&halt.reason, width) {
+        lines.push(Line::from(Span::styled(row, theme.chrome())));
+    }
+    lines.push(Line::from(""));
+
+    if halt.steering {
+        // The steer field (hand a message back to the model).
+        lines.push(Line::from(Span::styled(s::STEER_LABEL, theme.chrome())));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", markers::USER_PROMPT), theme.accent()),
+            Span::styled(halt.editor.text().to_string(), theme.primary()),
+            Span::styled("▏", theme.accent()),
+        ]));
+    } else {
+        // The three choices.
+        for (key, label) in [
+            ("g", s::KEEP_GOING),
+            ("s", s::STOP),
+            ("t", s::SAY_SOMETHING),
+        ] {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  [{key}] "), theme.accent()),
+                Span::styled(label, theme.primary()),
+            ]));
+        }
+    }
+
+    let footer_h = 1u16;
+    let body_h = inner.height.saturating_sub(footer_h).max(1);
+    let body_area = Rect {
+        height: body_h,
+        ..inner
+    };
+    let footer_area = Rect {
+        y: inner.y + inner.height - footer_h,
+        height: footer_h,
+        ..inner
+    };
+    let hint = if halt.steering {
+        s::STEER_HINT
+    } else {
+        s::HINT
+    };
+    f.render_widget(Paragraph::new(lines), body_area);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(hint, theme.chrome()))),
         footer_area,
     );
 }
@@ -1324,6 +1410,32 @@ mod tests {
         assert!(screen.contains("question"), "calm title");
         // It must NOT borrow the permission prompt's loud safety vocabulary
         // (Design §5.1/§2 — the safety band stays rare).
+        assert!(!screen.contains("PERMISSION REQUIRED"));
+        assert!(!screen.contains("OUTSIDE YOUR PROJECT"));
+    }
+
+    #[test]
+    fn loop_halt_is_harness_voice_not_a_prompt() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.apply_event(UiEvent::LoopHalted {
+            reason: "read_file nope.txt three times".into(),
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(screen.contains("Stopped"), "harness voice heading");
+        assert!(
+            screen.contains("read_file nope.txt three times"),
+            "the reason"
+        );
+        assert!(
+            screen.contains("keep going") && screen.contains("stop here"),
+            "the choices"
+        );
+        // Neither a permission prompt nor a question prompt.
         assert!(!screen.contains("PERMISSION REQUIRED"));
         assert!(!screen.contains("OUTSIDE YOUR PROJECT"));
     }

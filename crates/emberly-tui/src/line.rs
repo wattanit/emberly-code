@@ -12,8 +12,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use emberly_core::{
-    AskAnswer, AskId, Command, FrontendPorts, Mode, PermissionDecision, PermissionId,
-    PermissionRendering, SandboxStatus, UiEvent,
+    AskAnswer, AskId, Command, FrontendPorts, LoopResolution, Mode, PermissionDecision,
+    PermissionId, PermissionRendering, SandboxStatus, UiEvent,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -110,6 +110,7 @@ impl LineRenderer {
             UiEvent::AskUserRequest {
                 question, options, ..
             } => self.render_ask(question, options, out)?,
+            UiEvent::LoopHalted { reason } => self.render_loop_halt(reason, out)?,
             UiEvent::HarnessError { what, why, next } => {
                 writeln!(out, "\nerror: {what}")?;
                 writeln!(out, "  why:  {why}")?;
@@ -232,6 +233,17 @@ impl LineRenderer {
         }
         Ok(())
     }
+
+    /// The loop-halt surface in degraded form (S-5, Design §8.5, §7): the
+    /// harness voice, calm — what happened, then the choices. No alarm styling.
+    fn render_loop_halt(&self, reason: &str, out: &mut impl Write) -> io::Result<()> {
+        use crate::strings::loop_halt as s;
+        writeln!(out)?;
+        writeln!(out, "{}", s::HEADING)?;
+        writeln!(out, "  {reason}")?;
+        writeln!(out, "{}", s::LINE_PROMPT)?;
+        Ok(())
+    }
 }
 
 impl Default for LineRenderer {
@@ -280,12 +292,26 @@ pub fn parse_ask_answer(line: &str, options: &[String]) -> AskAnswer {
     AskAnswer::Answered(text.to_string())
 }
 
+/// Interpret a loop-halt answer line (S-5, Design §8.5). `keep`/`go`/`resume`/
+/// `1` → resume; `stop`/`2` → stop; an empty line → stop (never keep spending
+/// unattended); anything else is a steer message handed back to the model.
+#[must_use]
+pub fn parse_loop_resolution(line: &str) -> LoopResolution {
+    let text = line.trim();
+    match text.to_lowercase().as_str() {
+        "keep" | "go" | "resume" | "keep going" | "1" => LoopResolution::Resume,
+        "stop" | "2" | "" => LoopResolution::Stop,
+        _ => LoopResolution::Steer(text.to_string()),
+    }
+}
+
 /// A decision prompt awaiting the next stdin line. Only one is ever open at a
 /// time (the engine serializes tool calls), but keeping them in one enum makes
 /// it impossible for a permission answer and a question answer to cross wires.
 enum Pending {
     Permission(PermissionId),
     Ask { id: AskId, options: Vec<String> },
+    Loop,
 }
 
 /// Run the line-mode frontend: render events to stdout, forward stdin lines to
@@ -342,6 +368,9 @@ pub async fn run(
                         UiEvent::AskUserRequest { id, options, .. } => {
                             pending = Some(Pending::Ask { id, options });
                         }
+                        UiEvent::LoopHalted { .. } => {
+                            pending = Some(Pending::Loop);
+                        }
                         _ => {}
                     }
                 }
@@ -356,6 +385,9 @@ pub async fn run(
                             }
                             Pending::Ask { id, options } => {
                                 let _ = tx.send(Command::AskUserAnswer { id, answer: parse_ask_answer(&line, &options) }).await;
+                            }
+                            Pending::Loop => {
+                                let _ = tx.send(Command::ResolveLoop { resolution: parse_loop_resolution(&line) }).await;
                             }
                         }
                     } else if line.trim() == "/cancel" {
@@ -562,6 +594,35 @@ mod tests {
     }
 
     #[test]
+    fn loop_halt_renders_harness_voice_no_alarm() {
+        let out = render_to_string(&UiEvent::LoopHalted {
+            reason: "read nope.txt repeatedly".into(),
+        });
+        assert!(out.contains("Stopped"), "harness heading: {out:?}");
+        assert!(out.contains("read nope.txt repeatedly"));
+        assert!(
+            out.contains("keep going") && out.contains("stop"),
+            "choices offered"
+        );
+        // Not a safety prompt.
+        assert!(!out.contains("!!"));
+    }
+
+    #[test]
+    fn parse_loop_resolution_maps_keep_stop_empty_and_steer() {
+        assert_eq!(parse_loop_resolution("keep"), LoopResolution::Resume);
+        assert_eq!(parse_loop_resolution("1"), LoopResolution::Resume);
+        assert_eq!(parse_loop_resolution("stop"), LoopResolution::Stop);
+        // Empty stops — never keep spending unattended.
+        assert_eq!(parse_loop_resolution("   "), LoopResolution::Stop);
+        // Anything else is a steer message handed back to the model.
+        assert_eq!(
+            parse_loop_resolution("focus on the parser"),
+            LoopResolution::Steer("focus on the parser".into())
+        );
+    }
+
+    #[test]
     fn parse_ask_answer_handles_number_text_and_empty() {
         let options = vec!["dev".to_string(), "prod".to_string()];
         assert_eq!(
@@ -598,6 +659,9 @@ mod tests {
                 id: AskId(1),
                 question: "ตกลงไหม?".into(),
                 options: vec!["ใช่".into(), "ไม่".into()],
+            },
+            UiEvent::LoopHalted {
+                reason: "no progress".into(),
             },
             UiEvent::ToolStarted {
                 call_id: ToolCallId::new("c"),

@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use emberly_core::{
-    channel, AskAnswer, CaptureSink, Command, Engine, EngineConfig, FileTranscript, Mode,
-    PermissionDecision, RetryPolicy, RuleEngine, RuleSource, SandboxStatus, SessionId,
-    TranscriptEvent, TranscriptSink, UiEvent,
+    channel, AskAnswer, CaptureSink, Command, Engine, EngineConfig, FileTranscript, LoopConfig,
+    LoopResolution, Mode, PermissionDecision, RetryPolicy, RuleEngine, RuleSource, SandboxStatus,
+    SessionId, TranscriptEvent, TranscriptSink, UiEvent,
 };
 use emberly_providers::{
     ContentBlock, Effort, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
@@ -58,6 +58,13 @@ fn make_config(
         // Off by default here so existing tests see byte-identical requests;
         // the T-9 tests flip this field on the returned config explicitly.
         tool_explanations: false,
+        trust_granted: false,
+        // Guardrail off by default so existing multi-turn tests are unaffected;
+        // the S-5 tests enable it explicitly on the returned config.
+        loop_config: LoopConfig {
+            enabled: false,
+            ..LoopConfig::default()
+        },
         truncate: TruncateConfig::default(),
         // Fast retries so retry tests don't wait on real backoff.
         retry: RetryPolicy {
@@ -1611,4 +1618,215 @@ async fn explanation_and_ask_user_together() {
         .system
         .unwrap_or_default()
         .contains("Tool-call explanations"));
+}
+
+// --- FR-1: trust decision recorded at session start ---------------------------
+
+#[tokio::test]
+async fn newly_granted_trust_is_recorded_once() {
+    let root = temp_project();
+    let sink = CaptureSink::new();
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(vec![ScriptedResponse::text("hi")])),
+        root,
+        Box::new(sink.clone()),
+    );
+    config.trust_granted = true;
+    let mut h = spawn(config);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let _ = h.collect(None).await;
+
+    let trust_records = sink
+        .records()
+        .iter()
+        .filter(|r| {
+            matches!(
+                &r.event,
+                TranscriptEvent::TrustDecision { trusted: true, .. }
+            )
+        })
+        .count();
+    assert_eq!(trust_records, 1, "trust decision recorded exactly once");
+}
+
+#[tokio::test]
+async fn already_trusted_session_records_no_trust_decision() {
+    let root = temp_project();
+    // Default config has trust_granted = false (already-trusted / silent).
+    let (mut h, sink) = start_capturing(vec![ScriptedResponse::text("hi")], root);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let _ = h.collect(None).await;
+    assert!(
+        !sink
+            .records()
+            .iter()
+            .any(|r| matches!(&r.event, TranscriptEvent::TrustDecision { .. })),
+        "no trust record when trust was not newly granted"
+    );
+}
+
+// --- S-5: loop-breaking guardrail (Tech Spec §7) ------------------------------
+
+fn spawn_with_loop(
+    scripts: Vec<ScriptedResponse>,
+    root: PathBuf,
+    loop_config: LoopConfig,
+) -> (Harness, CaptureSink) {
+    let sink = CaptureSink::new();
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(scripts)),
+        root,
+        Box::new(sink.clone()),
+    );
+    config.loop_config = loop_config;
+    (spawn(config), sink)
+}
+
+/// Drive a turn to completion, answering the first `LoopHalted` with `resolution`.
+async fn drive_resolving_loop(h: &mut Harness, resolution: LoopResolution) -> Vec<UiEvent> {
+    let mut events = Vec::new();
+    let mut pending = Some(resolution);
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(500), h.events_rx.recv()).await
+    {
+        if matches!(event, UiEvent::LoopHalted { .. }) {
+            if let Some(r) = pending.take() {
+                h.send(Command::ResolveLoop { resolution: r }).await;
+            }
+        }
+        events.push(event);
+    }
+    events
+}
+
+/// A tiny window so a re-treading loop trips quickly: read the same missing file
+/// each turn (deterministic identical failure = no progress, same signature).
+fn tiny_loop() -> LoopConfig {
+    LoopConfig {
+        enabled: true,
+        repeat_window: 2,
+        max_no_progress_turns: 99,
+    }
+}
+
+fn read_missing(id: &str) -> ScriptedResponse {
+    ScriptedResponse::tool_call(id, "read_file", r#"{"path":"nope.txt"}"#)
+}
+
+#[tokio::test]
+async fn re_treading_loop_halts_and_resume_continues() {
+    let root = temp_project();
+    let scripts = vec![
+        read_missing("c1"),
+        read_missing("c2"),
+        read_missing("c3"),
+        ScriptedResponse::text("done after resume"),
+    ];
+    let (mut h, sink) = spawn_with_loop(scripts, root, tiny_loop());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_resolving_loop(&mut h, LoopResolution::Resume).await;
+
+    // The guardrail halted exactly once, then resumed to completion.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, UiEvent::LoopHalted { .. }))
+            .count(),
+        1,
+        "halts once, not every turn"
+    );
+    assert_eq!(deltas(&events), "done after resume");
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::LoopHalt { resolution: Some(res), .. } if res == "resume"
+    )));
+}
+
+#[tokio::test]
+async fn re_treading_loop_stop_ends_the_turn() {
+    let root = temp_project();
+    let scripts = vec![read_missing("c1"), read_missing("c2"), read_missing("c3")];
+    let (mut h, sink) = spawn_with_loop(scripts, root, tiny_loop());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_resolving_loop(&mut h, LoopResolution::Stop).await;
+
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::LoopHalted { .. })));
+    assert!(
+        events.iter().any(|e| matches!(e, UiEvent::TurnEnded)),
+        "stop ends the turn cleanly"
+    );
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::LoopHalt { resolution: Some(res), .. } if res == "stop"
+    )));
+}
+
+#[tokio::test]
+async fn re_treading_loop_steer_injects_and_continues() {
+    let root = temp_project();
+    let scripts = vec![
+        read_missing("c1"),
+        read_missing("c2"),
+        read_missing("c3"),
+        ScriptedResponse::text("ok, steering"),
+    ];
+    let (mut h, sink) = spawn_with_loop(scripts, root, tiny_loop());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events =
+        drive_resolving_loop(&mut h, LoopResolution::Steer("read a.txt instead".into())).await;
+
+    assert_eq!(deltas(&events), "ok, steering");
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::LoopHalt { resolution: Some(res), .. } if res == "steer"
+    )));
+}
+
+#[tokio::test]
+async fn progressing_loop_never_halts() {
+    let root = temp_project();
+    // Each turn reads a *different* missing file → different result each time →
+    // genuine (if failing) progress → the guardrail must not trip.
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "read_file", r#"{"path":"a.txt"}"#),
+        ScriptedResponse::tool_call("c2", "read_file", r#"{"path":"b.txt"}"#),
+        ScriptedResponse::tool_call("c3", "read_file", r#"{"path":"c.txt"}"#),
+        ScriptedResponse::tool_call("c4", "read_file", r#"{"path":"d.txt"}"#),
+        ScriptedResponse::text("all read"),
+    ];
+    let (mut h, _sink) = spawn_with_loop(scripts, root, tiny_loop());
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = h.collect(None).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::LoopHalted { .. })),
+        "a loop that changes state each turn is progress, never halted"
+    );
+    assert_eq!(deltas(&events), "all read");
+}
+
+#[tokio::test]
+async fn disabled_guardrail_never_halts() {
+    let root = temp_project();
+    let scripts = vec![
+        read_missing("c1"),
+        read_missing("c2"),
+        read_missing("c3"),
+        read_missing("c4"),
+        ScriptedResponse::text("done"),
+    ];
+    let off = LoopConfig {
+        enabled: false,
+        ..LoopConfig::default()
+    };
+    let (mut h, _sink) = spawn_with_loop(scripts, root, off);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = h.collect(None).await;
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, UiEvent::LoopHalted { .. })));
+    assert_eq!(deltas(&events), "done");
 }

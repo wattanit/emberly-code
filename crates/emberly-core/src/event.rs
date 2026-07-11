@@ -79,6 +79,13 @@ pub enum UiEvent {
         options: Vec<String>,
     },
 
+    /// The loop-breaking guardrail halted a non-progressing loop (S-5, Tech Spec
+    /// §7, Design §8.5). A **harness-world** moment — rendered in the harness's
+    /// own out-of-band voice, not as model output, and distinct from the question
+    /// prompt. The frontend offers resume / stop / steer and replies with
+    /// [`Command::ResolveLoop`](crate::command::Command::ResolveLoop).
+    LoopHalted { reason: String },
+
     /// Context-window usage against the budget (Requirements §8.4). Always
     /// visible in the UI; invisible exhaustion is a defect.
     ContextUsage { pct: u8, tokens: u64 },
