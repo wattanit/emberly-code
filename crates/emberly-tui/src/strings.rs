@@ -36,6 +36,22 @@ pub mod permission {
     pub const MORE_BELOW: &str = "more below — scroll to review before allowing";
 }
 
+/// The `ask_user` question prompt (T-8, Design §5.1). Deliberately its **own**
+/// module, not shared with `permission`: this prompt is calm and neutral, has
+/// no safety vocabulary, and never uses the reserved safety band. Shared
+/// verbatim by both frontends for parity.
+pub mod ask_user {
+    pub const TITLE: &str = "question";
+    /// Leads the free-text answer field.
+    pub const ANSWER_LABEL: &str = "your answer";
+    /// Status/footer hint. No "safe default" language — Esc declines, and Enter
+    /// never auto-answers (Design §5.1).
+    pub const HINT: &str = "type answer · ↑↓ choose · Enter send · Esc decline";
+    /// Degraded-mode heading + decline hint (line frontend).
+    pub const HEADING: &str = "QUESTION";
+    pub const DECLINE_HINT: &str = "[Enter] send · empty = declined";
+}
+
 /// Status-bar and sidebar chrome (Design §3).
 pub mod status {
     pub const CONTEXT_ABBR: &str = "ctx";
@@ -78,6 +94,9 @@ pub mod markers {
     /// Reasoning trail: collapsed (expandable) vs expanded (Design §4.4).
     pub const REASONING_COLLAPSED: &str = "▸";
     pub const REASONING_EXPANDED: &str = "▾";
+    /// Leads the dim tool-call explanation caption (T-9, Design §4.5) so it
+    /// reads as an annotation of the call above, not as tool output.
+    pub const EXPLANATION: &str = "↳";
 }
 
 /// One-line orientation shown on clean exit (Design §8.3). The richer summary

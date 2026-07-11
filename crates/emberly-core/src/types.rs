@@ -66,6 +66,19 @@ impl PermissionDecision {
     }
 }
 
+/// The user's reply to an `ask_user` question (T-8). Unlike a permission
+/// decision, this carries data and has no unsafe default: there is no keypress
+/// that answers for the user; a dismissal is an explicit
+/// [`Declined`](AskAnswer::Declined) (Design §5.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskAnswer {
+    /// The user's answer: free text, or the label of a chosen option.
+    Answered(String),
+    /// The user dismissed the question without answering.
+    Declined,
+}
+
 /// Provider-reported or estimated token counts for a completion
 /// (Requirements P-6, Tech Spec §4.4). Drives the context indicator and the
 /// cost estimate. Defined in `emberly-providers` and re-exported so the two

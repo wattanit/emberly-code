@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::registry::ToolRegistry;
 
+mod ask_user;
 mod bash;
 mod edit;
 mod glob;
@@ -12,6 +13,7 @@ mod grep;
 mod read;
 mod write;
 
+pub use ask_user::AskUserTool;
 pub use bash::BashTool;
 pub use edit::EditFileTool;
 pub use glob::GlobTool;
@@ -29,5 +31,6 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(BashTool::default()));
     registry.register(Arc::new(GlobTool));
     registry.register(Arc::new(GrepTool));
+    registry.register(Arc::new(AskUserTool));
     registry
 }

@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::{PermissionId, SessionId};
-use crate::types::{Effort, Mode, PermissionDecision};
+use crate::id::{AskId, PermissionId, SessionId};
+use crate::types::{AskAnswer, Effort, Mode, PermissionDecision};
 
 /// A command issued to the engine. `#[non_exhaustive]` so new commands are not
 /// a breaking change.
@@ -25,6 +25,13 @@ pub enum Command {
         id: PermissionId,
         decision: PermissionDecision,
     },
+
+    /// The user's answer to a pending `ask_user` question (T-8), correlated by
+    /// `id` with the [`UiEvent::AskUserRequest`](crate::event::UiEvent::AskUserRequest)
+    /// that raised it. Carries the typed answer or an explicit
+    /// [`Declined`](crate::types::AskAnswer::Declined); Enter never auto-answers
+    /// (Design §5.1).
+    AskUserAnswer { id: AskId, answer: AskAnswer },
 
     /// Change the auto-accept mode (Requirements §6.4). Handled from Phase 2;
     /// the engine validates the transition against the sandbox status.

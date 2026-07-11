@@ -51,3 +51,15 @@ impl fmt::Display for PermissionId {
         write!(f, "{}", self.0)
     }
 }
+
+/// Correlates an `AskUserRequest` event with the `AskUserAnswer` command that
+/// resolves it (T-8). Engine-assigned and monotonic within a session; a sibling
+/// of [`PermissionId`], kept distinct so an answer never crosses wires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AskId(pub u64);
+
+impl fmt::Display for AskId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}

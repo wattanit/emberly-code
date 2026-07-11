@@ -10,8 +10,9 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use emberly_core::{
-    resume, Command, Effort, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus,
-    SessionId, TokenUsage, ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
+    resume, AskAnswer, AskId, Command, Effort, PermissionDecision, PermissionId,
+    PermissionRendering, SandboxStatus, SessionId, TokenUsage, ToolCallId, TranscriptEvent,
+    TranscriptRecord, UiEvent,
 };
 
 use std::collections::HashMap;
@@ -56,6 +57,9 @@ pub enum ConvItem {
         /// What the call is doing (from `describe`) — e.g. `run: cargo test`.
         /// Set at start and kept; the result status is separate.
         summary: String,
+        /// The model's caption for a non-obvious call (T-9, Design §4.5).
+        /// `None` when the model gave none — rendered as nothing, no placeholder.
+        explanation: Option<String>,
         /// `None` while running; `Some(ok)` once finished.
         done: Option<bool>,
         /// The finished one-line status (e.g. `exit 0`, `read foo.rs (12 lines)`).
@@ -212,6 +216,32 @@ pub enum Action {
     EditFile(PathBuf),
 }
 
+/// A pending `ask_user` question and the state of the user's reply-in-progress
+/// (T-8, Design §5.1). Options are selectable and a free-text answer is always
+/// available; `selected` starts `None` so Enter never auto-answers.
+pub struct AskPrompt {
+    pub id: AskId,
+    pub question: String,
+    pub options: Vec<String>,
+    /// The highlighted option, or `None` until the user moves to one — there is
+    /// no default selection (Design §5.1: no unsafe default).
+    pub selected: Option<usize>,
+    /// The free-text answer buffer, always available alongside any options.
+    pub editor: LineEditor,
+}
+
+impl AskPrompt {
+    fn new(id: AskId, question: String, options: Vec<String>) -> Self {
+        Self {
+            id,
+            question,
+            options,
+            selected: None,
+            editor: LineEditor::new(),
+        }
+    }
+}
+
 /// The complete view-model the renderer reads.
 pub struct App {
     pub session: SessionInfo,
@@ -257,6 +287,10 @@ pub struct App {
     /// Scroll offset (rows from top) into the current permission prompt's
     /// content, so long commands/diffs can be reviewed in full (Design §5).
     pub permission_scroll: usize,
+    /// The `ask_user` question currently awaiting an answer, if any (T-8). While
+    /// set, the question prompt owns the screen and normal input is suspended
+    /// (Design §5.1). Never the permission prompt's safety styling.
+    pub pending_ask: Option<AskPrompt>,
     pub sidebar_visible: bool,
     /// Conversation scrollback offset in rows *from the bottom*: 0 follows the
     /// latest output; larger values scroll up into history. Clamped to content
@@ -318,6 +352,7 @@ impl App {
             mode: emberly_core::Mode::default(),
             modified_files: Vec::new(),
             pending_permission: None,
+            pending_ask: None,
             permission_scroll: 0,
             sidebar_visible: true,
             scroll: 0,
@@ -375,10 +410,19 @@ impl App {
                                 .map(|p| format!("{tool} {p}"))
                         })
                         .unwrap_or_else(|| tool.clone());
+                    // The explanation (T-9) rides in the recorded args, so a
+                    // replayed session shows the same caption a live one did.
+                    let explanation = args
+                        .get("explanation")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
                     self.conversation.push(ConvItem::Tool {
                         call_id: call_id.clone(),
                         tool: tool.clone(),
                         summary,
+                        explanation,
                         done: None,
                         result: None,
                         preview: None,
@@ -456,12 +500,14 @@ impl App {
                 call_id,
                 tool,
                 summary,
+                explanation,
             } => {
                 self.streaming = false;
                 self.conversation.push(ConvItem::Tool {
                     call_id,
                     tool,
                     summary,
+                    explanation,
                     done: None,
                     result: None,
                     preview: None,
@@ -490,6 +536,14 @@ impl App {
             UiEvent::PermissionRequest { id, rendering } => {
                 self.pending_permission = Some((id, rendering));
                 self.permission_scroll = 0; // start every prompt at the top
+            }
+            UiEvent::AskUserRequest {
+                id,
+                question,
+                options,
+            } => {
+                self.streaming = false;
+                self.pending_ask = Some(AskPrompt::new(id, question, options));
             }
             UiEvent::ContextUsage { pct, tokens } => {
                 self.context_pct = pct;
@@ -609,6 +663,11 @@ impl App {
         }
         if let Some(id) = self.pending_permission.as_ref().map(|(i, _)| *i) {
             return self.on_permission_key(id, key);
+        }
+        // The question prompt also owns the keyboard while open (Design §5.1),
+        // but with opposite semantics: no unsafe default, Esc declines.
+        if self.pending_ask.is_some() {
+            return self.on_ask_key(key);
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -730,23 +789,30 @@ impl App {
     // ---- motion (Design §6.4) --------------------------------------------
 
     /// Whether the model is actively working — drives the spinner and the
-    /// streaming accent glow. Off during a permission prompt and when motion is
-    /// disabled (that screen is perfectly still).
+    /// streaming accent glow. Off during a permission prompt or a question
+    /// prompt, and when motion is disabled (those screens are perfectly still).
     #[must_use]
     pub fn is_working(&self) -> bool {
-        self.motion && self.busy && self.pending_permission.is_none()
+        self.motion && self.busy && !self.is_deciding()
     }
 
     /// Whether *anything* is animating right now — the working spinner/glow, or
     /// a transient effect (overlay ease-in, sidebar settle). The ticker redraws
     /// only while this is true, so idle screens stay quiet. Always false during
-    /// a permission prompt or with motion off.
+    /// a decision prompt or with motion off.
     #[must_use]
     pub fn is_animating(&self) -> bool {
-        if !self.motion || self.pending_permission.is_some() {
+        if !self.motion || self.is_deciding() {
             return false;
         }
         self.busy || self.overlay_ease > 0 || self.sidebar_settle > 0
+    }
+
+    /// Whether a decision prompt (permission or question) is open — those
+    /// screens are perfectly still (Design §5, §5.1, §6.4).
+    #[must_use]
+    fn is_deciding(&self) -> bool {
+        self.pending_permission.is_some() || self.pending_ask.is_some()
     }
 
     /// Advance one animation frame. Called by the ticker only while
@@ -843,7 +909,7 @@ impl App {
     /// prompt or overlay is open — nothing may be typed into a decision, and an
     /// overlay is read-only (Design §5, §4.2).
     pub fn on_paste(&mut self, text: &str) {
-        if self.pending_permission.is_none() && self.overlays.is_empty() && self.palette.is_none() {
+        if !self.is_deciding() && self.overlays.is_empty() && self.palette.is_none() {
             self.editor.insert_str(text);
         }
     }
@@ -895,6 +961,70 @@ impl App {
         self.pending_permission = None;
         self.permission_scroll = 0;
         Action::Command(Command::PermissionAnswer { id, decision })
+    }
+
+    /// Keys while a question prompt is open (T-8, Design §5.1). Typing edits the
+    /// free-text answer; ↑/↓ move the option selection; Enter submits the typed
+    /// text if any, else the highlighted option, else **nothing** — Enter never
+    /// auto-answers. Esc declines (a real answer). No key silently decides.
+    fn on_ask_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(prompt) = self.pending_ask.as_mut() else {
+            return Action::None;
+        };
+        match key.code {
+            // Dismiss = an explicit decline returned to the model (Design §5.1).
+            KeyCode::Esc => self.answer_ask(AskAnswer::Declined),
+            KeyCode::Up => {
+                prompt.selected = match prompt.selected {
+                    None | Some(0) => None,
+                    Some(i) => Some(i - 1),
+                };
+                Action::None
+            }
+            KeyCode::Down if !prompt.options.is_empty() => {
+                let last = prompt.options.len() - 1;
+                prompt.selected = Some(prompt.selected.map_or(0, |i| (i + 1).min(last)));
+                Action::None
+            }
+            KeyCode::Enter => {
+                let text = prompt.editor.text().trim().to_string();
+                if !text.is_empty() {
+                    return self.answer_ask(AskAnswer::Answered(text));
+                }
+                if let Some(option) = prompt.selected.and_then(|i| prompt.options.get(i)) {
+                    let answer = AskAnswer::Answered(option.clone());
+                    return self.answer_ask(answer);
+                }
+                // Nothing typed, nothing chosen: ignored (no unsafe default).
+                Action::None
+            }
+            // A literal newline in the free-text answer (multi-line), matching
+            // the main input's Ctrl+J affordance.
+            KeyCode::Char('j') if ctrl => {
+                prompt.editor.newline();
+                Action::None
+            }
+            KeyCode::Backspace => {
+                prompt.editor.backspace();
+                Action::None
+            }
+            KeyCode::Char(c) if !ctrl => {
+                prompt.editor.insert_char(c);
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn answer_ask(&mut self, answer: AskAnswer) -> Action {
+        let Some(prompt) = self.pending_ask.take() else {
+            return Action::None;
+        };
+        Action::Command(Command::AskUserAnswer {
+            id: prompt.id,
+            answer,
+        })
     }
 
     // ---- overlays ---------------------------------------------------------
@@ -1811,6 +1941,7 @@ mod tests {
             call_id: id.clone(),
             tool: "bash".into(),
             summary: "run: ls".into(),
+            explanation: None,
         });
         a.apply_event(UiEvent::ToolFinished {
             call_id: id.clone(),
@@ -1831,6 +1962,23 @@ mod tests {
                 assert_eq!(summary, "run: ls");
                 assert_eq!(result.as_deref(), Some("exit 0"));
                 assert_eq!(preview.as_deref(), Some("hello\nworld"));
+            }
+            other => panic!("expected a tool item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_started_carries_the_explanation_onto_the_item() {
+        let mut a = app();
+        a.apply_event(UiEvent::ToolStarted {
+            call_id: ToolCallId::new("c1"),
+            tool: "bash".into(),
+            summary: "run: sed …".into(),
+            explanation: Some("raise the log level".into()),
+        });
+        match &a.conversation[0] {
+            ConvItem::Tool { explanation, .. } => {
+                assert_eq!(explanation.as_deref(), Some("raise the log level"));
             }
             other => panic!("expected a tool item, got {other:?}"),
         }
@@ -2094,6 +2242,107 @@ mod tests {
             })
         );
         assert!(a.pending_permission.is_none());
+    }
+
+    // ---- ask_user question prompt (T-8, Design §5.1) ---------------------
+
+    fn ask(a: &mut App, options: &[&str]) {
+        a.apply_event(UiEvent::AskUserRequest {
+            id: AskId(7),
+            question: "which environment?".into(),
+            options: options.iter().map(|s| (*s).to_string()).collect(),
+        });
+    }
+
+    #[test]
+    fn ask_enter_never_auto_answers() {
+        let mut a = app();
+        ask(&mut a, &["dev", "prod"]);
+        // Nothing typed, no option chosen: Enter must not answer (Design §5.1).
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(action, Action::None);
+        assert!(a.pending_ask.is_some(), "the question is still waiting");
+    }
+
+    #[test]
+    fn ask_esc_declines() {
+        let mut a = app();
+        ask(&mut a, &["dev", "prod"]);
+        let action = a.on_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(
+            action,
+            Action::Command(Command::AskUserAnswer {
+                id: AskId(7),
+                answer: AskAnswer::Declined,
+            })
+        );
+        assert!(a.pending_ask.is_none());
+    }
+
+    #[test]
+    fn ask_arrow_then_enter_picks_the_selected_option() {
+        let mut a = app();
+        ask(&mut a, &["dev", "prod"]);
+        a.on_key(KeyEvent::from(KeyCode::Down)); // select "dev" (index 0)
+        a.on_key(KeyEvent::from(KeyCode::Down)); // select "prod" (index 1)
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            action,
+            Action::Command(Command::AskUserAnswer {
+                id: AskId(7),
+                answer: AskAnswer::Answered("prod".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn ask_free_text_submits_and_beats_a_selection() {
+        let mut a = app();
+        ask(&mut a, &["dev", "prod"]);
+        a.on_key(KeyEvent::from(KeyCode::Down)); // highlight an option…
+        for c in "staging".chars() {
+            a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        // …but typed text wins on Enter.
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            action,
+            Action::Command(Command::AskUserAnswer {
+                id: AskId(7),
+                answer: AskAnswer::Answered("staging".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn ask_free_text_works_without_options() {
+        let mut a = app();
+        ask(&mut a, &[]);
+        for c in "yes".chars() {
+            a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            action,
+            Action::Command(Command::AskUserAnswer {
+                id: AskId(7),
+                answer: AskAnswer::Answered("yes".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn ask_prompt_stills_motion() {
+        let mut a = app();
+        a.busy = true;
+        a.motion = true;
+        assert!(a.is_working(), "working before the question");
+        ask(&mut a, &["dev"]);
+        assert!(
+            !a.is_working(),
+            "no spinner while a question is up (Design §6.4)"
+        );
+        assert!(!a.is_animating());
     }
 
     #[test]

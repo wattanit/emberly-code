@@ -133,6 +133,18 @@ pub enum TranscriptEvent {
         executed: Option<String>,
     },
 
+    /// The model asked the user a question and it was resolved (T-8, Tech Spec
+    /// §3.2): the question, any options offered, and the user's answer — or
+    /// `None` when they declined. Additive — older readers warn-skip it, so no
+    /// `SCHEMA_VERSION` bump (like `ModelSwitch`/`EffortChange`).
+    AskUser {
+        question: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<String>,
+    },
+
     /// The auto-accept mode changed (Requirements §6.4).
     ModeChange { mode: Mode },
 

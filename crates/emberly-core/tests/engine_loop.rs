@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use emberly_core::{
-    channel, CaptureSink, Command, Engine, EngineConfig, FileTranscript, Mode, PermissionDecision,
-    RetryPolicy, RuleEngine, RuleSource, SandboxStatus, SessionId, TranscriptEvent, TranscriptSink,
-    UiEvent,
+    channel, AskAnswer, CaptureSink, Command, Engine, EngineConfig, FileTranscript, Mode,
+    PermissionDecision, RetryPolicy, RuleEngine, RuleSource, SandboxStatus, SessionId,
+    TranscriptEvent, TranscriptSink, UiEvent,
 };
 use emberly_providers::{
     ContentBlock, Effort, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
@@ -55,6 +55,9 @@ fn make_config(
         project_root: root,
         model: "fake-1".into(),
         system: None,
+        // Off by default here so existing tests see byte-identical requests;
+        // the T-9 tests flip this field on the returned config explicitly.
+        tool_explanations: false,
         truncate: TruncateConfig::default(),
         // Fast retries so retry tests don't wait on real backoff.
         retry: RetryPolicy {
@@ -117,8 +120,8 @@ fn start_with_file_transcript(
 
 fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
-    let (engine, asks_rx) = Engine::new(config, engine_ports.events_tx);
-    tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx));
+    let (engine, asks_rx, user_asks_rx) = Engine::new(config, engine_ports.events_tx);
+    tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx, user_asks_rx));
     Harness {
         commands_tx: frontend.commands_tx,
         events_rx: frontend.events_rx,
@@ -1360,4 +1363,252 @@ async fn set_effort_on_a_model_without_a_control_declines_calmly() {
             .any(|r| matches!(&r.event, TranscriptEvent::EffortChange { .. })),
         "no audit record for a declined change"
     );
+}
+
+// --- T-9: tool-call explanation (Tech Spec §5.4) ------------------------------
+
+/// Build a harness from a retained `FakeProvider` handle with the T-9 toggle
+/// set, so a test can drive a turn and then inspect the request the engine sent.
+fn spawn_keeping_provider(
+    fake: Arc<FakeProvider>,
+    root: PathBuf,
+    tool_explanations: bool,
+) -> Harness {
+    let mut config = make_config(fake, root, EngineConfig::no_transcript());
+    config.tool_explanations = tool_explanations;
+    spawn(config)
+}
+
+#[tokio::test]
+async fn explanations_on_inject_schema_property_and_prompt_instruction() {
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("hi")]));
+    let mut h = spawn_keeping_provider(fake.clone(), temp_project(), true);
+    h.send(Command::UserInput {
+        text: "hello".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = match fake.last_request() {
+        Some(r) => r,
+        None => panic!("no request captured"),
+    };
+    // Every advertised tool gained the optional `explanation` property.
+    assert!(!req.tools.is_empty(), "built-ins are advertised");
+    assert!(
+        req.tools.iter().all(|t| t
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.get("explanation"))
+            .is_some()),
+        "explanation injected into every tool schema"
+    );
+    // The instruction is appended to the outgoing system prompt.
+    let system = req.system.unwrap_or_default();
+    assert!(
+        system.contains("Tool-call explanations"),
+        "prompt instructs the model to explain"
+    );
+}
+
+#[tokio::test]
+async fn explanations_off_omit_property_and_instruction() {
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("hi")]));
+    let mut h = spawn_keeping_provider(fake.clone(), temp_project(), false);
+    h.send(Command::UserInput {
+        text: "hello".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = match fake.last_request() {
+        Some(r) => r,
+        None => panic!("no request captured"),
+    };
+    assert!(
+        req.tools.iter().all(|t| t
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.get("explanation"))
+            .is_none()),
+        "no explanation property when the feature is off — no tokens spent"
+    );
+    // The test harness starts from `system: None`, so off → still no system.
+    assert!(
+        req.system.unwrap_or_default().is_empty(),
+        "no instruction appended when off"
+    );
+}
+
+#[tokio::test]
+async fn tool_started_surfaces_the_models_explanation() {
+    let root = temp_project();
+    // A non-obvious call the model captioned, then an obvious one it did not.
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "read_file",
+            r#"{"path":"a.txt","explanation":"peek at the config"}"#,
+        ),
+        ScriptedResponse::tool_call("c2", "read_file", r#"{"path":"b.txt"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = start(scripts, root);
+    h.send(Command::UserInput {
+        text: "look".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    let explanations: Vec<Option<String>> = events
+        .iter()
+        .filter_map(|e| match e {
+            UiEvent::ToolStarted { explanation, .. } => Some(explanation.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        explanations,
+        vec![Some("peek at the config".to_string()), None],
+        "captioned call carries the explanation; the obvious one carries none"
+    );
+}
+
+// --- T-8: ask_user round trip (Tech Spec §5.2) --------------------------------
+
+/// Drive a turn to completion, answering the first `AskUserRequest` with
+/// `answer`. Returns the collected events (the caller asserts on them and on
+/// the transcript).
+async fn drive_answering_ask(h: &mut Harness, answer: AskAnswer) -> Vec<UiEvent> {
+    let mut events = Vec::new();
+    let mut answered: Option<AskAnswer> = Some(answer);
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(500), h.events_rx.recv()).await
+    {
+        if let UiEvent::AskUserRequest { id, .. } = &event {
+            if let Some(answer) = answered.take() {
+                h.send(Command::AskUserAnswer { id: *id, answer }).await;
+            }
+        }
+        events.push(event);
+    }
+    events
+}
+
+#[tokio::test]
+async fn ask_user_blocks_then_resumes_with_the_answer() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "ask_user",
+            r#"{"question":"which environment?","options":["dev","prod"]}"#,
+        ),
+        ScriptedResponse::text("deploying to dev"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, root);
+    h.send(Command::UserInput {
+        text: "deploy".into(),
+    })
+    .await;
+    let events = drive_answering_ask(&mut h, AskAnswer::Answered("dev".into())).await;
+
+    assert!(events.iter().any(|e| matches!(
+        e,
+        UiEvent::AskUserRequest { question, options, .. }
+            if question == "which environment?"
+                && options == &["dev".to_string(), "prod".to_string()]
+    )));
+    assert_eq!(deltas(&events), "deploying to dev");
+    assert!(
+        sink.records().iter().any(|r| matches!(
+            &r.event,
+            TranscriptEvent::ToolResult { output, ok, .. }
+                if *ok && output.contains("The user answered: dev")
+        )),
+        "answer returned to the model as tool-result data"
+    );
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::AskUser { question, answer: Some(a), .. }
+            if question == "which environment?" && a == "dev"
+    )));
+}
+
+#[tokio::test]
+async fn ask_user_dismissed_returns_a_structured_decline() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "ask_user", r#"{"question":"proceed?"}"#),
+        ScriptedResponse::text("stopping, as you didn't say"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, root);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_answering_ask(&mut h, AskAnswer::Declined).await;
+
+    assert_eq!(deltas(&events), "stopping, as you didn't say");
+    assert!(
+        sink.records().iter().any(|r| matches!(
+            &r.event,
+            TranscriptEvent::ToolResult { output, ok, .. }
+                if *ok && output.contains("declined to answer")
+        )),
+        "decline returned to the model as data"
+    );
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::AskUser { answer: None, question, .. } if question == "proceed?"
+    )));
+}
+
+/// The plan's combined "Done when" in one offline session (Tech Spec §14.5):
+/// with explanations on, a captioned call surfaces its explanation, an
+/// `ask_user` call blocks and resumes with the answer, and the request the
+/// engine sent carried both the schema property and the prompt instruction.
+#[tokio::test]
+async fn explanation_and_ask_user_together() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "read_file",
+            r#"{"path":"cfg.txt","explanation":"peek at the config"}"#,
+        ),
+        ScriptedResponse::tool_call(
+            "c2",
+            "ask_user",
+            r#"{"question":"continue?","options":["yes","no"]}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let fake = Arc::new(FakeProvider::new(scripts));
+    let mut h = spawn_keeping_provider(fake.clone(), root, true);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_answering_ask(&mut h, AskAnswer::Answered("yes".into())).await;
+
+    // T-9: the captioned call surfaced its explanation.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        UiEvent::ToolStarted { explanation: Some(x), .. } if x == "peek at the config"
+    )));
+    // T-8: the question was asked and the loop resumed with the answer.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::AskUserRequest { .. })));
+    assert_eq!(deltas(&events), "done");
+
+    // T-9: the request advertised the schema property and the instruction.
+    let req = match fake.last_request() {
+        Some(r) => r,
+        None => panic!("no request captured"),
+    };
+    assert!(req.tools.iter().all(|t| t
+        .input_schema
+        .get("properties")
+        .and_then(|p| p.get("explanation"))
+        .is_some()));
+    assert!(req
+        .system
+        .unwrap_or_default()
+        .contains("Tool-call explanations"));
 }

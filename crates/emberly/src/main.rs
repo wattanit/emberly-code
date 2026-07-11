@@ -468,6 +468,7 @@ async fn run() -> anyhow::Result<()> {
         project_root,
         model,
         system: resolved.system_prompt.clone(),
+        tool_explanations: resolved.tool_explanations,
         truncate: TruncateConfig::default(),
         retry: emberly_core::RetryPolicy::default(),
         session_id,
@@ -494,8 +495,8 @@ async fn run() -> anyhow::Result<()> {
     };
 
     let (engine_ports, frontend_ports) = channel();
-    let (engine, asks_rx) = Engine::new(config, engine_ports.events_tx);
-    let engine_task = tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx));
+    let (engine, asks_rx, user_asks_rx) = Engine::new(config, engine_ports.events_tx);
+    let engine_task = tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx, user_asks_rx));
 
     // Drive the session until the user quits or the engine closes its events.
     // The frontend drops its command sender on quit, the engine finishes, and

@@ -51,6 +51,7 @@ fn ui_event_variants_roundtrip() -> serde_json::Result<()> {
             call_id: ToolCallId("call_1".into()),
             tool: "read_file".into(),
             summary: "read src/main.rs".into(),
+            explanation: None,
         },
         UiEvent::ToolFinished {
             call_id: ToolCallId("call_1".into()),
