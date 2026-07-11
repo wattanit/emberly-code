@@ -26,7 +26,7 @@ Phase 1's `reduce_output` (`crates/emberly-tools/src/reduce.rs:64`) for the turn
 | Group | Status | Notes |
 |---|---|---|
 | 1. `[context]` config: `window_turns` (default 40) + `keep_recent_turns` | [x] | `ContextConfig` in engine.rs, `[context]` in ConfigFile, merged+resolved, threaded to Engine; `KEEP_RECENT` replaced; provenance in `config show` |
-| 2. Adaptive windowing at send time (`build_request`) | [ ] | |
+| 2. Adaptive windowing at send time (`build_request`) | [x] | `windowed_messages()` view in `build_request`; turn-grouping, pinned prefix, elision marker; 5 integration tests |
 | 3. Marker↔range identifier scheme (resolve the §16 open item) | [ ] | |
 | 4. `recall` built-in tool + engine gate (not permission-gated) | [ ] | |
 | 5. Context-usage reflects the working window | [ ] | |
@@ -66,29 +66,33 @@ Window is a **send-time view**, not a mutation. `build_request()`
 (`:1742`); insert windowing there so `self.conversation` stays **complete** in
 memory (needed for `recall`, group 4) and the transcript/UI are untouched.
 
-- [ ] Keep only the last `window_turns` non-pinned turns in the sent messages;
+- [x] Keep only the last `window_turns` non-pinned turns in the sent messages;
       elide the earlier ones. **Pinned, never dropped and never counted against
       the window** (Tech Spec §7): the system prompt (already separate, in
       `CompletionRequest.system` via `effective_system()`, `engine.rs:1741`,
       `:1755`), the **original task** (`conversation[0]`, positionally pinned as
       compaction already assumes, `engine.rs:652`), and any **active compaction
       summary** message.
-- [ ] **Clean turn boundaries only.** Never cut between a `ContentBlock::ToolUse`
+      _`windowed_messages()` views `self.conversation` at send time; `pinned_count()` returns 1 normally, 2 when `compacted`; `group_turn_starts()` groups at `Role::User` boundaries; `build_request` sends the view._
+- [x] **Clean turn boundaries only.** Never cut between a `ContentBlock::ToolUse`
       and its matching `Message::tool_result` — a windowed message list must stay
       provider-valid (every tool_use has its tool_result), the same invariant
       compaction respects. Define a "turn" grouping over `Vec<Message>`
       (`message.rs:66`) and window whole turns from the tail.
-- [ ] Replace the dropped span with a **single synthetic marker message** —
+      _`group_turn_starts` groups messages at `Role::User` boundaries; tool_use + tool_result are always in the same turn. Verified by `window_never_splits_tool_use_from_result` test._
+- [x] Replace the dropped span with a **single synthetic marker message** —
       `[N earlier turns elided from context — still in the session transcript]`
       (Tech Spec §7) — carrying the transcript range it stands for (group 3).
       Inserted only into the sent view, never pushed to `self.conversation` and
       never written to the transcript (HC-7: the log and the user's scrollback
       stay whole; the window changes only what is *sent*).
-- [ ] Compose with compaction (Tech Spec §7): windowing bounds how many
+      _Marker is a `Message::user_text` inserted into the `windowed_messages()` view only. Turn-range refinement deferred to Group 3._
+- [x] Compose with compaction (Tech Spec §7): windowing bounds how many
       *post-summary* turns ride verbatim; the compaction summary is pinned into
       the sent context and never windowed away. Verify order: compaction rebuilds
       `self.conversation` (`compact()`, `engine.rs:649`), windowing views it at
       send time — one view, not a second mutation.
+      _`compacted: bool` on Engine + EngineConfig; set in `compact()` and detected from transcript on resume (`resume::has_compaction`); `window_pins_compaction_summary` test verifies._
 
 ## 3. Marker↔range identifier scheme  *(FR-3; Tech Spec §7, §16)*
 

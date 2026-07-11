@@ -407,6 +407,7 @@ async fn run() -> anyhow::Result<()> {
     let mut history: Vec<TranscriptRecord> = Vec::new();
     let mut initial_conversation: Vec<Message> = Vec::new();
     let resuming;
+    let mut compacted = false;
     let mut title = String::new();
     let session_id;
     let session_path;
@@ -423,6 +424,7 @@ async fn run() -> anyhow::Result<()> {
         session_id = resume::session_id(&loaded.records).unwrap_or_default();
         transcript = open_transcript(FileTranscript::open(&path));
         session_path = path;
+        compacted = resume::has_compaction(&loaded.records);
         history = loaded.records;
         resuming = true;
     } else {
@@ -523,6 +525,7 @@ async fn run() -> anyhow::Result<()> {
         transcript,
         initial_conversation,
         resuming,
+        compacted,
         summary_prompt: resolved.summary_prompt.clone(),
         // Lets `/model` switch provider/model in-session (C-6); resolves any
         // configured profile, so it works even from the offline placeholder.

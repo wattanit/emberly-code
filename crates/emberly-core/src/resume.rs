@@ -162,6 +162,16 @@ pub fn interrupted(records: &[TranscriptRecord]) -> bool {
     }
 }
 
+/// Whether the transcript recorded any compaction, so the engine knows the
+/// rebuilt conversation has a pinned compaction summary at `conversation[1]`
+/// (FR-3 windowing composition).
+#[must_use]
+pub fn has_compaction(records: &[TranscriptRecord]) -> bool {
+    records
+        .iter()
+        .any(|r| matches!(r.event, TranscriptEvent::Compaction { .. }))
+}
+
 /// The `(provider, model)` a session started with, from its `session_start`
 /// (needed to reconstruct the provider on resume).
 #[must_use]

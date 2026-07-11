@@ -148,6 +148,10 @@ pub struct EngineConfig {
     /// True when resuming an existing transcript: no fresh `session_start` is
     /// written and the original task is treated as already recorded.
     pub resuming: bool,
+    /// True when the resumed session had been compacted, so the compaction
+    /// summary at `conversation[1]` is pinned in the sent context (FR-3
+    /// windowing composition with compaction).
+    pub compacted: bool,
     /// A `/compact` summarization-prompt override (P-7); `None` uses the
     /// built-in default.
     pub summary_prompt: Option<String>,
@@ -264,6 +268,22 @@ fn stable_hash(s: &str) -> u64 {
     h.finish()
 }
 
+/// Identify turn boundaries for context windowing (FR-3, Tech Spec §7). Each
+/// turn starts at a [`Role::User`] message; `Role::Assistant` and `Role::Tool`
+/// messages belong to the current turn. The first message always starts a turn
+/// (even when it is not `Role::User`), so a post-compaction tail that begins
+/// with an assistant message is never split from its tool results. Returns the
+/// starting index of each turn, relative to the input slice.
+fn group_turn_starts(messages: &[Message]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    for (i, msg) in messages.iter().enumerate() {
+        if msg.role == Role::User || starts.is_empty() {
+            starts.push(i);
+        }
+    }
+    starts
+}
+
 /// The audit label for a loop resolution (S-5, Tech Spec §3.2).
 fn resolution_label(r: &LoopResolution) -> String {
     match r {
@@ -370,6 +390,9 @@ pub struct Engine {
     original_task_recorded: bool,
     /// True when this run resumed an existing transcript (skips `session_start`).
     resuming: bool,
+    /// True once a compaction has run (live or resumed), so the summary at
+    /// `conversation[1]` is pinned in the sent context (FR-3 windowing).
+    compacted: bool,
     /// Set when `/compact` arrives mid-turn; performed at the next clean
     /// boundary (Tech Spec §7).
     compact_requested: bool,
@@ -451,6 +474,7 @@ impl Engine {
             // On resume the original task already lives in the restored history.
             original_task_recorded: config.resuming,
             resuming: config.resuming,
+            compacted: config.compacted,
             compact_requested: false,
             summary_prompt: config.summary_prompt,
             provider_factory: config.provider_factory,
@@ -715,6 +739,7 @@ impl Engine {
         rebuilt.push(Message::user_text(summary.clone()));
         rebuilt.extend(self.conversation[to..].iter().cloned());
         self.conversation = rebuilt;
+        self.compacted = true;
 
         self.write_transcript(TranscriptEvent::Compaction {
             summary,
@@ -1736,6 +1761,61 @@ impl Engine {
         });
     }
 
+    /// The number of messages at the front of the conversation that are always
+    /// sent and never windowed away (FR-3, Tech Spec §7): the original task
+    /// (position 0) plus the compaction summary (position 1) when one is active.
+    fn pinned_count(&self) -> usize {
+        if self.conversation.is_empty() {
+            return 0;
+        }
+        // The original task is always pinned at position 0.
+        let mut n = 1;
+        // After compaction (live or resumed), the summary at position 1 is
+        // also pinned (Tech Spec §7: windowing never drops the summary).
+        if self.compacted {
+            n += 1;
+        }
+        n.min(self.conversation.len())
+    }
+
+    /// The windowed view of the conversation for sending to the provider
+    /// (FR-3, Tech Spec §7). A **pure view** — never mutates
+    /// `self.conversation` (HC-7). Keeps the pinned prefix and the last
+    /// `context.window_turns` turns; replaces older turns with one synthetic
+    /// elision marker. Turns are grouped at clean boundaries: every
+    /// `ContentBlock::ToolUse` keeps its matching `Message::tool_result`, so
+    /// the sent list stays provider-valid.
+    fn windowed_messages(&self) -> Vec<Message> {
+        let pinned = self.pinned_count();
+        let total = self.conversation.len();
+        if total <= pinned {
+            return self.conversation.clone();
+        }
+
+        let turns = group_turn_starts(&self.conversation[pinned..]);
+        let elided = turns.len().saturating_sub(self.context.window_turns);
+        if elided == 0 {
+            return self.conversation.clone();
+        }
+
+        // Index into self.conversation where the first kept turn begins.
+        let keep_from = if elided < turns.len() {
+            pinned + turns[elided]
+        } else {
+            // window_turns = 0: elide every non-pinned turn.
+            total
+        };
+
+        let mut result =
+            Vec::with_capacity(pinned + 1 + total.saturating_sub(keep_from));
+        result.extend(self.conversation[..pinned].iter().cloned());
+        result.push(Message::user_text(format!(
+            "[{elided} earlier turns elided from context — still in the session transcript]"
+        )));
+        result.extend(self.conversation[keep_from..].iter().cloned());
+        result
+    }
+
     fn build_request(&self) -> CompletionRequest {
         let tools = self
             .tools
@@ -1763,7 +1843,7 @@ impl Engine {
             // spent. Kept out of the stored `self.system` so a config reload
             // (which replaces it) stays orthogonal to this toggle.
             system: self.effective_system(),
-            messages: self.conversation.clone(),
+            messages: self.windowed_messages(),
             tools,
             max_output_tokens: Some(self.provider.model_info().max_output_tokens),
             temperature: None,

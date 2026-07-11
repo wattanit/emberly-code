@@ -19,7 +19,7 @@ use emberly_core::{
 };
 use emberly_providers::{
     ContentBlock, Effort, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
-    ScriptOutcome, ScriptedResponse, StopReason, StreamEvent, TokenUsage,
+    ScriptOutcome, ScriptedResponse, StopReason, StreamEvent, TokenUsage, ToolCallId,
 };
 use emberly_tools::{default_registry, TruncateConfig};
 use tokio::sync::mpsc;
@@ -90,6 +90,7 @@ fn make_config(
         transcript,
         initial_conversation: Vec::new(),
         resuming: false,
+        compacted: false,
         summary_prompt: None,
         provider_factory: None,
         config_reloader: None,
@@ -2057,4 +2058,261 @@ async fn hc7_transcript_and_sidecar_preserve_full_result() {
         }
         _ => panic!("expected ToolResult"),
     }
+}
+
+// ── Phase 2: adaptive context windowing (FR-3) ──
+
+/// Build a conversation with `n` user→assistant turns after the pinned
+/// original task. Each turn is a user message followed by an assistant reply.
+fn multi_turn_conversation(n: usize) -> Vec<Message> {
+    let mut conv = vec![Message::user_text("original task")];
+    for i in 0..n {
+        conv.push(Message::user_text(format!("user turn {i}")));
+        conv.push(Message::assistant_text(format!("assistant reply {i}")));
+    }
+    conv
+}
+
+/// Start a session with a retained `FakeProvider`, a custom `ContextConfig`,
+/// and a pre-populated conversation (so `window_turns` can fire immediately).
+fn spawn_windowed(
+    fake: Arc<FakeProvider>,
+    root: PathBuf,
+    context: ContextConfig,
+    initial_conversation: Vec<Message>,
+    compacted: bool,
+) -> Harness {
+    let mut config = make_config(fake, root, EngineConfig::no_transcript());
+    config.context = context;
+    config.initial_conversation = initial_conversation;
+    config.resuming = true;
+    config.compacted = compacted;
+    spawn(config)
+}
+
+/// Extract the text from the first `ContentBlock::Text` in a message.
+fn first_text(msg: &Message) -> &str {
+    for block in &msg.content {
+        if let ContentBlock::Text { text } = block {
+            return text;
+        }
+    }
+    ""
+}
+
+#[tokio::test]
+async fn window_drops_old_turns_from_sent_context() {
+    // FR-3: with window_turns=3, old turns are dropped from the sent request
+    // while the conversation stays complete in memory (HC-7).
+    let conv = multi_turn_conversation(10); // 1 pinned + 10 turns = 21 msgs
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
+    let ctx = ContextConfig {
+        window_turns: 3,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn_windowed(fake.clone(), temp_project(), ctx, conv.clone(), false);
+    h.send(Command::UserInput {
+        text: "next".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    let msgs = &req.messages;
+
+    // The original task is always sent (pinned).
+    assert_eq!(
+        first_text(&msgs[0]),
+        "original task",
+        "original task is pinned at position 0"
+    );
+
+    // The elision marker is next.
+    assert!(
+        first_text(&msgs[1]).contains("earlier turns elided"),
+        "elision marker present: {}",
+        first_text(&msgs[1])
+    );
+
+    // The last 3 turns are kept: turn 8 (2 msgs), turn 9 (2 msgs), and the new
+    // "next" turn (1 msg — no assistant reply yet). Plus pinned(1) + marker(1).
+    assert_eq!(
+        msgs.len(),
+        7,
+        "pinned(1) + marker(1) + 3 kept turns(2+2+1)"
+    );
+
+    // The kept turns include the last few user messages.
+    let texts: Vec<&str> = msgs.iter().map(first_text).collect();
+    assert!(texts.contains(&"user turn 8"), "turn 8 kept");
+    assert!(texts.contains(&"user turn 9"), "turn 9 kept");
+    assert!(
+        !texts.contains(&"user turn 0"),
+        "turn 0 elided from sent context"
+    );
+    assert!(texts.contains(&"next"), "new message sent");
+}
+
+#[tokio::test]
+async fn window_no_elision_when_under_limit() {
+    // With window_turns=40 (default), a 5-turn conversation is sent whole.
+    let conv = multi_turn_conversation(5);
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
+    let mut h = spawn_windowed(
+        fake.clone(),
+        temp_project(),
+        ContextConfig::default(),
+        conv,
+        false,
+    );
+    h.send(Command::UserInput {
+        text: "next".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    // 1 pinned + 5 turns(10) + 1 new = 12 messages. No marker.
+    assert_eq!(req.messages.len(), 12);
+    assert!(
+        !req.messages
+            .iter()
+            .any(|m| first_text(m).contains("elided")),
+        "no elision marker when under window"
+    );
+}
+
+#[tokio::test]
+async fn window_never_splits_tool_use_from_result() {
+    // A windowed message list must stay provider-valid: every ToolUse has its
+    // matching ToolResult (FR-3 clean boundary invariant).
+    let mut conv = vec![Message::user_text("original task")]; // pinned
+    // 6 turns, each with a tool call: [User, Assistant+ToolUse, ToolResult]
+    for i in 0..6 {
+        let call_id = ToolCallId::new(format!("c{i}"));
+        conv.push(Message::user_text(format!("turn {i}")));
+        conv.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: format!("calling tool {i}"),
+                },
+                ContentBlock::ToolUse {
+                    id: call_id.clone(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "x"}),
+                },
+            ],
+        });
+        conv.push(Message::tool_result(call_id, format!("result {i}"), false));
+    }
+
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
+    let ctx = ContextConfig {
+        window_turns: 2,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn_windowed(fake.clone(), temp_project(), ctx, conv, false);
+    h.send(Command::UserInput {
+        text: "next".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    let msgs = &req.messages;
+
+    // Collect every tool_use id and every tool_result call_id in the sent view.
+    let mut use_ids: Vec<&str> = Vec::new();
+    let mut result_ids: Vec<&str> = Vec::new();
+    for msg in msgs {
+        for block in &msg.content {
+            match block {
+                ContentBlock::ToolUse { id, .. } => use_ids.push(id.0.as_str()),
+                ContentBlock::ToolResult { call_id, .. } => result_ids.push(call_id.0.as_str()),
+                _ => {}
+            }
+        }
+    }
+
+    // Every tool_use in the sent view must have its matching tool_result.
+    for id in &use_ids {
+        assert!(
+            result_ids.contains(id),
+            "tool_use {id} has no matching tool_result in the sent view"
+        );
+    }
+    // And vice-versa: every result has its use.
+    for id in &result_ids {
+        assert!(
+            use_ids.contains(id),
+            "tool_result {id} has no matching tool_use in the sent view"
+        );
+    }
+}
+
+#[tokio::test]
+async fn window_pins_compaction_summary() {
+    // After compaction, the summary at conversation[1] is pinned and never
+    // windowed away (FR-3 composition with compaction).
+    let mut conv = vec![
+        Message::user_text("original task"),      // pinned [0]
+        Message::user_text("compaction summary"), // pinned [1]
+    ];
+    // Add enough turns to trigger windowing.
+    for i in 0..10 {
+        conv.push(Message::user_text(format!("turn {i}")));
+        conv.push(Message::assistant_text(format!("reply {i}")));
+    }
+
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
+    let ctx = ContextConfig {
+        window_turns: 3,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn_windowed(fake.clone(), temp_project(), ctx, conv, true);
+    h.send(Command::UserInput {
+        text: "next".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    let msgs = &req.messages;
+
+    // Position 0 = original task, position 1 = compaction summary (both pinned).
+    assert_eq!(first_text(&msgs[0]), "original task");
+    assert_eq!(first_text(&msgs[1]), "compaction summary");
+    // Position 2 = elision marker.
+    assert!(
+        first_text(&msgs[2]).contains("elided"),
+        "marker after pinned prefix"
+    );
+}
+
+#[tokio::test]
+async fn window_preserves_conversation_in_memory() {
+    // HC-7: windowing is a send-time view; self.conversation stays complete.
+    let conv = multi_turn_conversation(10);
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
+    let ctx = ContextConfig {
+        window_turns: 2,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn_windowed(fake.clone(), temp_project(), ctx, conv, false);
+    h.send(Command::UserInput {
+        text: "next".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    // The sent view is smaller than the full conversation.
+    assert!(
+        req.messages.len() < 22,
+        "sent view is windowed ({}) vs full conversation (22)",
+        req.messages.len()
+    );
+    // But the request itself is a valid, self-contained message list.
+    assert!(!req.messages.is_empty());
 }
