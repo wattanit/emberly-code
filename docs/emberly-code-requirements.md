@@ -1,11 +1,11 @@
 # Emberly Code AI Coding Harness — Requirements Document
 
-**Version:** 0.5 
-**Status:** approved 
-**Date:** 2026-07-10
+**Version:** 0.6 
+**Status:** approved
+**Date:** 2026-07-11
 **Owner:** Wattanit
-**Companion documents:** Design Guideline v0.5 (downstream), Technical
-Specification v0.6 (downstream)
+**Companion documents:** Design Guideline v0.6 (downstream), Technical
+Specification v0.7 (downstream)
 
 This document defines WHAT the harness must do and WHY. HOW it is built is
 deferred to the Technical Specification. UX, visual, and voice decisions are
@@ -52,8 +52,10 @@ structurally coupled to any single model vendor.
   plus project-instruction file compatibility (AGENTS.md native; CLAUDE.md
   read for cross-harness compatibility).
 - Session persistence as append-only JSONL transcripts; session resume.
-- Context management: tool-result truncation at ingestion, manual
-  compaction, visible context-usage indicator.
+- Context management: a layered token-economy strategy — tool-result
+  truncation and salient reduction at ingestion, an adaptive context window,
+  manual and automatic compaction, and a visible context-usage indicator
+  (§8).
 - Engine/frontend separation via an event model (the TUI is the only
   frontend in current scope, but the boundary must exist).
 - Thai text support as content: Thai input and display everywhere
@@ -79,13 +81,26 @@ section cited; this list is the scope overview, not the requirement):
 - A loop-breaking guardrail that halts a non-progressing agent loop and
   returns control to the user (§11, S-5).
 
+Added in the 0.3 feature set (efficiency and cost optimization: the token
+and dollar cost of a long session is itself a product concern, addressed as
+a layered context-management strategy over §8; each item carries an ID and
+full statement in the section cited; this list is the scope overview, not the
+requirement):
+
+- Deterministic tool-result token reduction beyond size-based truncation —
+  keep the salient content in context, the full result in the transcript
+  (§8.5, FR-2).
+- An adaptive context window that carries recent turns and keeps older ones
+  retrievable rather than always sending the whole conversation (§8.6, FR-3).
+- Automatic compaction at a high context-usage threshold, graduating the
+  automatic-compaction door kept open in v0.1's §2.2 (§8.7, FR-4).
+- Token-efficient session resume from a derived conversation-state cache
+  rather than re-ingesting the full audit transcript (§8.8, FR-5).
+
 ### 2.2 Explicitly deferred (designed-for, not yet built)
 
 - **MCP client support.** The internal tool abstraction must permit a future
   MCP adapter, but no MCP implementation ships yet.
-- **Automatic compaction.** Current scope ships truncation-at-ingestion and manual
-  `/compact` only. Auto-compaction is a fast-follow once the summarization
-  prompt is validated through real use.
 - Headless / server / IDE frontends (enabled by the event-model boundary,
   not built).
 - **User theming.** Current scope ships a single built-in theme; all colors live in
@@ -224,6 +239,23 @@ is defective by definition.
   transparency and in-situ learning (§1.2) at a cost of a few output tokens
   per non-obvious call; it must be defeatable by configuration for users who
   do not want the tokens spent.
+- **T-10 — Recall tool.** A built-in tool the model may call to bring earlier
+  conversation turns — those dropped from the working window by the adaptive
+  context window (FR-3, §8.6) — back into context on demand. It is the
+  explicit, model-driven counterpart to windowing: the harness never
+  auto-expands the window or guesses when old history matters; when the model
+  needs a dropped turn, it asks. Recall returns the requested turns in the
+  harness's normalized, reduced form (the same economy as §8.1/§8.5), never
+  the raw transcript, so recovering history costs tokens proportional to what
+  is recalled, not to the transcript's raw size — a recall path that re-inflated
+  the elided noise would defeat the window it serves. It reads only the current
+  session's own history and touches no filesystem or network, so it is **not
+  permission-gated** (§6): re-reading conversation the model itself produced
+  and already saw is not an action against the project, and the permission
+  model guards actions against the project, not the model reading its own
+  context. Without a recall channel the adaptive window would be lossy
+  amnesia; with it, the window is a token economy the model can reverse when a
+  task genuinely needs the older context.
 
 ## 6. Permission and Safety Model
 
@@ -429,6 +461,84 @@ A context-usage percentage is always visible to the user (status line),
 driven by P-6 token accounting against the active model's window minus a
 reserved output budget. Invisible context exhaustion is a defect.
 
+The 0.3 requirements below (§8.5–§8.8) are a layered context-economy
+strategy, cheapest and most conservative first: size truncation (§8.1) →
+salient tool-result reduction (§8.5) → an adaptive window over turns (§8.6) →
+compaction, manual (§8.3) and automatic (§8.7). Each layer only changes what
+is *sent to the model*; none rewrites or prunes the transcript (HC-7). §8.8
+carries the resulting economy across a resume.
+
+### 8.5 Tool-result token reduction
+
+- **FR-2 — Tool-result token reduction.** Beyond the size-based truncation
+  of §8.1, a tool result may be reduced to its salient content before it
+  enters the model context, keeping the parts that inform the model's next
+  step and eliding the noise, while the complete unreduced result is written
+  to the transcript (HC-7) and remains retrievable on demand (via the §8.1
+  reference marker). Reduction is deterministic and adds no model call to the
+  agent loop — a context defense that itself costs a model round-trip or
+  per-tool-call latency defeats its own purpose. What counts as salient is
+  per tool (e.g. a build's diagnostics and its summary line, not its progress
+  chatter; a matcher's hits, not the directories it walked). The reduction is
+  marked in context so the model knows content was withheld and can re-read
+  the full result. A reduction that discards information the model then cannot
+  recover is defective — the full result is always one reference away. This
+  refines §8.1: §8.1 bounds size blindly (head/tail); FR-2 reduces by meaning
+  where a tool's output has a known salient shape.
+
+### 8.6 Adaptive context window
+
+- **FR-3 — Adaptive context window.** The model context need not carry every
+  past turn verbatim: the harness maintains a working window of the most
+  recent turns, and older turns may be dropped from the context sent to the
+  model while remaining in the transcript and retrievable. The harness does
+  not guess when old history matters — dropping is reversible by the model:
+  when the model needs older context it recalls it through the **recall tool
+  (T-10)**, which returns the dropped turns in normalized, reduced form. Recall
+  reads only the session's own history, so it is not permission-gated (T-10,
+  §6). Pinned content (§8.3 — system prompt, project instructions,
+  original task) is never dropped from the window. The window is a token and
+  cost economy for long sessions, distinct from compaction (§8.3, §8.7):
+  windowing drops-but-keeps-retrievable, compaction summarizes. The window
+  size is tunable (Technical Specification sets an initial default; §13).
+  Honesty clause: a windowed session is not a lossy session — every dropped
+  turn is in the transcript and one re-read away; the window changes what is
+  sent, never what happened (HC-7).
+
+### 8.7 Automatic compaction
+
+- **FR-4 — Automatic compaction.** The harness automatically compacts (§8.3)
+  when context usage crosses a high threshold of the budget (§8.4), without
+  waiting for the user to invoke compaction manually — a long-running session
+  must not stall, overflow, or silently degrade because the user did not act
+  on the indicator. Automatic compaction uses the same mechanism, the same
+  pinned-content rules, the same clean-boundary rule, and the same
+  summarization-failure fallback as manual compaction (§8.3); it differs only
+  in its trigger. It is **on by default**; the threshold is tunable and
+  automatic compaction is disableable in configuration for users who prefer to
+  compact manually only. Every automatic compaction is a transcript event
+  (HC-7) and is surfaced to the user (Design Guideline) — the context changing
+  under the model is never silent. This graduates the automatic-compaction
+  item formerly deferred in §2.2 through its named door (see §13, "Resolved
+  since v0.5").
+
+### 8.8 Efficient session resume
+
+- **FR-5 — Efficient session resume.** Resuming a session must not cost the
+  tokens of re-ingesting the full audit transcript. The harness persists the
+  session's derived conversation state — the in-context view, already the
+  product of truncation (§8.1), reduction (§8.5), windowing (§8.6), and
+  compaction (§8.3, §8.7) — so a resume restores that state directly rather
+  than replaying and re-tokenizing the entire append-only log. HC-7 honesty
+  clause: the transcript remains the **sole** ground truth; the persisted
+  conversation state is a derived cache, always reconstructable from the
+  transcript, and resume falls back to full transcript replay (see the
+  Technical Specification's resume section) whenever the cache is absent,
+  stale, or unreadable — the optimization never becomes a second source of
+  truth, and losing the cache never loses a session. The economy is
+  observable: resuming a long session consumes context proportional to its
+  working view, not to its full history.
+
 ## 9. Architecture Requirements
 
 (Behavioral requirements only; structure belongs to the Technical Spec.)
@@ -498,11 +608,17 @@ reserved output budget. Invisible context exhaustion is a defect.
 
 - N (verbatim recent turns kept by compaction) and truncation head/tail
   sizes (Tech Spec sets initial defaults; tune with use).
-- Auto-compaction trigger threshold and rollout criteria (fast-follow;
-  requires validated summarization prompt).
 - Loop-guardrail detection heuristic — what precisely counts as "no
   progress," and the default thresholds (S-5). Tech Spec sets initial
   values; tune with use.
+- Adaptive-window default size (FR-3). Tech Spec sets the initial default;
+  tune with use.
+- Per-tool "salient content" rules and defaults for tool-result reduction
+  (FR-2). Tech Spec sets initial rules; tune with use so reduction never
+  hides what the model needs.
+- Automatic-compaction default threshold (FR-4). Tech Spec sets the initial
+  value; tune with use so it fires before overflow without compacting too
+  eagerly.
 
 Resolved since v0.1: product/command name (Emberly Code / `emberly`,
 Design Guideline §1.1); default bash allowlist initial contents (Tech
@@ -522,3 +638,23 @@ subtree-trusted, with a pre-trust allowlist and an explicit
 `emberly trust revoke` (FR-1, Tech Spec §6.7); tool-call explanation on by
 default and config-defeatable (T-9); reasoning trail defaults to collapsed
 (P-10, Design §4.4).
+
+Resolved since v0.5 (0.3 feature set): automatic compaction graduated from
+the §2.2 deferred tier to in scope through its named door — on by default at
+a high threshold, threshold tunable, disableable (FR-4, §8.7), which also
+retires the v0.1 "auto-compaction trigger threshold and rollout criteria"
+open question (threshold is now a tunable default set in the Tech Spec).
+Compaction was found to be an existing requirement (§8.3 user-invoked
+compaction, plus Design §3.3's three-way reachability), so the missing
+trigger is an implementation gap to close in v0.3, not a new requirement.
+Session-resume efficiency scoped as a derived, rebuildable conversation-state
+cache subordinate to the transcript, never a second ground truth (FR-5, §8.8,
+HC-7 preserved). Tool-result token reduction scoped as deterministic, with no
+model call added to the agent loop (FR-2, §8.5). Adaptive context window
+scoped as deterministic windowing plus model-driven re-read of dropped turns,
+distinct from compaction (FR-3, §8.6). The model's re-read affordance is
+resolved as a dedicated **recall tool (T-10)** returning normalized, reduced
+turns — chosen over reusing `read_file` on the raw transcript, which would
+re-inflate the elided noise in verbose JSONL and so defeat the window's token
+economy; recall is engine-internal (no filesystem/network) and not
+permission-gated.
