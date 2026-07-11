@@ -58,6 +58,7 @@ fn make_config(
         // Off by default here so existing tests see byte-identical requests;
         // the T-9 tests flip this field on the returned config explicitly.
         tool_explanations: false,
+        trust_granted: false,
         truncate: TruncateConfig::default(),
         // Fast retries so retry tests don't wait on real backoff.
         retry: RetryPolicy {
@@ -1611,4 +1612,49 @@ async fn explanation_and_ask_user_together() {
         .system
         .unwrap_or_default()
         .contains("Tool-call explanations"));
+}
+
+// --- FR-1: trust decision recorded at session start ---------------------------
+
+#[tokio::test]
+async fn newly_granted_trust_is_recorded_once() {
+    let root = temp_project();
+    let sink = CaptureSink::new();
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(vec![ScriptedResponse::text("hi")])),
+        root,
+        Box::new(sink.clone()),
+    );
+    config.trust_granted = true;
+    let mut h = spawn(config);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let _ = h.collect(None).await;
+
+    let trust_records = sink
+        .records()
+        .iter()
+        .filter(|r| {
+            matches!(
+                &r.event,
+                TranscriptEvent::TrustDecision { trusted: true, .. }
+            )
+        })
+        .count();
+    assert_eq!(trust_records, 1, "trust decision recorded exactly once");
+}
+
+#[tokio::test]
+async fn already_trusted_session_records_no_trust_decision() {
+    let root = temp_project();
+    // Default config has trust_granted = false (already-trusted / silent).
+    let (mut h, sink) = start_capturing(vec![ScriptedResponse::text("hi")], root);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let _ = h.collect(None).await;
+    assert!(
+        !sink
+            .records()
+            .iter()
+            .any(|r| matches!(&r.event, TranscriptEvent::TrustDecision { .. })),
+        "no trust record when trust was not newly granted"
+    );
 }

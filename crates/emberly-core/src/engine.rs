@@ -59,6 +59,10 @@ pub struct EngineConfig {
     /// is never prompted and no tokens are spent (Requirements T-9). Fixed for
     /// the engine's life (a live config reload does not change it).
     pub tool_explanations: bool,
+    /// True when workspace trust was *newly* granted at startup this launch
+    /// (FR-1) — the engine records a `trust_decision` at session start. A
+    /// silently-already-trusted session leaves this false.
+    pub trust_granted: bool,
     pub truncate: TruncateConfig,
     /// Retry policy for retryable provider failures and mid-stream drops.
     pub retry: RetryPolicy,
@@ -211,6 +215,8 @@ pub struct Engine {
     system: Option<String>,
     /// Whether tool-call explanations are enabled (T-9); see [`EngineConfig`].
     tool_explanations: bool,
+    /// Newly-granted workspace trust to record at session start (FR-1).
+    trust_granted: bool,
     truncate: TruncateConfig,
     retry: RetryPolicy,
     gate: Arc<ChannelGate>,
@@ -304,6 +310,7 @@ impl Engine {
             effort: seed_effort,
             system: config.system,
             tool_explanations: config.tool_explanations,
+            trust_granted: config.trust_granted,
             truncate: config.truncate,
             retry: config.retry,
             gate: Arc::new(ChannelGate { asks: asks_tx }),
@@ -358,6 +365,14 @@ impl Engine {
                 sandbox: self.sandbox.clone(),
                 config_provenance: self.config_provenance.clone(),
                 prompts_version: crate::prompts::VERSION,
+            });
+        }
+        // Record a newly-granted workspace-trust decision right after session
+        // start (FR-1, Tech Spec §3.2). Already-trusted launches record nothing.
+        if self.trust_granted {
+            self.write_transcript(TranscriptEvent::TrustDecision {
+                path: self.project_root.display().to_string(),
+                trusted: true,
             });
         }
 

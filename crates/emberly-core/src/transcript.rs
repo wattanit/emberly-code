@@ -133,6 +133,12 @@ pub enum TranscriptEvent {
         executed: Option<String>,
     },
 
+    /// The workspace-trust decision for this session's root (FR-1, Tech Spec
+    /// §3.2, §6.7). Written when trust was newly granted at startup; a declined
+    /// root never starts a session, so only `trusted: true` reaches a transcript.
+    /// Additive — older readers warn-skip it, so no `SCHEMA_VERSION` bump.
+    TrustDecision { path: String, trusted: bool },
+
     /// The model asked the user a question and it was resolved (T-8, Tech Spec
     /// §3.2): the question, any options offered, and the user's answer — or
     /// `None` when they declined. Additive — older readers warn-skip it, so no

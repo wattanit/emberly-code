@@ -28,13 +28,13 @@ explicitly *not* containment).
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. Workspace trust — store, config, CLI (FR-1 data layer) | [ ] | `trust.toml` (0600, global-only) read/write/list/revoke; subtree membership; `[trust] trusted_dirs` (global tier only); `emberly trust list`/`revoke <path>` |
-| 2. Workspace trust — the startup gate + prompt (FR-1 gate) | [ ] | pre-engine gate in `main.rs` (canonicalize → check → prompt); decline exits with no session; accept writes store + records `trust_decision`; honest "gate ≠ containment" line |
+| 1. Workspace trust — store, config, CLI (FR-1 data layer) | [x] | Done 2026-07-11; `trust.rs` store (0600, global-only) + subtree membership; `[trust] trusted_dirs` read only from global tier (project ignored w/ notice); `emberly trust list`/`revoke`; 10 tests |
+| 2. Workspace trust — the startup gate + prompt (FR-1 gate) | [x] | Done 2026-07-11; pre-engine gate (canonicalize → check → prompt); decline `return Ok(())` (no session); accept writes store + engine records `TrustDecision`; non-tty declines cleanly; honesty line in-prompt; 2 engine tests |
 | 3. Loop guardrail — detection + halt/await in the engine (S-5 core) | [ ] | per-turn signature (normalized tool-args multiset + result hash + modified-file set); trip on `repeat_window` no-progress turns; `LoopHalted` + park on resume/stop/steer; `[loop]` config |
 | 4. Loop guardrail — the halt surface (S-5 UI, both frontends) | [ ] | harness-voice, out-of-band (not model output, not the question prompt); keep-going / stop / say-something; degraded parity; motion stilled |
 | 5. End-to-end, exit criterion, docs & SFD bookkeeping | [ ] | combined offline tests; README; **Spec bump decision (owner)** — trust realized as a pre-engine gate refines §3.1 `TrustRequest`; memory |
 
-**Overall Phase 5: NOT STARTED.** Branch `phase5/trust-and-loop-guardrail` off
+**Overall Phase 5: IN PROGRESS** (2 / 5 groups). Branch `phase5/trust-and-loop-guardrail` off
 `version0.2` (Phase 4 merged).
 
 ---
@@ -86,33 +86,33 @@ degraded-mode parity where it adds a surface.
 The data layer: a global trust store with membership, the config allowlist, and
 the management CLI — everything except the startup prompt (group 2).
 
-- [ ] **Trust store module** (new, in the `emberly` binary — trust is a binary
+- [x] **Trust store module** (new, in the `emberly` binary — trust is a binary
       concern, outside `emberly-sandbox`). `~/.config/emberly/trust.toml` via a
       new `config::global_trust_path()` (next to `global_keys_path`). Entries are
       canonical paths with an `accepted` flag + timestamp. Read enforces 0600
       (reuse `enforce_private_permissions`); write creates the dir + file at 0600
       (a **new** create-then-`set_permissions(0o600)` helper — none exists).
-- [ ] **Membership = subtree trust** (FR-1): a canonicalized root is trusted if
+- [x] **Membership = subtree trust** (FR-1): a canonicalized root is trusted if
       it *or any ancestor* is an accepted store entry, **or** matches the
       `trust.trusted_dirs` allowlist. `is_trusted(root) -> bool` + `record_trust(
       root)`.
-- [ ] **`[trust] trusted_dirs` config, GLOBAL TIER ONLY** (FR-1). Read only from
+- [x] **`[trust] trusted_dirs` config, GLOBAL TIER ONLY** (FR-1). Read only from
       the global config binding at load (never the project binding); a `[trust]`
       in project `.agents/config.toml` is dropped with a `Resolved.notices`
       warning ("ignoring project [trust] — trust is global-only"). Add a
       `TrustConfig { trusted_dirs: Vec<String> }` but resolve it off the global
       tier explicitly, so the tier separation is visible in code.
-- [ ] **Trust CLI** (Tech Spec §10): `emberly trust list` (print accepted paths +
+- [x] **Trust CLI** (Tech Spec §10): `emberly trust list` (print accepted paths +
       when) and `emberly trust revoke <path>` (canonicalize, remove the entry,
       confirm) — so revoking is never hand-editing a file. New `Cli::TrustList`/
       `Cli::TrustRevoke(String)` variants + a `"trust"` arm in `parse_args` + two
       dispatch arms that `return Ok(())` (mirror the `config show` two-level
       pattern).
-- [ ] Tests (binary crate — `expect` allowed): store round-trip; subtree
+- [x] Tests (binary crate — `expect` allowed): store round-trip; subtree
       membership (ancestor match trusts a subdir); allowlist match; **0600
       rejection** of a group-readable store (mirror `rejects_group_readable_keys_
       file`); project `[trust]` ignored; `revoke` removes an entry and re-arms.
-- [ ] `cargo fmt` + `clippy` + `test` green; commit.
+- [x] `cargo fmt` + `clippy` + `test` green; commit.
 
 ---
 
@@ -121,15 +121,15 @@ the management CLI — everything except the startup prompt (group 2).
 The gate itself: checked in the binary **before** any project file is read into
 the prompt and **before** any session exists.
 
-- [ ] **Canonicalize the root** at startup (`main.rs` does not today) and run the
+- [x] **Canonicalize the root** at startup (`main.rs` does not today) and run the
       gate **between root-determination and `config::load`** — the only point
       that is after the root is known but before AGENTS.md/CLAUDE.md enter the
       prompt (Design §8.4) and before a session/transcript exists.
-- [ ] **The gate:** trusted (store ∪ allowlist) → proceed silently. Untrusted →
+- [x] **The gate:** trusted (store ∪ allowlist) → proceed silently. Untrusted →
       the prompt. **Accept** → `record_trust(root)` then proceed. **Decline** →
       print one calm line and `return Ok(())` — **no session created** (the
       session file is opened later, so decline naturally starts nothing, FR-1).
-- [ ] **The prompt** (Design §8.4), a pre-engine stdin prompt (like
+- [x] **The prompt** (Design §8.4), a pre-engine stdin prompt (like
       `offer_resume`, works identically in rich and plain since it prints before
       either frontend takes the terminal): names the folder; states plainly what
       agreeing means ("Emberly will read, edit, and run commands in this
@@ -138,19 +138,19 @@ the prompt and **before** any session exists.
       dimmed honesty line ("trusting this folder does not switch off later
       permission prompts"); ASCII TRUST / DON'T-TRUST framing. **Non-tty →
       declines cleanly** (guard on `is_terminal`, never hang a pipe).
-- [ ] **Audit record.** On **accept**, write `TranscriptEvent::TrustDecision {
+- [x] **Audit record.** On **accept**, write `TranscriptEvent::TrustDecision {
       path, trusted: true }` as an early record once the session sink exists
       (Tech Spec §3.2 `trust_decision`). On **decline** there is no session, so
       the durable record is the store's *absence* of the path (nothing to write);
       note this honestly.
-- [ ] **Honesty:** the gate lives in the binary, imports nothing from
+- [x] **Honesty:** the gate lives in the binary, imports nothing from
       `emberly-sandbox`, and touches no ruleset (FR-1 honesty clause) — a code
       comment states it.
-- [ ] Tests: `is_trusted` short-circuits the gate (trusted → no prompt path
+- [x] Tests: `is_trusted` short-circuits the gate (trusted → no prompt path
       taken); the decision function returns decline for empty/"n" and accept only
       for a deliberate "trust"/"yes"; `TrustDecision` recorded on accept. The
       interactive prompt end-to-end is an owner manual smoke (needs a tty).
-- [ ] `cargo fmt` + `clippy` + `test` green; commit.
+- [x] `cargo fmt` + `clippy` + `test` green; commit.
 
 ---
 
