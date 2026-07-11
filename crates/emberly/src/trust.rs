@@ -228,7 +228,7 @@ fn prompt_accepts(root: &Path) -> bool {
     println!("Only trust code you have reason to trust — project files can carry instructions.");
     // The honesty clause, in situ (FR-1): trust is not a waiver of later prompts.
     println!("(Trusting does not switch off later permission prompts — it decides only whether Emberly runs here.)");
-    print!("Trust this folder?  type \"trust\" to proceed · anything else = DON'T TRUST: ");
+    print!("Trust this folder?  type \"trust\", \"yes\", or \"y\" to proceed · anything else = DON'T TRUST: ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {
@@ -237,11 +237,14 @@ fn prompt_accepts(root: &Path) -> bool {
     accepts(&line)
 }
 
-/// The trust decision from a typed line (Design §8.4): a deliberate `trust`/
-/// `yes` grants; **anything else declines** (the safe default). Pure, so the
-/// no-unsafe-default rule is testable.
+/// The trust decision from a typed line (Design §8.4): a deliberate `trust`,
+/// `yes`, or `y` grants; **anything else declines** (the safe default). Pure,
+/// so the no-unsafe-default rule is testable.
 fn accepts(line: &str) -> bool {
-    matches!(line.trim().to_lowercase().as_str(), "trust" | "yes")
+    matches!(
+        line.trim().to_lowercase().as_str(),
+        "trust" | "yes" | "y"
+    )
 }
 
 // ---- helpers -------------------------------------------------------------
@@ -302,11 +305,12 @@ mod tests {
         assert!(accepts("trust"));
         assert!(accepts("  Trust\n"));
         assert!(accepts("yes"));
-        // Everything else declines — including empty and a bare "y" (this is a
-        // more deliberate gate than the permission prompt).
+        assert!(accepts("y"));
+        assert!(accepts("  Y\n"));
+        // Everything else declines — including empty (this is a more deliberate
+        // gate than the permission prompt).
         assert!(!accepts(""));
         assert!(!accepts("\n"));
-        assert!(!accepts("y"));
         assert!(!accepts("no"));
         assert!(!accepts("sure"));
     }

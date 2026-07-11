@@ -417,9 +417,11 @@ sees in a folder Emberly has not been trusted in before — it appears
   alarm; it is a considered question, in keeping with §1.2's "calmest
   screens in the app."
 - **The safe default is decline.** The default keypress does not grant
-  trust; trusting is the deliberate choice. Declining does not start the
-  session (Requirements FR-1) — Emberly says so in one line and exits
-  cleanly, never half-starting in a crippled state.
+  trust; trusting is the deliberate choice. Typing `trust`, `yes`, or `y`
+  (case-insensitive) grants; anything else — including a bare Enter —
+  declines. Declining does not start the session (Requirements FR-1) —
+  Emberly says so in one line and exits cleanly, never half-starting in a
+  crippled state.
 - **It is not the permission prompt and not the reserved safety band
   (§2).** Trust is a once-per-folder gate on *whether* Emberly runs here;
   it never stands in for the per-action prompts that govern *what* it does
@@ -430,7 +432,7 @@ sees in a folder Emberly has not been trusted in before — it appears
   within a project they already trusted (Requirements FR-1) — the prompt is
   a rare, considered moment, not a recurring toll.
 - Degraded mode (§7): the same content, ASCII-framed, capitalized
-  TRUST / DON'T TRUST choices, deliberate key to trust.
+  TRUST / DON'T TRUST choices, deliberate affirmative input to trust.
 
 ### 8.5 When the loop is broken
 
