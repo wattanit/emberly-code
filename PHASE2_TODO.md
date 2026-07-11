@@ -25,7 +25,7 @@ Phase 1's `reduce_output` (`crates/emberly-tools/src/reduce.rs:64`) for the turn
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. `[context]` config: `window_turns` (default 40) + `keep_recent_turns` | [ ] | |
+| 1. `[context]` config: `window_turns` (default 40) + `keep_recent_turns` | [x] | `ContextConfig` in engine.rs, `[context]` in ConfigFile, merged+resolved, threaded to Engine; `KEEP_RECENT` replaced; provenance in `config show` |
 | 2. Adaptive windowing at send time (`build_request`) | [ ] | |
 | 3. Marker↔range identifier scheme (resolve the §16 open item) | [ ] | |
 | 4. `recall` built-in tool + engine gate (not permission-gated) | [ ] | |
@@ -44,17 +44,20 @@ No `[context]` section is wired yet — only the `KEEP_RECENT = 6` constant
 Follow the existing `[loop]` → `LoopConfig` precedent (`config.rs:71`,
 `engine.rs:54`).
 
-- [ ] Add `ContextConfig { window_turns, keep_recent_turns }` to `ConfigFile`
+- [x] Add `ContextConfig { window_turns, keep_recent_turns }` to `ConfigFile`
       (`crates/emberly/src/config.rs:20`) with `#[serde(default)]`; defaults
       `window_turns = 40` (Tech Spec §8), `keep_recent_turns = 6` (the current
       `KEEP_RECENT`). Resolve in `Resolved`/`load()` (`config.rs:296`, `:506+`).
-- [ ] Thread to the engine: new field(s) on `EngineConfig` (`engine.rs:75`) and
+      _`ContextConfig` in `emberly-core/src/engine.rs`, `ContextConfigFile` + `[context]` section in `config.rs`, field-merge + resolution in `load()`._
+- [x] Thread to the engine: new field(s) on `EngineConfig` (`engine.rs:75`) and
       `Engine` (`engine.rs:275`); **replace the hardcoded `KEEP_RECENT`**
       (`engine.rs:45`, used by `compact()`) with the configured value so manual
       and automatic compaction (Phase 3) both read one source.
-- [ ] `config show` reports both keys with their provenance tier (C-3), like any
+      _`context: ContextConfig` on `EngineConfig` + `Engine`; `KEEP_RECENT` removed, `compact()` reads `self.context.keep_recent_turns`; exported from `lib.rs`._
+- [x] `config show` reports both keys with their provenance tier (C-3), like any
       config key. Defaults are placeholders — "initial; tune with use" (Tech Spec
       §16, Requirements §13).
+      _Provenance entries for `context.window_turns` and `context.keep_recent_turns` added to `load()`; surface via existing overrides output in `show()`._
 
 ## 2. Adaptive windowing at send time  *(FR-3; Tech Spec §7, §3.2; HC-7)*
 

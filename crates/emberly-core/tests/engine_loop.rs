@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use emberly_core::{
-    channel, AskAnswer, CaptureSink, Command, Engine, EngineConfig, FileTranscript, LoopConfig,
-    LoopResolution, Mode, PermissionDecision, RetryPolicy, RuleEngine, RuleSource, SandboxStatus,
-    SessionId, TranscriptEvent, TranscriptSink, UiEvent,
+    channel, AskAnswer, CaptureSink, Command, ContextConfig, Engine, EngineConfig, FileTranscript,
+    LoopConfig, LoopResolution, Mode, PermissionDecision, RetryPolicy, RuleEngine, RuleSource,
+    SandboxStatus, SessionId, TranscriptEvent, TranscriptSink, UiEvent,
 };
 use emberly_providers::{
     ContentBlock, Effort, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
@@ -66,6 +66,7 @@ fn make_config(
             ..LoopConfig::default()
         },
         truncate: TruncateConfig::default(),
+        context: ContextConfig::default(),
         // Fast retries so retry tests don't wait on real backoff.
         retry: RetryPolicy {
             max_attempts: 3,

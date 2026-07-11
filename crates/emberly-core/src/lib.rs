@@ -31,7 +31,7 @@ pub use channels::{channel, channel_with_capacity, EnginePorts, FrontendPorts};
 pub use command::Command;
 pub use emberly_providers::{Message, RetryPolicy};
 pub use emberly_tools::AskUserOutcome;
-pub use engine::{Engine, EngineConfig, LoopConfig};
+pub use engine::{ContextConfig, Engine, EngineConfig, LoopConfig};
 pub use event::UiEvent;
 pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfig};
 pub use gate::{AskUserAsk, PermissionAsk};

@@ -40,10 +40,6 @@ use crate::types::{LoopResolution, PermissionRendering, SandboxStatus, TokenUsag
 /// (Tech Spec §16 — the heuristic v1 title).
 const TITLE_CLIP: usize = 60;
 
-/// How many trailing messages `/compact` keeps verbatim (`context.
-/// keep_recent_turns`, default 6 — Tech Spec §7; config wiring is group 5).
-const KEEP_RECENT: usize = 6;
-
 /// Reserve this many tokens for model output when computing context usage,
 /// or the model's max output, whichever is smaller (Tech Spec §7).
 const OUTPUT_RESERVE: u64 = 8_000;
@@ -71,6 +67,29 @@ impl Default for LoopConfig {
     }
 }
 
+/// Adaptive context-window and compaction configuration (FR-3, Tech Spec
+/// §7/§8). Defaults are placeholders — tune with real long sessions (Tech Spec
+/// §16, Requirements §13). `Copy` so it is cheap to pass into send-time views.
+#[derive(Debug, Clone, Copy)]
+pub struct ContextConfig {
+    /// How many trailing non-pinned turns are sent to the provider (FR-3, Tech
+    /// Spec §7). Older turns are elided from the sent context behind one
+    /// marker; they stay in the transcript and the user's scrollback (HC-7).
+    pub window_turns: usize,
+    /// How many trailing messages `/compact` keeps verbatim (Tech Spec §7).
+    /// Also the tail manual and automatic compaction (Phase 3) both keep.
+    pub keep_recent_turns: usize,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            window_turns: 40,
+            keep_recent_turns: 6,
+        }
+    }
+}
+
 /// Everything needed to construct an [`Engine`].
 pub struct EngineConfig {
     pub provider: Arc<dyn Provider>,
@@ -90,6 +109,8 @@ pub struct EngineConfig {
     pub trust_granted: bool,
     /// Loop-breaking guardrail tunables (S-5, Tech Spec §7).
     pub loop_config: LoopConfig,
+    /// Adaptive context-window + compaction config (FR-3, Tech Spec §7/§8).
+    pub context: ContextConfig,
     pub truncate: TruncateConfig,
     /// Retry policy for retryable provider failures and mid-stream drops.
     pub retry: RetryPolicy,
@@ -288,6 +309,8 @@ pub struct Engine {
     trust_granted: bool,
     /// Loop-breaking guardrail state (S-5, Tech Spec §7).
     loop_config: LoopConfig,
+    /// Adaptive context-window + compaction config (FR-3, Tech Spec §7/§8).
+    context: ContextConfig,
     /// What the in-flight tool-call turn did (reset per turn).
     turn_obs: TurnObservation,
     /// Cumulative modified-file paths across the session (progress if a turn
@@ -397,6 +420,7 @@ impl Engine {
             tool_explanations: config.tool_explanations,
             trust_granted: config.trust_granted,
             loop_config: config.loop_config,
+            context: config.context,
             turn_obs: TurnObservation::default(),
             loop_seen_files: HashSet::new(),
             loop_seen_results: HashSet::new(),
@@ -642,7 +666,7 @@ impl Engine {
 
     /// Manual `/compact` at a clean boundary (Tech Spec §7). Replaces the middle
     /// of the conversation — everything after the pinned original task and
-    /// before the last [`KEEP_RECENT`] messages — with a model-written summary,
+    /// before the last `context.keep_recent_turns` messages — with a model-written summary,
     /// keeping the session usable when context grows. The pinned content
     /// (system prompt, original task) is never compacted; the JSONL log is
     /// untouched (the compaction is recorded as one event, replayed on resume).
@@ -651,7 +675,7 @@ impl Engine {
         // conversation). Keep the tail verbatim; summarize the middle.
         let pinned = usize::from(!self.conversation.is_empty());
         let len = self.conversation.len();
-        let keep = KEEP_RECENT.min(len.saturating_sub(pinned));
+        let keep = self.context.keep_recent_turns.min(len.saturating_sub(pinned));
         let from = pinned;
         let to = len.saturating_sub(keep);
         if to <= from {

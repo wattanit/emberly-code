@@ -46,6 +46,9 @@ pub struct ConfigFile {
     /// `[truncate]` tool-result reduction + size backstop (FR-2, Tech Spec §8).
     #[serde(default)]
     pub truncate: TruncateConfigFile,
+    /// `[context]` adaptive window + compaction tail (FR-3, Tech Spec §7/§8).
+    #[serde(default)]
+    pub context: ContextConfigFile,
 }
 
 /// `[ui]` — presentation toggles that shape what the interface shows without
@@ -75,6 +78,17 @@ pub struct LoopConfig {
     pub enabled: Option<bool>,
     pub repeat_window: Option<u32>,
     pub max_no_progress_turns: Option<u32>,
+}
+
+/// `[context]` — the adaptive context window and compaction tail (FR-3, Tech
+/// Spec §7/§8). All optional; the engine applies defaults when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct ContextConfigFile {
+    /// How many trailing non-pinned turns are sent (default 40). Older turns
+    /// are elided from the sent context (FR-3).
+    pub window_turns: Option<u32>,
+    /// How many trailing messages compaction keeps verbatim (default 6).
+    pub keep_recent_turns: Option<u32>,
 }
 
 /// `[truncate]` — tool-result reduction and size backstop at ingestion
@@ -287,6 +301,13 @@ impl ConfigFile {
         if higher.truncate.tail_lines.is_some() {
             self.truncate.tail_lines = higher.truncate.tail_lines;
         }
+        // `[context]` (FR-3) merges field-by-field.
+        if higher.context.window_turns.is_some() {
+            self.context.window_turns = higher.context.window_turns;
+        }
+        if higher.context.keep_recent_turns.is_some() {
+            self.context.keep_recent_turns = higher.context.keep_recent_turns;
+        }
         // `[trust]` is deliberately NOT merged — it is read only from the global
         // tier (FR-1); see `global_trust_dirs` and the project-[trust] notice.
     }
@@ -326,6 +347,8 @@ pub struct Resolved {
     pub loop_config: emberly_core::LoopConfig,
     /// Resolved truncation/reduction config (FR-2, §8.1), ready for the engine.
     pub truncate: emberly_tools::TruncateConfig,
+    /// Resolved adaptive context-window config (FR-3, Tech Spec §7/§8).
+    pub context: emberly_core::ContextConfig,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -480,6 +503,39 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         );
     }
 
+    // Context window + compaction (FR-3): record provenance when a user tier
+    // sets any `[context]` field.
+    if field(&project, |c: &ConfigFile| c.context.window_turns.is_some())
+        || field(&global, |c: &ConfigFile| c.context.window_turns.is_some())
+    {
+        record(
+            &mut provenance,
+            "context.window_turns",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.context.window_turns.is_some()),
+                field(&global, |c: &ConfigFile| c.context.window_turns.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| c.context.keep_recent_turns.is_some())
+        || field(&global, |c: &ConfigFile| c.context.keep_recent_turns.is_some())
+    {
+        record(
+            &mut provenance,
+            "context.keep_recent_turns",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.context.keep_recent_turns.is_some()),
+                field(&global, |c: &ConfigFile| c.context.keep_recent_turns.is_some()),
+            ),
+            true,
+        );
+    }
+
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
     let mut notices = Vec::new();
@@ -538,6 +594,19 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
                 max_bytes: merged.truncate.max_bytes.unwrap_or(d.max_bytes),
                 head_lines: merged.truncate.head_lines.unwrap_or(d.head_lines),
                 tail_lines: merged.truncate.tail_lines.unwrap_or(d.tail_lines),
+            }
+        },
+        context: {
+            let d = emberly_core::ContextConfig::default();
+            emberly_core::ContextConfig {
+                window_turns: merged
+                    .context
+                    .window_turns
+                    .map_or(d.window_turns, |v| v as usize),
+                keep_recent_turns: merged
+                    .context
+                    .keep_recent_turns
+                    .map_or(d.keep_recent_turns, |v| v as usize),
             }
         },
     })
