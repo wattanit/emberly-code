@@ -32,10 +32,10 @@ explicitly *not* containment).
 | 2. Workspace trust — the startup gate + prompt (FR-1 gate) | [x] | Done 2026-07-11; pre-engine gate (canonicalize → check → prompt); decline `return Ok(())` (no session); accept writes store + engine records `TrustDecision`; non-tty declines cleanly; honesty line in-prompt; 2 engine tests |
 | 3. Loop guardrail — detection + halt/await in the engine (S-5 core) | [x] | Done 2026-07-11; per-turn signature (normalized args—strips T-9 caption—+ result hash + modified-file set); trips on repeat_window/max_no_progress; `LoopHalted`+`ResolveLoop{Resume/Stop/Steer}`; `LoopHalt` transcript; `[loop]` config→engine; 6 tests |
 | 4. Loop guardrail — the halt surface (S-5 UI, both frontends) | [x] | Done 2026-07-11; `LoopHaltPrompt` (menu + steer field), harness-voice `render_loop_halt` (chrome/warning, no safety band); g/s/t + Esc=stop; degraded `parse_loop_resolution`; motion stilled; 10 tests |
-| 5. End-to-end, exit criterion, docs & SFD bookkeeping | [ ] | combined offline tests; README; **Spec bump decision (owner)** — trust realized as a pre-engine gate refines §3.1 `TrustRequest`; memory |
+| 5. End-to-end, exit criterion, docs & SFD bookkeeping | [x] | Done 2026-07-11; revoke round-trip test; README (trust + loop); **Spec bumped v0.5→v0.6** (owner-approved: TrustRequest withdrawn, §16 resolved note); Req/Design pins→v0.6; plan as-built + memory updated |
 
-**Overall Phase 5: IN PROGRESS** (4 / 5 groups). Branch `phase5/trust-and-loop-guardrail` off
-`version0.2` (Phase 4 merged).
+**Overall Phase 5: COMPLETE** (5 / 5 groups). Branch `phase5/trust-and-loop-guardrail` off
+`version0.2` (Phase 4 merged); not yet merged. **This closes the 0.2 feature set (M6).**
 
 ---
 
@@ -228,14 +228,14 @@ asking; this is the *harness* stepping in).
 
 ## 5. End-to-end, exit criterion, docs & SFD bookkeeping  *(Tech Spec §14.5; SFD G-10/G-11/G-16/G-24)*
 
-- [ ] **Combined offline tests** proving the plan's "Done when": (trust) an
+- [x] **Combined offline tests** proving the plan's "Done when": (trust) an
       untrusted root declines → no session; a trusted ancestor suppresses the
       prompt for a subdir; `revoke` re-arms. (loop) a re-treading script trips and
       each of resume/stop/steer is honored and recorded; a progressing script
       never trips.
-- [ ] **README:** short "Trusting a folder" and "When the loop is broken"
+- [x] **README:** short "Trusting a folder" and "When the loop is broken"
       sections.
-- [ ] **Spec bump decision (owner) — a real one this phase.** Implementation
+- [x] **Spec bump decision (owner) — a real one this phase.** Implementation
       refined the trust design: it is realized as a **pre-engine binary gate**
       (Tech Spec §6.7), so **`UiEvent::TrustRequest{path}` (§3.1) is not used** and
       `trust_decision` is recorded only on accept (no session exists on decline).
@@ -245,10 +245,10 @@ asking; this is the *harness* stepping in).
       Spec, refresh Req/Design companion pins (G-16), and record the feedback
       item. If declined, leave `TrustRequest` in §3.1 as a still-open door and
       note the divergence.
-- [ ] **Memory:** note the trust store location/shape and the loop-guardrail
+- [x] **Memory:** note the trust store location/shape and the loop-guardrail
       defaults if non-obvious (per the memory rules — only what the code doesn't
       already say).
-- [ ] Full suite + `fmt` + `clippy` green; final commit. This closes the 0.2
+- [x] Full suite + `fmt` + `clippy` green; final commit. This closes the 0.2
       feature set (M6) — all of P-8/P-9/P-10/T-8/T-9/C-5/C-6/FR-1/S-5.
 
 ---

@@ -1,6 +1,6 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.5 
+**Version:** 0.6 
 **Status:** approved 
 **Date:** 2026-07-11
 **Owner:** Wattanit
@@ -77,13 +77,19 @@ Non-exhaustive enum, serializable (A-3):
 `ToolStarted{.., explanation: Option<String>}` (the T-9 line, §5.4),
 `ToolFinished{..}`, `PermissionRequest{id, rendering}`,
 `AskUserRequest{id, question, options}` (T-8), `LoopHalted{reason}` (S-5),
-`TrustRequest{path}` (FR-1), `ContextUsage{pct, tokens}`, `CostEstimate{..}`,
+`ContextUsage{pct, tokens}`, `CostEstimate{..}`,
 `SandboxStatus(..)`, `ModeChanged(..)`, `ModelChanged{provider, model}` and
 `EffortChanged{effort: Option<Effort>, available: Vec<Effort>}` (C-6/P-9 —
 carries the model's offered levels so the picker knows its options and the
 sidebar the current one; `effort`/`available` empty when the model has no
 control), `HarnessError{..}`, `SessionMeta{..}`,
 `FileModified{path, adds, dels}`, `CompactionStatus(..)`.
+
+Workspace trust (FR-1) is **not** a `UiEvent`: it is a pre-engine gate in the
+binary (§6.7), resolved before the engine loop starts and before any project
+file is read into a prompt, so it never crosses the engine↔frontend channel.
+(v0.5 listed a `TrustRequest{path}` UiEvent; the pre-engine gate supersedes it —
+withdrawn in v0.6, see §16.)
 
 ### 3.2 `TranscriptEvent` (durable, append-only JSONL)
 
@@ -96,8 +102,10 @@ One JSON object per line in
 
 - `v` — schema version, present from day one (HC-7 longevity).
 - Event types: `session_start` (model, provider, config provenance,
-  sandbox status), `trust_decision` (path + trusted/declined — FR-1,
-  §6.7), `user_message`, `assistant_message` (complete, not deltas;
+  sandbox status), `trust_decision` (path + trusted — FR-1, §6.7; written on
+  **accept only**, since a decline starts no session and so has no transcript to
+  record into — the trust store's absence of the path is the durable record of a
+  non-grant), `user_message`, `assistant_message` (complete, not deltas;
   carries a distinct `reasoning` field when the model produced one —
   P-10, §4.7), `tool_call` (with the model's `explanation` when present —
   T-9, §5.4), `tool_result` (with `truncated: bool` and, when
@@ -414,8 +422,11 @@ canonical path, subtree-trusted**, with an optional pre-trust allowlist.
   `trustedDirectories` pattern requested for Claude Code). Project config
   cannot contribute here (FR-1).
 - **Checked in the binary at startup** (§10), before the engine begins the
-  loop: canonicalize the root, test membership (store ∪ allowlist). A miss
-  raises the trust gate (frontend prompt, Design §8.4); on decline the
+  loop *and before any project file is read into a prompt*: canonicalize the
+  root, test membership (store ∪ allowlist). A miss raises the trust gate — a
+  plain pre-engine prompt printed before either frontend takes the terminal, so
+  it reads the same in rich and plain mode and needs no engine event (Design
+  §8.4); a non-interactive launch declines cleanly. On decline the
   process exits cleanly with no session started; on accept the canonical
   path is written to the store and the session proceeds. The decision is a
   transcript event (`trust_decision`, §3.2).
@@ -675,6 +686,16 @@ in-app config/prompt editor and model/effort pickers (C-5, C-6), and the
 loop-breaking guardrail (S-5). *Proves the 0.2 scope.*
 
 ## 16. Open Items
+
+**Resolved in v0.6 (2026-07-11, M6 close — Phase 5).** Workspace trust (FR-1) is
+realized as a **pre-engine binary gate** (§6.7), not an engine event: the v0.5
+`TrustRequest{path}` UiEvent (§3.1) is **withdrawn** — trust is decided before
+the engine loop and before project files are read, so it never crosses the
+engine↔frontend channel. `trust_decision` (§3.2) is written on accept only (a
+decline starts no session). The loop-breaking guardrail (S-5) landed as
+specified: `LoopHalted`/`loop_halt` events plus a `ResolveLoop{resume|stop|
+steer}` command. Minor, additive bump; Requirements/Design unchanged (pins
+refreshed to Spec v0.6).
 
 - First-party SSE vs `eventsource-stream` (decide in M3 by reading the
   crate; bias first-party).

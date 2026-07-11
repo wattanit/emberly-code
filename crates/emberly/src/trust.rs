@@ -132,20 +132,30 @@ pub fn list() -> Result<()> {
 /// (Tech Spec §10). Matches on the canonical path, falling back to the literal
 /// argument so a since-deleted folder can still be revoked.
 pub fn revoke(arg: &str) -> Result<()> {
+    let path = config::global_trust_path().context("no home directory for the trust store")?;
+    match revoke_at(&path, arg)? {
+        Some(target) => println!("Revoked trust for {target}. It will be asked about again."),
+        None => println!("{arg} was not in the trust store."),
+    }
+    Ok(())
+}
+
+/// Remove `arg` (canonical or literal) from the store at `path`. Returns the
+/// removed target on success, `None` if it was not present. Split out so the
+/// revoke round-trip is testable without the global path.
+fn revoke_at(path: &Path, arg: &str) -> Result<Option<String>> {
     let target = expand_tilde(arg)
         .canonicalize()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| arg.to_string());
-    let mut store = load_store()?;
+    let mut store = load_store_at(path)?;
     let before = store.trusted.len();
     store.trusted.retain(|e| e.path != target && e.path != arg);
     if store.trusted.len() == before {
-        println!("{target} was not in the trust store.");
-        return Ok(());
+        return Ok(None);
     }
-    save_store(&store)?;
-    println!("Revoked trust for {target}. It will be asked about again.");
-    Ok(())
+    save_store_at(path, &store)?;
+    Ok(Some(target))
 }
 
 // ---- store I/O -----------------------------------------------------------
@@ -323,6 +333,32 @@ mod tests {
             .map(|e| PathBuf::from(&e.path))
             .collect();
         assert!(is_member(&proj.join("sub"), &trusted));
+    }
+
+    #[test]
+    fn revoke_removes_an_entry_and_re_arms_the_gate() {
+        let dir = tmp();
+        let store_path = dir.join("trust.toml");
+        // The store holds canonical paths (as `record_trust` writes them); temp
+        // dirs are symlinked on macOS, so canonicalize before storing.
+        let proj = tmp().canonicalize().expect("canon");
+        let proj_str = proj.display().to_string();
+        let mut store = TrustStore::default();
+        store.trusted.push(TrustEntry {
+            path: proj_str.clone(),
+            accepted: true,
+            ts: 0,
+        });
+        save_store_at(&store_path, &store).expect("save");
+
+        // Revoking removes it…
+        let removed = revoke_at(&store_path, &proj_str).expect("revoke");
+        assert_eq!(removed.as_deref(), Some(proj_str.as_str()));
+        let after = load_store_at(&store_path).expect("reload");
+        assert!(after.trusted.is_empty(), "gate re-armed");
+
+        // …and revoking again is a no-op, not an error.
+        assert_eq!(revoke_at(&store_path, &proj_str).expect("revoke2"), None);
     }
 
     #[test]

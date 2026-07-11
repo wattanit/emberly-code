@@ -1,12 +1,19 @@
 # Emberly Code — Implementation Plan (0.2 feature set)
 
-**Status:** 📝 **planning — not started**
-**Date:** 2026-07-10
+**Status:** ✅ **complete (2026-07-11)** — all five phases implemented and, for
+1–4, merged to `version0.2`; Phase 5 (trust & loop guardrail) done on
+`phase5/trust-and-loop-guardrail`, pending merge. The whole 0.2 feature set
+(M6) ships: P-8 provider profiles + Z.ai, C-5 in-app editing, P-9/P-10 effort +
+thinking trail, T-8/T-9 ask-user + tool-call explanation, FR-1 workspace trust,
+S-5 loop-breaking guardrail.
+**Date:** 2026-07-10 (planned); completed 2026-07-11
 **Owner:** Wattanit
 **Source documents** (G-14 as-built pin for the 0.2 release):
 - Requirements Document v0.5 (`docs/emberly-code-requirements.md`) — WHAT/WHY
 - Design Guideline v0.5 (`docs/emberly-code-design-guideline.md`) — UX/voice
-- Technical Specification v0.3 (`docs/emberly-code-tech-spec.md`) — HOW
+- Technical Specification v0.6 (`docs/emberly-code-tech-spec.md`) — HOW
+  (bumped v0.3 → v0.6 across implementation: v0.4 endpoint-configurable
+  adapters, v0.5 effort/reasoning refinements, v0.6 pre-engine trust gate)
 
 This plan expands Tech Spec §15 milestone **M6** (the 0.2 feature set) into
 workable phases. It builds on the shipped v0.1 product (all six crates, the
