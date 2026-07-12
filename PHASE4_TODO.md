@@ -30,14 +30,14 @@ and the fact that the view types already derive serde (`Message`/`ContentBlock`/
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. `ViewCache` type, `-view.json` path, own version | [ ] | derived, never authoritative |
+| 1. `ViewCache` type, `-view.json` path, own version | [x] | `view_cache.rs` — `ViewCache`, `VIEW_CACHE_VERSION` (1), `view_cache_path()`; 3 unit tests |
 | 2. Write the cache best-effort after the view settles | [ ] | no config key |
 | 3. Staleness guard (transcript byte-length + offset) | [ ] | |
 | 4. Cache-first fast-path resume (launch + in-session) | [ ] | also fixes the `adopt_session` turn-state gap |
 | 5. Fallback replay + one dimmed harness-voice notice | [ ] | fast path silent |
 | 6. Tests (offline, deterministic — §14.6) + exit criterion | [ ] | |
 
-**Overall Phase 4: NOT STARTED.**
+**Overall Phase 4: IN PROGRESS (group 1 of 6).**
 
 ---
 
@@ -46,7 +46,7 @@ and the fact that the view types already derive serde (`Message`/`ContentBlock`/
 A new serde struct serializing the engine's derived view. It holds no fact the
 transcript lacks (HC-7 does not apply to it).
 
-- [ ] New module `crates/emberly-core/src/view_cache.rs`: `ViewCache` deriving
+- [x] New module `crates/emberly-core/src/view_cache.rs`: `ViewCache` deriving
       `Serialize, Deserialize`, holding the view state the engine reconstructs on
       resume (from `Engine`, `engine.rs:352`): `conversation: Vec<Message>`
       (`:394`), `turn_map: Vec<usize>` (`:400`) + `next_turn: usize` (`:402`),
@@ -55,15 +55,17 @@ transcript lacks (HC-7 does not apply to it).
       (`:408`), and `original_task_recorded: bool` (`:437`). All these types
       already derive serde. (`auto_compact_armed` can be re-derived to a safe
       default on resume — no need to persist the latch.)
-- [ ] Own **cache** version: `VIEW_CACHE_VERSION` constant, **independent of the
+- [x] Own **cache** version: `VIEW_CACHE_VERSION` constant, **independent of the
       transcript `SCHEMA_VERSION`** (`transcript.rs:25`, which governs JSONL lines
       only) — the sidecar shape differs from `TranscriptRecord`. A cache whose
       version is unknown/older is treated as stale → replay (never a crash).
-- [ ] Path: `<sessions_dir>/<session-id>-view.json`, derived the same way as the
+- [x] Path: `<sessions_dir>/<session-id>-view.json`, derived the same way as the
       outputs sidecar (`{stem}-view.json`, mirroring `transcript.rs:313`). One
       helper for the path so writer and reader agree.
-- [ ] Include the staleness fields (group 3) and `session_id` on the struct so a
+- [x] Include the staleness fields (group 3) and `session_id` on the struct so a
       cache can be sanity-checked against the transcript it claims to derive from.
+      _`transcript_byte_len: u64` (doubles as the built-through offset in the
+      append-only model) and `session_id` on the struct._
 
 ## 2. Write the cache best-effort after the view settles  *(FR-5; Tech Spec §3.2a, §8)*
 
