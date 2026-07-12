@@ -173,4 +173,12 @@ pub enum UiEvent {
     /// Progress/outcome of a `/compact` operation (Requirements §8.3). Emitted
     /// from Phase 5 onward.
     CompactionStatus { message: String },
+
+    /// The model updated its task list (T-11, Tech Spec §3.1, Design §4.7). The
+    /// full list is sent on every update (replace, not merge). The sidebar's
+    /// Tasks section and the inline checklist both render from this. Additive —
+    /// older frontends warn-skip it.
+    TaskListUpdated {
+        items: Vec<emberly_tools::TaskItem>,
+    },
 }

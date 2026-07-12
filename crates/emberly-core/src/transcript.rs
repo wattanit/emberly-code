@@ -191,6 +191,14 @@ pub enum TranscriptEvent {
     /// The session title was set or renamed (Requirements §8.2).
     SessionTitle { title: String },
 
+    /// The model updated its task list (T-11, Tech Spec §3.2, HC-7). The full
+    /// list is recorded on every update (replace, not merge). Additive — older
+    /// readers warn-skip it, so no `SCHEMA_VERSION` bump (like `AskUser`/
+    /// `EffortChange`).
+    TaskList {
+        items: Vec<emberly_tools::TaskItem>,
+    },
+
     /// Clean session end.
     SessionEnd {
         #[serde(default, skip_serializing_if = "Option::is_none")]

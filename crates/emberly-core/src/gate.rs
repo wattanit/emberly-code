@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use emberly_tools::{
     AskUserGate, AskUserOutcome, PermissionGate, PermissionOutcome, PermissionRequest,
-    RecallGate, RecallOutcome,
+    RecallGate, RecallOutcome, TaskItem, TaskListError, TaskListGate,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -119,5 +119,41 @@ impl RecallGate for RecallGateImpl {
             return RecallOutcome::Empty;
         }
         reply_rx.await.unwrap_or(RecallOutcome::Empty)
+    }
+}
+
+/// A task-list update in flight from a tool to the engine, carrying the
+/// oneshot the engine acks on (T-11). Like [`RecallAsk`], opaque to callers of
+/// the engine — they only route the receiver back into
+/// [`Engine::run`](crate::engine::Engine::run).
+pub struct TaskListAsk {
+    pub(crate) items: Vec<TaskItem>,
+    pub(crate) reply: oneshot::Sender<Result<(), TaskListError>>,
+}
+
+/// The task-list gate installed into every
+/// [`ToolCtx`](emberly_tools::ToolCtx). Fails closed: if the engine is gone or
+/// the reply is dropped, the answer is `Err` (the safe default — the tool maps
+/// it to a structured failure, HC-6).
+pub(crate) struct TaskListGateImpl {
+    pub(crate) asks: mpsc::Sender<TaskListAsk>,
+}
+
+#[async_trait]
+impl TaskListGate for TaskListGateImpl {
+    async fn set_task_list(&self, items: Vec<TaskItem>) -> Result<(), TaskListError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .asks
+            .send(TaskListAsk {
+                items,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(TaskListError);
+        }
+        reply_rx.await.unwrap_or(Err(TaskListError))
     }
 }

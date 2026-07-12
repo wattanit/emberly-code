@@ -8,6 +8,7 @@ use crate::ask_user::{AskUserGate, AskUserOutcome, DeclineAskGate};
 use crate::permission::{PermissionGate, PermissionOutcome, PermissionRequest};
 use crate::recall::{DeclineRecallGate, RecallGate, RecallOutcome};
 use crate::sandbox::Sandbox;
+use crate::task_list::{DropTaskListGate, TaskItem, TaskListError, TaskListGate};
 
 /// Truncation-at-ingestion configuration (Requirements §8.1, Tech Spec §5.3).
 /// Carried in [`ToolCtx`]; the truncation function that consumes it lands in
@@ -54,6 +55,7 @@ pub struct ToolCtx {
     sandbox: Arc<dyn Sandbox>,
     ask: Arc<dyn AskUserGate>,
     recall: Arc<dyn RecallGate>,
+    task_list: Arc<dyn TaskListGate>,
 }
 
 impl ToolCtx {
@@ -75,6 +77,7 @@ impl ToolCtx {
             sandbox,
             ask: Arc::new(DeclineAskGate),
             recall: Arc::new(DeclineRecallGate),
+            task_list: Arc::new(DropTaskListGate),
         }
     }
 
@@ -91,6 +94,14 @@ impl ToolCtx {
     #[must_use]
     pub fn with_recall_gate(mut self, recall: Arc<dyn RecallGate>) -> Self {
         self.recall = recall;
+        self
+    }
+
+    /// Install the task-list gate (T-11). Kept a builder so existing callers
+    /// and tests, which never set a task list, need no change.
+    #[must_use]
+    pub fn with_task_list_gate(mut self, task_list: Arc<dyn TaskListGate>) -> Self {
+        self.task_list = task_list;
         self
     }
 
@@ -129,5 +140,16 @@ impl ToolCtx {
     /// The single path to the recall gate; touches no filesystem or network.
     pub async fn recall(&self, from: usize, to: usize) -> RecallOutcome {
         self.recall.recall(from, to).await
+    }
+
+    /// Replace the engine's task list with the full list (T-11). The single
+    /// path to the task-list gate; touches no filesystem or network, so it is
+    /// **not permission-gated** (§6). The model always sends the complete list
+    /// (replace, not merge).
+    pub async fn set_task_list(
+        &self,
+        items: Vec<TaskItem>,
+    ) -> Result<(), TaskListError> {
+        self.task_list.set_task_list(items).await
     }
 }

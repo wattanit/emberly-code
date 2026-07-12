@@ -136,12 +136,13 @@ fn start_with_file_transcript(
 
 fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx) = Engine::new(config, engine_ports.events_tx);
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx) = Engine::new(config, engine_ports.events_tx);
     tokio::spawn(engine.run(
         engine_ports.commands_rx,
         asks_rx,
         user_asks_rx,
         recall_rx,
+        task_rx,
     ));
     Harness {
         commands_tx: frontend.commands_tx,
@@ -1977,7 +1978,7 @@ async fn bash_reduction_collapses_progress_in_context() {
     let path = root.join("session.jsonl");
     let cmd = "for i in $(seq 1 100); do echo 'Downloading '$i'%'; done; echo 'Done'";
     let scripts = vec![
-        ScriptedResponse::tool_call("c1", "bash", &format!(r#"{{"command":"{cmd}"}}"#)),
+        ScriptedResponse::tool_call("c1", "bash", format!(r#"{{"command":"{cmd}"}}"#)),
         ScriptedResponse::text("done"),
     ];
     let mut h = start_with_truncate(scripts, root.clone(), &path, TruncateConfig::default());
@@ -3408,5 +3409,253 @@ async fn in_session_resume_restores_conversation() {
     assert!(
         user_texts.iter().any(|t| t.contains("remember this")),
         "restored conversation includes the prior user message: {user_texts:?}"
+    );
+}
+
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ T-11 — Task-list ("todo") tool tests (Phase 1, Group 6)                 ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+/// A `todo` round-trip emits `TaskListUpdated` and a `task_list` transcript
+/// event with the full list (replace semantics — a second call replaces).
+#[tokio::test]
+async fn todo_round_trip_emits_event_and_transcript() {
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "t1",
+            "todo",
+            r#"{"items":[{"text":"step one","status":"in_progress"},{"text":"step two","status":"pending"}]}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, temp_project());
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // Must emit TaskListUpdated with the full list.
+    let updated = events.iter().find_map(|e| match e {
+        UiEvent::TaskListUpdated { items } => Some(items),
+        _ => None,
+    });
+    assert!(updated.is_some(), "todo emits TaskListUpdated");
+    let items = updated.expect("checked some");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].text, "step one");
+    assert_eq!(items[1].text, "step two");
+
+    // The transcript records the task_list event (HC-7).
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::TaskList { items } if items.len() == 2
+    )));
+}
+
+/// Replace semantics: a second `todo` call with fewer items replaces the list.
+#[tokio::test]
+async fn todo_second_call_replaces_not_merges() {
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "t1",
+            "todo",
+            r#"{"items":[{"text":"a","status":"pending"},{"text":"b","status":"pending"},{"text":"c","status":"pending"}]}"#,
+        ),
+        ScriptedResponse::tool_call(
+            "t2",
+            "todo",
+            r#"{"items":[{"text":"only a","status":"done"}]}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, temp_project());
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    // The last task_list transcript event must have exactly 1 item — replace,
+    // not merge.
+    let records = sink.records();
+    let last_task = records
+        .iter()
+        .rev()
+        .find_map(|r| match &r.event {
+            TranscriptEvent::TaskList { items } => Some(items),
+            _ => None,
+        })
+        .expect("at least one task_list event");
+    assert_eq!(last_task.len(), 1);
+    assert_eq!(last_task[0].text, "only a");
+}
+
+/// The `todo` call is not permission-gated: no PermissionRequest ever raised.
+#[tokio::test]
+async fn todo_is_not_permission_gated() {
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "t1",
+            "todo",
+            r#"{"items":[{"text":"do thing","status":"in_progress"}]}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = start(scripts, temp_project());
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    let has_permission = events
+        .iter()
+        .any(|e| matches!(e, UiEvent::PermissionRequest { .. }));
+    assert!(
+        !has_permission,
+        "todo never raises a permission prompt"
+    );
+}
+
+/// With `pin_task_list = true`, the task list survives compaction in the
+/// system prompt. With `false`, it is absent from the sent context.
+#[tokio::test]
+async fn todo_pinned_across_compaction() {
+    let scripts = vec![
+        // Turn 1: set the task list.
+        ScriptedResponse::tool_call(
+            "t1",
+            "todo",
+            r#"{"items":[{"text":"survive compaction","status":"in_progress"}]}"#,
+        ),
+        // Turns 2–5: text turns to build enough messages for compaction.
+        ScriptedResponse::text("r2"),
+        ScriptedResponse::text("r3"),
+        ScriptedResponse::text("r4"),
+        ScriptedResponse::text("r5"),
+        // Turn 6: the summarization call for `/compact`.
+        ScriptedResponse::text("SUMMARY"),
+        // Turn 7: a final call whose request we inspect.
+        ScriptedResponse::text("final"),
+    ];
+    let fake = Arc::new(FakeProvider::new(scripts));
+    let root = temp_project();
+
+    let mut config = make_config(fake.clone(), root, EngineConfig::no_transcript());
+    config.context = ContextConfig {
+        pin_task_list: true,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn(config);
+
+    // Send the first message — sets the task list.
+    h.send(Command::UserInput {
+        text: "start".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    // Build up messages for compaction.
+    for i in 0..4 {
+        h.send(Command::UserInput {
+            text: format!("msg {i}"),
+        })
+        .await;
+        let _ = h.collect(None).await;
+    }
+
+    // Trigger compaction.
+    h.send(Command::Compact).await;
+    let _ = h.collect(None).await;
+
+    // Send a final message and inspect the request.
+    h.send(Command::UserInput {
+        text: "check".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(
+        system.contains("survive compaction"),
+        "pinned task list should survive compaction in the system prompt"
+    );
+}
+
+/// With `pin_task_list = false`, the task list is absent from the sent context.
+#[tokio::test]
+async fn todo_unpinned_absent_from_context() {
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "t1",
+            "todo",
+            r#"{"items":[{"text":"should not be pinned","status":"pending"}]}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ];
+    let fake = Arc::new(FakeProvider::new(scripts));
+    let root = temp_project();
+
+    let mut config = make_config(fake.clone(), root, EngineConfig::no_transcript());
+    config.context = ContextConfig {
+        pin_task_list: false,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(
+        !system.contains("should not be pinned"),
+        "unpinned task list should be absent from the system prompt"
+    );
+}
+
+/// HC-7: the `task_list` transcript event is additive — resume tolerates it
+/// without crashing.
+#[tokio::test]
+async fn todo_transcript_event_is_additive_for_resume() {
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "t1",
+            "todo",
+            r#"{"items":[{"text":"task","status":"done"}]}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ];
+    let root = temp_project();
+    let session_dir = root.join(".agents").join("sessions");
+    let _ = std::fs::create_dir_all(&session_dir);
+    let sid = SessionId::new();
+    let path = session_dir.join(format!("{sid}.jsonl"));
+    let mut h = start_with_file_transcript(scripts, root.clone(), &path);
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    // The transcript file contains the task_list event. Reading it back for
+    // resume should not crash — the resume reader warn-skips unknown events.
+    let records = emberly_core::resume::read_records(&path);
+    assert!(
+        records.is_ok(),
+        "resume reader tolerates the task_list event"
+    );
+    let loaded = records.expect("checked ok");
+    assert!(
+        loaded.records.iter().any(|r| matches!(
+            &r.event,
+            TranscriptEvent::TaskList { .. }
+        )),
+        "transcript contains the task_list event"
     );
 }

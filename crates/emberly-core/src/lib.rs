@@ -32,10 +32,11 @@ pub use channels::{channel, channel_with_capacity, EnginePorts, FrontendPorts};
 pub use command::Command;
 pub use emberly_providers::{Message, RetryPolicy};
 pub use emberly_tools::AskUserOutcome;
+pub use emberly_tools::{TaskItem, TaskStatus};
 pub use engine::{ContextConfig, Engine, EngineConfig, LoopConfig};
 pub use event::UiEvent;
 pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfig};
-pub use gate::{AskUserAsk, PermissionAsk};
+pub use gate::{AskUserAsk, PermissionAsk, TaskListAsk};
 pub use id::{AskId, PermissionId, SessionId, ToolCallId};
 pub use transcript::{
     append_abnormal_exit, CaptureSink, CompactTrigger, ConfigProvenance, FileTranscript, NoopSink,

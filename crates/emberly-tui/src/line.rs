@@ -164,8 +164,24 @@ impl LineRenderer {
                     writeln!(out, "note: {line}")?;
                 }
             }
-            // Context % and cost belong to the rich TUI's status line (Phase 4);
-            // the plain frontend stays quiet on those.
+            UiEvent::CompactionStatus { .. }
+            | UiEvent::ContextUsage { .. }
+            | UiEvent::CostEstimate { .. }
+            | UiEvent::SessionUsage { .. } => {}
+            UiEvent::TaskListUpdated { items } => {
+                // ASCII checklist — the plain mode has no sidebar, so the
+                // inline block is the only surface (Design §7).
+                writeln!(out)?;
+                for item in items {
+                    let mark = match item.status {
+                        emberly_core::TaskStatus::Pending => "[ ]",
+                        emberly_core::TaskStatus::InProgress => "[~]",
+                        emberly_core::TaskStatus::Done => "[x]",
+                    };
+                    writeln!(out, "  {mark} {}", item.text)?;
+                }
+            }
+            // Unknown future events are ignored (non_exhaustive).
             _ => {}
         }
         Ok(())
@@ -686,6 +702,12 @@ mod tests {
                 delay_ms: 500,
                 reason: "429".into(),
             },
+            UiEvent::TaskListUpdated {
+                items: vec![emberly_core::TaskItem {
+                    text: "task".into(),
+                    status: emberly_core::TaskStatus::InProgress,
+                }],
+            },
         ];
         for e in events {
             let s = render_to_string(&e);
@@ -765,5 +787,31 @@ mod tests {
             parse_permission_answer("anything"),
             PermissionDecision::Deny
         );
+    }
+
+    #[test]
+    fn task_list_renders_ascii_checklist_in_plain_mode() {
+        // The plain frontend has no sidebar, so TaskListUpdated renders as an
+        // inline ASCII checklist (Design §7). No ANSI, markers carry status.
+        let out = render_to_string(&UiEvent::TaskListUpdated {
+            items: vec![
+                emberly_core::TaskItem {
+                    text: "first".into(),
+                    status: emberly_core::TaskStatus::Done,
+                },
+                emberly_core::TaskItem {
+                    text: "second".into(),
+                    status: emberly_core::TaskStatus::InProgress,
+                },
+                emberly_core::TaskItem {
+                    text: "third".into(),
+                    status: emberly_core::TaskStatus::Pending,
+                },
+            ],
+        });
+        assert!(out.contains("[x] first"), "done item: {out:?}");
+        assert!(out.contains("[~] second"), "in-progress item: {out:?}");
+        assert!(out.contains("[ ] third"), "pending item: {out:?}");
+        assert!(!out.contains('\u{1b}'), "no ANSI in degraded mode");
     }
 }
