@@ -24,7 +24,7 @@ use emberly_core::{
     TranscriptRecord, TranscriptSink,
 };
 use emberly_providers::Provider;
-use emberly_tools::{default_registry, TruncateConfig};
+use emberly_tools::default_registry;
 use emberly_tui::{frontend, SessionInfo};
 
 mod config;
@@ -407,10 +407,13 @@ async fn run() -> anyhow::Result<()> {
     let mut history: Vec<TranscriptRecord> = Vec::new();
     let mut initial_conversation: Vec<Message> = Vec::new();
     let resuming;
+    let mut compacted = false;
     let mut title = String::new();
     let session_id;
     let session_path;
     let transcript: Box<dyn TranscriptSink>;
+    let mut initial_cache = None;
+    let mut replayed = false;
 
     if let Some(path) = resume_path {
         let loaded = resume::read_records(&path)
@@ -418,7 +421,18 @@ async fn run() -> anyhow::Result<()> {
         for warning in &loaded.warnings {
             eprintln!("emberly: {warning}");
         }
-        initial_conversation = resume::rebuild_conversation(&loaded.records);
+        // FR-5: try the derived view cache first. A valid cache restores the
+        // conversation and all derived state directly — skip the expensive
+        // rebuild_conversation + build_turn_map (Tech Spec §3.2a).
+        initial_cache = resume::try_load_view_cache(&path);
+        if let Some(ref cache) = initial_cache {
+            initial_conversation = cache.conversation.clone();
+            compacted = cache.compacted;
+        } else {
+            initial_conversation = resume::rebuild_conversation(&loaded.records);
+            compacted = resume::has_compaction(&loaded.records);
+            replayed = true;
+        }
         title = resume::session_title(&loaded.records).unwrap_or_default();
         session_id = resume::session_id(&loaded.records).unwrap_or_default();
         transcript = open_transcript(FileTranscript::open(&path));
@@ -506,7 +520,8 @@ async fn run() -> anyhow::Result<()> {
         tool_explanations: resolved.tool_explanations,
         trust_granted,
         loop_config: resolved.loop_config,
-        truncate: TruncateConfig::default(),
+        truncate: resolved.truncate,
+        context: resolved.context,
         retry: emberly_core::RetryPolicy::default(),
         session_id,
         sessions_dir: sessions_dir.clone(),
@@ -522,6 +537,9 @@ async fn run() -> anyhow::Result<()> {
         transcript,
         initial_conversation,
         resuming,
+        compacted,
+        initial_cache,
+        replayed,
         summary_prompt: resolved.summary_prompt.clone(),
         // Lets `/model` switch provider/model in-session (C-6); resolves any
         // configured profile, so it works even from the offline placeholder.
@@ -532,8 +550,13 @@ async fn run() -> anyhow::Result<()> {
     };
 
     let (engine_ports, frontend_ports) = channel();
-    let (engine, asks_rx, user_asks_rx) = Engine::new(config, engine_ports.events_tx);
-    let engine_task = tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx, user_asks_rx));
+    let (engine, asks_rx, user_asks_rx, recall_rx) = Engine::new(config, engine_ports.events_tx);
+    let engine_task = tokio::spawn(engine.run(
+        engine_ports.commands_rx,
+        asks_rx,
+        user_asks_rx,
+        recall_rx,
+    ));
 
     // Drive the session until the user quits or the engine closes its events.
     // The frontend drops its command sender on quit, the engine finishes, and

@@ -1,14 +1,14 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.6 
-**Status:** approved 
+**Version:** 0.7 
+**Status:** approved
 **Date:** 2026-07-11
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.5 (upstream contract),
-Design Guideline v0.5 (upstream for all UI/UX decisions)
+**Companion documents:** Requirements Document v0.6 (upstream contract),
+Design Guideline v0.6 (upstream for all UI/UX decisions)
 
 This document defines HOW Emberly Code is built. Requirements-level
-identifiers (HC-n, P-n, T-n, C-n, S-n, A-n) refer to the Requirements
+identifiers (HC-n, FR-n, P-n, T-n, C-n, S-n, A-n) refer to the Requirements
 Document. Where this spec makes a choice, the requirement it satisfies is
 cited so traceability is mechanical.
 
@@ -23,7 +23,7 @@ emberly/
 ├── crates/
 │   ├── emberly-core/      # engine, event model, session, context mgmt
 │   ├── emberly-providers/ # Provider trait + Anthropic, OpenAI-compat
-│   ├── emberly-tools/     # Tool trait + six built-in tools
+│   ├── emberly-tools/     # Tool trait + the built-in tool suite
 │   ├── emberly-sandbox/   # permission rules + OS confinement
 │   ├── emberly-tui/       # ratatui frontend
 │   └── emberly/           # thin binary: wiring, CLI args, supervisor
@@ -116,18 +116,58 @@ One JSON object per line in
   `permission_decision` (what was asked, what the user answered, what
   actually ran — Requirements §6.6), `mode_change`, `model_switch` /
   `effort_change` (C-6/P-9), `compaction`
-  (summary text + replaced range), `session_title`, `session_end`,
+  (summary text + replaced range + a `trigger: manual | auto` field naming
+  whether the user or the FR-4 threshold initiated it — additive, older
+  readers warn-skip it, so no `SCHEMA_VERSION` bump; absent reads as
+  `manual`), `session_title`, `session_end`,
   `abnormal_exit` (written by the supervisor when possible).
 - The transcript is ground truth; the in-context conversation is rebuilt
   from it (resume) or maintained in parallel with it (live session).
-  Nothing ever rewrites a transcript line (HC-7, Requirements §8.2).
+  Nothing ever rewrites a transcript line (HC-7, Requirements §8.2). The
+  adaptive window (FR-3, §7) and tool-result reduction (FR-2, §5.3) change
+  only what is *sent to the provider*; both leave every transcript line
+  intact, so the log stays the complete audit record.
+
+### 3.2a Derived conversation-state cache (FR-5)
+
+A sidecar `.agents/sessions/<session-id>-view.json` holds the session's
+**derived** conversation state — the current in-context view (normalized
+messages), token-accounting totals, the compaction summary/range history,
+and the current window bound (§7) — so a resume restores that state directly
+instead of replaying and re-tokenizing the whole JSONL (Requirements FR-5).
+
+- **Derived, never authoritative.** The cache is a pure function of the
+  transcript; it is rewritten in place each time the view changes (unlike the
+  append-only transcript, HC-7 does not apply to it — it holds no fact the
+  transcript lacks). Losing, corrupting, or deleting it loses nothing.
+- **Staleness guard.** The cache records the transcript length in bytes and
+  the byte offset it was built through; on resume, if the transcript has
+  grown past that offset, is shorter, or the file is unreadable/parse-fails,
+  the cache is discarded and resume falls back to full transcript replay
+  (§3.3). The cache is only trusted when it provably matches the log.
+- Written on the same flush cadence as the transcript is not required — a
+  best-effort write after each turn suffices, because the transcript replay
+  fallback (§3.3) is always correct. A crash mid-write is a stale cache, which
+  the staleness guard already rejects.
 
 ### 3.3 Resume
 
-`emberly resume` (and the offer-on-next-launch flow, Design §8.3)
-replays the transcript: conversation view is reconstructed by applying
-`compaction` events as view transformations. Unknown event types (newer
-`v`) are surfaced as a warning, not a crash.
+`emberly resume` (and the offer-on-next-launch flow, Design §8.3) restores
+the conversation view. Two paths, cache-first (Requirements FR-5):
+
+1. **Fast path (cache).** If the derived cache (§3.2a) exists and its
+   staleness guard matches the transcript, load the view, accounting, and
+   window state from it directly — no per-line re-tokenization. This is the
+   normal resume and is what makes resume cost proportional to the working
+   view, not the full history (FR-5).
+2. **Fallback (replay).** Otherwise replay the transcript: the conversation
+   view is reconstructed by applying `compaction` events as view
+   transformations, then re-deriving the window bound. Unknown event types
+   (newer `v`) are surfaced as a warning, not a crash. Replay is always
+   correct on its own; the cache is only ever an optimization over it.
+
+Design §8.6 requires the fallback to be announced in one dimmed harness-voice
+line (speech about the slow path); the fast path is silent.
 
 ## 4. Provider Layer (`emberly-providers`)
 
@@ -272,16 +312,47 @@ proxying JSON-RPC (T-7); nothing else in the engine changes.
 | `glob` | Root-confined; ignores `.git/` and honors `.gitignore` by default. |
 | `grep` | First-party wrapper over the `grep-searcher`/`ignore` crates (the ripgrep libraries — pure Rust, same author). Root-confined. |
 | `ask_user` | Presents a question and optional discrete options to the user and blocks the agent loop until answered (T-8). Returns the typed answer, or a structured `{declined: true}` if dismissed, so the model can proceed or stop. Touches no filesystem or network — a pure engine↔frontend round-trip — so it bypasses the sandbox but still flows through the `Tool` trait; it is a `Command`/`UiEvent` pair under the hood (§3). |
+| `recall` | Returns earlier conversation turns dropped from the working window (T-10, FR-3, §7). Args: a turn range (or the id referenced by a window-elision marker). Returns the engine's **normalized, reduced** messages for that range — never raw JSONL — so recall costs tokens proportional to what is recalled, not the transcript's raw size. Reads only the current session's own history from the transcript records the engine already holds; touches no filesystem or network, so like `ask_user` it bypasses the sandbox and is not permission-gated (§6), while still flowing through the `Tool` trait. |
 
-### 5.3 Truncation at ingestion (Requirements §8.1)
+### 5.3 Tool-result reduction at ingestion (Requirements §8.1, FR-2)
 
-Applied when a tool result is appended: if output exceeds
-`truncate.max_lines` (default 400) or `truncate.max_bytes` (default
-64 KiB), keep head (default 150 lines) + tail (default 100 lines),
-insert `[... N lines elided — /view to open full output ...]`, write the
-full output to the sidecar file, and record `full_output_ref` in the
-transcript event. Deterministic, no model call. The `/view` handoff
-(Design §4.3) opens the sidecar read-only in `$VISUAL`/`$EDITOR`.
+Two deterministic, no-model-call layers run when a tool result is appended,
+salient-reduction first, then the size backstop. The full untruncated output
+is always written to the sidecar and referenced by `full_output_ref`, so both
+layers are recoverable via `/view` (Design §4.3); neither ever touches the
+transcript's recorded result (HC-7).
+
+- **Salient reduction (FR-2).** Where a tool's output has a known salient
+  shape, a per-tool reducer keeps the meat and elides the noise *by meaning*,
+  not by position. The reducer set (initial; tune with use — Requirements
+  §13):
+  - `bash`: keep the exit status, all of stderr, and the head+tail of stdout;
+    drop repetitive progress/percentage lines (deterministic
+    collapse of runs of near-identical lines). *Example (non-normative):* a
+    500-line `cargo build` collapses to its warnings/errors and final
+    summary.
+  - `grep`: keep match lines and their file:line headers; drop nothing that
+    is a hit (hits are the point).
+  - `read_file`: no semantic reducer — a file read is already bounded by the
+    optional `start_line`/`end_line` and the size backstop; reducing by
+    meaning would risk hiding code the model asked for.
+  - `glob`: keep the path list; if it exceeds the count backstop, keep head
+    +tail with the elision marker.
+  Reducers are pure functions `(&ToolSpec, &raw_output) -> reduced_output`
+  registered per tool; a tool with no registered reducer falls straight
+  through to the size backstop. `truncate.reduce = bool` (default `true`,
+  §8) disables the reduction layer for users who want raw results.
+- **Size backstop (Requirements §8.1).** After reduction, if output still
+  exceeds `truncate.max_lines` (default 400) or `truncate.max_bytes`
+  (default 64 KiB), keep head (default 150 lines) + tail (default 100 lines)
+  and insert `[... N lines elided — /view to open full output ...]`. This is
+  the blind head/tail defense that always applies, reducer or not.
+
+The elision/reduction marker names what was withheld and offers `/view`; the
+`/view` handoff (Design §4.3) opens the sidecar read-only in
+`$VISUAL`/`$EDITOR`. A reducer must never drop information the model cannot
+then recover from the sidecar — the sidecar holds the complete output, so
+"recoverable" is guaranteed by construction (Requirements FR-2).
 
 ### 5.4 Tool-call explanation (T-9)
 
@@ -462,8 +533,41 @@ canonical path, subtree-trusted**, with an optional pre-trust allowlist.
 - **Failure fallback:** if the summarization call fails, hard-truncate
   oldest non-pinned turns to 50% budget with a visible warning — a full
   context never produces a stuck session.
-- Auto-compaction: designed-for (the trigger is one threshold check in
-  the accounting path) but not enabled in current scope (Requirements §2.2).
+- **Automatic compaction (FR-4).** One threshold check in the accounting
+  path: when `ContextUsage.pct` crosses `context.auto_compact_threshold`
+  (default `0.85`) the engine schedules a compaction at the next clean
+  boundary (same queueing as manual, same pinned/boundary/fallback rules) —
+  the *only* difference from `/compact` is the trigger and the
+  `compaction.trigger = auto` transcript field (§3.2). On by default
+  (`context.auto_compact = true`); set `false` to compact manually only.
+  After an auto-compaction fires, it will not re-fire until usage has fallen
+  and re-crossed the threshold (the compaction itself drops usage well below
+  it, so no thrash). Surfaced in the harness voice per Design §8.6. This
+  enables what v0.5 §7 left designed-for; the manual path is unchanged.
+- **Adaptive context window (FR-3).** Independently of compaction, the engine
+  sends only a working window of recent turns to the provider. The window is
+  the last `context.window_turns` (default `40`) non-pinned turns; pinned
+  content (system prompt, project instructions, original task) and any active
+  compaction summary are always sent and never counted against the window.
+  Turns older than the window are replaced *in the sent context only* by a
+  single synthetic marker — `[N earlier turns elided from context — still in
+  the session transcript]` — while remaining verbatim in the transcript and,
+  for the user, in TUI scrollback (Design §8.6).
+  - **Model-driven re-read via `recall` (Requirements T-10/FR-3).** The
+    window never guesses; when the model needs a dropped turn it calls the
+    `recall` built-in (§5.2). The elision marker carries the transcript range
+    it stands for; `recall` takes that range and returns those turns in the
+    engine's normalized, reduced form (§5.3), served from the transcript
+    records the engine already holds — a pure engine round-trip, no
+    filesystem/network, not permission-gated (§6), like `ask_user`. It is
+    deliberately **not** `read_file` over the raw JSONL: that would re-inflate
+    the elided noise in verbose transcript form and defeat the window's token
+    economy (Requirements T-10). A generous `window_turns` default keeps the
+    drop — and thus the recall — rare.
+  - Windowing composes with compaction: compaction summarizes the middle and
+    is pinned into the sent context; windowing bounds how many *post-summary*
+    turns ride verbatim. Both are cost economies; neither rewrites the log
+    (HC-7). The window bound is part of the derived cache (§3.2a).
 - **Loop-breaking guardrail (S-5).** The engine keeps a rolling signature
   of recent steps: for each turn, the multiset of `(tool_name,
   normalized-args)` tuples plus a hash of the resulting `tool_result`
@@ -515,6 +619,15 @@ canonical path, subtree-trusted**, with an optional pre-trust allowlist.
   expanded | hidden` view default, **default `collapsed`** (Design §4.4);
   `ui.tool_explanations = bool`, **default `true`** (§5.4); `[loop] enabled,
   repeat_window, max_no_progress_turns` (§7).
+- **New config keys, 0.3 context economy** (initial; tune with use):
+  `truncate.reduce = bool` (**default `true`**) toggles salient tool-result
+  reduction (§5.3, FR-2); `context.window_turns` (**default `40`**) bounds the
+  adaptive window (§7, FR-3); `context.auto_compact = bool` (**default
+  `true`**) and `context.auto_compact_threshold` (**default `0.85`**) drive
+  automatic compaction (§7, FR-4). The existing `context.keep_recent_turns`
+  (default `6`) still sets the verbatim tail kept by a compaction. The derived
+  conversation-state cache (§3.2a, FR-5) has no key — it is always written and
+  always guarded by the staleness check, so it needs no opt-in.
 - **Trust:** store at `~/.config/emberly/trust.toml`, `0600`, global only;
   optional `trust.trusted_dirs` pre-trust allowlist in global config
   (§6.7) — neither is ever a project key (Requirements FR-1).
@@ -621,6 +734,13 @@ guardrail are all engine, config, and TUI logic over the existing crate
 set. `emberly-sandbox`'s frozen dependency list is untouched (the trust
 gate lives outside it, §6.7).
 
+The 0.3 feature set also adds **no new dependencies**: tool-result reduction
+(FR-2), the adaptive window (FR-3) and its `recall` tool (T-10), automatic
+compaction (FR-4), and the derived conversation-state cache (FR-5) are engine
+and config logic over the existing set — the cache serializes the
+already-`serde`-derived normalized message types (A-3) to JSON via
+`serde_json`. `emberly-sandbox` is untouched.
+
 Policy (Requirements §10): additions require `cargo vet` acceptance;
 `cargo deny` (licenses, duplicates, advisories) + `cargo geiger` report
 in CI; `emberly-sandbox` additions require explicit owner sign-off.
@@ -667,6 +787,22 @@ in CI; `emberly-sandbox` additions require explicit owner sign-off.
    a provider profile pointed at a fake endpoint proving a new provider is
    config-only (P-8); trust-gate tests — untrusted root prompts and decline
    exits with no session, project-local trust key is ignored (FR-1).
+6. **0.3 context-economy coverage** (offline, deterministic): per-tool
+   reducer unit tests — a noisy `bash`/`grep`/`glob` output reduces to its
+   salient content and the full output is recoverable from the sidecar, and
+   `truncate.reduce = false` passes output through (FR-2); an adaptive-window
+   test asserting old turns are dropped from the sent context but the
+   transcript and elision marker are intact, plus a `recall` round-trip via
+   `FakeProvider` asserting the tool returns the dropped turns in normalized,
+   reduced form (not raw JSONL) and never raises a permission prompt (FR-3,
+   T-10); an automatic-compaction
+   test driving `ContextUsage` past the threshold via `FakeProvider` usage
+   numbers and asserting a `compaction` event with `trigger = auto` fires at
+   the next clean boundary and does not thrash (FR-4); a resume test asserting
+   the cache fast-path restores the same view the live session held, and that
+   a deliberately-staled/corrupted/deleted cache falls back to transcript
+   replay producing the identical view (FR-5, the HC-7 subordination made a
+   test).
 
 Agent *quality* evaluation (does it code well) is explicitly out of
 scope for this spec — post-release discipline with separate tooling.
@@ -688,8 +824,45 @@ the Z.ai profile, reasoning effort (P-9) and reasoning trail (P-10),
 ask-user tool (T-8), tool-call explanation (T-9), workspace trust (FR-1),
 in-app config/prompt editor and model/effort pickers (C-5, C-6), and the
 loop-breaking guardrail (S-5). *Proves the 0.2 scope.*
+M7 — 0.3 context-economy feature set: wire the `/compact` command surface
+into the registry (the existing implementation gap — Requirements §8.3 +
+Design §3.3), tool-result reduction (FR-2), the adaptive context window with
+its `recall` re-read tool (FR-3, T-10), automatic compaction (FR-4), and the
+derived conversation-state resume cache (FR-5). *Proves the 0.3 scope: a long session
+costs proportionally less in tokens, dollars, and resume time, with no fact
+lost from the transcript.*
 
 ## 16. Open Items
+
+**v0.7 (2026-07-11, 0.3 context-economy scope).** The 0.3 feature set lands as
+engine/config additions over the existing crates (§12): tool-result reduction
+(FR-2, §5.3), the adaptive window (FR-3, §7), automatic compaction on by
+default at `0.85` (FR-4, §7), and the derived resume cache (FR-5, §3.2a/§3.3).
+The `compaction` transcript event gains an additive `trigger` field (§3.2, no
+schema bump). The missing `/compact` command surface is folded into M7 as an
+implementation gap against the existing §8.3 requirement, not new scope.
+Minor, additive bump; Requirements bumped to v0.6 and Design to v0.6 in
+lockstep (pins refreshed).
+
+Open items introduced by the 0.3 scope:
+
+- **Adaptive-window re-read affordance (FR-3, §7) — RESOLVED (owner,
+  2026-07-11).** Recovered via a dedicated `recall` built-in (Requirements
+  T-10, §5.2/§7), not `read_file` over raw JSONL — the raw path would
+  re-inflate elided noise and defeat the window. `recall` is engine-internal
+  (no filesystem/network) and not permission-gated. Remaining M7 detail: the
+  marker↔range identifier scheme (turn indices vs. an opaque marker id).
+- **Per-tool reducer rules (FR-2, §5.3).** The initial `bash`/`grep`/`glob`
+  reducers are a starting set; validate against real tool output in M7 so
+  reduction never hides what the model needs, and extend the reducer registry
+  as new salient shapes appear.
+- **`context.window_turns` and `context.auto_compact_threshold` defaults
+  (§7, §8).** `40` and `0.85` are placeholders; tune with real long sessions
+  so windowing/compaction fire before overflow without cutting genuine
+  working context.
+- **Cache staleness guard (FR-5, §3.2a).** Byte-length + offset is the initial
+  guard; confirm it is sufficient in M7 (a content hash is the fallback if
+  same-length divergence is ever observed).
 
 **Resolved in v0.6 (2026-07-11, M6 close — Phase 5).** Workspace trust (FR-1) is
 realized as a **pre-engine binary gate** (§6.7), not an engine event: the v0.5

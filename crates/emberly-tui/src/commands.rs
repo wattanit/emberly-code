@@ -41,6 +41,9 @@ pub enum AppCommand {
     /// Re-read config + prompts from disk and apply them (C-5) — useful after
     /// editing a file outside emberly.
     Reload,
+    /// Manually compact the conversation — summarize older turns into a
+    /// summary at a clean boundary (Requirements §8.3, Tech Spec §7).
+    Compact,
     /// Cancel the in-flight turn.
     Cancel,
     /// Exit emberly.
@@ -130,6 +133,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "Re-read config & prompts from disk and apply them",
         cmd: AppCommand::Reload,
+    },
+    CommandSpec {
+        name: "compact",
+        key: None,
+        desc: "Summarize older turns to reclaim context space",
+        cmd: AppCommand::Compact,
     },
     CommandSpec {
         name: "sidebar",

@@ -19,8 +19,8 @@ use emberly_providers::{
 };
 use emberly_sandbox::{Decision, Mode, Query, RuleEngine};
 use emberly_tools::{
-    truncate_output, AskUserOutcome, PermissionOutcome, PermissionRequest, Sandbox, ToolCtx,
-    ToolRegistry, TruncateConfig,
+    reduce_output, truncate_output, AskUserOutcome, PermissionOutcome, PermissionRequest, RecallOutcome,
+    Reduction, Sandbox, ToolCtx, ToolRegistry, TruncateConfig,
 };
 use futures::StreamExt;
 use time::OffsetDateTime;
@@ -29,20 +29,18 @@ use tokio::sync::mpsc;
 use crate::command::Command;
 use crate::event::UiEvent;
 use crate::factory::{ConfigReloader, ProviderFactory};
-use crate::gate::{AskGate, AskUserAsk, ChannelGate, PermissionAsk};
+use crate::gate::{AskGate, AskUserAsk, ChannelGate, PermissionAsk, RecallAsk, RecallGateImpl};
 use crate::id::{AskId, PermissionId, SessionId};
 use crate::transcript::{
-    ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord, TranscriptSink,
+    CompactTrigger, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent,
+    TranscriptRecord, TranscriptSink,
 };
 use crate::types::{LoopResolution, PermissionRendering, SandboxStatus, TokenUsage};
+use crate::view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
 
 /// The session title is the first user message, clipped to this many chars
 /// (Tech Spec §16 — the heuristic v1 title).
 const TITLE_CLIP: usize = 60;
-
-/// How many trailing messages `/compact` keeps verbatim (`context.
-/// keep_recent_turns`, default 6 — Tech Spec §7; config wiring is group 5).
-const KEEP_RECENT: usize = 6;
 
 /// Reserve this many tokens for model output when computing context usage,
 /// or the model's max output, whichever is smaller (Tech Spec §7).
@@ -71,6 +69,40 @@ impl Default for LoopConfig {
     }
 }
 
+/// Adaptive context-window and compaction configuration (FR-3, Tech Spec
+/// §7/§8). Defaults are placeholders — tune with real long sessions (Tech Spec
+/// §16, Requirements §13). `Copy` so it is cheap to pass into send-time views.
+#[derive(Debug, Clone, Copy)]
+pub struct ContextConfig {
+    /// How many trailing non-pinned turns are sent to the provider (FR-3, Tech
+    /// Spec §7). Older turns are elided from the sent context behind one
+    /// marker; they stay in the transcript and the user's scrollback (HC-7).
+    pub window_turns: usize,
+    /// How many trailing messages `/compact` keeps verbatim (Tech Spec §7).
+    /// Also the tail manual and automatic compaction (Phase 3) both keep.
+    pub keep_recent_turns: usize,
+    /// Whether automatic compaction is enabled (FR-4, Tech Spec §7/§8). When
+    /// `true` (default), the engine schedules a compaction at the next clean
+    /// boundary once context usage crosses `auto_compact_threshold`. Set
+    /// `false` to compact manually only.
+    pub auto_compact: bool,
+    /// The context-usage fraction that triggers automatic compaction (FR-4,
+    /// Tech Spec §7/§8). Default `0.85`. In `(0.0, 1.0]`; an out-of-range
+    /// value is a config error, not a silent clamp.
+    pub auto_compact_threshold: f64,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            window_turns: 40,
+            keep_recent_turns: 6,
+            auto_compact: true,
+            auto_compact_threshold: 0.85,
+        }
+    }
+}
+
 /// Everything needed to construct an [`Engine`].
 pub struct EngineConfig {
     pub provider: Arc<dyn Provider>,
@@ -90,6 +122,8 @@ pub struct EngineConfig {
     pub trust_granted: bool,
     /// Loop-breaking guardrail tunables (S-5, Tech Spec §7).
     pub loop_config: LoopConfig,
+    /// Adaptive context-window + compaction config (FR-3, Tech Spec §7/§8).
+    pub context: ContextConfig,
     pub truncate: TruncateConfig,
     /// Retry policy for retryable provider failures and mid-stream drops.
     pub retry: RetryPolicy,
@@ -127,6 +161,18 @@ pub struct EngineConfig {
     /// True when resuming an existing transcript: no fresh `session_start` is
     /// written and the original task is treated as already recorded.
     pub resuming: bool,
+    /// True when the resumed session had been compacted, so the compaction
+    /// summary at `conversation[1]` is pinned in the sent context (FR-3
+    /// windowing composition with compaction).
+    pub compacted: bool,
+    /// Cached derived state from a prior run (FR-5 fast path). `Some` when a
+    /// valid `-view.json` was loaded at launch — the engine seeds turn_map,
+    /// accounting, and compaction state directly from it instead of deriving
+    /// them. `None` for fresh sessions and fallback-replay resumes.
+    pub initial_cache: Option<ViewCache>,
+    /// True when this resume fell back to transcript replay (no valid cache).
+    /// Drives the one dimmed harness-voice Notice on start (Design §8.6).
+    pub replayed: bool,
     /// A `/compact` summarization-prompt override (P-7); `None` uses the
     /// built-in default.
     pub summary_prompt: Option<String>,
@@ -177,6 +223,64 @@ struct TurnOutput {
     /// `(signature, redacted)` for the reasoning block, when the provider sent
     /// one. `redacted` blocks carry opaque `data` here and have no replay text.
     reasoning_signature: Option<(String, bool)>,
+}
+
+/// The derived session state passed to [`Engine::adopt_session`] — either
+/// freshly computed or restored from the view cache (FR-5).
+struct AdoptedState {
+    turn_map: Vec<usize>,
+    next_turn: usize,
+    compacted: bool,
+    session_usage: TokenUsage,
+    session_cost_usd: f64,
+    context_tokens_authoritative: Option<u64>,
+    original_task_recorded: bool,
+}
+
+impl AdoptedState {
+    /// Defaults for a fresh session (empty conversation, zero accounting).
+    fn fresh() -> Self {
+        Self {
+            turn_map: Vec::new(),
+            next_turn: 0,
+            compacted: false,
+            session_usage: TokenUsage::default(),
+            session_cost_usd: 0.0,
+            context_tokens_authoritative: None,
+            original_task_recorded: false,
+        }
+    }
+
+    /// Derive from a replayed conversation (FR-5 fallback path).
+    fn replayed(conversation: &[Message], compacted: bool) -> Self {
+        let (turn_map, next_turn) = build_turn_map(conversation);
+        Self {
+            turn_map,
+            next_turn,
+            compacted,
+            session_usage: TokenUsage::default(),
+            session_cost_usd: 0.0,
+            context_tokens_authoritative: None,
+            original_task_recorded: true,
+        }
+    }
+
+    /// Restore from a valid view cache (FR-5 fast path). Returns the derived
+    /// state and the cached conversation so the caller can pass both to
+    /// [`Engine::adopt_session`] without a partial-move conflict.
+    fn from_cache(cache: ViewCache) -> (Self, Vec<Message>) {
+        let conversation = cache.conversation;
+        let state = Self {
+            turn_map: cache.turn_map,
+            next_turn: cache.next_turn,
+            compacted: cache.compacted,
+            session_usage: cache.session_usage,
+            session_cost_usd: cache.session_cost_usd,
+            context_tokens_authoritative: cache.context_tokens_authoritative,
+            original_task_recorded: cache.original_task_recorded,
+        };
+        (state, conversation)
+    }
 }
 
 /// Outcome of running one tool call.
@@ -243,6 +347,46 @@ fn stable_hash(s: &str) -> u64 {
     h.finish()
 }
 
+/// Identify turn boundaries for context windowing (FR-3, Tech Spec §7). Each
+/// turn starts at a [`Role::User`] message; `Role::Assistant` and `Role::Tool`
+/// messages belong to the current turn. The first message always starts a turn
+/// (even when it is not `Role::User`), so a post-compaction tail that begins
+/// with an assistant message is never split from its tool results. Returns the
+/// starting index of each turn, relative to the input slice.
+fn group_turn_starts(messages: &[Message]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    for (i, msg) in messages.iter().enumerate() {
+        if msg.role == Role::User || starts.is_empty() {
+            starts.push(i);
+        }
+    }
+    starts
+}
+
+/// Build a parallel turn-number map for a conversation (FR-3, Tech Spec
+/// §7/§16). Each message gets the number of the turn it belongs to. Turn 0
+/// is the first message (the pinned original task); each subsequent
+/// [`Role::User`] message increments the counter. Returns `(turn_map,
+/// next_turn)` so the engine can continue assigning monotonic numbers.
+fn build_turn_map(conversation: &[Message]) -> (Vec<usize>, usize) {
+    let mut turn_map = Vec::with_capacity(conversation.len());
+    let mut current_turn: usize = 0;
+    let mut next_turn: usize = 1;
+    for (i, msg) in conversation.iter().enumerate() {
+        if i > 0 && msg.role == Role::User {
+            current_turn = next_turn;
+            next_turn += 1;
+        }
+        turn_map.push(current_turn);
+    }
+    // If the conversation is empty, next_turn starts at 0 (turn 0 is the next
+    // message to arrive).
+    if conversation.is_empty() {
+        next_turn = 0;
+    }
+    (turn_map, next_turn)
+}
+
 /// The audit label for a loop resolution (S-5, Tech Spec §3.2).
 fn resolution_label(r: &LoopResolution) -> String {
     match r {
@@ -288,6 +432,8 @@ pub struct Engine {
     trust_granted: bool,
     /// Loop-breaking guardrail state (S-5, Tech Spec §7).
     loop_config: LoopConfig,
+    /// Adaptive context-window + compaction config (FR-3, Tech Spec §7/§8).
+    context: ContextConfig,
     /// What the in-flight tool-call turn did (reset per turn).
     turn_obs: TurnObservation,
     /// Cumulative modified-file paths across the session (progress if a turn
@@ -308,8 +454,19 @@ pub struct Engine {
     /// The ask-user gate (T-8), installed into every `ToolCtx` so the
     /// `ask_user` tool can block on a frontend round trip.
     ask_gate: Arc<AskGate>,
+    /// The recall gate (T-10), installed into every `ToolCtx` so the `recall`
+    /// tool can retrieve elided turns from the in-memory conversation.
+    recall_gate: Arc<RecallGateImpl>,
     events_tx: mpsc::Sender<UiEvent>,
     conversation: Vec<Message>,
+    /// Parallel to `conversation`: the stable monotonic turn number of each
+    /// message (FR-3, Tech Spec §7/§16). `Role::User` messages start a new
+    /// turn (incrementing `next_turn`); assistant/tool messages inherit the
+    /// current turn. Compaction retires numbers but never shifts surviving
+    /// ones, so "turn 12" means the same thing all session.
+    turn_map: Vec<usize>,
+    /// The next turn number to assign (monotonic; never decremented).
+    next_turn: usize,
     /// Cumulative billed tokens this session (summed per request — each
     /// request's input is billed, so this is the cost basis, not the context
     /// size).
@@ -347,9 +504,20 @@ pub struct Engine {
     original_task_recorded: bool,
     /// True when this run resumed an existing transcript (skips `session_start`).
     resuming: bool,
-    /// Set when `/compact` arrives mid-turn; performed at the next clean
-    /// boundary (Tech Spec §7).
-    compact_requested: bool,
+    /// True once a compaction has run (live or resumed), so the summary at
+    /// `conversation[1]` is pinned in the sent context (FR-3 windowing).
+    compacted: bool,
+    /// True when the resume fell back to transcript replay (FR-5 slow path).
+    /// Drives the one dimmed Notice on engine start (Design §8.6).
+    replayed: bool,
+    /// Set when `/compact` or the auto-trigger requests a compaction;
+    /// performed at the next clean boundary (Tech Spec §7). `Manual` outranks
+    /// `Auto` — a user `/compact` is never downgraded (FR-4).
+    pending_compaction: Option<CompactTrigger>,
+    /// Hysteresis latch for the auto-trigger (FR-4, Tech Spec §7): after an
+    /// auto-compaction fires the latch disarms and stays disarmed until usage
+    /// has fallen below the threshold and re-crossed it (no thrash).
+    auto_compact_armed: bool,
     /// Optional `/compact` prompt override (P-7).
     summary_prompt: Option<String>,
     /// Builds a provider on an in-session model switch (C-6); `None` disables it.
@@ -370,9 +538,11 @@ impl Engine {
         Self,
         mpsc::Receiver<PermissionAsk>,
         mpsc::Receiver<AskUserAsk>,
+        mpsc::Receiver<RecallAsk>,
     ) {
         let (asks_tx, asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (user_asks_tx, user_asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        let (recall_tx, recall_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         // Capture before `config.sandbox` is moved into the struct below.
         let sandbox_spawn: Arc<dyn Sandbox> = config.sandbox_spawn.unwrap_or_else(|| {
             // Fallback (no explicit spawner): confine from the status, but with
@@ -387,6 +557,28 @@ impl Engine {
         // Seed the session effort from the model's declared default before the
         // provider is moved into the struct (P-9, Tech Spec §4.6).
         let seed_effort = config.provider.model_info().default_effort;
+        // Build the turn map from the initial conversation — or restore it
+        // directly from the cache when the FR-5 fast path loaded (FR-5).
+        let (turn_map, next_turn) = match &config.initial_cache {
+            Some(c) => (c.turn_map.clone(), c.next_turn),
+            None => build_turn_map(&config.initial_conversation),
+        };
+        let session_usage = config
+            .initial_cache
+            .as_ref()
+            .map_or(TokenUsage::default(), |c| c.session_usage);
+        let session_cost_usd = config
+            .initial_cache
+            .as_ref()
+            .map_or(0.0, |c| c.session_cost_usd);
+        let context_tokens_authoritative = config
+            .initial_cache
+            .as_ref()
+            .and_then(|c| c.context_tokens_authoritative);
+        let original_task_recorded = config
+            .initial_cache
+            .as_ref()
+            .map_or(config.resuming, |c| c.original_task_recorded);
         let engine = Self {
             provider: config.provider,
             tools: config.tools,
@@ -397,6 +589,7 @@ impl Engine {
             tool_explanations: config.tool_explanations,
             trust_granted: config.trust_granted,
             loop_config: config.loop_config,
+            context: config.context,
             turn_obs: TurnObservation::default(),
             loop_seen_files: HashSet::new(),
             loop_seen_results: HashSet::new(),
@@ -407,11 +600,14 @@ impl Engine {
             retry: config.retry,
             gate: Arc::new(ChannelGate { asks: asks_tx }),
             ask_gate: Arc::new(AskGate { asks: user_asks_tx }),
+            recall_gate: Arc::new(RecallGateImpl { asks: recall_tx }),
             events_tx,
             conversation: config.initial_conversation,
-            session_usage: TokenUsage::default(),
-            session_cost_usd: 0.0,
-            context_tokens_authoritative: None,
+            turn_map,
+            next_turn,
+            session_usage,
+            session_cost_usd,
+            context_tokens_authoritative,
             next_permission_id: 0,
             next_ask_id: 0,
             transcript: config.transcript,
@@ -425,14 +621,17 @@ impl Engine {
             sandbox_spawn,
             config_provenance: config.config_provenance,
             // On resume the original task already lives in the restored history.
-            original_task_recorded: config.resuming,
+            original_task_recorded,
             resuming: config.resuming,
-            compact_requested: false,
+            compacted: config.compacted,
+            replayed: config.replayed,
+            pending_compaction: None,
+            auto_compact_armed: true,
             summary_prompt: config.summary_prompt,
             provider_factory: config.provider_factory,
             config_reloader: config.config_reloader,
         };
-        (engine, asks_rx, user_asks_rx)
+        (engine, asks_rx, user_asks_rx, recall_rx)
     }
 
     /// Run the engine until the command channel closes. Idle between turns,
@@ -443,10 +642,20 @@ impl Engine {
         mut commands_rx: mpsc::Receiver<Command>,
         mut asks_rx: mpsc::Receiver<PermissionAsk>,
         mut user_asks_rx: mpsc::Receiver<AskUserAsk>,
+        mut recall_rx: mpsc::Receiver<RecallAsk>,
     ) {
         if self.resuming {
             // Continuing an existing transcript: no fresh session_start, but
             // surface the restored context size right away (Design §8.4).
+            // When the resume fell back to transcript replay (no valid cache),
+            // say so in one dimmed line — speech about the slow path only
+            // (Design §8.6). The fast path is silent.
+            if self.replayed {
+                self.emit(UiEvent::Notice {
+                    message: "Rebuilding the session from its transcript…".into(),
+                })
+                .await;
+            }
             self.emit_context_usage().await;
         } else {
             self.write_transcript(TranscriptEvent::SessionStart {
@@ -489,18 +698,20 @@ impl Engine {
             match command {
                 Command::UserInput { text } => {
                     self.record_user_message(&text);
-                    self.conversation.push(Message::user_text(text));
+                    self.push_conversation_message(Message::user_text(text));
                     self.emit_context_usage().await;
-                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx)
+                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx, &mut recall_rx)
                         .await;
                     // The engine is idle again; let the frontend stop its
                     // "working" affordance (Design §6.3).
                     self.emit(UiEvent::TurnEnded).await;
-                    // A `/compact` sent mid-turn runs now, at the clean boundary
-                    // (every tool_use has its tool_result — Tech Spec §7).
-                    if std::mem::take(&mut self.compact_requested) {
-                        self.compact().await;
+                    // A `/compact` sent mid-turn or an auto-trigger request
+                    // runs now, at the clean boundary (every tool_use has its
+                    // tool_result — Tech Spec §7).
+                    if let Some(trigger) = self.pending_compaction.take() {
+                        self.compact(trigger).await;
                     }
+                    self.write_view_cache();
                 }
                 // No turn is running while idle; these are strays or no-ops here.
                 Command::Cancel
@@ -508,7 +719,10 @@ impl Engine {
                 | Command::AskUserAnswer { .. }
                 | Command::ResolveLoop { .. } => {}
                 // Idle is already a clean boundary — compact immediately.
-                Command::Compact => self.compact().await,
+                Command::Compact => {
+                    self.compact(CompactTrigger::Manual).await;
+                    self.write_view_cache();
+                }
                 // Session switches are only issued at idle (the frontend gates
                 // them while a turn runs), so a clean boundary is guaranteed.
                 Command::NewSession { session_id } => self.start_new_session(session_id).await,
@@ -524,6 +738,10 @@ impl Engine {
 
         // Command channel closed: the frontend is gone. Clean end of session.
         self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+        // Write the cache one final time so it reflects the final transcript
+        // (the SessionEnd line grew the file; without this the cache would be
+        // stale on the next resume — FR-5).
+        self.write_view_cache();
     }
 
     /// Start a fresh session in place (`/new`): end the current transcript
@@ -547,7 +765,13 @@ impl Engine {
         };
         self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
         self.transcript = Box::new(sink);
-        self.adopt_session(session_id, path, Vec::new(), false);
+        self.adopt_session(
+            session_id,
+            path,
+            Vec::new(),
+            AdoptedState::fresh(),
+            false,
+        );
         self.write_transcript(TranscriptEvent::SessionStart {
             session_id,
             provider: self.provider_label.clone(),
@@ -564,6 +788,8 @@ impl Engine {
     /// transcript, reopen the target for append, and replace the live
     /// conversation with the one rebuilt from it. Reading the target *before*
     /// ending the current session keeps the current one intact on any failure.
+    /// Tries the derived view cache first (FR-5 fast path); falls back to a
+    /// full transcript replay when the cache is absent or stale.
     async fn resume_session(&mut self, session_id: SessionId) {
         let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
         let loaded = match crate::resume::read_records(&path) {
@@ -578,7 +804,6 @@ impl Engine {
                 return;
             }
         };
-        let conversation = crate::resume::rebuild_conversation(&loaded.records);
         let sink = match FileTranscript::open(&path) {
             Ok(file) => file,
             Err(error) => {
@@ -593,30 +818,60 @@ impl Engine {
         };
         self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
         self.transcript = Box::new(sink);
-        // Resuming: the original task lives in the restored history, so no fresh
-        // session_start is written (matches launch-time resume — Tech Spec §3.3).
-        self.adopt_session(session_id, path, conversation, true);
+
+        // FR-5: try the cache first. A valid cache restores the full derived
+        // state directly — no per-line re-tokenization. The fast path is silent
+        // (Design §8.6).
+        if let Some(cache) = crate::resume::try_load_view_cache(&path) {
+            let (state, conversation) = AdoptedState::from_cache(cache);
+            self.adopt_session(session_id, path, conversation, state, true);
+        } else {
+            // Fallback: replay the transcript, re-deriving the view. Announce
+            // the slow path in one dimmed harness-voice line (Design §8.6).
+            self.emit(UiEvent::Notice {
+                message: "Rebuilding the session from its transcript…".into(),
+            })
+            .await;
+            let conversation = crate::resume::rebuild_conversation(&loaded.records);
+            let compacted = crate::resume::has_compaction(&loaded.records);
+            self.adopt_session(
+                session_id,
+                path,
+                conversation.clone(),
+                AdoptedState::replayed(&conversation, compacted),
+                true,
+            );
+        }
         self.emit_context_usage().await;
     }
 
     /// Reset session-scoped state to a freshly adopted session and publish the
     /// new transcript path to the shared handle so the host's panic/exit path
-    /// names the current session (HC-3).
+    /// names the current session (HC-3). Carries the full derived state —
+    /// turn map, compaction flag, and token accounting — so both the cache
+    /// fast path (FR-5) and the replay fallback restore correct turn state
+    /// (fixing the pre-existing `adopt_session` gap).
     fn adopt_session(
         &mut self,
         session_id: SessionId,
         path: PathBuf,
         conversation: Vec<Message>,
+        state: AdoptedState,
         resuming: bool,
     ) {
         self.session_id = session_id;
         self.conversation = conversation;
-        self.original_task_recorded = resuming;
+        self.turn_map = state.turn_map;
+        self.next_turn = state.next_turn;
+        self.compacted = state.compacted;
+        self.original_task_recorded = state.original_task_recorded;
         self.resuming = resuming;
-        self.compact_requested = false;
-        self.session_usage = TokenUsage::default();
-        self.session_cost_usd = 0.0;
-        self.context_tokens_authoritative = None;
+        self.replayed = false;
+        self.pending_compaction = None;
+        self.auto_compact_armed = true;
+        self.session_usage = state.session_usage;
+        self.session_cost_usd = state.session_cost_usd;
+        self.context_tokens_authoritative = state.context_tokens_authoritative;
         self.next_permission_id = 0;
         if let Ok(mut guard) = self.active_session_path.write() {
             *guard = path;
@@ -640,18 +895,28 @@ impl Engine {
         }
     }
 
-    /// Manual `/compact` at a clean boundary (Tech Spec §7). Replaces the middle
+    /// Queue a compaction for the next clean boundary (Tech Spec §7). Manual
+    /// outranks Auto — a user `/compact` is never downgraded to `auto` (FR-4).
+    fn request_compaction(&mut self, trigger: CompactTrigger) {
+        if matches!(self.pending_compaction, Some(CompactTrigger::Manual)) {
+            return;
+        }
+        self.pending_compaction = Some(trigger);
+    }
+
+    /// Compaction at a clean boundary (Tech Spec §7). Replaces the middle
     /// of the conversation — everything after the pinned original task and
-    /// before the last [`KEEP_RECENT`] messages — with a model-written summary,
+    /// before the last `context.keep_recent_turns` messages — with a model-written summary,
     /// keeping the session usable when context grows. The pinned content
     /// (system prompt, original task) is never compacted; the JSONL log is
     /// untouched (the compaction is recorded as one event, replayed on resume).
-    async fn compact(&mut self) {
+    /// `trigger` records whether the user or the FR-4 threshold initiated it.
+    async fn compact(&mut self, trigger: CompactTrigger) {
         // Pinned = the original task (the system prompt lives outside the
         // conversation). Keep the tail verbatim; summarize the middle.
         let pinned = usize::from(!self.conversation.is_empty());
         let len = self.conversation.len();
-        let keep = KEEP_RECENT.min(len.saturating_sub(pinned));
+        let keep = self.context.keep_recent_turns.min(len.saturating_sub(pinned));
         let from = pinned;
         let to = len.saturating_sub(keep);
         if to <= from {
@@ -686,19 +951,39 @@ impl Engine {
         };
 
         // Rebuild: [original task][summary as user message][recent verbatim].
+        // Turn map is rebuilt in parallel: pinned turns keep their numbers, the
+        // summary gets the next monotonic number, and the tail retains its
+        // original numbers (FR-3: compaction retires numbers, never shifts them).
         let mut rebuilt = Vec::with_capacity(2 + keep);
+        let mut rebuilt_turns = Vec::with_capacity(2 + keep);
         rebuilt.extend(self.conversation[..from].iter().cloned());
+        rebuilt_turns.extend(self.turn_map[..from].iter().copied());
+        let summary_turn = self.next_turn;
         rebuilt.push(Message::user_text(summary.clone()));
+        rebuilt_turns.push(summary_turn);
+        self.next_turn += 1;
         rebuilt.extend(self.conversation[to..].iter().cloned());
+        rebuilt_turns.extend(self.turn_map[to..].iter().copied());
         self.conversation = rebuilt;
+        self.turn_map = rebuilt_turns;
+        self.compacted = true;
 
         self.write_transcript(TranscriptEvent::Compaction {
             summary,
             replaced_from: u32::try_from(from).unwrap_or(u32::MAX),
             replaced_to: u32::try_from(to).unwrap_or(u32::MAX),
+            trigger,
         });
+        let turns_compacted = to - from;
         self.emit(UiEvent::CompactionStatus {
-            message: format!("compacted — kept the task, a summary, and the last {keep} messages"),
+            message: match trigger {
+                CompactTrigger::Manual => {
+                    format!("Compacted {turns_compacted} turns into a summary.")
+                }
+                CompactTrigger::Auto => format!(
+                    "Context was near full — compacted {turns_compacted} turns to keep going."
+                ),
+            },
         })
         .await;
         self.emit_context_usage().await;
@@ -740,6 +1025,7 @@ impl Engine {
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
+        recall_rx: &mut mpsc::Receiver<RecallAsk>,
     ) {
         let mut drop_attempts = 0u32;
         loop {
@@ -761,7 +1047,13 @@ impl Engine {
                         return; // model finished its turn
                     }
                     if self
-                        .run_tool_calls(tool_calls, commands_rx, asks_rx, user_asks_rx)
+                        .run_tool_calls(
+                            tool_calls,
+                            commands_rx,
+                            asks_rx,
+                            user_asks_rx,
+                            recall_rx,
+                        )
                         .await
                         .is_canceled()
                     {
@@ -777,7 +1069,7 @@ impl Engine {
                             LoopResolution::Steer(text) => {
                                 self.reset_loop_window();
                                 self.record_user_message(&text);
-                                self.conversation.push(Message::user_text(text));
+                                self.push_conversation_message(Message::user_text(text));
                                 self.emit_context_usage().await;
                             }
                         }
@@ -885,7 +1177,7 @@ impl Engine {
                     match command {
                         Command::Cancel => break StreamEnd::Interrupted,
                         // Queue a compaction for the clean boundary (Tech Spec §7).
-                        Command::Compact => self.compact_requested = true,
+                        Command::Compact => self.request_compaction(CompactTrigger::Manual),
                         // A mode toggle applies immediately, even mid-stream.
                         Command::SetMode { mode } => self.set_mode(mode).await,
                         // Ignore permission answers / other commands mid-stream.
@@ -973,13 +1265,14 @@ impl Engine {
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
+        recall_rx: &mut mpsc::Receiver<RecallAsk>,
     ) -> ToolCallResult {
         // Start a fresh loop-signature observation for this turn (S-5).
         self.turn_obs = TurnObservation::default();
         let mut iter = tool_calls.into_iter();
         while let Some(call) = iter.next() {
             match self
-                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx)
+                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx, recall_rx)
                 .await
             {
                 ToolCallResult::Completed(outcome) => self.ingest_tool_result(&call, outcome).await,
@@ -1080,7 +1373,7 @@ impl Engine {
                 // A mode toggle applies immediately; keep waiting for a decision.
                 Some(Command::SetMode { mode }) => self.set_mode(mode).await,
                 // Queue a compaction for after we resume (if we do).
-                Some(Command::Compact) => self.compact_requested = true,
+                Some(Command::Compact) => self.request_compaction(CompactTrigger::Manual),
                 // Strays (permission/ask answers with no pending prompt): ignore.
                 Some(_) => {}
                 // Frontend gone: stop, fail-safe (never spin unattended).
@@ -1102,6 +1395,7 @@ impl Engine {
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
+        recall_rx: &mut mpsc::Receiver<RecallAsk>,
     ) -> ToolCallResult {
         let args = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
 
@@ -1146,6 +1440,7 @@ impl Engine {
                 outcome = &mut exec => return ToolCallResult::Completed(outcome),
                 Some(ask) = asks_rx.recv() => self.on_permission_ask(ask, &mut pending).await,
                 Some(ask) = user_asks_rx.recv() => self.on_user_ask(ask, &mut pending_user).await,
+                Some(recall) = recall_rx.recv() => self.on_recall(recall).await,
                 command = commands_rx.recv(), if commands_open => match command {
                     Some(Command::PermissionAnswer { id, decision }) => {
                         self.answer_permission(id, decision, &mut pending).await;
@@ -1155,7 +1450,7 @@ impl Engine {
                     }
                     Some(Command::Cancel) => return ToolCallResult::Canceled,
                     // Queue a compaction for the clean boundary (Tech Spec §7).
-                    Some(Command::Compact) => self.compact_requested = true,
+                    Some(Command::Compact) => self.request_compaction(CompactTrigger::Manual),
                     // A mode toggle applies immediately to later asks this turn.
                     Some(Command::SetMode { mode }) => self.set_mode(mode).await,
                     Some(_) => {}
@@ -1283,6 +1578,23 @@ impl Engine {
             options: options.to_vec(),
             answer,
         });
+    }
+
+    /// Handle a `recall` request from the tool (T-10): resolve the turn range
+    /// to messages from the in-memory conversation, reduce tool results, and
+    /// reply. A pure engine round trip — no filesystem, no network, no
+    /// permission gate (§6). The tool future blocks on the oneshot reply.
+    async fn on_recall(&self, ask: RecallAsk) {
+        let RecallAsk { from, to, reply } = ask;
+        let messages = self.recall_turns(from, to);
+        let outcome = if messages.is_empty() {
+            RecallOutcome::Empty
+        } else {
+            let count = messages.len();
+            let content = render_recall(&messages, self.truncate.reduce);
+            RecallOutcome::Turns { content, count }
+        };
+        let _ = reply.send(outcome);
     }
 
     /// Change the auto-accept mode (Requirements §6.4, §6.7). Auto tiers are
@@ -1563,11 +1875,24 @@ impl Engine {
         if self.loop_config.enabled {
             self.turn_obs.result_content.push_str(&outcome.content);
         }
-        let truncation = truncate_output(&outcome.content, &self.truncate);
+        // Salient reduction (FR-2) runs before the size backstop (§5.3), gated
+        // on `truncate.reduce`. Both are deterministic, no-model-call transforms.
+        let reduced = if self.truncate.reduce {
+            reduce_output(&call.name, &outcome.content)
+        } else {
+            Reduction {
+                content: outcome.content.clone(),
+                reduced: false,
+                withheld: String::new(),
+            }
+        };
+        let truncation = truncate_output(&reduced.content, &self.truncate);
 
-        // Durable record: the model-visible (possibly truncated) output, plus a
-        // sidecar holding the full output when truncated (Requirements §8.1).
-        let full_output_ref = if truncation.truncated {
+        // Durable record: the model-visible (possibly reduced + truncated)
+        // output, plus a sidecar holding the full output when either layer
+        // withheld content (Requirements §8.1/§8.5, HC-7).
+        let withheld = reduced.reduced || truncation.truncated;
+        let full_output_ref = if withheld {
             self.transcript.sidecar(&call.id, &outcome.content)
         } else {
             None
@@ -1576,11 +1901,11 @@ impl Engine {
             call_id: call.id.clone(),
             ok: outcome.ok,
             output: truncation.content.clone(),
-            truncated: truncation.truncated,
+            truncated: withheld,
             full_output_ref,
         });
 
-        self.conversation.push(Message::tool_result(
+        self.push_conversation_message(Message::tool_result(
             call.id.clone(),
             truncation.content,
             !outcome.ok,
@@ -1626,8 +1951,9 @@ impl Engine {
             truncated: false,
             full_output_ref: None,
         });
-        self.conversation
-            .push(Message::tool_result(call.id.clone(), canceled, true));
+        self.push_conversation_message(
+            Message::tool_result(call.id.clone(), canceled, true),
+        );
         self.emit(UiEvent::ToolFinished {
             call_id: call.id.clone(),
             ok: false,
@@ -1693,10 +2019,93 @@ impl Engine {
                 input,
             });
         }
-        self.conversation.push(Message {
+        self.push_conversation_message(Message {
             role: Role::Assistant,
             content,
         });
+    }
+
+    /// Push a message to the conversation and update the turn map (FR-3 turn
+    /// numbering). `Role::User` messages start a new turn; assistant/tool
+    /// messages inherit the current turn number.
+    fn push_conversation_message(&mut self, msg: Message) {
+        let turn = if self.conversation.is_empty() || msg.role == Role::User {
+            let t = self.next_turn;
+            self.next_turn += 1;
+            t
+        } else {
+            *self.turn_map.last().unwrap_or(&0)
+        };
+        self.conversation.push(msg);
+        self.turn_map.push(turn);
+    }
+
+    /// The number of messages at the front of the conversation that are always
+    /// sent and never windowed away (FR-3, Tech Spec §7): the original task
+    /// (position 0) plus the compaction summary (position 1) when one is active.
+    fn pinned_count(&self) -> usize {
+        if self.conversation.is_empty() {
+            return 0;
+        }
+        // The original task is always pinned at position 0.
+        let mut n = 1;
+        // After compaction (live or resumed), the summary at position 1 is
+        // also pinned (Tech Spec §7: windowing never drops the summary).
+        if self.compacted {
+            n += 1;
+        }
+        n.min(self.conversation.len())
+    }
+
+    /// The windowed view of the conversation for sending to the provider
+    /// (FR-3, Tech Spec §7). A **pure view** — never mutates
+    /// `self.conversation` (HC-7). Keeps the pinned prefix and the last
+    /// `context.window_turns` turns; replaces older turns with one synthetic
+    /// elision marker. Turns are grouped at clean boundaries: every
+    /// `ContentBlock::ToolUse` keeps its matching `Message::tool_result`, so
+    /// the sent list stays provider-valid.
+    fn windowed_messages(&self) -> Vec<Message> {
+        let pinned = self.pinned_count();
+        let total = self.conversation.len();
+        if total <= pinned {
+            return self.conversation.clone();
+        }
+
+        let turns = group_turn_starts(&self.conversation[pinned..]);
+        let elided = turns.len().saturating_sub(self.context.window_turns);
+        if elided == 0 {
+            return self.conversation.clone();
+        }
+
+        // Index into self.conversation where the first kept turn begins.
+        let keep_from = if elided < turns.len() {
+            pinned + turns[elided]
+        } else {
+            // window_turns = 0: elide every non-pinned turn.
+            total
+        };
+
+        // The turn range being elided, using stable monotonic turn numbers
+        // (FR-3, Tech Spec §7/§16) so the marker names a range `recall` can
+        // take.
+        let first_turn_msg = pinned + turns[0];
+        let last_turn_msg = if elided < turns.len() {
+            pinned + turns[elided] - 1
+        } else {
+            total - 1
+        };
+        let first_turn = self.turn_map[first_turn_msg];
+        let last_turn = self.turn_map[last_turn_msg];
+
+        let mut result =
+            Vec::with_capacity(pinned + 1 + total.saturating_sub(keep_from));
+        result.extend(self.conversation[..pinned].iter().cloned());
+        result.push(Message::user_text(format!(
+            "[turns {first_turn}–{last_turn} elided from context \
+             — still in the session transcript; use recall to retrieve them]"
+        )));
+        result.extend(self.conversation[keep_from..].iter().cloned());
+        result
     }
 
     fn build_request(&self) -> CompletionRequest {
@@ -1726,7 +2135,7 @@ impl Engine {
             // spent. Kept out of the stored `self.system` so a config reload
             // (which replaces it) stays orthogonal to this toggle.
             system: self.effective_system(),
-            messages: self.conversation.clone(),
+            messages: self.windowed_messages(),
             tools,
             max_output_tokens: Some(self.provider.model_info().max_output_tokens),
             temperature: None,
@@ -1758,6 +2167,27 @@ impl Engine {
             self.sandbox_spawn.clone(),
         )
         .with_ask_gate(self.ask_gate.clone())
+        .with_recall_gate(self.recall_gate.clone())
+    }
+
+    /// Resolve a turn-number range to the messages it contains (T-10, FR-3).
+    /// Returns the engine's normalized, in-memory messages for those turns —
+    /// never raw JSONL. `from`/`to` are inclusive stable turn numbers as shown
+    /// in the elision marker. Returns an empty vec if the range matches no
+    /// turns (e.g. out of bounds or turns retired by compaction).
+    #[must_use]
+    pub fn recall_turns(&self, from: usize, to: usize) -> Vec<Message> {
+        if from > to || self.turn_map.is_empty() {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        for (i, msg) in self.conversation.iter().enumerate() {
+            let turn = self.turn_map[i];
+            if turn >= from && turn <= to {
+                result.push(msg.clone());
+            }
+        }
+        result
     }
 
     fn take_permission_id(&mut self) -> PermissionId {
@@ -1783,6 +2213,44 @@ impl Engine {
         self.transcript.record(&record);
     }
 
+    /// Write the derived conversation-state cache best-effort (FR-5, Tech Spec
+    /// §3.2a). Called after the view settles — a turn completes, a compaction
+    /// runs. Losing this file loses nothing: the replay fallback is always
+    /// correct (HC-7 subordination). Any I/O or serialization error is
+    /// swallowed (HC-3 — never a panic); the cache is never relied upon.
+    fn write_view_cache(&self) {
+        let transcript_path = {
+            let guard = match self.active_session_path.read() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            guard.clone()
+        };
+        let byte_len = match std::fs::metadata(&transcript_path) {
+            Ok(m) => m.len(),
+            Err(_) => return, // no transcript file (e.g. NoopSink in tests)
+        };
+        let cache = ViewCache {
+            version: VIEW_CACHE_VERSION,
+            session_id: self.session_id,
+            conversation: self.conversation.clone(),
+            turn_map: self.turn_map.clone(),
+            next_turn: self.next_turn,
+            compacted: self.compacted,
+            original_task_recorded: self.original_task_recorded,
+            session_usage: self.session_usage,
+            session_cost_usd: self.session_cost_usd,
+            context_tokens_authoritative: self.context_tokens_authoritative,
+            transcript_byte_len: byte_len,
+        };
+        let cache_path = view_cache_path(&transcript_path);
+        let json = match serde_json::to_string(&cache) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let _ = std::fs::write(&cache_path, json);
+    }
+
     async fn emit_provider_error(&self, error: &ProviderError) {
         self.emit(UiEvent::HarnessError {
             what: "the model request failed".into(),
@@ -1795,8 +2263,9 @@ impl Engine {
     /// Emit context usage and, when pricing is configured, the running cost
     /// estimate (Requirements §8.4, P-6; Design §3.1). Uses the provider's
     /// authoritative prompt-token count once available, falling back to a
-    /// chars/4 estimate before the first `Usage`.
-    async fn emit_context_usage(&self) {
+    /// chars/4 estimate before the first `Usage`. Also checks the FR-4
+    /// automatic-compaction threshold and queues a compaction when crossed.
+    async fn emit_context_usage(&mut self) {
         let info = self.provider.model_info();
         let reserve = OUTPUT_RESERVE.min(u64::from(info.max_output_tokens));
         let budget = u64::from(info.context_window)
@@ -1811,6 +2280,24 @@ impl Engine {
             tokens,
         })
         .await;
+
+        // Automatic compaction threshold check (FR-4, Tech Spec §7). The latch
+        // prevents thrash: after an auto-compaction fires the latch disarms and
+        // stays disarmed until usage drops below the threshold, then re-crosses
+        // it. The compaction itself drops usage well below the line, so
+        // re-arming is natural.
+        if self.context.auto_compact {
+            let pct_f = f64::from(u8::try_from(pct).unwrap_or(100));
+            if pct_f >= self.context.auto_compact_threshold * 100.0 {
+                if self.auto_compact_armed {
+                    self.request_compaction(CompactTrigger::Auto);
+                    self.auto_compact_armed = false;
+                }
+            } else {
+                // Usage below threshold: re-arm the latch.
+                self.auto_compact_armed = true;
+            }
+        }
 
         // Cumulative session tokens — always available (independent of pricing).
         self.emit(UiEvent::SessionUsage {
@@ -1831,7 +2318,12 @@ impl Engine {
     fn context_tokens(&self) -> u64 {
         let count = |s: &str| self.provider.count_tokens(s).tokens;
         let mut total = self.system.as_deref().map(count).unwrap_or(0);
-        for message in &self.conversation {
+        // Count the windowed sent view (FR-3, Design §8.6), not the full
+        // in-memory conversation — so usage reflects what the provider
+        // actually receives. The elision marker is included because it rides
+        // in the sent messages.
+        let messages = self.windowed_messages();
+        for message in &messages {
             for block in &message.content {
                 total = total.saturating_add(match block {
                     ContentBlock::Text { text } => count(text),
@@ -1884,6 +2376,49 @@ fn render_for_summary(messages: &[Message]) -> String {
                 ContentBlock::ToolResult { content, .. } => format!("[tool result: {content}]"),
                 // Reasoning is the model's private scratch, not conversation
                 // content; the summary is built from the answer, so skip it.
+                ContentBlock::Reasoning { .. } => String::new(),
+            };
+            if !piece.is_empty() {
+                out.push_str(role);
+                out.push_str(": ");
+                out.push_str(&piece);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// Render recalled messages as readable text for the model (T-10). Tool
+/// results are reduced via Phase 1's `reduce_output` so recall costs tokens
+/// proportional to what is recalled, never the raw output size. Never raw
+/// JSONL — the rendered form is the model-facing view (T-10).
+fn render_recall(messages: &[Message], reduce: bool) -> String {
+    let mut out = String::new();
+    for message in messages {
+        let role = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+            Role::System => "system",
+        };
+        for block in &message.content {
+            let piece = match block {
+                ContentBlock::Text { text } => text.clone(),
+                ContentBlock::ToolUse { name, input, .. } => {
+                    format!("[tool call: {name} {input}]")
+                }
+                ContentBlock::ToolResult { content, .. } => {
+                    // Reduce tool results via Phase 1's salient reduction
+                    // (T-10: never raw JSONL; proportional to recalled
+                    // content, not the original raw size).
+                    if reduce {
+                        let r = reduce_output("", content);
+                        r.content
+                    } else {
+                        content.clone()
+                    }
+                }
                 ContentBlock::Reasoning { .. } => String::new(),
             };
             if !piece.is_empty() {

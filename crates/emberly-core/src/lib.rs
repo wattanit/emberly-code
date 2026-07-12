@@ -26,24 +26,26 @@ pub mod resume;
 pub mod spawn;
 pub mod transcript;
 pub mod types;
+pub mod view_cache;
 
 pub use channels::{channel, channel_with_capacity, EnginePorts, FrontendPorts};
 pub use command::Command;
 pub use emberly_providers::{Message, RetryPolicy};
 pub use emberly_tools::AskUserOutcome;
-pub use engine::{Engine, EngineConfig, LoopConfig};
+pub use engine::{ContextConfig, Engine, EngineConfig, LoopConfig};
 pub use event::UiEvent;
 pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfig};
 pub use gate::{AskUserAsk, PermissionAsk};
 pub use id::{AskId, PermissionId, SessionId, ToolCallId};
 pub use transcript::{
-    append_abnormal_exit, CaptureSink, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent,
-    TranscriptRecord, TranscriptSink, SCHEMA_VERSION,
+    append_abnormal_exit, CaptureSink, CompactTrigger, ConfigProvenance, FileTranscript, NoopSink,
+    TranscriptEvent, TranscriptRecord, TranscriptSink, SCHEMA_VERSION,
 };
 pub use types::{
     AskAnswer, Effort, LoopResolution, Mode, PermissionDecision, PermissionRendering,
     SandboxStatus, TokenUsage,
 };
+pub use view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
 // The rule engine and confinement probe live in the security crate; re-export
 // the pieces the composition root (the binary) wires so it depends only on core.
 pub use emberly_sandbox::probe::probe;

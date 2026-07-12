@@ -1,11 +1,11 @@
 # Emberly Code — Design Guideline
 
-**Version:** 0.5 
-**Status:** approved 
-**Date:** 2026-07-10
+**Version:** 0.6 
+**Status:** approved
+**Date:** 2026-07-11
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.5 (upstream), Technical
-Specification v0.6 (downstream — this document constrains it)
+**Companion documents:** Requirements Document v0.6 (upstream), Technical
+Specification v0.7 (downstream — this document constrains it)
 
 This document defines how Emberly Code looks, feels, and speaks. It is the
 second of three project documents. Where a decision here has technical
@@ -173,8 +173,11 @@ read-only temporary file containing the raw markdown (`/view`, also on
 the palette). This satisfies "I want the full markdown" without building
 a terminal markdown browser. Fallback order: `$VISUAL` → `$EDITOR` →
 print raw to the pane with a notice. The same mechanism is reused for
-inspecting full untruncated tool outputs referenced by truncation markers
-(Requirements §8.1).
+inspecting full tool outputs referenced by a reduction marker — both the
+size truncation of Requirements §8.1 and the salient reduction of
+Requirements FR-2 (§8.5). A reduced or truncated tool result is never a dead
+end: its marker names what was withheld and offers `/view` to the complete
+output, so "kept the meat in context" never reads as "lost the rest."
 
 ### 4.4 The reasoning trail
 
@@ -452,6 +455,47 @@ what is not making progress:
   choosing to ask; this is the *harness* stepping in when the model did
   not.
 
+### 8.6 Keeping context lean (reduction, windowing, compaction)
+
+The 0.3 context-economy layers (Requirements §8.5–§8.8) share one design
+rule: **the context may get leaner, but the user is never lied to about
+it.** Nothing is silently dropped, and everything dropped has a visible way
+back.
+
+- **Tool-result reduction and windowing are quiet by default.** Reduced tool
+  results carry the §4.3 marker (what was withheld, `/view` for the whole
+  thing) and nothing more — reduction is the normal case, not an event to
+  announce. A turn dropped from the adaptive window (Requirements FR-3) is
+  not erased from the scrollback the user reads; windowing governs what is
+  *sent to the model*, and the conversation the user scrolls remains whole.
+  The context-usage indicator (§3.1, §8.4) reflects the working window, so
+  "why did usage drop" is always answerable, never mysterious. When the model
+  reaches back for a dropped turn, its `recall` call (Requirements T-10)
+  renders as ordinary, quiet tool activity in the flow — one dim line like any
+  tool call, optionally with a §4.5 explanation — so the user can *see* the
+  model choosing to reload history, without ceremony. `recall` is the model
+  reading its own context; it is distinct from `/view` (§4.3), which is the
+  user opening full output — the two never share a surface.
+- **Compaction is a harness-world moment (§6.1), announced in the harness's
+  own voice** — never as model output, since it is the harness reshaping the
+  model's context. Manual `/compact` shows the §6.3 spinner ("compacting")
+  and then one calm line — "Compacted 24 turns into a summary." Automatic
+  compaction (Requirements FR-4) is the same line with its reason —
+  "Context was near full — compacted 24 turns to keep going." — so the
+  context changing under the model is a visible act, not a silent one. No
+  alarm styling: staying under budget is routine housekeeping, and §1.2's
+  "calm under load" applies most exactly here.
+- **The summary is inspectable, not a black box.** The compaction summary is
+  ordinary conversation content in the flow and openable in full via `/view`
+  (§4.3), so the user can see what the model will now treat as history.
+- **Resume is fast and honest (Requirements FR-5).** Resuming restores the
+  working view directly, so a long session reopens without a visible
+  reload-the-world stall; the one-line resume offer (§8.3) is unchanged. If
+  the derived cache is unusable and the harness must rebuild from the
+  transcript, it says so in one dimmed harness-voice line rather than
+  reopening silently slower — silence about the fast path, speech about the
+  fallback.
+
 ## 9. Design-Driven Requirements Feedback
 
 Decisions in this document that add to or refine the Requirements doc,
@@ -490,6 +534,15 @@ recorded so the trace is explicit:
 - **Loop-break offers keep-going / stop / steer** (§8.5) — realizes
   Requirements S-5's "ends in a user decision" as three concrete choices in
   the harness voice.
+- **Compaction and windowing are surfaced, never silent** (§8.6) — refines
+  Requirements FR-3/FR-4: automatic compaction and a shrinking context
+  window are announced in the harness voice (or, for routine reduction,
+  carry a `/view`-able marker), consistent with "silence about defaults,
+  speech about deviations." The context indicator reflecting the working
+  window (§8.6) is a Design commitment the Tech Spec's accounting absorbs.
+- **A reduced/truncated tool result is never a dead end** (§4.3) — realizes
+  Requirements FR-2's "full result one reference away" as the reused `/view`
+  escape hatch with a marker naming what was withheld.
 
 ## 10. Open Questions
 
@@ -503,6 +556,18 @@ recorded so the trace is explicit:
   dedicated keybindings beyond palette + `/command` reachability (§3.1,
   §4.6). Tune with use once the surfaces exist.
 
+- Exact wording and verbosity of the automatic-compaction notice (§8.6) —
+  candidate lines are examples; tune against real sessions so the notice
+  informs without nagging in a session that compacts repeatedly.
+
 Resolved since v0.4: reasoning-trail default view — `collapsed` (§4.4,
 owner); tool-call explanation line — on by default, config-defeatable
 (§4.5, owner).
+
+Resolved since v0.5 (0.3 feature set): the context-economy layers are
+surfaced honestly and calmly, never silently — routine reduction/windowing
+carries a `/view`-able marker (§4.3, §8.6), compaction (manual and automatic)
+is a harness-voice moment (§8.6), and the context indicator tracks the
+working window (§8.6, owner). The model's `recall` of dropped turns
+(Requirements T-10) renders as quiet, ordinary tool activity, kept distinct
+from the user-facing `/view` (§8.6, owner).

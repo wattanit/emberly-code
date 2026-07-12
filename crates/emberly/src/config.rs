@@ -43,6 +43,12 @@ pub struct ConfigFile {
     /// `[loop]` guardrail settings (S-5). Threaded to the engine (Tech Spec §7).
     #[serde(default, rename = "loop")]
     pub loop_: LoopConfig,
+    /// `[truncate]` tool-result reduction + size backstop (FR-2, Tech Spec §8).
+    #[serde(default)]
+    pub truncate: TruncateConfigFile,
+    /// `[context]` adaptive window + compaction tail (FR-3, Tech Spec §7/§8).
+    #[serde(default)]
+    pub context: ContextConfigFile,
 }
 
 /// `[ui]` — presentation toggles that shape what the interface shows without
@@ -72,6 +78,39 @@ pub struct LoopConfig {
     pub enabled: Option<bool>,
     pub repeat_window: Option<u32>,
     pub max_no_progress_turns: Option<u32>,
+}
+
+/// `[context]` — the adaptive context window and compaction tail (FR-3, Tech
+/// Spec §7/§8). All optional; the engine applies defaults when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct ContextConfigFile {
+    /// How many trailing non-pinned turns are sent (default 40). Older turns
+    /// are elided from the sent context (FR-3).
+    pub window_turns: Option<u32>,
+    /// How many trailing messages compaction keeps verbatim (default 6).
+    pub keep_recent_turns: Option<u32>,
+    /// Whether automatic compaction is enabled (default `true`, FR-4).
+    pub auto_compact: Option<bool>,
+    /// Context-usage fraction that triggers automatic compaction (default
+    /// `0.85`, FR-4). Must be in `(0.0, 1.0]`.
+    pub auto_compact_threshold: Option<f64>,
+}
+
+/// `[truncate]` — tool-result reduction and size backstop at ingestion
+/// (FR-2, Requirements §8.1, Tech Spec §5.3/§8). All optional; the engine
+/// applies defaults when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct TruncateConfigFile {
+    /// Whether salient tool-result reduction runs (default `true`).
+    pub reduce: Option<bool>,
+    /// Truncate when output exceeds this many lines.
+    pub max_lines: Option<usize>,
+    /// …or this many bytes.
+    pub max_bytes: Option<usize>,
+    /// Lines of head to keep.
+    pub head_lines: Option<usize>,
+    /// Lines of tail to keep.
+    pub tail_lines: Option<usize>,
 }
 
 /// A `[providers.<name>]` profile: an adapter (wire format) plus the endpoint
@@ -251,6 +290,35 @@ impl ConfigFile {
         if higher.loop_.max_no_progress_turns.is_some() {
             self.loop_.max_no_progress_turns = higher.loop_.max_no_progress_turns;
         }
+        // `[truncate]` (FR-2) merges field-by-field.
+        if higher.truncate.reduce.is_some() {
+            self.truncate.reduce = higher.truncate.reduce;
+        }
+        if higher.truncate.max_lines.is_some() {
+            self.truncate.max_lines = higher.truncate.max_lines;
+        }
+        if higher.truncate.max_bytes.is_some() {
+            self.truncate.max_bytes = higher.truncate.max_bytes;
+        }
+        if higher.truncate.head_lines.is_some() {
+            self.truncate.head_lines = higher.truncate.head_lines;
+        }
+        if higher.truncate.tail_lines.is_some() {
+            self.truncate.tail_lines = higher.truncate.tail_lines;
+        }
+        // `[context]` (FR-3) merges field-by-field.
+        if higher.context.window_turns.is_some() {
+            self.context.window_turns = higher.context.window_turns;
+        }
+        if higher.context.keep_recent_turns.is_some() {
+            self.context.keep_recent_turns = higher.context.keep_recent_turns;
+        }
+        if higher.context.auto_compact.is_some() {
+            self.context.auto_compact = higher.context.auto_compact;
+        }
+        if higher.context.auto_compact_threshold.is_some() {
+            self.context.auto_compact_threshold = higher.context.auto_compact_threshold;
+        }
         // `[trust]` is deliberately NOT merged — it is read only from the global
         // tier (FR-1); see `global_trust_dirs` and the project-[trust] notice.
     }
@@ -288,6 +356,10 @@ pub struct Resolved {
     pub tool_explanations: bool,
     /// Resolved loop-breaking guardrail tunables (S-5), ready for the engine.
     pub loop_config: emberly_core::LoopConfig,
+    /// Resolved truncation/reduction config (FR-2, §8.1), ready for the engine.
+    pub truncate: emberly_tools::TruncateConfig,
+    /// Resolved adaptive context-window config (FR-3, Tech Spec §7/§8).
+    pub context: emberly_core::ContextConfig,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -424,6 +496,93 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         merged.ui.tool_explanations.is_some(),
     );
 
+    // Truncation/reduction (FR-2): record provenance when a user tier sets any
+    // `[truncate]` field (speech about deviations from the baked-in defaults).
+    if field(&project, |c| c.truncate.reduce.is_some())
+        || field(&global, |c| c.truncate.reduce.is_some())
+    {
+        record(
+            &mut provenance,
+            "truncate.reduce",
+            source_of(
+                false,
+                false,
+                field(&project, |c| c.truncate.reduce.is_some()),
+                field(&global, |c| c.truncate.reduce.is_some()),
+            ),
+            true,
+        );
+    }
+
+    // Context window + compaction (FR-3): record provenance when a user tier
+    // sets any `[context]` field.
+    if field(&project, |c: &ConfigFile| c.context.window_turns.is_some())
+        || field(&global, |c: &ConfigFile| c.context.window_turns.is_some())
+    {
+        record(
+            &mut provenance,
+            "context.window_turns",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.context.window_turns.is_some()),
+                field(&global, |c: &ConfigFile| c.context.window_turns.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| c.context.keep_recent_turns.is_some())
+        || field(&global, |c: &ConfigFile| c.context.keep_recent_turns.is_some())
+    {
+        record(
+            &mut provenance,
+            "context.keep_recent_turns",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.context.keep_recent_turns.is_some()),
+                field(&global, |c: &ConfigFile| c.context.keep_recent_turns.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| c.context.auto_compact.is_some())
+        || field(&global, |c: &ConfigFile| c.context.auto_compact.is_some())
+    {
+        record(
+            &mut provenance,
+            "context.auto_compact",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.context.auto_compact.is_some()),
+                field(&global, |c: &ConfigFile| c.context.auto_compact.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| {
+        c.context.auto_compact_threshold.is_some()
+    }) || field(&global, |c: &ConfigFile| {
+        c.context.auto_compact_threshold.is_some()
+    }) {
+        record(
+            &mut provenance,
+            "context.auto_compact_threshold",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| {
+                    c.context.auto_compact_threshold.is_some()
+                }),
+                field(&global, |c: &ConfigFile| {
+                    c.context.auto_compact_threshold.is_some()
+                }),
+            ),
+            true,
+        );
+    }
+
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
     let mut notices = Vec::new();
@@ -472,6 +631,40 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
                     .loop_
                     .max_no_progress_turns
                     .map_or(d.max_no_progress_turns, |v| v as usize),
+            }
+        },
+        truncate: {
+            let d = emberly_tools::TruncateConfig::default();
+            emberly_tools::TruncateConfig {
+                reduce: merged.truncate.reduce.unwrap_or(d.reduce),
+                max_lines: merged.truncate.max_lines.unwrap_or(d.max_lines),
+                max_bytes: merged.truncate.max_bytes.unwrap_or(d.max_bytes),
+                head_lines: merged.truncate.head_lines.unwrap_or(d.head_lines),
+                tail_lines: merged.truncate.tail_lines.unwrap_or(d.tail_lines),
+            }
+        },
+        context: {
+            let d = emberly_core::ContextConfig::default();
+            let threshold = merged
+                .context
+                .auto_compact_threshold
+                .unwrap_or(d.auto_compact_threshold);
+            if threshold <= 0.0 || threshold > 1.0 {
+                anyhow::bail!(
+                    "context.auto_compact_threshold must be in (0.0, 1.0], got {threshold}"
+                );
+            }
+            emberly_core::ContextConfig {
+                window_turns: merged
+                    .context
+                    .window_turns
+                    .map_or(d.window_turns, |v| v as usize),
+                keep_recent_turns: merged
+                    .context
+                    .keep_recent_turns
+                    .map_or(d.keep_recent_turns, |v| v as usize),
+                auto_compact: merged.context.auto_compact.unwrap_or(d.auto_compact),
+                auto_compact_threshold: threshold,
             }
         },
     })

@@ -17,19 +17,23 @@ pub mod ctx;
 pub mod diff;
 pub mod path;
 pub mod permission;
+pub mod recall;
+pub mod reduce;
 pub mod registry;
 pub mod sandbox;
 pub mod tool;
 pub mod truncate;
 
 pub use ask_user::{AskUserGate, AskUserOutcome};
+pub use recall::{RecallGate, RecallOutcome};
 pub use builtin::{
     default_registry, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool,
-    WriteFileTool,
+    RecallTool, WriteFileTool,
 };
 pub use ctx::{ToolCtx, TruncateConfig};
 pub use permission::{PermissionGate, PermissionOutcome, PermissionRequest};
 pub use registry::ToolRegistry;
 pub use sandbox::{BashInvocation, PlainSandbox, Sandbox};
 pub use tool::{FileChange, Tool, ToolOutcome, ToolSpec};
+pub use reduce::{reduce_output, Reduction};
 pub use truncate::{truncate_output, Truncation};

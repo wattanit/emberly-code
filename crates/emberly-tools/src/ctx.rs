@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::ask_user::{AskUserGate, AskUserOutcome, DeclineAskGate};
 use crate::permission::{PermissionGate, PermissionOutcome, PermissionRequest};
+use crate::recall::{DeclineRecallGate, RecallGate, RecallOutcome};
 use crate::sandbox::Sandbox;
 
 /// Truncation-at-ingestion configuration (Requirements §8.1, Tech Spec §5.3).
@@ -21,6 +22,9 @@ pub struct TruncateConfig {
     pub head_lines: usize,
     /// Lines of tail to keep.
     pub tail_lines: usize,
+    /// Whether salient tool-result reduction runs before the size backstop
+    /// (FR-2, Tech Spec §5.3/§8). Default `true`; set `false` for raw results.
+    pub reduce: bool,
 }
 
 impl Default for TruncateConfig {
@@ -30,6 +34,7 @@ impl Default for TruncateConfig {
             max_bytes: 64 * 1024,
             head_lines: 150,
             tail_lines: 100,
+            reduce: true,
         }
     }
 }
@@ -48,6 +53,7 @@ pub struct ToolCtx {
     gate: Arc<dyn PermissionGate>,
     sandbox: Arc<dyn Sandbox>,
     ask: Arc<dyn AskUserGate>,
+    recall: Arc<dyn RecallGate>,
 }
 
 impl ToolCtx {
@@ -68,6 +74,7 @@ impl ToolCtx {
             gate,
             sandbox,
             ask: Arc::new(DeclineAskGate),
+            recall: Arc::new(DeclineRecallGate),
         }
     }
 
@@ -76,6 +83,14 @@ impl ToolCtx {
     #[must_use]
     pub fn with_ask_gate(mut self, ask: Arc<dyn AskUserGate>) -> Self {
         self.ask = ask;
+        self
+    }
+
+    /// Install the recall gate (T-10). Kept a builder so existing callers and
+    /// tests, which never recall, need no change.
+    #[must_use]
+    pub fn with_recall_gate(mut self, recall: Arc<dyn RecallGate>) -> Self {
+        self.recall = recall;
         self
     }
 
@@ -108,5 +123,11 @@ impl ToolCtx {
     /// path to the ask-user gate; touches no filesystem or network.
     pub async fn ask_user(&self, question: String, options: Vec<String>) -> AskUserOutcome {
         self.ask.ask(question, options).await
+    }
+
+    /// Retrieve elided turns from the engine's in-memory conversation (T-10).
+    /// The single path to the recall gate; touches no filesystem or network.
+    pub async fn recall(&self, from: usize, to: usize) -> RecallOutcome {
+        self.recall.recall(from, to).await
     }
 }

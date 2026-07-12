@@ -9,6 +9,7 @@
 use async_trait::async_trait;
 use emberly_tools::{
     AskUserGate, AskUserOutcome, PermissionGate, PermissionOutcome, PermissionRequest,
+    RecallGate, RecallOutcome,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -81,5 +82,42 @@ impl AskUserGate for AskGate {
             return AskUserOutcome::Declined;
         }
         reply_rx.await.unwrap_or(AskUserOutcome::Declined)
+    }
+}
+
+/// A `recall` request in flight from a tool to the engine, carrying the
+/// oneshot the engine replies on (T-10). Like [`AskUserAsk`], opaque to
+/// callers of the engine.
+pub struct RecallAsk {
+    pub(crate) from: usize,
+    pub(crate) to: usize,
+    pub(crate) reply: oneshot::Sender<RecallOutcome>,
+}
+
+/// The recall gate installed into every
+/// [`ToolCtx`](emberly_tools::ToolCtx). Fails closed: if the engine is gone or
+/// the reply is dropped, the answer is [`RecallOutcome::Empty`] (the safe
+/// default — the model proceeds without the recalled turns).
+pub(crate) struct RecallGateImpl {
+    pub(crate) asks: mpsc::Sender<RecallAsk>,
+}
+
+#[async_trait]
+impl RecallGate for RecallGateImpl {
+    async fn recall(&self, from: usize, to: usize) -> RecallOutcome {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .asks
+            .send(RecallAsk {
+                from,
+                to,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return RecallOutcome::Empty;
+        }
+        reply_rx.await.unwrap_or(RecallOutcome::Empty)
     }
 }
