@@ -2078,7 +2078,12 @@ impl Engine {
     fn context_tokens(&self) -> u64 {
         let count = |s: &str| self.provider.count_tokens(s).tokens;
         let mut total = self.system.as_deref().map(count).unwrap_or(0);
-        for message in &self.conversation {
+        // Count the windowed sent view (FR-3, Design §8.6), not the full
+        // in-memory conversation — so usage reflects what the provider
+        // actually receives. The elision marker is included because it rides
+        // in the sent messages.
+        let messages = self.windowed_messages();
+        for message in &messages {
             for block in &message.content {
                 total = total.saturating_add(match block {
                     ContentBlock::Text { text } => count(text),

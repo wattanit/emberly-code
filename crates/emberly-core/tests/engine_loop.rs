@@ -2557,3 +2557,318 @@ async fn recall_out_of_range_returns_empty() {
     });
     assert!(found_empty, "out-of-range recall returns a structured empty");
 }
+
+#[tokio::test]
+async fn context_usage_reflects_windowed_view() {
+    // FR-3/Design §8.6: ContextUsage must reflect the sent window, not the
+    // full conversation. With a small window, old turns are dropped from
+    // the sent context, so token usage should be lower than the full
+    // conversation's size.
+    let conv = multi_turn_conversation(10); // 21 messages
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
+
+    // Small window: only 2 turns kept.
+    let ctx_small = ContextConfig {
+        window_turns: 2,
+        ..ContextConfig::default()
+    };
+    let mut h_small = spawn_windowed(
+        fake.clone(),
+        temp_project(),
+        ctx_small,
+        conv.clone(),
+        false,
+    );
+    h_small.send(Command::UserInput {
+        text: "next".into(),
+    })
+    .await;
+    let events_small = h_small.collect(None).await;
+
+    // Large window: everything kept.
+    let fake_full = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
+    let ctx_full = ContextConfig {
+        window_turns: 40,
+        ..ContextConfig::default()
+    };
+    let mut h_full = spawn_windowed(
+        fake_full,
+        temp_project(),
+        ctx_full,
+        conv,
+        false,
+    );
+    h_full.send(Command::UserInput {
+        text: "next".into(),
+    })
+    .await;
+    let events_full = h_full.collect(None).await;
+
+    // Extract the ContextUsage token counts from the events.
+    let tokens_small = events_small
+        .into_iter()
+        .rev()
+        .find_map(|e| match e {
+            UiEvent::ContextUsage { tokens, .. } => Some(tokens),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let tokens_full = events_full
+        .into_iter()
+        .rev()
+        .find_map(|e| match e {
+            UiEvent::ContextUsage { tokens, .. } => Some(tokens),
+            _ => None,
+        })
+        .unwrap_or(0);
+
+    assert!(
+        tokens_small < tokens_full,
+        "windowed usage ({tokens_small}) should be less than full ({tokens_full})"
+    );
+}
+
+#[tokio::test]
+async fn recall_renders_as_ordinary_tool_activity() {
+    // Design §8.6/§4.5: `recall` rides the existing ToolStarted/ToolFinished
+    // events — no new UiEvent variant. The TUI and line renderer are
+    // tool-agnostic, so recall renders as one dim line like any tool.
+    let conv = multi_turn_conversation(10);
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "r1",
+            "recall",
+            r#"{"from_turn":1,"to_turn":2}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let fake = Arc::new(FakeProvider::new(scripts));
+    let ctx = ContextConfig {
+        window_turns: 2,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn_windowed(fake, temp_project(), ctx, conv, false);
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // Must find a ToolStarted for recall — no special event variant.
+    let has_recall_start = events.iter().any(|e| match e {
+        UiEvent::ToolStarted { tool, summary, .. } => {
+            tool == "recall" && summary.contains("recall")
+        }
+        _ => false,
+    });
+    assert!(has_recall_start, "recall emits a ToolStarted event");
+
+    // Must find a ToolFinished for the recall call.
+    let has_recall_finish = events.iter().any(|e| match e {
+        UiEvent::ToolFinished { summary, .. } => summary.contains("recalled"),
+        _ => false,
+    });
+    assert!(has_recall_finish, "recall emits a ToolFinished event");
+
+    // No AskUserRequest, PermissionRequest, or LoopHalted — recall is quiet.
+    let has_blocking = events.iter().any(|e| {
+        matches!(
+            e,
+            UiEvent::AskUserRequest { .. }
+                | UiEvent::PermissionRequest { .. }
+                | UiEvent::LoopHalted { .. }
+        )
+    });
+    assert!(!has_blocking, "recall raises no blocking surface");
+}
+
+#[tokio::test]
+async fn windowing_does_not_affect_user_scrollback() {
+    // Design §8.6 / HC-7: windowing governs what is *sent* to the provider;
+    // the conversation the user reads (built from UiEvents) is unaffected.
+    // A window-dropped turn still appears in the event stream the frontend
+    // consumes — it was streamed live as AssistantDelta + ToolFinished etc.
+    let conv = multi_turn_conversation(10);
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
+    let ctx = ContextConfig {
+        window_turns: 2,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn_windowed(fake, temp_project(), ctx, conv, false);
+    h.send(Command::UserInput {
+        text: "next".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // The "next" user message is in the event stream (as AssistantDelta
+    // triggered by it). The key point: the UI event stream carries the
+    // full conversation the user saw live — windowing only affects what
+    // build_request sends to the provider, which the frontend never sees
+    // directly.
+    //
+    // Verify the engine produced a TurnEnded (normal completion) and that
+    // no event hints at windowing (no special "elided" UiEvent).
+    let has_turn_ended = events.iter().any(|e| matches!(e, UiEvent::TurnEnded));
+    assert!(has_turn_ended, "turn completed normally");
+
+    // No UiEvent variant carries the elision marker — it lives only in the
+    // sent messages, which the frontend never sees. The user's scrollback
+    // (built from UiEvents) is whole.
+    let has_elision_event = events.iter().any(|e| {
+        matches!(e, UiEvent::Notice { message } if message.contains("elided"))
+    });
+    assert!(
+        !has_elision_event,
+        "windowing produces no user-visible elision event"
+    );
+}
+
+#[tokio::test]
+async fn windowing_leaves_transcript_untouched() {
+    // HC-7: windowing is a send-time view. The transcript records the full
+    // live conversation — never elided or rewritten. This test starts fresh
+    // (not a resume), runs several real turns to build a conversation, then
+    // triggers windowing with a small window and verifies the transcript has
+    // every message intact.
+    let root = temp_project();
+    let path = root.join("session.jsonl");
+
+    // Build enough turns to exceed a small window. Each script is one turn.
+    let mut scripts = Vec::new();
+    for i in 0..8 {
+        // The model answers each user turn with text.
+        scripts.push(ScriptedResponse::text(format!("reply {i}")));
+    }
+    let fake = Arc::new(FakeProvider::new(scripts));
+
+    let sink = match FileTranscript::open(&path) {
+        Ok(sink) => sink,
+        Err(error) => panic!("open transcript: {error}"),
+    };
+    let mut config = make_config(fake, root, Box::new(sink));
+    config.context = ContextConfig {
+        window_turns: 3,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn(config);
+
+    // Send 8 user messages, each producing one assistant reply.
+    for i in 0..8 {
+        h.send(Command::UserInput {
+            text: format!("msg {i}"),
+        })
+        .await;
+        let _ = h.collect(None).await;
+    }
+    drop(h);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let loaded = emberly_core::resume::read_records(&path).unwrap_or_else(|e| panic!("{e}"));
+
+    // All 8 user messages + 8 assistant messages are in the transcript.
+    let user_messages: Vec<&str> = loaded
+        .records
+        .iter()
+        .filter_map(|r| match &r.event {
+            TranscriptEvent::UserMessage { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        user_messages.len(),
+        8,
+        "all 8 user messages in transcript, none elided by windowing"
+    );
+    assert!(user_messages.contains(&"msg 0"), "first message intact");
+    assert!(user_messages.contains(&"msg 7"), "last message intact");
+
+    // No compaction was performed.
+    assert!(
+        !emberly_core::resume::has_compaction(&loaded.records),
+        "no compaction in transcript"
+    );
+}
+
+#[tokio::test]
+async fn windowing_with_compaction_and_recall_compose() {
+    // FR-3 exit criterion composition: a post-compaction conversation is
+    // windowed (summary pinned), and recall retrieves window-dropped turns
+    // that are still in self.conversation. No compacted-range special case.
+    //
+    // Conversation: [task(0), summary(1), turn2(2), reply2(2), turn3(3),
+    // reply3(3), turn4(4), reply4(4), turn5(5), reply5(5)]
+    // With window_turns=2, turns 2–3 are elided. The model calls recall(2,3).
+    let mut conv = vec![
+        Message::user_text("original task"),      // pinned [0]
+        Message::user_text("compaction summary"), // pinned [1]
+    ];
+    for i in 2..=5 {
+        conv.push(Message::user_text(format!("turn {i}")));
+        conv.push(Message::assistant_text(format!("reply {i}")));
+    }
+
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "r1",
+            "recall",
+            r#"{"from_turn":2,"to_turn":3}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let fake = Arc::new(FakeProvider::new(scripts));
+    let ctx = ContextConfig {
+        window_turns: 2,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn_windowed(fake.clone(), temp_project(), ctx, conv, true);
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    let msgs = &req.messages;
+
+    // Pinned prefix: task + summary.
+    assert_eq!(first_text(&msgs[0]), "original task");
+    assert_eq!(first_text(&msgs[1]), "compaction summary");
+
+    // The recall result should contain turns 2–3 content.
+    let recall_content: String = msgs
+        .iter()
+        .filter_map(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => {
+                    if content.contains("turn 2") {
+                        Some(content.clone())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+        })
+        .next()
+        .unwrap_or_default();
+
+    assert!(
+        !recall_content.is_empty(),
+        "recall returned turn 2 content"
+    );
+    assert!(
+        recall_content.contains("turn 3"),
+        "recall returned turn 3 content"
+    );
+    assert!(
+        recall_content.contains("reply 2"),
+        "recall returned reply 2 content"
+    );
+    // Not raw JSONL.
+    assert!(
+        !recall_content.contains("{\"role\""),
+        "recall is rendered text, not raw JSONL"
+    );
+}

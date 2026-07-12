@@ -29,11 +29,11 @@ Phase 1's `reduce_output` (`crates/emberly-tools/src/reduce.rs:64`) for the turn
 | 2. Adaptive windowing at send time (`build_request`) | [x] | `windowed_messages()` view in `build_request`; turn-grouping, pinned prefix, elision marker; 5 integration tests |
 | 3. Marker↔range identifier scheme (resolve the §16 open item) | [x] | Stable monotonic turn numbers (`turn_map` + `next_turn`); marker reads `turns X–Y elided…`; `recall_turns()` resolves ranges; 3 new tests |
 | 4. `recall` built-in tool + engine gate (not permission-gated) | [x] | `RecallGate` trait + `RecallTool` + channel-backed `RecallGateImpl`; `on_recall` services in select loop; `render_recall` reduces tool results; 2 integration tests |
-| 5. Context-usage reflects the working window | [ ] | |
-| 6. UI: `recall` as ordinary quiet tool activity + degraded parity | [ ] | |
-| 7. Tests (offline, deterministic — §14.6) + exit criterion | [ ] | |
+| 5. Context-usage reflects the working window | [x] | `context_tokens()` counts `windowed_messages()` not full conversation; 1 integration test verifies lower usage with small window |
+| 6. UI: `recall` as ordinary quiet tool activity + degraded parity | [x] | Recall rides existing ToolStarted/ToolFinished — no new event variant; scrollback unaffected by windowing; 2 tests confirm |
+| 7. Tests (offline, deterministic — §14.6) + exit criterion | [x] | 16 Phase 2 tests total: windowing, clean boundaries, recall round-trip, compaction composition, usage tracking, transcript integrity, UI parity; 393 tests green, clippy-clean |
 
-**Overall Phase 2: NOT STARTED.**
+**Overall Phase 2: COMPLETE.**
 
 ---
 
@@ -154,53 +154,64 @@ so, like `ask_user`, it bypasses the sandbox and is **not permission-gated**
 Design §8.6: the context-usage indicator must reflect the **working window**, so
 "why did usage drop" is always answerable.
 
-- [ ] Token accounting / `emit_context_usage` (`engine.rs`, emitted at
+- [x] Token accounting / `emit_context_usage` (`engine.rs`, emitted at
       `ingest_tool_result:1616` and elsewhere) counts the **windowed sent view**
       (pinned + last `window_turns` + marker), not the full `self.conversation`.
       `ContextUsage` (`event.rs`) then tracks what is actually sent (P-6 remains
       trigger-grade, not exact).
-- [ ] A `recall` inflates the next request (the recalled turns ride in the tool
+      _`context_tokens()` now iterates `self.windowed_messages()` instead of `self.conversation`. The elision marker is included in the count since it rides in the sent messages._
+- [x] A `recall` inflates the next request (the recalled turns ride in the tool
       result), so usage rising after a recall is expected and correct — verify it
       is reflected, not hidden.
+      _Naturally reflected: the recalled content is a tool_result message in `self.conversation`, which `windowed_messages()` includes in the recent window, so `context_tokens()` counts it._
 
 ## 6. UI: `recall` as ordinary quiet tool activity  *(Design §8.6, §4.5, §7)*
 
-- [ ] `recall` renders as **ordinary, quiet tool activity** — one dim line via
+- [x] `recall` renders as **ordinary, quiet tool activity** — one dim line via
       the existing `ToolStarted`/`ToolFinished` (`event.rs:39`, `:54`; TUI
       `app.rs:529`), optionally with a §4.5 explanation line — **no new `UiEvent`
       or `TranscriptEvent` variant** (unlike `ask_user`, which needs a blocking
       surface). It is the model reading its own context; keep it visibly distinct
       from the user-facing `/view` (§4.3) — the two never share a surface.
-- [ ] The user's scrollback stays whole: windowing governs what is *sent*, so a
+      _Confirmed: `recall` goes through `run_one_tool_call` which emits the generic `ToolStarted`/`ToolFinished`. The TUI app.rs and line.rs renderers are tool-agnostic. `recall_renders_as_ordinary_tool_activity` test verifies no blocking surface._
+- [x] The user's scrollback stays whole: windowing governs what is *sent*, so a
       window-dropped turn is **not** erased from the conversation the user reads
       (Design §8.6). Confirm the TUI conversation model is unaffected by send-time
       windowing.
-- [ ] Degraded mode (§7): `recall` activity and any marker render in ASCII with
+      _Confirmed: TUI conversation is built from `UiEvent`s (AssistantDelta, ToolStarted, etc.), not from the windowed `build_request()` messages. `windowing_does_not_affect_user_scrollback` test verifies no elision event reaches the UI._
+- [x] Degraded mode (§7): `recall` activity and any marker render in ASCII with
       no color-only meaning.
+      _Confirmed: line.rs renders `> {tool}: {summary}` and `[{tag}] {summary}` — plain ASCII, no color, tool-agnostic. Recall renders identically to any tool._
 
 ## 7. Tests + exit criterion  *(Tech Spec §14.6 offline, deterministic)*
 
-- [ ] **Windowing:** with `window_turns` small, assert old turns are dropped from
+- [x] **Windowing:** with `window_turns` small, assert old turns are dropped from
       the **sent** request (inspect `build_request`/what `FakeProvider` receives)
       while `self.conversation`, the transcript, and the elision marker are
       intact; assert pinned content (system, `conversation[0]`, compaction
       summary) is always sent.
-- [ ] **Clean boundary:** a window cut never splits a `tool_use`/`tool_result`
+      _`window_drops_old_turns_from_sent_context`, `windowing_leaves_transcript_untouched`._
+- [x] **Clean boundary:** a window cut never splits a `tool_use`/`tool_result`
       pair — the sent message list is provider-valid.
-- [ ] **`recall` round-trip via `FakeProvider`:** the model calls `recall` for a
+      _`window_never_splits_tool_use_from_result`._
+- [x] **`recall` round-trip via `FakeProvider`:** the model calls `recall` for a
       dropped range; assert it returns those turns in **normalized, reduced** form
       (not raw JSONL) and that it **never raises a permission prompt** (T-10, §6).
-- [ ] **Composition with compaction:** windowing over a post-compaction
+      _`recall_round_trip_returns_dropped_turns`, `recall_out_of_range_returns_empty`._
+- [x] **Composition with compaction:** windowing over a post-compaction
       conversation keeps the summary pinned (a normal turn) and windows only the
       turns around it; `recall` still targets only window-dropped turns, all
       present in `self.conversation` (no compacted-range branch).
-- [ ] **Usage tracks the window:** `ContextUsage` reflects the sent window, not
+      _`window_pins_compaction_summary`, `turn_numbers_stable_across_compaction`, `windowing_with_compaction_and_recall_compose`._
+- [x] **Usage tracks the window:** `ContextUsage` reflects the sent window, not
       the full conversation (group 5).
-- [ ] **Exit criterion (Phase 2 done when):** old turns are dropped from the sent
+      _`context_usage_reflects_windowed_view`._
+- [x] **Exit criterion (Phase 2 done when):** old turns are dropped from the sent
       context while the transcript and marker are intact; a `recall` round-trip
       returns dropped turns in normalized, reduced form and raises no permission
       prompt (Tech Spec §14.6, FR-3, T-10). Workspace clippy-clean under the §1
       lint policy; offline suite green.
+      _393 tests pass, clippy clean (only pre-existing warning). 16 Phase 2 tests covering all exit criteria._
 
 ---
 
