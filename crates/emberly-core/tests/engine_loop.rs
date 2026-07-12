@@ -1977,7 +1977,7 @@ async fn bash_reduction_collapses_progress_in_context() {
     let path = root.join("session.jsonl");
     let cmd = "for i in $(seq 1 100); do echo 'Downloading '$i'%'; done; echo 'Done'";
     let scripts = vec![
-        ScriptedResponse::tool_call("c1", "bash", &format!(r#"{{"command":"{cmd}"}}"#)),
+        ScriptedResponse::tool_call("c1", "bash", format!(r#"{{"command":"{cmd}"}}"#)),
         ScriptedResponse::text("done"),
     ];
     let mut h = start_with_truncate(scripts, root.clone(), &path, TruncateConfig::default());
