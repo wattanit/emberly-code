@@ -114,6 +114,11 @@ pub mod markers {
     /// Leads the dim tool-call explanation caption (T-9, Design §4.5) so it
     /// reads as an annotation of the call above, not as tool output.
     pub const EXPLANATION: &str = "↳";
+    /// Task-list status glyphs (T-11, Design §4.7). Rich-mode symbols; the
+    /// plain frontend uses ASCII `[ ]`/`[~]`/`[x]` fallbacks (Design §7).
+    pub const TASK_PENDING: &str = "○";
+    pub const TASK_IN_PROGRESS: &str = "◐";
+    pub const TASK_DONE: &str = "✓";
 }
 
 /// One-line orientation shown on clean exit (Design §8.3). The richer summary

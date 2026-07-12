@@ -94,6 +94,9 @@ pub struct ContextConfigFile {
     /// Context-usage fraction that triggers automatic compaction (default
     /// `0.85`, FR-4). Must be in `(0.0, 1.0]`.
     pub auto_compact_threshold: Option<f64>,
+    /// Whether the task list is pinned in the sent context (default `true`,
+    /// T-11). When `false`, the task list is not appended to the system prompt.
+    pub pin_task_list: Option<bool>,
 }
 
 /// `[truncate]` — tool-result reduction and size backstop at ingestion
@@ -318,6 +321,9 @@ impl ConfigFile {
         }
         if higher.context.auto_compact_threshold.is_some() {
             self.context.auto_compact_threshold = higher.context.auto_compact_threshold;
+        }
+        if higher.context.pin_task_list.is_some() {
+            self.context.pin_task_list = higher.context.pin_task_list;
         }
         // `[trust]` is deliberately NOT merged — it is read only from the global
         // tier (FR-1); see `global_trust_dirs` and the project-[trust] notice.
@@ -582,6 +588,21 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             true,
         );
     }
+    if field(&project, |c: &ConfigFile| c.context.pin_task_list.is_some())
+        || field(&global, |c: &ConfigFile| c.context.pin_task_list.is_some())
+    {
+        record(
+            &mut provenance,
+            "context.pin_task_list",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.context.pin_task_list.is_some()),
+                field(&global, |c: &ConfigFile| c.context.pin_task_list.is_some()),
+            ),
+            true,
+        );
+    }
 
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
@@ -665,7 +686,7 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
                     .map_or(d.keep_recent_turns, |v| v as usize),
                 auto_compact: merged.context.auto_compact.unwrap_or(d.auto_compact),
                 auto_compact_threshold: threshold,
-                pin_task_list: d.pin_task_list,
+                pin_task_list: merged.context.pin_task_list.unwrap_or(d.pin_task_list),
             }
         },
     })

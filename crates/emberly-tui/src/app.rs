@@ -11,8 +11,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use emberly_core::{
     resume, AskAnswer, AskId, Command, Effort, LoopResolution, Mode, PermissionDecision,
-    PermissionId, PermissionRendering, SandboxStatus, SessionId, TokenUsage, ToolCallId,
-    TranscriptEvent, TranscriptRecord, UiEvent,
+    PermissionId, PermissionRendering, SandboxStatus, SessionId, TaskItem, TokenUsage,
+    ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
 };
 
 use std::collections::HashMap;
@@ -74,6 +74,10 @@ pub enum ConvItem {
     /// A unified diff shown inline when an edit executes (Design §4.2). Capped
     /// on render; the full diff is available in the overlay (Ctrl+O).
     Diff { unified: String },
+    /// The model's task list (T-11, Design §4.7). Shown as an inline checklist
+    /// block; a completed list settles to an all-done block rather than
+    /// vanishing.
+    TaskList { items: Vec<TaskItem> },
 }
 
 /// A dismissable, scrollable pane overlay (Design §4.2). Modal for navigation:
@@ -307,6 +311,9 @@ pub struct App {
     pub sandbox: Option<SandboxStatus>,
     pub mode: emberly_core::Mode,
     pub modified_files: Vec<ModifiedFile>,
+    /// The model-maintained task list (T-11, Design §4.7). Updated from
+    /// `UiEvent::TaskListUpdated`; cleared on a new session.
+    pub tasks: Vec<TaskItem>,
     /// The permission prompt currently awaiting an answer, if any. While set,
     /// the prompt owns the screen and normal input is suspended (Design §5).
     pub pending_permission: Option<(PermissionId, PermissionRendering)>,
@@ -380,6 +387,7 @@ impl App {
             sandbox: None,
             mode: emberly_core::Mode::default(),
             modified_files: Vec::new(),
+            tasks: Vec::new(),
             pending_permission: None,
             pending_ask: None,
             pending_loop_halt: None,
@@ -653,6 +661,10 @@ impl App {
             }
             UiEvent::CompactionStatus { message } => {
                 self.conversation.push(ConvItem::Notice(message));
+            }
+            UiEvent::TaskListUpdated { items } => {
+                self.tasks = items.clone();
+                self.conversation.push(ConvItem::TaskList { items });
             }
             // `#[non_exhaustive]`: unknown future events are ignored, not fatal.
             _ => {}
@@ -1637,6 +1649,7 @@ impl App {
         self.session.title = title;
         self.conversation.clear();
         self.modified_files.clear();
+        self.tasks.clear();
         self.latest_diffs.clear();
         self.last_modified = None;
         self.scroll = 0;

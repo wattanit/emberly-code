@@ -8,7 +8,7 @@
 //! (context %, mode) live only on the status bar (Design §3.2) — everything the
 //! sidebar shows is also reachable by command, so nothing is sidebar-exclusive.
 
-use emberly_core::{Mode, SandboxStatus};
+use emberly_core::{Mode, SandboxStatus, TaskStatus};
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::text::{Line, Span};
@@ -501,6 +501,34 @@ fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                     )));
                 }
             }
+            ConvItem::TaskList { items } => {
+                // Inline checklist block (T-11, Design §4.7). A completed list
+                // settles to an all-✓ block rather than vanishing.
+                for item in items {
+                    let (glyph, style) = match item.status {
+                        TaskStatus::Pending => (markers::TASK_PENDING, theme.chrome()),
+                        TaskStatus::InProgress => (markers::TASK_IN_PROGRESS, theme.accent()),
+                        TaskStatus::Done => (markers::TASK_DONE, theme.success()),
+                    };
+                    for (i, row) in text::wrap(&item.text, w.saturating_sub(4))
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if i == 0 {
+                            out.push(Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled(format!("{glyph} "), style),
+                                Span::styled(row, theme.primary()),
+                            ]));
+                        } else {
+                            out.push(Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(row, theme.primary()),
+                            ]));
+                        }
+                    }
+                }
+            }
         }
     }
     out
@@ -653,6 +681,25 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(fit(&file.path, path_w), path_style),
                 Span::styled(format!(" +{}", file.adds), theme.diff_add()),
                 Span::styled(format!(" -{}", file.dels), theme.diff_del()),
+            ]));
+        }
+    }
+
+    // Task list (T-11, Design §3.1/§4.7): one line per item with a status
+    // glyph. Not shown when empty (Design §3.1). The single in-progress item
+    // is lightly ember-accented; color is never the sole signal (Design §7).
+    if !app.tasks.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Tasks", theme.chrome())));
+        for item in &app.tasks {
+            let (glyph, style) = match item.status {
+                TaskStatus::Pending => (markers::TASK_PENDING, theme.chrome()),
+                TaskStatus::InProgress => (markers::TASK_IN_PROGRESS, theme.accent()),
+                TaskStatus::Done => (markers::TASK_DONE, theme.success()),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{glyph} "), style),
+                Span::styled(fit(&item.text, w.saturating_sub(2)), theme.primary()),
             ]));
         }
     }
