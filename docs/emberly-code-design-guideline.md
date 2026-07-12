@@ -1,11 +1,11 @@
 # Emberly Code — Design Guideline
 
-**Version:** 0.6 
-**Status:** approved
-**Date:** 2026-07-11
+**Version:** 0.7 
+**Status:** approved   
+**Date:** 2026-07-12
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.6 (upstream), Technical
-Specification v0.7 (downstream — this document constrains it)
+**Companion documents:** Requirements Document v0.7 (upstream), Technical
+Specification v0.8 (downstream — this document constrains it)
 
 This document defines how Emberly Code looks, feels, and speaks. It is the
 second of three project documents. Where a decision here has technical
@@ -19,16 +19,16 @@ Specification must absorb it.
 ### 1.1 Name
 
 - **Product name:** Emberly Code — the coding-agent sibling of Emberly
-  (the chat client), following the family-name convention.
+(the chat client), following the family-name convention.
 - **Binary/command name:** `emberly`.
 - The install docs suggest (but do not create) a short shell alias `emb`
-  for heavy daily use. The harness itself never assumes the alias exists.
+for heavy daily use. The harness itself never assumes the alias exists.
 - Naming collision check (crates.io, Homebrew, common distro repos, PATH
-  conventions) is a release-checklist item in the Tech Spec.
+conventions) is a release-checklist item in the Tech Spec.
 - **Wordmark:** plain styled text — `emberly` in the ember accent
-  followed by `code` and the version in dimmed secondary text. No
-  figlet/ASCII-art rendering, no logo glyph. Identical in degraded mode
-  minus color.
+followed by `code` and the version in dimmed secondary text. No
+figlet/ASCII-art rendering, no logo glyph. Identical in degraded mode
+minus color.
 
 ### 1.2 Brand concept: "the ember"
 
@@ -40,56 +40,56 @@ exactly what a terminal is.
 Design translation, stated as principles:
 
 - **Warm, not loud.** One warm accent (ember amber/copper range) carries
-  identity. Everything else is quiet: dimmed grays for chrome and
-  secondary text, high-contrast neutral for primary content.
+identity. Everything else is quiet: dimmed grays for chrome and
+secondary text, high-contrast neutral for primary content.
 - **Light, clean, useful.** Personality comes from restraint, spacing,
-  and voice — not decoration. No ASCII-art splash, no gratuitous boxes,
-  no emoji in chrome.
+and voice — not decoration. No ASCII-art splash, no gratuitous boxes,
+no emoji in chrome.
 - **Calm under load.** The interface never gets busier when things go
-  wrong. Errors and permission prompts are the calmest, clearest screens
-  in the app.
+wrong. Errors and permission prompts are the calmest, clearest screens
+in the app.
 
 ### 1.3 Anti-goals
 
 - The sterile hacker-terminal aesthetic (pure function, zero warmth).
 - The over-decorated TUI (heavy box-drawing everywhere, rainbow syntax
-  chrome, animation as noise). Motion in small, purposeful doses is
-  welcome — see §6.4.
+chrome, animation as noise). Motion in small, purposeful doses is
+welcome — see §6.4.
 - Any personality expression that costs clarity or a keystroke.
 
 ## 2. Color and Typography
 
 - **Palette roles and candidate values.** These are working values —
-  expected to be tuned by eye once the real interface exists. All colors
-  live in a single theme definition in code (one file, named roles), so
-  tuning is a value change, not a refactor.
+expected to be tuned by eye once the real interface exists. All colors
+live in a single theme definition in code (one file, named roles), so
+tuning is a value change, not a refactor.
   - *Background reference* — `#16120F` warm near-black (the terminal's
-    own background wins where not drawn over; this value guides drawn
-    surfaces). Raised surface (prompts, overlays): `#221C17`.
+  own background wins where not drawn over; this value guides drawn
+  surfaces). Raised surface (prompts, overlays): `#221C17`.
   - *Ember accent* — `#E8833A`. Dim accent (focus borders, subtle
-    marks): `#9C5A2B`. Used for: the wordmark, the active/focus
-    indicator, the spinner, key highlights. Used sparingly; if more than
-    ~5% of a screen is accent-colored, something is wrong.
+  marks): `#9C5A2B`. Used for: the wordmark, the active/focus
+  indicator, the spinner, key highlights. Used sparingly; if more than
+  ~5% of a screen is accent-colored, something is wrong.
   - *Primary text* — `#EDE6DB` warm off-white.
   - *Secondary/chrome* — `#9D968C` dimmed warm gray. Labels, dividers,
-    hints, metadata.
+  hints, metadata.
   - *Semantic colors* — success/allow `#8FB573`, error/deny `#D96C5F`,
-    warning/caution `#DBA94D`, used only for their semantic meaning,
-    never decoratively. Diff colors follow universal convention (green
-    additions, red deletions) using the success/error values.
+  warning/caution `#DBA94D`, used only for their semantic meaning,
+  never decoratively. Diff colors follow universal convention (green
+  additions, red deletions) using the success/error values.
 - **One theme.** User theming is out of current scope; the single
-  built-in warm-dark theme ships, with a light-terminal legibility
-  fallback. The centralized theme definition is the future-proofing —
-  a theme system later means loading a different set of values into the
-  same roles, nothing more.
+built-in warm-dark theme ships, with a light-terminal legibility
+fallback. The centralized theme definition is the future-proofing —
+a theme system later means loading a different set of values into the
+same roles, nothing more.
 - **Safety styling is reserved.** The visual treatment used for
-  outside-project-root permission prompts (see §5) is used for that and
-  nothing else. It must never be diluted by reuse.
+outside-project-root permission prompts (see §5) is used for that and
+nothing else. It must never be diluted by reuse.
 - **Typography** is whatever monospace the user's terminal provides.
-  Hierarchy is achieved through spacing, dimming, and weight (bold), never
-  through size (unavailable) or color alone (degradation, §7).
+Hierarchy is achieved through spacing, dimming, and weight (bold), never
+through size (unavailable) or color alone (degradation, §7).
 - Box-drawing characters are used minimally: section dividers and the
-  sidebar separator. Content is never trapped inside full boxes.
+sidebar separator. Content is never trapped inside full boxes.
 
 ## 3. Layout
 
@@ -99,14 +99,14 @@ A main conversation pane and a right sidebar, in the spirit of the best
 current harnesses:
 
 - **Main pane** — the conversation: user prompts, assistant text, tool
-  activity, diffs, permission prompts. This pane owns scrollback.
+activity, diffs, permission prompts. This pane owns scrollback.
 - **Right sidebar** (fixed width, collapsible with a keybinding):
   1. Wordmark + version — one line, small. The brand is present, not
-     dominant.
+    dominant.
   2. Session title (auto-generated from the task, user-renamable).
   3. Project root path (abbreviated with `~`).
   4. Model block: provider + model name, the reasoning-effort level when
-     the model exposes one (Requirements P-9), context usage percentage
+    the model exposes one (Requirements P-9), context usage percentage
      (Requirements §8.4), session cost estimate, and sandbox status
      (Requirements §6.7) — one dimmed line when fully confined, warning
      styling with a short reason when degraded. Sandbox status is
@@ -118,16 +118,23 @@ current harnesses:
      the next turn and is announced in the conversation in the harness's
      own voice — never silently.
   5. **Modified files** — every file the agent has created or changed
-     this session, with add/remove line counts. Each entry is
+    this session, with add/remove line counts. Each entry is
      selectable → opens the cumulative diff for inspection (§4.2).
-  6. Extension sections — MCP, LSP, Skills — rendered only when the
-     underlying subsystem exists and has content. Today these are absent,
-     not shown as empty "None" stubs. The layout reserves the pattern,
-     not the pixels.
+  6. **Tasks** (Requirements T-11) — the model's current task list when one
+    exists: each item on its own line with a status glyph (§4.7), the
+     in-progress item lightly accented. Absent when the model has not opened
+     a list; never an empty stub.
+  7. Extension sections — **Memory**, **Skills**, MCP, LSP — each rendered
+    only when its subsystem exists and has content. Memory (Requirements
+     FR-6) and Skills (Requirements FR-7) become real in this version:
+     Memory shows a count and opens an entry inspector (§4.9); Skills lists
+     the available skills by name and origin (§4.9). MCP and LSP remain
+     absent, not shown as empty "None" stubs. The layout reserves the
+     pattern, not the pixels.
 - **Status line** (bottom, one line): current mode (normal /
-  auto-accept-edits / auto), context %, and 3–5 contextual keybinding
-  hints in dimmed text. Hints change with state (e.g. during a permission
-  prompt they show the prompt's keys).
+auto-accept-edits / auto), context %, and 3–5 contextual keybinding
+hints in dimmed text. Hints change with state (e.g. during a permission
+prompt they show the prompt's keys).
 
 ### 3.2 Narrow terminals
 
@@ -144,6 +151,42 @@ is reachable three ways: palette, `/command`, or keybinding — the palette
 is the discovery mechanism, slash-commands are the muscle-memory
 mechanism. New-user help text teaches the palette first.
 
+### 3.4 Pointer (mouse) interaction
+
+Mouse support (Requirements §2.1) is **additive convenience, never a new
+authority**. The governing rule: **anything the mouse can do, the keyboard can
+already do, and the mouse can do nothing the keyboard cannot.** The pointer
+speeds up navigation; it never becomes the sole path to a function (the §3.3
+"reachable three ways" principle extends to a fourth, optional way) and it
+never lowers the bar on a decision.
+
+- **What the pointer does:** wheel/trackpad scrolls the focused pane or open
+overlay; a click selects — a sidebar entry (opening its diff or inspector,
+§4.2/§4.9), a command-palette row, a model/effort picker row, a collapsed
+reasoning trail or task list to expand it (§4.4, §4.7). Clicking is a
+shortcut for "focus + Enter," nothing more.
+- **Text selection is preserved.** Capturing the mouse for the above would
+otherwise steal the terminal's own click-drag-to-copy — a real loss in a
+tool people read constantly. Emberly keeps native selection reachable: hold
+the terminal's selection modifier (Shift in most terminals) to drag-select
+and copy as usual, and this is stated in `/help`. Users who want their
+terminal's selection unconditionally can set `mouse = false` (below), which
+releases the mouse entirely.
+- **The pointer never weakens a decision.** On a permission prompt (§5), a
+click may land on Deny/Allow exactly as a keypress would, but every §5
+guarantee holds unchanged: no click "approves whatever is focused," no
+hover-to-approve, no click-through past unseen content (the approve
+affordance still indicates unscrolled content below), and clicking Allow is
+as deliberate an act as pressing the approve key. The mouse buys speed on
+the safe paths and buys *nothing* on the dangerous one.
+- **Off switch and degradation:** `mouse = false` disables capture for users
+who prefer their terminal's native pointer behavior. Degraded mode (§7) —
+`--plain`, `NO_COLOR`, `TERM=dumb` — turns mouse capture **off**: that mode
+is line-oriented and append-only with no cursor repositioning (§7), so
+seizing the mouse there would only break the terminal's own selection for no
+gain. Mouse is thus an enhancement of the rich TUI, consistent with color
+and motion (§2, §6.4) as things that add comfort and never carry meaning.
+
 ## 4. Rendering Policy
 
 ### 4.1 Markdown subset
@@ -151,11 +194,11 @@ mechanism. New-user help text teaches the palette first.
 Assistant output renders a small, boring subset well:
 
 - Fenced code blocks with syntax highlighting (accent-free scheme;
-  highlighting uses the neutral/semantic range so code never competes
-  with the ember accent).
+highlighting uses the neutral/semantic range so code never competes
+with the ember accent).
 - Bold, inline code, bulleted/numbered lists, headings as bold + spacing.
 - Everything else (tables, images, links, nested exotica) passes through
-  as plain text, unmangled.
+as plain text, unmangled.
 
 ### 4.2 Diffs are first-class
 
@@ -186,22 +229,22 @@ When a provider streams the model's reasoning distinctly from its answer
 answer:
 
 - **Collapsed by default**, shown as a single dimmed line — "reasoning
-  (12 lines)" — with an expand affordance. The answer is what the user
-  came for; the reasoning is available, not imposed. Expanded, it renders
-  in secondary/chrome color (§2), one visual step below assistant text, so
-  a glance always distinguishes reasoning from conclusion.
+(12 lines)" — with an expand affordance. The answer is what the user
+came for; the reasoning is available, not imposed. Expanded, it renders
+in secondary/chrome color (§2), one visual step below assistant text, so
+a glance always distinguishes reasoning from conclusion.
 - **Live while streaming:** the dimmed reasoning may stream in place so the
-  workspace feels alive during long thinks (this is where the accent
-  streaming glow, §6.4, lives); when the answer begins, the trail settles
-  to its collapsed line unless the user pinned it open.
+workspace feels alive during long thinks (this is where the accent
+streaming glow, §6.4, lives); when the answer begins, the trail settles
+to its collapsed line unless the user pinned it open.
 - A `reasoning = collapsed | expanded | hidden` config key sets the
-  default view; **the default is `collapsed`** — reasoning is available at a
-  glance's cost, never imposed and never hidden by surprise. `hidden` still
-  records the trace to the transcript (Requirements P-10) — hidden is a view
-  choice, never a discard.
+default view; **the default is `collapsed`** — reasoning is available at a
+glance's cost, never imposed and never hidden by surprise. `hidden` still
+records the trace to the transcript (Requirements P-10) — hidden is a view
+choice, never a discard.
 - Degraded mode (§7): the trail is a plain labeled block
-  (`--- reasoning ---`), never color-only, and defaults to collapsed via a
-  one-line marker the user can `/view`.
+(`--- reasoning ---`), never color-only, and defaults to collapsed via a
+one-line marker the user can `/view`.
 
 ### 4.5 The tool-call explanation line
 
@@ -220,20 +263,105 @@ In-app editing (Requirements C-5) offers two paths, chosen by the size of
 the edit, both reachable from the command palette (§3.3):
 
 - **Quick edit — a TUI overlay.** A focused, scrollable overlay (the §4.2
-  overlay pattern, made editable) for a single config value or a short
-  prompt. Before an edit, the overlay shows the value's provenance tier
-  (Requirements C-3) in a dimmed line — you always see whether you are
-  about to override a baked-in default or an existing project value.
-  Saving writes to the project tier (Requirements C-1), never to the
-  baked-in defaults, and shows the written path.
+overlay pattern, made editable) for a single config value or a short
+prompt. Before an edit, the overlay shows the value's provenance tier
+(Requirements C-3) in a dimmed line — you always see whether you are
+about to override a baked-in default or an existing project value.
+Saving writes to the project tier (Requirements C-1), never to the
+baked-in defaults, and shows the written path.
 - **Full edit — `$EDITOR` handoff.** For a whole prompt file or the full
-  config, hand off to `$VISUAL`/`$EDITOR` (the §4.3 fallback order),
-  reloading on save. This reuses the user's real editor rather than
-  growing a text editor inside the TUI.
+config, hand off to `$VISUAL`/`$EDITOR` (the §4.3 fallback order),
+reloading on save. This reuses the user's real editor rather than
+growing a text editor inside the TUI.
 
 Either way, a change that cannot take effect until restart is named as such
 at the moment of saving — silence about live changes, speech about the ones
 that need a restart.
+
+### 4.7 The task list
+
+The model's task list (Requirements T-11) renders in two calm places, never as
+a spectacle:
+
+- **Inline**, when the model creates or updates it: a compact checklist block
+in the conversation flow — one line per item, prefixed by a status glyph.
+It appears where the model wrote it, so the reader sees the plan take shape
+in context, then scrolls past it like any other turn.
+- **Persistently**, in the sidebar Tasks section (§3.1) so "what's left" is
+answerable at a glance without scrolling back.
+- **Status glyphs carry meaning without color:** pending `○`, in-progress
+`◐`, done `✓`, with ASCII fallbacks `[ ]` / `[~]` / `[x]` in degraded mode
+(§7) — color is reinforcement, never the sole signal. The single
+in-progress item is lightly ember-accented; it is the one place a task list
+earns a touch of warmth, and only one item is ever in progress at a glance.
+- It is **model-authored**: Emberly renders it faithfully and never
+editorializes, reorders, or checks items off on the model's behalf (T-11).
+A completed list settles to a quiet all-`✓` block rather than vanishing —
+the record of what was done is part of the conversation.
+
+### 4.8 Images in a terminal
+
+The terminal cannot be relied on to paint pixels, and Emberly does not try:
+there is **no sixel/kitty/iTerm image rendering in current scope** (a
+compatibility rabbit hole that degrades badly across terminals, against §7's
+spirit). A read-image call (Requirements T-12) renders instead as a labeled
+reference line in tool-activity styling — `read image  mockup.png · 1200×800 · PNG` — because the value is the *model* seeing the image (P-11), not the user
+re-seeing a file they already have. The honesty is explicit: the line states
+that the image went to the model, not to the screen.
+
+- If the active model has no vision (Requirements P-11), the
+unsupported-capability result renders as a calm tool-result note — "this
+model can't read images; switch model (§3.1) or describe it" — never a
+harness error (§6.1), so the model and user both learn the image was not
+seen rather than assuming it was.
+- Degraded mode (§7): the same reference line, ASCII-only.
+- Terminal image protocols are noted as a possible future nicety (§10), gated
+on capability detection, never a default.
+
+### 4.9 Memory and skills in the flow
+
+Memory (Requirements FR-6) and skills (Requirements FR-7) surface the same way
+the `recall` tool does (§8.6): as **quiet, ordinary tool activity**, one dim
+line, never ceremony.
+
+- A memory write/update reads like `remembered · project · "uses pnpm, not npm"`; a recall like `recalled 2 memories`. A skill invocation reads like
+`skill · pdf-fill · user` — name and origin on the line. Each may carry a
+§4.5 explanation when the model supplied one. None of these is a harness-voice
+moment; they are the model using its own faculties, shown without weight.
+- **Origin is always on the line** — `user` vs `project` for memory, and for
+skills — because origin is how the user reads trust (Requirements FR-6/FR-7):
+a project-supplied skill or memory is exactly the kind of thing to notice.
+- **Inspectors, not black boxes.** The sidebar Memory section opens an overlay
+(§4.2 pattern) listing entries grouped by scope, each editable/deletable via
+the in-app edit path (§4.6) — memory the user cannot see or correct is memory
+the user cannot trust (FR-6). The Skills section lists available skills by
+name, description, and origin; selecting one shows its instruction body
+read-only, so "what could this skill tell the model to do" is always
+inspectable before it ever runs.
+- **Trust is visible, not just enforced.** Project memory and project skills
+from an untrusted folder are simply **not shown and not offered** (Requirements
+FR-1); their absence is the correct, quiet signal, consistent with the trust
+gate (§8.4). Running a skill's bundled script still surfaces the ordinary
+permission prompt (§5) like any command — the skill line never implies its
+scripts ran unprompted.
+
+### 4.10 Web-search results
+
+A web search (Requirements T-14) returns results into the conversation as
+**agent-world content** (§6.1): a short list of hits — title, source URL, and a
+snippet each — rendered as a tool result the model reads and reacts to. The
+rendering makes two things unmistakable:
+
+- **It came from the open internet, and it is untrusted (Requirements T-14).**
+The block is labeled as fetched web content and styled as data, never in the
+harness's own voice and never as the assistant's conclusion — so a snippet
+that says "ignore your instructions" reads visibly as *quoted web text*, not
+as something Emberly is telling the user or the model to do. Source URLs are
+shown so the user can judge provenance.
+- Result count and snippet length are bounded (the Technical Specification sets
+the caps) and long result sets follow the §8.6 reduction economy — search is
+not a context flood. The permission gate for reaching the network at all is
+§5.2.
 
 ## 5. The Permission Prompt
 
@@ -242,27 +370,27 @@ meets human attention, and it is designed so that **saying yes always
 requires having seen what you are saying yes to.**
 
 - **Full content, always.** The complete command, or the complete diff,
-  and all affected paths. Never truncated to fit — long content scrolls
-  within the prompt. If the user hasn't scrolled to the end of a long
-  diff, the approve hint indicates there is more below.
+and all affected paths. Never truncated to fit — long content scrolls
+within the prompt. If the user hasn't scrolled to the end of a long
+diff, the approve hint indicates there is more below.
 - **Escalation is visually loud.** A prompt for anything touching outside
-  the project root (Requirements HC-4) uses the reserved safety styling
-  (§2): distinct color band and an explicit plain-language line — "This
-  affects files OUTSIDE your project." It must be impossible to mistake
-  for a routine prompt at a glance.
+the project root (Requirements HC-4) uses the reserved safety styling
+(§2): distinct color band and an explicit plain-language line — "This
+affects files OUTSIDE your project." It must be impossible to mistake
+for a routine prompt at a glance.
 - **Choices:** Deny (safe default) · Allow once · Allow for this session
-  (where the rule layer permits persistence, per Requirements §6.6).
-  The default keypress (Enter/Esc behavior) maps to *deny*. Approval is
-  always a deliberate, distinct key.
+(where the rule layer permits persistence, per Requirements §6.6).
+The default keypress (Enter/Esc behavior) maps to *deny*. Approval is
+always a deliberate, distinct key.
 - **Forbidden patterns**, written down so they stay forbidden:
   - No timeout-to-approve, ever.
   - No "Enter approves whatever is focused."
   - No batching multiple distinct actions under one approval.
   - No auto-scroll that moves content out from under the user's eyes
-    while a prompt is open.
+  while a prompt is open.
 - Every prompt shows *why* it appeared (which rule matched, or "outside
-  project root") in one dimmed line — this teaches the permission model
-  in situ.
+project root") in one dimmed line — this teaches the permission model
+in situ.
 
 ### 5.1 The question prompt (the model asking your opinion)
 
@@ -272,18 +400,42 @@ permission prompt guards you against an action and defaults to *deny*; a
 question prompt invites your input and has no dangerous default.
 
 - **Its own quiet styling — never the reserved safety treatment (§2).**
-  Reusing the outside-project-root band here would dilute the one signal
-  that must stay rare and loud. The question prompt is calm and neutral: a
-  clear question, the model's options as a selectable list when it offered
-  them, and a free-text answer always available.
+Reusing the outside-project-root band here would dilute the one signal
+that must stay rare and loud. The question prompt is calm and neutral: a
+clear question, the model's options as a selectable list when it offered
+them, and a free-text answer always available.
 - **No unsafe default.** Unlike the permission prompt, there is no
-  "safe default" keypress that answers for you — the model asked because it
-  genuinely needs *your* choice, so the prompt waits. It is still
-  dismissible (Esc returns "user declined to answer" to the model as a
-  structured result, so the model can proceed or stop), but Enter never
-  auto-selects an option on the user's behalf.
+"safe default" keypress that answers for you — the model asked because it
+genuinely needs *your* choice, so the prompt waits. It is still
+dismissible (Esc returns "user declined to answer" to the model as a
+structured result, so the model can proceed or stop), but Enter never
+auto-selects an option on the user's behalf.
 - **No motion on this screen** (§6.4): like the permission prompt, nothing
-  animates while you are being asked to decide.
+animates while you are being asked to decide.
+
+### 5.2 The web-search prompt (reaching the network)
+
+Web search is permission-gated (Requirements T-14), so it produces a permission
+prompt — but a plain one, deliberately **not** the reserved outside-project-root
+safety band (§2). That band guards filesystem escape and must stay rare and
+loud; a web search is a routine, lower-stakes action, and diluting the reserved
+styling here would blunt the one signal that must never be ignored.
+
+- **What it shows:** the search query, the configured search backend it will
+reach (endpoint name, not the raw key — §4.5-style dimmed line), and one
+plain line naming the two facts the user is consenting to — *this reaches the
+internet, and what comes back is untrusted web content* (§4.10). Enough to
+decide, no alarm.
+- **Choices and default** follow the ordinary permission prompt (§5): Deny is
+the default keypress; Allow once · Allow for this session · and, where the
+rule layer permits, an "always allow web search in this project" that writes
+a rule (Requirements §6.6). Search is rule-allowlistable exactly like a bash
+command (Requirements T-14), so a user who wants unattended search grants it
+once.
+- It is a permission prompt, so all §5 forbidden patterns apply (no
+timeout-to-approve, no click/Enter-through). It reuses the calm neutral
+treatment of a normal prompt; only the outside-root escalation earns the
+reserved band.
 
 ## 6. Voice and Language
 
@@ -298,31 +450,31 @@ Two failure registers, visually and verbally distinct because the user's
 correct response differs:
 
 - **Agent-world failures** (tool errors, edit mismatch, command failed):
-  rendered as normal tool-result content in the conversation flow — the
-  *model* is expected to react, and the user watches it recover.
+rendered as normal tool-result content in the conversation flow — the
+*model* is expected to react, and the user watches it recover.
 - **Harness-world failures** (network, provider errors, bugs): rendered
-  in the harness's own voice in a clearly-out-of-band style, with the
-  next step ("retrying in 5s", "session saved; run `emberly resume`").
+in the harness's own voice in a clearly-out-of-band style, with the
+next step ("retrying in 5s", "session saved; run `emberly resume`").
 
 ### 6.2 General voice
 
 - Second person, present tense, plain words. "Saved session to …" not
-  "Session persistence completed successfully."
+"Session persistence completed successfully."
 - Warmth lives in helpfulness and tone, not exclamation points. The
-  fireplace feeling is *calm*, and calm text is short text.
+fireplace feeling is *calm*, and calm text is short text.
 - Hints and chrome are terse (2–5 words). Explanations live in `/help`
-  and docs, not in the interface chrome.
+and docs, not in the interface chrome.
 - **Interface text is English in current scope; Thai text is fully supported as
-  content.** The user must be able to type Thai in the input box and
-  read Thai anywhere it appears — messages, model output, file content,
-  diffs, session titles — with correct rendering, wrapping, and cursor
-  movement. The technical caveat for the Tech Spec: Thai text layout in
-  terminals needs real grapheme-cluster width handling (combining
-  vowel/tone marks are zero-width); the layout and input engines must
-  not assume one-char-one-column. Interface strings are still kept
-  centralized rather than scattered as literals — cheap discipline that
-  leaves the door open to interface localization later without
-  committing to it now.
+content.** The user must be able to type Thai in the input box and
+read Thai anywhere it appears — messages, model output, file content,
+diffs, session titles — with correct rendering, wrapping, and cursor
+movement. The technical caveat for the Tech Spec: Thai text layout in
+terminals needs real grapheme-cluster width handling (combining
+vowel/tone marks are zero-width); the layout and input engines must
+not assume one-char-one-column. Interface strings are still kept
+centralized rather than scattered as literals — cheap discipline that
+leaves the door open to interface localization later without
+committing to it now.
 
 ### 6.3 Loading and progress
 
@@ -338,20 +490,20 @@ like a dark, cold terminal — the ember should visibly glow. The policy
 is *few, small, purposeful*:
 
 - **Sanctioned motion:** the spinner (an ember-like pulse rather than a
-  generic line spinner is on-brand and costs nothing); a subtle
-  brightness pulse on the accent while the model is streaming; brief
-  ease-in of overlays (one or two frames of expansion, not a slide
-  show); a short settle animation when a modified-file entry lands in
-  the sidebar.
+generic line spinner is on-brand and costs nothing); a subtle
+brightness pulse on the accent while the model is streaming; brief
+ease-in of overlays (one or two frames of expansion, not a slide
+show); a short settle animation when a modified-file entry lands in
+the sidebar.
 - **Rules:** motion is ambient status, never information — nothing is
-  communicated *only* by animation. Nothing moves on a screen where the
-  user is being asked to decide (permission prompts are perfectly
-  still). No looping animation on an idle screen except the prompt
-  cursor. Frame budget is trivial (a TUI animating at 10–15fps in a
-  handful of cells); animation must never delay input handling or
-  streaming output.
+communicated *only* by animation. Nothing moves on a screen where the
+user is being asked to decide (permission prompts are perfectly
+still). No looping animation on an idle screen except the prompt
+cursor. Frame budget is trivial (a TUI animating at 10–15fps in a
+handful of cells); animation must never delay input handling or
+streaming output.
 - **Off switch:** all motion disabled in degraded mode (§7) and by a
-  `motion = false` config key.
+`motion = false` config key.
 
 The test for any proposed animation: if it were removed, the app loses a
 little warmth but zero information. If removing it loses information,
@@ -365,31 +517,37 @@ interface honors the same spirit. Degradation is a designed mode, not an
 accident:
 
 - `NO_COLOR` and `TERM=dumb` are respected. In degraded mode: no color,
-  no box-drawing, no spinner (plain "working…" lines), ASCII-only
-  markers. Diff +/- prefixes and the words ALLOW/DENY carry the meaning
-  that color otherwise reinforces — **color and unicode are enhancement,
-  never the sole carrier of meaning**, everywhere, always.
+no box-drawing, no spinner (plain "working…" lines), ASCII-only
+markers. Diff +/- prefixes and the words ALLOW/DENY carry the meaning
+that color otherwise reinforces — **color and unicode are enhancement,
+never the sole carrier of meaning**, everywhere, always.
 - The permission prompt in degraded mode keeps its guarantees: full
-  content, explicit OUTSIDE-PROJECT-ROOT banner in capital letters,
-  deliberate approve key.
+content, explicit OUTSIDE-PROJECT-ROOT banner in capital letters,
+deliberate approve key.
 - A `--plain` flag forces degraded mode for weird environments, piping,
-  and screen readers; degraded mode output is line-oriented and
-  append-only (no cursor repositioning), which is also what makes a
-  future headless mode trivial.
+and screen readers; degraded mode output is line-oriented and
+append-only (no cursor repositioning), which is also what makes a
+future headless mode trivial.
+- The 0.4 surfaces degrade with everything else: mouse capture is off (§3.4);
+the task list uses ASCII status markers `[ ]`/`[~]`/`[x]` (§4.7); an image
+read is a plain ASCII reference line (§4.8); memory/skill/search activity
+and their origins are plain labeled lines; and the web-search prompt keeps
+its full permission-prompt guarantees in capitals (§5.2). No 0.4 feature
+relies on color, motion, or the pointer to carry meaning.
 - Degraded mode is a supported, tested configuration, not a best-effort
-  fallback.
+fallback.
 
 ## 8. Key Moments
 
 ### 8.1 First run and `init`
 
 - First run without config simply works (baked-in defaults, Requirements
-  C-1) and prints a two-line orientation: where it's running, and that
-  `emberly init` materializes the configuration for inspection.
+C-1) and prints a two-line orientation: where it's running, and that
+`emberly init` materializes the configuration for inspection.
 - `emberly init` prints exactly: what it created, where, and the one
-  next command worth knowing. No walls of text. The init experience is
-  the first impression and should feel like a considerate colleague, not
-  an installer wizard.
+next command worth knowing. No walls of text. The init experience is
+the first impression and should feel like a considerate colleague, not
+an installer wizard.
 
 ### 8.2 Session start
 
@@ -414,28 +572,36 @@ sees in a folder Emberly has not been trusted in before — it appears
 *before* the session starts, before any project file is read into a prompt.
 
 - **Calm, plain, and honest about what it is.** It names the folder, states
-  plainly what agreeing means ("Emberly will read, edit, and run commands
-  in this folder"), and asks whether the user trusts this code — with a
-  one-line nudge to review unfamiliar folders first. It is not styled as an
-  alarm; it is a considered question, in keeping with §1.2's "calmest
-  screens in the app."
+plainly what agreeing means ("Emberly will read, edit, and run commands
+in this folder"), and asks whether the user trusts this code — with a
+one-line nudge to review unfamiliar folders first. It is not styled as an
+alarm; it is a considered question, in keeping with §1.2's "calmest
+screens in the app."
 - **The safe default is decline.** The default keypress does not grant
-  trust; trusting is the deliberate choice. Typing `trust`, `yes`, or `y`
-  (case-insensitive) grants; anything else — including a bare Enter —
-  declines. Declining does not start the session (Requirements FR-1) —
-  Emberly says so in one line and exits cleanly, never half-starting in a
-  crippled state.
+trust; trusting is the deliberate choice. Typing `trust`, `yes`, or `y`
+(case-insensitive) grants; anything else — including a bare Enter —
+declines. Declining does not start the session (Requirements FR-1) —
+Emberly says so in one line and exits cleanly, never half-starting in a
+crippled state.
 - **It is not the permission prompt and not the reserved safety band
-  (§2).** Trust is a once-per-folder gate on *whether* Emberly runs here;
-  it never stands in for the per-action prompts that govern *what* it does
-  (Requirements FR-1 honesty clause). The prompt says as much in a dimmed
-  line: trusting the folder does not switch off later prompts.
+(§2).** Trust is a once-per-folder gate on *whether* Emberly runs here;
+it never stands in for the per-action prompts that govern *what* it does
+(Requirements FR-1 honesty clause). The prompt says as much in a dimmed
+line: trusting the folder does not switch off later prompts.
 - **Asked once per trusted subtree.** Trusting a folder trusts its
-  subdirectories too, so the gate does not reappear as the user moves
-  within a project they already trusted (Requirements FR-1) — the prompt is
-  a rare, considered moment, not a recurring toll.
+subdirectories too, so the gate does not reappear as the user moves
+within a project they already trusted (Requirements FR-1) — the prompt is
+a rare, considered moment, not a recurring toll.
 - Degraded mode (§7): the same content, ASCII-framed, capitalized
-  TRUST / DON'T TRUST choices, deliberate affirmative input to trust.
+TRUST / DON'T TRUST choices, deliberate affirmative input to trust.
+- **What trust now also gates:** as of the 0.4 features, the gate stands
+before not just project files entering a prompt but also project **memory**
+(Requirements FR-6) and project **skills** (Requirements FR-7) being loaded
+or offered — both are project-resident text/code that reach the model. The
+prompt's plain-language line already covers this ("Emberly will read, edit,
+and run commands in this folder"); no new wording is needed, but the gate's
+reach is wider, and untrusted-folder memory/skills are silently absent
+(§4.9) rather than half-loaded.
 
 ### 8.5 When the loop is broken
 
@@ -445,15 +611,15 @@ out-of-band voice — not as model output, because the model is precisely
 what is not making progress:
 
 - One calm line of what happened and why — "Stopped: the last few steps
-  repeated without progress." — then the choices: keep going (resume the
-  loop), stop here, or say something (hand a steer back to the model). No
-  blame, no alarm styling.
+repeated without progress." — then the choices: keep going (resume the
+loop), stop here, or say something (hand a steer back to the model). No
+blame, no alarm styling.
 - The user is always the one who decides what happens next; the guardrail
-  never quietly resumes or quietly abandons the task. This is the visible
-  counterpart to S-5's promise that a runaway loop ends in a user decision.
+never quietly resumes or quietly abandons the task. This is the visible
+counterpart to S-5's promise that a runaway loop ends in a user decision.
 - It is distinct from the question prompt (§5.1): that is the *model*
-  choosing to ask; this is the *harness* stepping in when the model did
-  not.
+choosing to ask; this is the *harness* stepping in when the model did
+not.
 
 ### 8.6 Keeping context lean (reduction, windowing, compaction)
 
@@ -463,38 +629,38 @@ it.** Nothing is silently dropped, and everything dropped has a visible way
 back.
 
 - **Tool-result reduction and windowing are quiet by default.** Reduced tool
-  results carry the §4.3 marker (what was withheld, `/view` for the whole
-  thing) and nothing more — reduction is the normal case, not an event to
-  announce. A turn dropped from the adaptive window (Requirements FR-3) is
-  not erased from the scrollback the user reads; windowing governs what is
-  *sent to the model*, and the conversation the user scrolls remains whole.
-  The context-usage indicator (§3.1, §8.4) reflects the working window, so
-  "why did usage drop" is always answerable, never mysterious. When the model
-  reaches back for a dropped turn, its `recall` call (Requirements T-10)
-  renders as ordinary, quiet tool activity in the flow — one dim line like any
-  tool call, optionally with a §4.5 explanation — so the user can *see* the
-  model choosing to reload history, without ceremony. `recall` is the model
-  reading its own context; it is distinct from `/view` (§4.3), which is the
-  user opening full output — the two never share a surface.
+results carry the §4.3 marker (what was withheld, `/view` for the whole
+thing) and nothing more — reduction is the normal case, not an event to
+announce. A turn dropped from the adaptive window (Requirements FR-3) is
+not erased from the scrollback the user reads; windowing governs what is
+*sent to the model*, and the conversation the user scrolls remains whole.
+The context-usage indicator (§3.1, §8.4) reflects the working window, so
+"why did usage drop" is always answerable, never mysterious. When the model
+reaches back for a dropped turn, its `recall` call (Requirements T-10)
+renders as ordinary, quiet tool activity in the flow — one dim line like any
+tool call, optionally with a §4.5 explanation — so the user can *see* the
+model choosing to reload history, without ceremony. `recall` is the model
+reading its own context; it is distinct from `/view` (§4.3), which is the
+user opening full output — the two never share a surface.
 - **Compaction is a harness-world moment (§6.1), announced in the harness's
-  own voice** — never as model output, since it is the harness reshaping the
-  model's context. Manual `/compact` shows the §6.3 spinner ("compacting")
-  and then one calm line — "Compacted 24 turns into a summary." Automatic
-  compaction (Requirements FR-4) is the same line with its reason —
-  "Context was near full — compacted 24 turns to keep going." — so the
-  context changing under the model is a visible act, not a silent one. No
-  alarm styling: staying under budget is routine housekeeping, and §1.2's
-  "calm under load" applies most exactly here.
+own voice** — never as model output, since it is the harness reshaping the
+model's context. Manual `/compact` shows the §6.3 spinner ("compacting")
+and then one calm line — "Compacted 24 turns into a summary." Automatic
+compaction (Requirements FR-4) is the same line with its reason —
+"Context was near full — compacted 24 turns to keep going." — so the
+context changing under the model is a visible act, not a silent one. No
+alarm styling: staying under budget is routine housekeeping, and §1.2's
+"calm under load" applies most exactly here.
 - **The summary is inspectable, not a black box.** The compaction summary is
-  ordinary conversation content in the flow and openable in full via `/view`
-  (§4.3), so the user can see what the model will now treat as history.
+ordinary conversation content in the flow and openable in full via `/view`
+(§4.3), so the user can see what the model will now treat as history.
 - **Resume is fast and honest (Requirements FR-5).** Resuming restores the
-  working view directly, so a long session reopens without a visible
-  reload-the-world stall; the one-line resume offer (§8.3) is unchanged. If
-  the derived cache is unusable and the harness must rebuild from the
-  transcript, it says so in one dimmed harness-voice line rather than
-  reopening silently slower — silence about the fast path, speech about the
-  fallback.
+working view directly, so a long session reopens without a visible
+reload-the-world stall; the one-line resume offer (§8.3) is unchanged. If
+the derived cache is unusable and the harness must rebuild from the
+transcript, it says so in one dimmed harness-voice line rather than
+reopening silently slower — silence about the fast path, speech about the
+fallback.
 
 ## 9. Design-Driven Requirements Feedback
 
@@ -502,63 +668,98 @@ Decisions in this document that add to or refine the Requirements doc,
 recorded so the trace is explicit:
 
 - **Cost estimation** (sidebar model block, §3.1) — extends Requirements
-  P-6: per-provider token accounting must also support session cost
-  estimates from configurable per-model pricing. Estimates are labeled as
-  estimates.
+P-6: per-provider token accounting must also support session cost
+estimates from configurable per-model pricing. Estimates are labeled as
+estimates.
 - **Session titles** (§3.1) and rename — a small addition to session
-  persistence metadata (Requirements §8.2).
+persistence metadata (Requirements §8.2).
 - **Full-output inspection via `$EDITOR`** (§4.3) — realizes the
-  "reference where the full output lives" requirement (Requirements
-  §8.1) as a concrete UX mechanism.
-- **`--plain` / line-oriented degraded mode** (§7) — is the de facto
-  contract for the future headless frontend (Requirements A-1).
+"reference where the full output lives" requirement (Requirements
+§8.1) as a concrete UX mechanism.
+- `**--plain` / line-oriented degraded mode** (§7) — is the de facto
+contract for the future headless frontend (Requirements A-1).
 - **Thai text support (content, not chrome)** (§6.2) — a scope item
-  for the Requirements doc: Thai input and display everywhere content
-  appears, with grapheme-cluster-aware text layout. Interface
-  localization is not a requirement in current scope.
+for the Requirements doc: Thai input and display everywhere content
+appears, with grapheme-cluster-aware text layout. Interface
+localization is not a requirement in current scope.
 - **Single built-in theme, theming deferred** (§2) — a new explicit
-  deferral for the Requirements doc's §2.2.
+deferral for the Requirements doc's §2.2.
 - **Reasoning-trail view key `reasoning = collapsed|expanded|hidden`**
-  (§4.4) — refines Requirements P-10: `hidden` is a view choice only; the
-  trace is still recorded to the transcript. The config key is a Design
-  addition the Tech Spec absorbs.
+(§4.4) — refines Requirements P-10: `hidden` is a view choice only; the
+trace is still recorded to the transcript. The config key is a Design
+addition the Tech Spec absorbs.
 - **Model/effort switch is announced, never silent** (§3.1) — refines
-  Requirements C-6: a switch is surfaced in the conversation, consistent
-  with "silence about defaults, speech about deviations."
+Requirements C-6: a switch is surfaced in the conversation, consistent
+with "silence about defaults, speech about deviations."
 - **Question prompt has no unsafe default** (§5.1) — refines Requirements
-  T-8: Esc returns a structured "declined to answer"; Enter never
-  auto-answers.
+T-8: Esc returns a structured "declined to answer"; Enter never
+auto-answers.
 - **Trust gate defaults to decline and exits cleanly on decline** (§8.4) —
-  realizes Requirements FR-1 as concrete UX, and reinforces its honesty
-  clause (trust ≠ waiver of later prompts) in the prompt text itself.
+realizes Requirements FR-1 as concrete UX, and reinforces its honesty
+clause (trust ≠ waiver of later prompts) in the prompt text itself.
 - **Loop-break offers keep-going / stop / steer** (§8.5) — realizes
-  Requirements S-5's "ends in a user decision" as three concrete choices in
-  the harness voice.
+Requirements S-5's "ends in a user decision" as three concrete choices in
+the harness voice.
 - **Compaction and windowing are surfaced, never silent** (§8.6) — refines
-  Requirements FR-3/FR-4: automatic compaction and a shrinking context
-  window are announced in the harness voice (or, for routine reduction,
-  carry a `/view`-able marker), consistent with "silence about defaults,
-  speech about deviations." The context indicator reflecting the working
-  window (§8.6) is a Design commitment the Tech Spec's accounting absorbs.
+Requirements FR-3/FR-4: automatic compaction and a shrinking context
+window are announced in the harness voice (or, for routine reduction,
+carry a `/view`-able marker), consistent with "silence about defaults,
+speech about deviations." The context indicator reflecting the working
+window (§8.6) is a Design commitment the Tech Spec's accounting absorbs.
 - **A reduced/truncated tool result is never a dead end** (§4.3) — realizes
-  Requirements FR-2's "full result one reference away" as the reused `/view`
-  escape hatch with a marker naming what was withheld.
+Requirements FR-2's "full result one reference away" as the reused `/view`
+escape hatch with a marker naming what was withheld.
+- **No terminal image painting** (§4.8) — realizes Requirements T-12/P-11 as a
+labeled reference line rather than in-terminal image rendering; sixel/kitty/
+iTerm protocols are deferred (§10). A Design constraint the Tech Spec absorbs
+(the read-image tool surfaces a reference, not pixels).
+- **Memory and skills render as quiet tool activity with visible origin**
+(§4.9) — refines Requirements FR-6/FR-7 surfacing: memory/skill/recall lines
+show `user` vs `project` origin so trust is legible, and both get sidebar
+inspectors (memory editable, skill body read-only). Origin-on-the-line is a
+Design commitment the Tech Spec's event payloads carry.
+- **Web-search prompt uses the ordinary permission treatment, not the reserved
+band** (§5.2) — refines Requirements T-14: reaching the network is a routine
+gated action with a network/untrusted label, deliberately kept off the
+outside-project-root safety styling so that band stays rare.
+- **Web results are labeled untrusted agent-world content** (§4.10) — realizes
+Requirements T-14's untrusted-content requirement as a styling rule: fetched
+web text is quoted data with visible source URLs, never harness or assistant
+voice.
+- **Mouse is additive-never-exclusive with native selection preserved** (§3.4)
+— realizes the Requirements §2.1 mouse scope item: the pointer speeds safe
+navigation and buys nothing on a permission decision; Shift-drag keeps the
+terminal's own copy, and `mouse = false` releases capture. The Tech Spec
+absorbs the capture/passthrough mechanics.
+- **Task-list glyphs never color-only** (§4.7) — realizes Requirements T-11 as
+a two-place (inline + sidebar) render with ASCII-fallback status markers,
+consistent with §7.
 
 ## 10. Open Questions
 
 - Final palette values — candidates are set in §2; tuning happens by eye
-  against the built interface. Candidate worth exploring then: harmonize
-  with Emberly-the-app's fireplace palette so the family reads as
-  related on a shared screen.
+against the built interface. Candidate worth exploring then: harmonize
+with Emberly-the-app's fireplace palette so the family reads as
+related on a shared screen.
 - Session-title auto-generation approach (model-generated from the first
-  task vs. heuristic; Tech Spec).
+task vs. heuristic; Tech Spec).
 - Whether the model/effort picker and the config/prompt editor get
-  dedicated keybindings beyond palette + `/command` reachability (§3.1,
-  §4.6). Tune with use once the surfaces exist.
-
+dedicated keybindings beyond palette + `/command` reachability (§3.1,
+§4.6). Tune with use once the surfaces exist.
 - Exact wording and verbosity of the automatic-compaction notice (§8.6) —
-  candidate lines are examples; tune against real sessions so the notice
-  informs without nagging in a session that compacts repeatedly.
+candidate lines are examples; tune against real sessions so the notice
+informs without nagging in a session that compacts repeatedly.
+- Task-list emphasis: sidebar-primary vs inline-primary once real sessions
+exist, and whether long done-lists collapse to a count (§4.7). Tune with use.
+- Terminal image protocols (sixel/kitty/iTerm) as a future display nicety
+behind capability detection (§4.8) — worth exploring only if users on
+capable terminals ask; never a default, never load-bearing.
+- Web-search result density — how many hits and how long a snippet reads well
+in the flow without becoming a context flood (§4.10); pairs with the Tech
+Spec's caps. Tune with use.
+- Whether clicking should also select *text* within a pane (beyond entries),
+or leave in-pane text selection entirely to the terminal via the Shift
+modifier (§3.4). Lean to the latter until a real need appears.
 
 Resolved since v0.4: reasoning-trail default view — `collapsed` (§4.4,
 owner); tool-call explanation line — on by default, config-defeatable
@@ -571,3 +772,17 @@ is a harness-voice moment (§8.6), and the context indicator tracks the
 working window (§8.6, owner). The model's `recall` of dropped turns
 (Requirements T-10) renders as quiet, ordinary tool activity, kept distinct
 from the user-facing `/view` (§8.6, owner).
+
+Resolved since v0.6 (0.4 feature set): the six 0.4 capabilities are given feel
+and interaction, all under the identity's calm-and-honest rules. The task list
+renders inline plus a sidebar Tasks section with color-free status glyphs
+(§4.7). Images are a labeled reference line, not in-terminal pixels — no
+sixel/kitty/iTerm rendering in scope (§4.8). Memory and skills render as quiet
+tool activity with origin on the line and sidebar inspectors, and are gated by
+workspace trust (§4.9, §8.4). Web search reaches the network behind an ordinary
+permission prompt — never the reserved outside-root band — and its results are
+labeled untrusted agent-world content with visible source URLs (§5.2, §4.10).
+Mouse interaction is additive-never-exclusive: it speeds safe navigation, buys
+nothing on a permission decision, preserves the terminal's native Shift-drag
+selection, and is off in degraded mode and under `mouse = false` (§3.4). All
+six degrade to plain, tested, meaning-preserving output (§7).
