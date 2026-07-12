@@ -3079,4 +3079,26 @@ mod tests {
         assert_eq!(a.effort, Some(Effort::High));
         assert_eq!(a.effort_levels, vec![Effort::Low, Effort::High]);
     }
+
+    #[test]
+    fn compact_command_is_reachable_via_slash_and_palette() {
+        // The registry entry exists so /compact flows through `by_name` and
+        // the palette fuzzy list (Design §3.3, Tech Spec §9).
+        assert_eq!(
+            crate::commands::by_name("compact"),
+            Some(crate::commands::AppCommand::Compact)
+        );
+        // `/compact` via the slash parser dispatches Command::Compact.
+        let mut a = app();
+        assert_eq!(a.run_slash("compact"), Action::Command(Command::Compact));
+        // The palette entry dispatches the same command.
+        assert_eq!(
+            a.run_command(crate::commands::AppCommand::Compact),
+            Action::Command(Command::Compact)
+        );
+        // `compact` appears in the command listing (used by /help).
+        assert!(crate::commands::COMMANDS
+            .iter()
+            .any(|c| c.name == "compact"));
+    }
 }

@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use emberly_core::{
-    channel, AskAnswer, CaptureSink, Command, ContextConfig, Engine, EngineConfig, FileTranscript,
-    LoopConfig, LoopResolution, Mode, PermissionDecision, RetryPolicy, RuleEngine, RuleSource,
-    SandboxStatus, SessionId, TranscriptEvent, TranscriptSink, UiEvent,
+    channel, AskAnswer, CaptureSink, Command, CompactTrigger, ContextConfig, Engine, EngineConfig,
+    FileTranscript, LoopConfig, LoopResolution, Mode, PermissionDecision, RetryPolicy, RuleEngine,
+    RuleSource, SandboxStatus, SessionId, TranscriptEvent, TranscriptSink, UiEvent,
 };
 use emberly_providers::{
     ContentBlock, Effort, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
@@ -392,15 +392,17 @@ async fn compact_summarizes_the_middle_and_records_the_event() {
     h.send(Command::Compact).await;
     let events = h.collect(None).await;
 
-    // The UI is told compaction happened.
+    // The UI is told compaction happened, with the turn count.
     assert!(events.iter().any(|e| matches!(
         e,
-        UiEvent::CompactionStatus { message } if message.contains("compacted")
+        UiEvent::CompactionStatus { message } if message.contains("Compacted") && message.contains("turns")
     )));
-    // The transcript records the compaction with the model's summary.
+    // The transcript records the compaction with the model's summary and
+    // the manual trigger (FR-4, Tech Spec §3.2).
     assert!(sink.records().iter().any(|r| matches!(
         &r.event,
-        TranscriptEvent::Compaction { summary, .. } if summary == "SUMMARY OF THE MIDDLE"
+        TranscriptEvent::Compaction { summary, trigger: CompactTrigger::Manual, .. }
+            if summary == "SUMMARY OF THE MIDDLE"
     )));
 }
 
@@ -2870,5 +2872,177 @@ async fn windowing_with_compaction_and_recall_compose() {
     assert!(
         !recall_content.contains("{\"role\""),
         "recall is rendered text, not raw JSONL"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — automatic compaction (FR-4)
+// ---------------------------------------------------------------------------
+
+/// A small-context provider so the threshold is easy to cross without a huge
+/// script. Budget = context_window − reserve = 1000 − 100 = 900; the default
+/// 0.85 threshold fires at 765 tokens. A Usage of 800 input → 88 % > 85 %.
+fn auto_compact_provider(scripts: Vec<ScriptedResponse>) -> Arc<FakeProvider> {
+    let info = ModelInfo {
+        model: "m".into(),
+        context_window: 1_000,
+        max_output_tokens: 100,
+        pricing: None,
+        effort_levels: Vec::new(),
+        default_effort: None,
+    };
+    Arc::new(FakeProvider::new(scripts).with_model_info(info))
+}
+
+/// A turn that reports high usage so `emit_context_usage` crosses the threshold.
+fn high_usage_turn(text: &str) -> ScriptedResponse {
+    ScriptedResponse {
+        events: vec![
+            StreamEvent::TextDelta { text: text.into() },
+            StreamEvent::Usage {
+                usage: TokenUsage {
+                    input: 800,
+                    output: 10,
+                },
+            },
+        ],
+        outcome: ScriptOutcome::Done(StopReason::EndTurn),
+    }
+}
+
+#[tokio::test]
+async fn auto_compaction_fires_at_clean_boundary_and_does_not_thrash() {
+    let scripts = vec![
+        ScriptedResponse::text("r1"),
+        ScriptedResponse::text("r2"),
+        ScriptedResponse::text("r3"),
+        ScriptedResponse::text("r4"),
+        // This turn reports 88 % usage → auto-trigger fires after the turn
+        // ends, at the clean boundary (not mid-tool-round).
+        high_usage_turn("r5"),
+        // Consumed by the summarization call inside `compact()`.
+        ScriptedResponse::text("AUTO SUMMARY"),
+        // A second high-usage turn — must NOT re-trigger (no-thrash latch).
+        high_usage_turn("r6"),
+    ];
+    let provider: Arc<dyn Provider> = auto_compact_provider(scripts);
+    let sink = CaptureSink::new();
+    let mut config = make_config(provider, temp_project(), Box::new(sink.clone()));
+    config.context = ContextConfig::default(); // auto_compact = true, threshold = 0.85
+    let mut h = spawn(config);
+
+    // Build up enough turns for compaction to have a range to summarize
+    // (needs more than pinned + keep_recent to produce to > from).
+    for i in 0..4 {
+        h.send(Command::UserInput {
+            text: format!("msg {i}"),
+        })
+        .await;
+        let _ = h.collect(None).await;
+    }
+
+    // This turn's Usage pushes pct past the threshold.
+    h.send(Command::UserInput {
+        text: "msg 4".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // FR-4: auto-compaction fired at the clean boundary.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::CompactionStatus { message } if message.contains("near full"))),
+        "auto-compaction should surface its reason"
+    );
+    assert!(
+        sink.records()
+            .iter()
+            .any(|r| matches!(
+                &r.event,
+                TranscriptEvent::Compaction {
+                    trigger: CompactTrigger::Auto,
+                    ..
+                }
+            )),
+        "transcript should record trigger = auto"
+    );
+
+    // No-thrash: a subsequent turn with the same high usage does NOT re-trigger
+    // (the latch disarmed and usage never dropped below the threshold).
+    h.send(Command::UserInput {
+        text: "msg 5".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::CompactionStatus { .. })),
+        "auto-compaction must not re-fire while the latch is disarmed"
+    );
+}
+
+#[tokio::test]
+async fn auto_compact_disabled_never_auto_fires() {
+    let scripts = vec![
+        ScriptedResponse::text("r1"),
+        ScriptedResponse::text("r2"),
+        ScriptedResponse::text("r3"),
+        ScriptedResponse::text("r4"),
+        high_usage_turn("r5"),
+        // A manual /compact still works (consumes this summary script).
+        ScriptedResponse::text("MANUAL SUMMARY"),
+    ];
+    let provider: Arc<dyn Provider> = auto_compact_provider(scripts);
+    let sink = CaptureSink::new();
+    let mut config = make_config(provider, temp_project(), Box::new(sink.clone()));
+    config.context = ContextConfig {
+        auto_compact: false,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn(config);
+
+    for i in 0..4 {
+        h.send(Command::UserInput {
+            text: format!("msg {i}"),
+        })
+        .await;
+        let _ = h.collect(None).await;
+    }
+
+    // This turn crosses the threshold, but auto_compact is false.
+    h.send(Command::UserInput {
+        text: "msg 4".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::CompactionStatus { .. })),
+        "auto-compaction must not fire when disabled"
+    );
+
+    // Manual /compact still works.
+    h.send(Command::Compact).await;
+    let events = h.collect(None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::CompactionStatus { message } if message.contains("Compacted"))),
+        "manual compaction still works when auto is disabled"
+    );
+    assert!(
+        sink.records()
+            .iter()
+            .any(|r| matches!(
+                &r.event,
+                TranscriptEvent::Compaction {
+                    trigger: CompactTrigger::Manual,
+                    ..
+                }
+            )),
+        "manual compaction records trigger = manual"
     );
 }

@@ -830,8 +830,16 @@ impl Engine {
             replaced_to: u32::try_from(to).unwrap_or(u32::MAX),
             trigger,
         });
+        let turns_compacted = to - from;
         self.emit(UiEvent::CompactionStatus {
-            message: format!("compacted — kept the task, a summary, and the last {keep} messages"),
+            message: match trigger {
+                CompactTrigger::Manual => {
+                    format!("Compacted {turns_compacted} turns into a summary.")
+                }
+                CompactTrigger::Auto => format!(
+                    "Context was near full — compacted {turns_compacted} turns to keep going."
+                ),
+            },
         })
         .await;
         self.emit_context_usage().await;
