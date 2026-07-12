@@ -21,14 +21,16 @@ pub mod recall;
 pub mod reduce;
 pub mod registry;
 pub mod sandbox;
+pub mod task_list;
 pub mod tool;
 pub mod truncate;
 
 pub use ask_user::{AskUserGate, AskUserOutcome};
 pub use recall::{RecallGate, RecallOutcome};
+pub use task_list::{TaskItem, TaskListError, TaskListGate, TaskStatus};
 pub use builtin::{
     default_registry, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool,
-    RecallTool, WriteFileTool,
+    RecallTool, TaskListTool, WriteFileTool,
 };
 pub use ctx::{ToolCtx, TruncateConfig};
 pub use permission::{PermissionGate, PermissionOutcome, PermissionRequest};
