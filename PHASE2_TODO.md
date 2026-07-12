@@ -28,7 +28,7 @@ Phase 1's `reduce_output` (`crates/emberly-tools/src/reduce.rs:64`) for the turn
 | 1. `[context]` config: `window_turns` (default 40) + `keep_recent_turns` | [x] | `ContextConfig` in engine.rs, `[context]` in ConfigFile, merged+resolved, threaded to Engine; `KEEP_RECENT` replaced; provenance in `config show` |
 | 2. Adaptive windowing at send time (`build_request`) | [x] | `windowed_messages()` view in `build_request`; turn-grouping, pinned prefix, elision marker; 5 integration tests |
 | 3. Marker↔range identifier scheme (resolve the §16 open item) | [x] | Stable monotonic turn numbers (`turn_map` + `next_turn`); marker reads `turns X–Y elided…`; `recall_turns()` resolves ranges; 3 new tests |
-| 4. `recall` built-in tool + engine gate (not permission-gated) | [ ] | |
+| 4. `recall` built-in tool + engine gate (not permission-gated) | [x] | `RecallGate` trait + `RecallTool` + channel-backed `RecallGateImpl`; `on_recall` services in select loop; `render_recall` reduces tool results; 2 integration tests |
 | 5. Context-usage reflects the working window | [ ] | |
 | 6. UI: `recall` as ordinary quiet tool activity + degraded parity | [ ] | |
 | 7. Tests (offline, deterministic — §14.6) + exit criterion | [ ] | |
@@ -122,16 +122,18 @@ A new built-in that reads the session's own history — no filesystem, no networ
 so, like `ask_user`, it bypasses the sandbox and is **not permission-gated**
 (§6). Mirror the `ask_user` wiring.
 
-- [ ] `RecallTool` in `crates/emberly-tools/src/builtin/recall.rs`; `ToolSpec`
+- [x] `RecallTool` in `crates/emberly-tools/src/builtin/recall.rs`; `ToolSpec`
       name `recall`, args = a turn range (or the marker id from group 3). Register
       in `default_registry()` (`builtin/mod.rs:26`).
-- [ ] Engine-state access via a gate on `ToolCtx` mirroring `AskUserGate`:
+      _`RecallTool` with `from_turn`/`to_turn` args; registered alongside other builtins; `RecallGate` trait + `RecallOutcome` in `recall.rs`._
+- [x] Engine-state access via a gate on `ToolCtx` mirroring `AskUserGate`:
       `RecallGate` trait + a `DeclineRecall`/default, a channel-backed engine impl
       alongside `AskGate` (`gate.rs:63`), installed in `make_ctx().with_*_gate`
       (`engine.rs:1766`), and serviced in the engine like `on_user_ask`
       (`engine.rs:1225`). The tool calls `ctx.recall(range)` and returns the
       result as a normal `ToolOutcome` (HC-6).
-- [ ] **Data source: the engine's in-memory `self.conversation`** (the full,
+      _`RecallGateImpl` in `gate.rs`; `RecallAsk` channel; `on_recall` handler in `run_one_tool_call` select loop; `make_ctx().with_recall_gate()`._
+- [x] **Data source: the engine's in-memory `self.conversation`** (the full,
       un-windowed vector — windowing never removes turns from it, group 2), sliced
       by the range and **reduced via `reduce_output`** (`reduce.rs:64`) so recall
       costs tokens proportional to what is recalled, **never raw JSONL** (T-10 —
@@ -141,9 +143,11 @@ so, like `ask_user`, it bypasses the sandbox and is **not permission-gated**
       compacted-range special case**: the compaction summary is a normal pinned
       turn, and turns compaction discarded are represented by it, not recalled
       (owner decision — see notes).
-- [ ] Not permission-gated and no sandbox involvement (T-10, §6): re-reading the
+      _`recall_turns()` slices by turn_map; `render_recall()` renders to text with `reduce_output` on tool results; verified by `recall_round_trip_returns_dropped_turns` test asserting not raw JSONL._
+- [x] Not permission-gated and no sandbox involvement (T-10, §6): re-reading the
       model's own context is not an action against the project. Assert this in a
       test (group 7).
+      _Recall flows through the `RecallGate` channel, bypassing the permission gate and sandbox entirely. `recall_round_trip_returns_dropped_turns` uses `collect(None)` — no permission answer needed._
 
 ## 5. Context-usage reflects the working window  *(FR-3; Design §8.6; Tech Spec §7)*
 

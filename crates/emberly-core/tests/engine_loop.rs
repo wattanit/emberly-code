@@ -129,8 +129,13 @@ fn start_with_file_transcript(
 
 fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
-    let (engine, asks_rx, user_asks_rx) = Engine::new(config, engine_ports.events_tx);
-    tokio::spawn(engine.run(engine_ports.commands_rx, asks_rx, user_asks_rx));
+    let (engine, asks_rx, user_asks_rx, recall_rx) = Engine::new(config, engine_ports.events_tx);
+    tokio::spawn(engine.run(
+        engine_ports.commands_rx,
+        asks_rx,
+        user_asks_rx,
+        recall_rx,
+    ));
     Harness {
         commands_tx: frontend.commands_tx,
         events_rx: frontend.events_rx,
@@ -2436,4 +2441,119 @@ async fn turn_numbers_stable_across_compaction() {
         marker.contains("turns 2"),
         "marker names the stable turn range: {marker}"
     );
+}
+
+#[tokio::test]
+async fn recall_round_trip_returns_dropped_turns() {
+    // T-10/FR-3: the model calls `recall` for elided turns; the tool returns
+    // them in reduced form, never raw JSONL, and raises no permission prompt.
+    // Conversation: 1 pinned + 10 turns. With window_turns=2, turns 1–8 are
+    // elided. The model calls recall(1, 2) to get the first two dropped turns.
+    let conv = multi_turn_conversation(10);
+    let scripts = vec![
+        // Turn 1: the model calls recall for turns 1–2.
+        ScriptedResponse::tool_call(
+            "r1",
+            "recall",
+            r#"{"from_turn":1,"to_turn":2}"#,
+        ),
+        // Turn 2: the model finishes.
+        ScriptedResponse::text("done"),
+    ];
+    let fake = Arc::new(FakeProvider::new(scripts));
+    let ctx = ContextConfig {
+        window_turns: 2,
+        ..ContextConfig::default()
+    };
+    let root = temp_project();
+    let mut h = spawn_windowed(fake.clone(), root, ctx, conv, false);
+
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    // recall is not permission-gated — no permission prompt, just tool activity.
+    let _ = h.collect(None).await;
+
+    // Inspect the second request (the one after recall returned its result).
+    // The engine sent the recall result back as a tool_result in the next
+    // request's conversation. Verify the recalled content is present.
+    let req = fake.last_request().expect("request captured");
+    let msgs = &req.messages;
+
+    // The recalled turns should appear in a tool result somewhere in the sent
+    // messages. recall(1,2) returns turns 1–2: "user turn 0", "assistant reply
+    // 0", "user turn 1", "assistant reply 1".
+    let recall_content: String = msgs
+        .iter()
+        .filter_map(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => {
+                    if content.contains("user turn 0") {
+                        Some(content.clone())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+        })
+        .next()
+        .unwrap_or_default();
+
+    assert!(
+        !recall_content.is_empty(),
+        "recall result should contain 'user turn 0'"
+    );
+    assert!(
+        recall_content.contains("user turn 1"),
+        "recall result should contain 'user turn 1'"
+    );
+    assert!(
+        recall_content.contains("assistant reply 0"),
+        "recall result should contain the assistant reply"
+    );
+    // It should NOT contain raw JSONL — it's rendered as readable text.
+    assert!(
+        !recall_content.contains("{\"role\""),
+        "recall result is rendered text, not raw JSONL"
+    );
+}
+
+#[tokio::test]
+async fn recall_out_of_range_returns_empty() {
+    // T-10: recalling a range that doesn't exist returns a valid, structured
+    // empty outcome — not an error (HC-6).
+    let conv = multi_turn_conversation(3);
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "r1",
+            "recall",
+            r#"{"from_turn":100,"to_turn":200}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let fake = Arc::new(FakeProvider::new(scripts));
+    let mut h = spawn_windowed(
+        fake.clone(),
+        temp_project(),
+        ContextConfig::default(),
+        conv,
+        false,
+    );
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    // The recall result should say "no turns found".
+    let found_empty = req.messages.iter().any(|m| {
+        m.content.iter().any(|b| match b {
+            ContentBlock::ToolResult { content, .. } => content.contains("No turns found"),
+            _ => false,
+        })
+    });
+    assert!(found_empty, "out-of-range recall returns a structured empty");
 }

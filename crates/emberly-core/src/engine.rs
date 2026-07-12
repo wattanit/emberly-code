@@ -19,8 +19,8 @@ use emberly_providers::{
 };
 use emberly_sandbox::{Decision, Mode, Query, RuleEngine};
 use emberly_tools::{
-    reduce_output, truncate_output, AskUserOutcome, PermissionOutcome, PermissionRequest, Reduction,
-    Sandbox, ToolCtx, ToolRegistry, TruncateConfig,
+    reduce_output, truncate_output, AskUserOutcome, PermissionOutcome, PermissionRequest, RecallOutcome,
+    Reduction, Sandbox, ToolCtx, ToolRegistry, TruncateConfig,
 };
 use futures::StreamExt;
 use time::OffsetDateTime;
@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 use crate::command::Command;
 use crate::event::UiEvent;
 use crate::factory::{ConfigReloader, ProviderFactory};
-use crate::gate::{AskGate, AskUserAsk, ChannelGate, PermissionAsk};
+use crate::gate::{AskGate, AskUserAsk, ChannelGate, PermissionAsk, RecallAsk, RecallGateImpl};
 use crate::id::{AskId, PermissionId, SessionId};
 use crate::transcript::{
     ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord, TranscriptSink,
@@ -375,6 +375,9 @@ pub struct Engine {
     /// The ask-user gate (T-8), installed into every `ToolCtx` so the
     /// `ask_user` tool can block on a frontend round trip.
     ask_gate: Arc<AskGate>,
+    /// The recall gate (T-10), installed into every `ToolCtx` so the `recall`
+    /// tool can retrieve elided turns from the in-memory conversation.
+    recall_gate: Arc<RecallGateImpl>,
     events_tx: mpsc::Sender<UiEvent>,
     conversation: Vec<Message>,
     /// Parallel to `conversation`: the stable monotonic turn number of each
@@ -448,9 +451,11 @@ impl Engine {
         Self,
         mpsc::Receiver<PermissionAsk>,
         mpsc::Receiver<AskUserAsk>,
+        mpsc::Receiver<RecallAsk>,
     ) {
         let (asks_tx, asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (user_asks_tx, user_asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        let (recall_tx, recall_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         // Capture before `config.sandbox` is moved into the struct below.
         let sandbox_spawn: Arc<dyn Sandbox> = config.sandbox_spawn.unwrap_or_else(|| {
             // Fallback (no explicit spawner): confine from the status, but with
@@ -488,6 +493,7 @@ impl Engine {
             retry: config.retry,
             gate: Arc::new(ChannelGate { asks: asks_tx }),
             ask_gate: Arc::new(AskGate { asks: user_asks_tx }),
+            recall_gate: Arc::new(RecallGateImpl { asks: recall_tx }),
             events_tx,
             conversation: config.initial_conversation,
             turn_map,
@@ -516,7 +522,7 @@ impl Engine {
             provider_factory: config.provider_factory,
             config_reloader: config.config_reloader,
         };
-        (engine, asks_rx, user_asks_rx)
+        (engine, asks_rx, user_asks_rx, recall_rx)
     }
 
     /// Run the engine until the command channel closes. Idle between turns,
@@ -527,6 +533,7 @@ impl Engine {
         mut commands_rx: mpsc::Receiver<Command>,
         mut asks_rx: mpsc::Receiver<PermissionAsk>,
         mut user_asks_rx: mpsc::Receiver<AskUserAsk>,
+        mut recall_rx: mpsc::Receiver<RecallAsk>,
     ) {
         if self.resuming {
             // Continuing an existing transcript: no fresh session_start, but
@@ -575,7 +582,7 @@ impl Engine {
                     self.record_user_message(&text);
                     self.push_conversation_message(Message::user_text(text));
                     self.emit_context_usage().await;
-                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx)
+                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx, &mut recall_rx)
                         .await;
                     // The engine is idle again; let the frontend stop its
                     // "working" affordance (Design §6.3).
@@ -835,6 +842,7 @@ impl Engine {
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
+        recall_rx: &mut mpsc::Receiver<RecallAsk>,
     ) {
         let mut drop_attempts = 0u32;
         loop {
@@ -856,7 +864,13 @@ impl Engine {
                         return; // model finished its turn
                     }
                     if self
-                        .run_tool_calls(tool_calls, commands_rx, asks_rx, user_asks_rx)
+                        .run_tool_calls(
+                            tool_calls,
+                            commands_rx,
+                            asks_rx,
+                            user_asks_rx,
+                            recall_rx,
+                        )
                         .await
                         .is_canceled()
                     {
@@ -1068,13 +1082,14 @@ impl Engine {
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
+        recall_rx: &mut mpsc::Receiver<RecallAsk>,
     ) -> ToolCallResult {
         // Start a fresh loop-signature observation for this turn (S-5).
         self.turn_obs = TurnObservation::default();
         let mut iter = tool_calls.into_iter();
         while let Some(call) = iter.next() {
             match self
-                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx)
+                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx, recall_rx)
                 .await
             {
                 ToolCallResult::Completed(outcome) => self.ingest_tool_result(&call, outcome).await,
@@ -1197,6 +1212,7 @@ impl Engine {
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
+        recall_rx: &mut mpsc::Receiver<RecallAsk>,
     ) -> ToolCallResult {
         let args = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
 
@@ -1241,6 +1257,7 @@ impl Engine {
                 outcome = &mut exec => return ToolCallResult::Completed(outcome),
                 Some(ask) = asks_rx.recv() => self.on_permission_ask(ask, &mut pending).await,
                 Some(ask) = user_asks_rx.recv() => self.on_user_ask(ask, &mut pending_user).await,
+                Some(recall) = recall_rx.recv() => self.on_recall(recall).await,
                 command = commands_rx.recv(), if commands_open => match command {
                     Some(Command::PermissionAnswer { id, decision }) => {
                         self.answer_permission(id, decision, &mut pending).await;
@@ -1378,6 +1395,23 @@ impl Engine {
             options: options.to_vec(),
             answer,
         });
+    }
+
+    /// Handle a `recall` request from the tool (T-10): resolve the turn range
+    /// to messages from the in-memory conversation, reduce tool results, and
+    /// reply. A pure engine round trip — no filesystem, no network, no
+    /// permission gate (§6). The tool future blocks on the oneshot reply.
+    async fn on_recall(&self, ask: RecallAsk) {
+        let RecallAsk { from, to, reply } = ask;
+        let messages = self.recall_turns(from, to);
+        let outcome = if messages.is_empty() {
+            RecallOutcome::Empty
+        } else {
+            let count = messages.len();
+            let content = render_recall(&messages, self.truncate.reduce);
+            RecallOutcome::Turns { content, count }
+        };
+        let _ = reply.send(outcome);
     }
 
     /// Change the auto-accept mode (Requirements §6.4, §6.7). Auto tiers are
@@ -1950,6 +1984,7 @@ impl Engine {
             self.sandbox_spawn.clone(),
         )
         .with_ask_gate(self.ask_gate.clone())
+        .with_recall_gate(self.recall_gate.clone())
     }
 
     /// Resolve a turn-number range to the messages it contains (T-10, FR-3).
@@ -2096,6 +2131,49 @@ fn render_for_summary(messages: &[Message]) -> String {
                 ContentBlock::ToolResult { content, .. } => format!("[tool result: {content}]"),
                 // Reasoning is the model's private scratch, not conversation
                 // content; the summary is built from the answer, so skip it.
+                ContentBlock::Reasoning { .. } => String::new(),
+            };
+            if !piece.is_empty() {
+                out.push_str(role);
+                out.push_str(": ");
+                out.push_str(&piece);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// Render recalled messages as readable text for the model (T-10). Tool
+/// results are reduced via Phase 1's `reduce_output` so recall costs tokens
+/// proportional to what is recalled, never the raw output size. Never raw
+/// JSONL — the rendered form is the model-facing view (T-10).
+fn render_recall(messages: &[Message], reduce: bool) -> String {
+    let mut out = String::new();
+    for message in messages {
+        let role = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+            Role::System => "system",
+        };
+        for block in &message.content {
+            let piece = match block {
+                ContentBlock::Text { text } => text.clone(),
+                ContentBlock::ToolUse { name, input, .. } => {
+                    format!("[tool call: {name} {input}]")
+                }
+                ContentBlock::ToolResult { content, .. } => {
+                    // Reduce tool results via Phase 1's salient reduction
+                    // (T-10: never raw JSONL; proportional to recalled
+                    // content, not the original raw size).
+                    if reduce {
+                        let r = reduce_output("", content);
+                        r.content
+                    } else {
+                        content.clone()
+                    }
+                }
                 ContentBlock::Reasoning { .. } => String::new(),
             };
             if !piece.is_empty() {

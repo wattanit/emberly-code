@@ -11,6 +11,7 @@ mod edit;
 mod glob;
 mod grep;
 mod read;
+mod recall;
 mod write;
 
 pub use ask_user::AskUserTool;
@@ -19,6 +20,7 @@ pub use edit::EditFileTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use read::ReadFileTool;
+pub use recall::RecallTool;
 pub use write::WriteFileTool;
 
 /// A registry with all built-in tools registered (bash with defaults).
@@ -32,5 +34,6 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(GlobTool));
     registry.register(Arc::new(GrepTool));
     registry.register(Arc::new(AskUserTool));
+    registry.register(Arc::new(RecallTool));
     registry
 }
