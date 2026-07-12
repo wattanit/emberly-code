@@ -1560,6 +1560,7 @@ impl App {
             AppCommand::Config => self.edit_config(),
             AppCommand::Prompt => self.edit_prompt("system"),
             AppCommand::Reload => Action::Command(Command::ReloadConfig),
+            AppCommand::Compact => Action::Command(Command::Compact),
             AppCommand::Cancel => Action::Command(Command::Cancel),
             AppCommand::Quit => Action::Quit,
         }
