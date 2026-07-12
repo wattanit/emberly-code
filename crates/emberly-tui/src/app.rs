@@ -314,6 +314,10 @@ pub struct App {
     /// The model-maintained task list (T-11, Design §4.7). Updated from
     /// `UiEvent::TaskListUpdated`; cleared on a new session.
     pub tasks: Vec<TaskItem>,
+    /// Memory entry counts for the sidebar (T-13, FR-6, Design §4.9). Updated
+    /// from `UiEvent::MemoryStatus`; cleared on a new session.
+    pub memory_user: usize,
+    pub memory_project: usize,
     /// The permission prompt currently awaiting an answer, if any. While set,
     /// the prompt owns the screen and normal input is suspended (Design §5).
     pub pending_permission: Option<(PermissionId, PermissionRendering)>,
@@ -388,6 +392,8 @@ impl App {
             mode: emberly_core::Mode::default(),
             modified_files: Vec::new(),
             tasks: Vec::new(),
+            memory_user: 0,
+            memory_project: 0,
             pending_permission: None,
             pending_ask: None,
             pending_loop_halt: None,
@@ -665,6 +671,10 @@ impl App {
             UiEvent::TaskListUpdated { items } => {
                 self.tasks = items.clone();
                 self.conversation.push(ConvItem::TaskList { items });
+            }
+            UiEvent::MemoryStatus { user, project } => {
+                self.memory_user = user;
+                self.memory_project = project;
             }
             // `#[non_exhaustive]`: unknown future events are ignored, not fatal.
             _ => {}
@@ -1650,6 +1660,8 @@ impl App {
         self.conversation.clear();
         self.modified_files.clear();
         self.tasks.clear();
+        self.memory_user = 0;
+        self.memory_project = 0;
         self.latest_diffs.clear();
         self.last_modified = None;
         self.scroll = 0;

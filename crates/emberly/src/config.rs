@@ -52,6 +52,9 @@ pub struct ConfigFile {
     /// `[image]` read_image size cap (P-11, Tech Spec §5.2).
     #[serde(default)]
     pub image: ImageConfigFile,
+    /// `[memory]` persistent memory (FR-6, Tech Spec §8.1).
+    #[serde(default)]
+    pub memory: MemoryConfigFile,
 }
 
 /// `[ui]` — presentation toggles that shape what the interface shows without
@@ -108,6 +111,16 @@ pub struct ContextConfigFile {
 pub struct ImageConfigFile {
     /// Maximum image file size in bytes (default 5 MiB).
     pub max_bytes: Option<usize>,
+}
+
+/// `[memory]` — persistent memory (FR-6, Tech Spec §8.1). All optional; the
+/// engine applies defaults when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct MemoryConfigFile {
+    /// Whether the memory system is enabled (default `true`).
+    pub enabled: Option<bool>,
+    /// Soft warn threshold for index growth (Tech Spec §16).
+    pub max_index_entries: Option<usize>,
 }
 
 /// `[truncate]` — tool-result reduction and size backstop at ingestion
@@ -343,6 +356,13 @@ impl ConfigFile {
         if higher.image.max_bytes.is_some() {
             self.image.max_bytes = higher.image.max_bytes;
         }
+        // `[memory]` (FR-6) merges field-by-field.
+        if higher.memory.enabled.is_some() {
+            self.memory.enabled = higher.memory.enabled;
+        }
+        if higher.memory.max_index_entries.is_some() {
+            self.memory.max_index_entries = higher.memory.max_index_entries;
+        }
         // `[trust]` is deliberately NOT merged — it is read only from the global
         // tier (FR-1); see `global_trust_dirs` and the project-[trust] notice.
     }
@@ -387,6 +407,8 @@ pub struct Resolved {
     /// Resolved image size limit in bytes for `read_image` (P-11, Tech Spec
     /// §5.2). Default 5 MiB.
     pub image_max_bytes: usize,
+    /// Resolved memory config (FR-6, Tech Spec §8.1), ready for the engine.
+    pub memory: emberly_core::MemoryConfig,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -643,6 +665,24 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         );
     }
 
+    // Memory (FR-6): record provenance when a user tier sets any `[memory]`
+    // field.
+    if field(&project, |c: &ConfigFile| c.memory.enabled.is_some())
+        || field(&global, |c: &ConfigFile| c.memory.enabled.is_some())
+    {
+        record(
+            &mut provenance,
+            "memory.enabled",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.memory.enabled.is_some()),
+                field(&global, |c: &ConfigFile| c.memory.enabled.is_some()),
+            ),
+            true,
+        );
+    }
+
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
     let mut notices = Vec::new();
@@ -729,6 +769,16 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             }
         },
         image_max_bytes: merged.image.max_bytes.unwrap_or(5 * 1024 * 1024),
+        memory: {
+            let d = emberly_core::MemoryConfig::default();
+            emberly_core::MemoryConfig {
+                enabled: merged.memory.enabled.unwrap_or(d.enabled),
+                max_index_entries: merged
+                    .memory
+                    .max_index_entries
+                    .unwrap_or(d.max_index_entries),
+            }
+        },
     })
 }
 
@@ -971,6 +1021,13 @@ fn global_keys_path() -> Option<PathBuf> {
 #[must_use]
 pub fn global_trust_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("trust.toml"))
+}
+
+/// The user-global memory directory (FR-6, Tech Spec §8.1):
+/// `~/.config/emberly/memory/`. Always loaded when a home directory exists.
+#[must_use]
+pub fn memory_dir() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("memory"))
 }
 
 /// The `trust.trusted_dirs` pre-trust allowlist, read **only** from the global

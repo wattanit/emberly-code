@@ -10,6 +10,7 @@ mod bash;
 mod edit;
 mod glob;
 mod grep;
+mod memory;
 mod read;
 mod read_image;
 mod recall;
@@ -25,6 +26,7 @@ pub use read::ReadFileTool;
 pub use read_image::ReadImageTool;
 pub use recall::RecallTool;
 pub use task_list::TaskListTool;
+pub use memory::MemoryTool;
 pub use write::WriteFileTool;
 
 /// A registry with all built-in tools registered (bash with defaults).
@@ -41,5 +43,6 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(AskUserTool));
     registry.register(Arc::new(RecallTool));
     registry.register(Arc::new(TaskListTool::new()));
+    registry.register(Arc::new(MemoryTool::new()));
     registry
 }

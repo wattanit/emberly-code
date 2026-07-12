@@ -98,6 +98,9 @@ fn make_config(
         provider_factory: None,
         config_reloader: None,
         image_max_bytes: 5 * 1024 * 1024,
+        memory: emberly_core::MemoryConfig::default(),
+        user_memory_dir: None,
+        project_memory_dir: None,
     }
 }
 
@@ -137,13 +140,14 @@ fn start_with_file_transcript(
 
 fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx) = Engine::new(config, engine_ports.events_tx);
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx) = Engine::new(config, engine_ports.events_tx);
     tokio::spawn(engine.run(
         engine_ports.commands_rx,
         asks_rx,
         user_asks_rx,
         recall_rx,
         task_rx,
+        memory_rx,
     ));
     Harness {
         commands_tx: frontend.commands_tx,
@@ -3768,4 +3772,128 @@ async fn read_image_on_non_vision_model_returns_unsupported_result() {
             .any(|b| matches!(b, ContentBlock::Image { .. }))
     });
     assert!(!has_image, "no Image block sent to a non-vision model");
+}
+
+// ---- memory round-trip (FR-6, T-13) ---------------------------------------
+
+/// A config with memory enabled and temp dirs for both scopes.
+fn memory_config(provider: Arc<dyn Provider>, root: PathBuf, user_dir: PathBuf, project_dir: Option<PathBuf>) -> EngineConfig {
+    let mut config = make_config(provider, root, EngineConfig::no_transcript());
+    config.memory = emberly_core::MemoryConfig::default();
+    config.user_memory_dir = Some(user_dir);
+    config.project_memory_dir = project_dir;
+    config
+}
+
+fn mem_temp_dir(label: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("emberly-mem-{label}-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+#[tokio::test]
+async fn memory_write_recall_round_trip() {
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "memory",
+            r#"{"op":"write","scope":"user","name":"Build","description":"how to build","body":"cargo build"}"#,
+        ),
+        ScriptedResponse::tool_call(
+            "c2",
+            "memory",
+            r#"{"op":"recall","scope":"user","name":"Build"}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = memory_config(provider, root, user_dir.clone(), None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "remember and recall".into() }).await;
+    let events = h.collect(None).await;
+
+    // The model produced its closing message.
+    assert_eq!(deltas(&events), "done");
+
+    // A MemoryStatus event was emitted with the updated count.
+    assert!(
+        events.iter().any(|e| matches!(e, UiEvent::MemoryStatus { user: 1, .. })),
+        "MemoryStatus with user count 1 was emitted"
+    );
+
+    // The recall returned the body — the tool_result content contains it.
+    // The second tool's result ("cargo build") should appear in a ToolFinished.
+    let recall_finish = events.iter().find(|e| matches!(e,
+        UiEvent::ToolFinished { summary, .. } if summary.contains("recalled")));
+    assert!(recall_finish.is_some(), "recall tool finished with origin");
+
+    // The index is pinned in the system prompt of the next request.
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(system.contains("Build"), "memory index pinned in system prompt");
+    assert!(system.contains("how to build"), "description in pinned index");
+}
+
+#[tokio::test]
+async fn memory_project_scope_absent_when_untrusted() {
+    // When project_memory_dir is None, a project-scope op returns Rejected
+    // and the project index never enters the pinned context.
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "memory",
+            r#"{"op":"write","scope":"project","name":"Note","description":"test","body":"body"}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    // project_memory_dir = None (untrusted root).
+    let config = memory_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "write project memory".into() }).await;
+    let events = h.collect(None).await;
+
+    // The tool finished with ok=false (Rejected — project unavailable).
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { ok: false, .. })),
+        "project memory rejected on untrusted root"
+    );
+}
+
+#[tokio::test]
+async fn memory_name_escape_is_rejected() {
+    // The HC-4 boundary: a name with path separators is rejected by the tool
+    // before it reaches the engine.
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "memory",
+            r#"{"op":"write","scope":"user","name":"../etc/passwd","description":"x","body":"y"}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = memory_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "write bad memory".into() }).await;
+    let events = h.collect(None).await;
+
+    // The tool finished with ok=false (path escape rejected).
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { ok: false, .. })),
+        "path-escape in name was rejected"
+    );
 }

@@ -704,6 +704,17 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    // Memory counts (T-13, FR-6, Design §4.9): per-scope entry counts, not
+    // bodies. An empty store shows no section (Design §3.1).
+    if app.memory_user > 0 || app.memory_project > 0 {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Memory", theme.chrome())));
+        lines.push(Line::from(Span::styled(
+            format!("user {} · project {}", app.memory_user, app.memory_project),
+            theme.primary(),
+        )));
+    }
+
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 

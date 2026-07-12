@@ -511,6 +511,7 @@ async fn run() -> anyhow::Result<()> {
             resolved.sandbox_require,
         ));
 
+    let project_memory_dir = project_root.join(".agents").join("memory");
     let config = EngineConfig {
         provider,
         tools: default_registry(),
@@ -548,16 +549,24 @@ async fn run() -> anyhow::Result<()> {
         ))),
         config_reloader: Some(config_reloader),
         image_max_bytes: resolved.image_max_bytes,
+        memory: resolved.memory.clone(),
+        user_memory_dir: config::memory_dir(),
+        // The trust gate exits on decline (FR-1), so reaching this point means
+        // the root is trusted. Project memory dir is always `Some` here; `None`
+        // is the structural fallback for a future untrusted session path (Tech
+        // Spec §6.7).
+        project_memory_dir: Some(project_memory_dir),
     };
 
     let (engine_ports, frontend_ports) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx) = Engine::new(config, engine_ports.events_tx);
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx) = Engine::new(config, engine_ports.events_tx);
     let engine_task = tokio::spawn(engine.run(
         engine_ports.commands_rx,
         asks_rx,
         user_asks_rx,
         recall_rx,
         task_rx,
+        memory_rx,
     ));
 
     // Drive the session until the user quits or the engine closes its events.
