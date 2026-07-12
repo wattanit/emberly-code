@@ -221,6 +221,19 @@ fn block_to_anthropic(block: &ContentBlock) -> Value {
                 })
             }
         }
+        // Map an image to the Anthropic base64 `source` shape (P-11, Tech Spec
+        // §4.2). Renders the block wherever it sits — user content or nested in
+        // a tool_result content array.
+        ContentBlock::Image { media_type, data } => {
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                }
+            })
+        }
     }
 }
 
@@ -575,5 +588,32 @@ mod tests {
             Some("redacted_thinking")
         );
         assert_eq!(wire.get("data").and_then(Value::as_str), Some("ENCRYPTED"));
+    }
+
+    #[test]
+    fn image_block_maps_to_anthropic_base64_source() {
+        // P-11, Tech Spec §4.2: the Image variant maps to the Anthropic
+        // `image` block with a `base64` source shape.
+        let block = ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "iVBOR".into(),
+        };
+        let wire = block_to_anthropic(&block);
+        assert_eq!(wire.get("type").and_then(Value::as_str), Some("image"));
+        let source = wire.get("source");
+        assert_eq!(
+            source.and_then(|s| s.get("type")).and_then(Value::as_str),
+            Some("base64")
+        );
+        assert_eq!(
+            source
+                .and_then(|s| s.get("media_type"))
+                .and_then(Value::as_str),
+            Some("image/png")
+        );
+        assert_eq!(
+            source.and_then(|s| s.get("data")).and_then(Value::as_str),
+            Some("iVBOR")
+        );
     }
 }

@@ -25,3 +25,4 @@ async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+base64.workspace = true

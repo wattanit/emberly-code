@@ -79,6 +79,12 @@ ignore = "0.4"
 globset = "0.4"
 grep-searcher = "0.1"
 grep-regex = "0.1"
+# --- Phase 2 / v0.4 (multimodal image, P-11/T-12) — pure-Rust, HC-2 ---
+# `base64` encodes image bytes for the ContentBlock::Image; `imagesize` reads
+# format + dimensions from the header only (no codec tree — deliberately over
+# the full `image` crate).
+base64 = "0.22"
+imagesize = { version = "0.15", features = ["png", "jpeg", "gif", "webp"] }
 
 [profile.release]
 # Fully static musl builds (HC-2) prefer small, predictable binaries.

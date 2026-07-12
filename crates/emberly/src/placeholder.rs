@@ -42,6 +42,7 @@ impl Provider for PlaceholderProvider {
             pricing: None,
             effort_levels: Vec::new(),
             default_effort: None,
+            vision: false,
         }
     }
 

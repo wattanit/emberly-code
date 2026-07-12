@@ -40,6 +40,9 @@ impl Default for TruncateConfig {
     }
 }
 
+/// Default maximum image file size: 5 MiB (Tech Spec §5.2).
+const IMAGE_MAX_BYTES_DEFAULT: usize = 5 * 1024 * 1024;
+
 /// Everything a tool needs to run: the project root (for confinement checks),
 /// the truncation config, and the permission gate. Cheap to clone (the gate is
 /// an `Arc`).
@@ -56,6 +59,11 @@ pub struct ToolCtx {
     ask: Arc<dyn AskUserGate>,
     recall: Arc<dyn RecallGate>,
     task_list: Arc<dyn TaskListGate>,
+    /// Whether the active model accepts image input (P-11). `read_image`
+    /// checks this to produce the HC-6 unsupported result before encoding.
+    vision: bool,
+    /// Maximum image file size in bytes (Tech Spec §5.2, default 5 MiB).
+    image_max_bytes: usize,
 }
 
 impl ToolCtx {
@@ -78,6 +86,8 @@ impl ToolCtx {
             ask: Arc::new(DeclineAskGate),
             recall: Arc::new(DeclineRecallGate),
             task_list: Arc::new(DropTaskListGate),
+            vision: false,
+            image_max_bytes: IMAGE_MAX_BYTES_DEFAULT,
         }
     }
 
@@ -102,6 +112,21 @@ impl ToolCtx {
     #[must_use]
     pub fn with_task_list_gate(mut self, task_list: Arc<dyn TaskListGate>) -> Self {
         self.task_list = task_list;
+        self
+    }
+
+    /// Set whether the active model accepts image input (P-11). Kept a builder
+    /// so existing callers and tests default to `false`.
+    #[must_use]
+    pub fn with_vision(mut self, vision: bool) -> Self {
+        self.vision = vision;
+        self
+    }
+
+    /// Set the maximum image file size in bytes (Tech Spec §5.2).
+    #[must_use]
+    pub fn with_image_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.image_max_bytes = max_bytes;
         self
     }
 
@@ -151,5 +176,17 @@ impl ToolCtx {
         items: Vec<TaskItem>,
     ) -> Result<(), TaskListError> {
         self.task_list.set_task_list(items).await
+    }
+
+    /// Whether the active model accepts image input (P-11).
+    #[must_use]
+    pub fn vision(&self) -> bool {
+        self.vision
+    }
+
+    /// Maximum image file size in bytes (Tech Spec §5.2).
+    #[must_use]
+    pub fn image_max_bytes(&self) -> usize {
+        self.image_max_bytes
     }
 }

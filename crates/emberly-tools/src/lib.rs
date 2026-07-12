@@ -30,12 +30,12 @@ pub use recall::{RecallGate, RecallOutcome};
 pub use task_list::{TaskItem, TaskListError, TaskListGate, TaskStatus};
 pub use builtin::{
     default_registry, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool,
-    RecallTool, TaskListTool, WriteFileTool,
+    ReadImageTool, RecallTool, TaskListTool, WriteFileTool,
 };
 pub use ctx::{ToolCtx, TruncateConfig};
 pub use permission::{PermissionGate, PermissionOutcome, PermissionRequest};
 pub use registry::ToolRegistry;
 pub use sandbox::{BashInvocation, PlainSandbox, Sandbox};
-pub use tool::{FileChange, Tool, ToolOutcome, ToolSpec};
+pub use tool::{FileChange, ImageContent, Tool, ToolOutcome, ToolSpec};
 pub use reduce::{reduce_output, Reduction};
 pub use truncate::{truncate_output, Truncation};

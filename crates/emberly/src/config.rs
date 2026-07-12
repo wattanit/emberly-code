@@ -49,6 +49,9 @@ pub struct ConfigFile {
     /// `[context]` adaptive window + compaction tail (FR-3, Tech Spec §7/§8).
     #[serde(default)]
     pub context: ContextConfigFile,
+    /// `[image]` read_image size cap (P-11, Tech Spec §5.2).
+    #[serde(default)]
+    pub image: ImageConfigFile,
 }
 
 /// `[ui]` — presentation toggles that shape what the interface shows without
@@ -97,6 +100,14 @@ pub struct ContextConfigFile {
     /// Whether the task list is pinned in the sent context (default `true`,
     /// T-11). When `false`, the task list is not appended to the system prompt.
     pub pin_task_list: Option<bool>,
+}
+
+/// `[image]` — the `read_image` size cap (P-11, Tech Spec §5.2). All optional;
+/// the engine applies the 5 MiB default when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct ImageConfigFile {
+    /// Maximum image file size in bytes (default 5 MiB).
+    pub max_bytes: Option<usize>,
 }
 
 /// `[truncate]` — tool-result reduction and size backstop at ingestion
@@ -158,6 +169,9 @@ pub struct ModelFile {
     /// The effort levels this model offers, if a subset. Omitted ⇒ the full
     /// ladder (`low|medium|high|max`) when `effort` is set.
     pub effort_levels: Option<Vec<String>>,
+    /// Whether the model accepts image input (P-11, Tech Spec §4.2). Default
+    /// `false`; set `true` for a vision-capable model.
+    pub vision: Option<bool>,
 }
 
 impl ProfileFile {
@@ -325,6 +339,10 @@ impl ConfigFile {
         if higher.context.pin_task_list.is_some() {
             self.context.pin_task_list = higher.context.pin_task_list;
         }
+        // `[image]` (P-11) merges field-by-field.
+        if higher.image.max_bytes.is_some() {
+            self.image.max_bytes = higher.image.max_bytes;
+        }
         // `[trust]` is deliberately NOT merged — it is read only from the global
         // tier (FR-1); see `global_trust_dirs` and the project-[trust] notice.
     }
@@ -366,6 +384,9 @@ pub struct Resolved {
     pub truncate: emberly_tools::TruncateConfig,
     /// Resolved adaptive context-window config (FR-3, Tech Spec §7/§8).
     pub context: emberly_core::ContextConfig,
+    /// Resolved image size limit in bytes for `read_image` (P-11, Tech Spec
+    /// §5.2). Default 5 MiB.
+    pub image_max_bytes: usize,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -604,6 +625,24 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         );
     }
 
+    // Image size cap (P-11): record provenance when a user tier sets
+    // `[image] max_bytes` (speech about deviations, silent on the default).
+    if field(&project, |c: &ConfigFile| c.image.max_bytes.is_some())
+        || field(&global, |c: &ConfigFile| c.image.max_bytes.is_some())
+    {
+        record(
+            &mut provenance,
+            "image.max_bytes",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.image.max_bytes.is_some()),
+                field(&global, |c: &ConfigFile| c.image.max_bytes.is_some()),
+            ),
+            true,
+        );
+    }
+
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
     let mut notices = Vec::new();
@@ -689,6 +728,7 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
                 pin_task_list: merged.context.pin_task_list.unwrap_or(d.pin_task_list),
             }
         },
+        image_max_bytes: merged.image.max_bytes.unwrap_or(5 * 1024 * 1024),
     })
 }
 

@@ -97,6 +97,7 @@ fn make_config(
         summary_prompt: None,
         provider_factory: None,
         config_reloader: None,
+        image_max_bytes: 5 * 1024 * 1024,
     }
 }
 
@@ -571,6 +572,7 @@ async fn cost_and_context_use_authoritative_usage() {
         }),
         effort_levels: Vec::new(),
         default_effort: None,
+        vision: false,
     };
     let response = ScriptedResponse {
         events: vec![
@@ -626,6 +628,7 @@ async fn usage_chunk_after_done_still_counts() {
         }),
         effort_levels: Vec::new(),
         default_effort: None,
+        vision: false,
     };
     // `drop_after` appends no terminal event, so this is exactly the wire
     // order: content delta → finish_reason (Done) → usage chunk → EOF.
@@ -1144,6 +1147,7 @@ impl emberly_core::ProviderFactory for ReseedFactory {
             pricing: None,
             effort_levels: Effort::ALL.to_vec(),
             default_effort: Some(Effort::High),
+            vision: false,
         };
         Ok(emberly_core::ProviderChoice {
             provider: Arc::new(FakeProvider::new(Vec::new()).with_model_info(info)),
@@ -1361,6 +1365,7 @@ async fn set_effort_on_a_model_without_a_control_declines_calmly() {
         pricing: None,
         effort_levels: Vec::new(),
         default_effort: None,
+        vision: false,
     };
     let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(Vec::new()).with_model_info(info));
     let sink = CaptureSink::new();
@@ -2898,6 +2903,7 @@ fn auto_compact_provider(scripts: Vec<ScriptedResponse>) -> Arc<FakeProvider> {
         pricing: None,
         effort_levels: Vec::new(),
         default_effort: None,
+        vision: false,
     };
     Arc::new(FakeProvider::new(scripts).with_model_info(info))
 }
@@ -3658,4 +3664,108 @@ async fn todo_transcript_event_is_additive_for_resume() {
         )),
         "transcript contains the task_list event"
     );
+}
+
+// ---- read_image round-trip (P-11, T-12) -----------------------------------
+
+/// A minimal 1×1 red PNG for fixture use.
+fn tiny_png() -> Vec<u8> {
+    use base64::{engine::general_purpose, Engine as _};
+    general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+        .unwrap_or_default()
+}
+
+/// A ModelInfo with vision enabled.
+fn vision_model_info() -> ModelInfo {
+    ModelInfo {
+        model: "vision-1".into(),
+        context_window: 200_000,
+        max_output_tokens: 8_192,
+        pricing: None,
+        effort_levels: Vec::new(),
+        default_effort: None,
+        vision: true,
+    }
+}
+
+#[tokio::test]
+async fn read_image_round_trip_appends_image_block() {
+    // P-11: on a vision model, `read_image` appends a ContentBlock::Image to
+    // the sent context.
+    let root = temp_project();
+    let _ = std::fs::write(root.join("pic.png"), tiny_png());
+    let fake = Arc::new(
+        FakeProvider::new(vec![
+            ScriptedResponse::tool_call("c1", "read_image", r#"{"path":"pic.png"}"#),
+            ScriptedResponse::text("I see a red pixel."),
+        ])
+        .with_model_info(vision_model_info()),
+    );
+    let provider: Arc<dyn Provider> = fake.clone();
+    let sink = CaptureSink::new();
+    let config = make_config(provider, root, Box::new(sink.clone()));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "what is in this image?".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // The model's closing message arrived.
+    assert_eq!(deltas(&events), "I see a red pixel.");
+
+    // The last request sent to the provider contains an Image block.
+    let req = fake
+        .last_request()
+        .expect("at least one request was sent");
+    let has_image = req.messages.iter().any(|m| {
+        m.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. }))
+    });
+    assert!(has_image, "ContentBlock::Image is in the sent context");
+}
+
+#[tokio::test]
+async fn read_image_on_non_vision_model_returns_unsupported_result() {
+    // HC-6: on a non-vision model the tool returns the structured unsupported
+    // result and NO image block is sent (P-11).
+    let root = temp_project();
+    let _ = std::fs::write(root.join("pic.png"), tiny_png());
+    // Default FakeProvider has vision: false.
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call("c1", "read_image", r#"{"path":"pic.png"}"#),
+        ScriptedResponse::text("I cannot see images."),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let sink = CaptureSink::new();
+    let config = make_config(provider, root, Box::new(sink.clone()));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "describe the image".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // The tool finished with ok=false (the unsupported result).
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { ok: false, summary, .. }
+            if summary.contains("no vision") || summary.contains("vision"))),
+        "unsupported-vision result emitted as a failed tool outcome"
+    );
+
+    // No Image block in the sent context.
+    let req = fake
+        .last_request()
+        .expect("at least one request was sent");
+    let has_image = req.messages.iter().any(|m| {
+        m.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. }))
+    });
+    assert!(!has_image, "no Image block sent to a non-vision model");
 }

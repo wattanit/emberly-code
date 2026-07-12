@@ -188,6 +188,9 @@ pub struct EngineConfig {
     /// Re-reads config + prompts from disk on an in-app edit (C-5). `None`
     /// disables live reload (the edit still lands on disk for the next session).
     pub config_reloader: Option<Arc<dyn ConfigReloader>>,
+    /// Maximum image file size in bytes for the `read_image` tool (Tech Spec
+    /// §5.2, default 5 MiB).
+    pub image_max_bytes: usize,
 }
 
 impl EngineConfig {
@@ -537,6 +540,9 @@ pub struct Engine {
     /// stores the last full replace, emits updates to frontends, and records
     /// them in the transcript (HC-7). Reset on a new session.
     task_list: Vec<emberly_tools::TaskItem>,
+    /// Maximum image file size in bytes (Tech Spec §5.2). Threaded to the
+    /// `read_image` tool via `ToolCtx`.
+    image_max_bytes: usize,
 }
 
 impl Engine {
@@ -647,6 +653,7 @@ impl Engine {
             provider_factory: config.provider_factory,
             config_reloader: config.config_reloader,
             task_list: Vec::new(),
+            image_max_bytes: config.image_max_bytes,
         };
         (engine, asks_rx, user_asks_rx, recall_rx, task_list_rx)
     }
@@ -1949,6 +1956,23 @@ impl Engine {
             !outcome.ok,
         ));
 
+        // An image from `read_image` (P-11): append a `ContentBlock::Image` as
+        // a synthetic user message so both adapters can carry it — Anthropic in
+        // a user-role image block, OpenAI as an `image_url` part (whose tool
+        // role cannot hold images, Tech Spec §4.2). The bytes are NOT in the
+        // transcript (HC-7); the `tool_call` recorded the path, and the block
+        // lives only in the live conversation (re-derived from disk on resume —
+        // honestly absent if the file is gone).
+        if let Some(image) = outcome.image {
+            self.push_conversation_message(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Image {
+                    media_type: image.media_type,
+                    data: image.data,
+                }],
+            });
+        }
+
         self.emit(UiEvent::ToolFinished {
             call_id: call.id.clone(),
             ok: outcome.ok,
@@ -2219,6 +2243,8 @@ impl Engine {
         .with_ask_gate(self.ask_gate.clone())
         .with_recall_gate(self.recall_gate.clone())
         .with_task_list_gate(self.task_list_gate.clone())
+        .with_vision(self.provider.model_info().vision)
+        .with_image_max_bytes(self.image_max_bytes)
     }
 
     /// Resolve a turn-number range to the messages it contains (T-10, FR-3).
@@ -2368,8 +2394,7 @@ impl Engine {
 
     fn context_tokens(&self) -> u64 {
         let count = |s: &str| self.provider.count_tokens(s).tokens;
-        let mut total = self.system.as_deref().map(count).unwrap_or(0);
-        // Count the windowed sent view (FR-3, Design §8.6), not the full
+        let mut total = self.system.as_deref().map(count).unwrap_or(0);        // Count the windowed sent view (FR-3, Design §8.6), not the full
         // in-memory conversation — so usage reflects what the provider
         // actually receives. The elision marker is included because it rides
         // in the sent messages.
@@ -2385,6 +2410,12 @@ impl Engine {
                     // Replayed reasoning is sent back on the wire, so it counts
                     // toward the context budget (P-10).
                     ContentBlock::Reasoning { text, .. } => count(text),
+                    // An image's token cost is not chars/4 of its base64. Until
+                    // an authoritative provider-reported usage arrives (P-6),
+                    // estimate a fixed per-image cost rather than inflating the
+                    // budget with raw base64 length (initial; tune with use,
+                    // Requirements §13).
+                    ContentBlock::Image { .. } => IMAGE_TOKEN_ESTIMATE,
                 });
             }
         }
@@ -2428,6 +2459,10 @@ fn render_for_summary(messages: &[Message]) -> String {
                 // Reasoning is the model's private scratch, not conversation
                 // content; the summary is built from the answer, so skip it.
                 ContentBlock::Reasoning { .. } => String::new(),
+                // An image is summarized by its media type, not its bytes.
+                ContentBlock::Image { media_type, .. } => {
+                    format!("[image: {media_type}]")
+                }
             };
             if !piece.is_empty() {
                 out.push_str(role);
@@ -2471,6 +2506,9 @@ fn render_recall(messages: &[Message], reduce: bool) -> String {
                     }
                 }
                 ContentBlock::Reasoning { .. } => String::new(),
+                ContentBlock::Image { media_type, .. } => {
+                    format!("[image: {media_type}]")
+                }
             };
             if !piece.is_empty() {
                 out.push_str(role);
@@ -2488,6 +2526,12 @@ const PREVIEW_LINES: usize = 8;
 /// Character ceiling for the inline preview, so a single very long line cannot
 /// flood the conversation.
 const PREVIEW_CHARS: usize = 600;
+
+/// Rough per-image token cost for the context-budget estimate (P-6). An image's
+/// cost is not chars/4 of its base64; until authoritative provider-reported usage
+/// arrives, this fixed estimate avoids inflating the budget. Initial; tune with
+/// use (Requirements §13, Tech Spec §16).
+const IMAGE_TOKEN_ESTIMATE: u64 = 765;
 
 /// A short excerpt of a tool's output for the conversation (Design §6.1): the
 /// first few lines, char-capped. The full output goes to the model; this is

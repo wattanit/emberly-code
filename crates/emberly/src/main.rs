@@ -547,6 +547,7 @@ async fn run() -> anyhow::Result<()> {
             &resolved,
         ))),
         config_reloader: Some(config_reloader),
+        image_max_bytes: resolved.image_max_bytes,
     };
 
     let (engine_ports, frontend_ports) = channel();
