@@ -284,6 +284,30 @@ fn group_turn_starts(messages: &[Message]) -> Vec<usize> {
     starts
 }
 
+/// Build a parallel turn-number map for a conversation (FR-3, Tech Spec
+/// §7/§16). Each message gets the number of the turn it belongs to. Turn 0
+/// is the first message (the pinned original task); each subsequent
+/// [`Role::User`] message increments the counter. Returns `(turn_map,
+/// next_turn)` so the engine can continue assigning monotonic numbers.
+fn build_turn_map(conversation: &[Message]) -> (Vec<usize>, usize) {
+    let mut turn_map = Vec::with_capacity(conversation.len());
+    let mut current_turn: usize = 0;
+    let mut next_turn: usize = 1;
+    for (i, msg) in conversation.iter().enumerate() {
+        if i > 0 && msg.role == Role::User {
+            current_turn = next_turn;
+            next_turn += 1;
+        }
+        turn_map.push(current_turn);
+    }
+    // If the conversation is empty, next_turn starts at 0 (turn 0 is the next
+    // message to arrive).
+    if conversation.is_empty() {
+        next_turn = 0;
+    }
+    (turn_map, next_turn)
+}
+
 /// The audit label for a loop resolution (S-5, Tech Spec §3.2).
 fn resolution_label(r: &LoopResolution) -> String {
     match r {
@@ -353,6 +377,14 @@ pub struct Engine {
     ask_gate: Arc<AskGate>,
     events_tx: mpsc::Sender<UiEvent>,
     conversation: Vec<Message>,
+    /// Parallel to `conversation`: the stable monotonic turn number of each
+    /// message (FR-3, Tech Spec §7/§16). `Role::User` messages start a new
+    /// turn (incrementing `next_turn`); assistant/tool messages inherit the
+    /// current turn. Compaction retires numbers but never shifts surviving
+    /// ones, so "turn 12" means the same thing all session.
+    turn_map: Vec<usize>,
+    /// The next turn number to assign (monotonic; never decremented).
+    next_turn: usize,
     /// Cumulative billed tokens this session (summed per request — each
     /// request's input is billed, so this is the cost basis, not the context
     /// size).
@@ -433,6 +465,8 @@ impl Engine {
         // Seed the session effort from the model's declared default before the
         // provider is moved into the struct (P-9, Tech Spec §4.6).
         let seed_effort = config.provider.model_info().default_effort;
+        // Build the turn map from the initial conversation (resume or fresh).
+        let (turn_map, next_turn) = build_turn_map(&config.initial_conversation);
         let engine = Self {
             provider: config.provider,
             tools: config.tools,
@@ -456,6 +490,8 @@ impl Engine {
             ask_gate: Arc::new(AskGate { asks: user_asks_tx }),
             events_tx,
             conversation: config.initial_conversation,
+            turn_map,
+            next_turn,
             session_usage: TokenUsage::default(),
             session_cost_usd: 0.0,
             context_tokens_authoritative: None,
@@ -537,7 +573,7 @@ impl Engine {
             match command {
                 Command::UserInput { text } => {
                     self.record_user_message(&text);
-                    self.conversation.push(Message::user_text(text));
+                    self.push_conversation_message(Message::user_text(text));
                     self.emit_context_usage().await;
                     self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx)
                         .await;
@@ -734,11 +770,21 @@ impl Engine {
         };
 
         // Rebuild: [original task][summary as user message][recent verbatim].
+        // Turn map is rebuilt in parallel: pinned turns keep their numbers, the
+        // summary gets the next monotonic number, and the tail retains its
+        // original numbers (FR-3: compaction retires numbers, never shifts them).
         let mut rebuilt = Vec::with_capacity(2 + keep);
+        let mut rebuilt_turns = Vec::with_capacity(2 + keep);
         rebuilt.extend(self.conversation[..from].iter().cloned());
+        rebuilt_turns.extend(self.turn_map[..from].iter().copied());
+        let summary_turn = self.next_turn;
         rebuilt.push(Message::user_text(summary.clone()));
+        rebuilt_turns.push(summary_turn);
+        self.next_turn += 1;
         rebuilt.extend(self.conversation[to..].iter().cloned());
+        rebuilt_turns.extend(self.turn_map[to..].iter().copied());
         self.conversation = rebuilt;
+        self.turn_map = rebuilt_turns;
         self.compacted = true;
 
         self.write_transcript(TranscriptEvent::Compaction {
@@ -826,7 +872,7 @@ impl Engine {
                             LoopResolution::Steer(text) => {
                                 self.reset_loop_window();
                                 self.record_user_message(&text);
-                                self.conversation.push(Message::user_text(text));
+                                self.push_conversation_message(Message::user_text(text));
                                 self.emit_context_usage().await;
                             }
                         }
@@ -1642,7 +1688,7 @@ impl Engine {
             full_output_ref,
         });
 
-        self.conversation.push(Message::tool_result(
+        self.push_conversation_message(Message::tool_result(
             call.id.clone(),
             truncation.content,
             !outcome.ok,
@@ -1688,8 +1734,9 @@ impl Engine {
             truncated: false,
             full_output_ref: None,
         });
-        self.conversation
-            .push(Message::tool_result(call.id.clone(), canceled, true));
+        self.push_conversation_message(
+            Message::tool_result(call.id.clone(), canceled, true),
+        );
         self.emit(UiEvent::ToolFinished {
             call_id: call.id.clone(),
             ok: false,
@@ -1755,10 +1802,25 @@ impl Engine {
                 input,
             });
         }
-        self.conversation.push(Message {
+        self.push_conversation_message(Message {
             role: Role::Assistant,
             content,
         });
+    }
+
+    /// Push a message to the conversation and update the turn map (FR-3 turn
+    /// numbering). `Role::User` messages start a new turn; assistant/tool
+    /// messages inherit the current turn number.
+    fn push_conversation_message(&mut self, msg: Message) {
+        let turn = if self.conversation.is_empty() || msg.role == Role::User {
+            let t = self.next_turn;
+            self.next_turn += 1;
+            t
+        } else {
+            *self.turn_map.last().unwrap_or(&0)
+        };
+        self.conversation.push(msg);
+        self.turn_map.push(turn);
     }
 
     /// The number of messages at the front of the conversation that are always
@@ -1806,11 +1868,24 @@ impl Engine {
             total
         };
 
+        // The turn range being elided, using stable monotonic turn numbers
+        // (FR-3, Tech Spec §7/§16) so the marker names a range `recall` can
+        // take.
+        let first_turn_msg = pinned + turns[0];
+        let last_turn_msg = if elided < turns.len() {
+            pinned + turns[elided] - 1
+        } else {
+            total - 1
+        };
+        let first_turn = self.turn_map[first_turn_msg];
+        let last_turn = self.turn_map[last_turn_msg];
+
         let mut result =
             Vec::with_capacity(pinned + 1 + total.saturating_sub(keep_from));
         result.extend(self.conversation[..pinned].iter().cloned());
         result.push(Message::user_text(format!(
-            "[{elided} earlier turns elided from context — still in the session transcript]"
+            "[turns {first_turn}–{last_turn} elided from context \
+             — still in the session transcript; use recall to retrieve them]"
         )));
         result.extend(self.conversation[keep_from..].iter().cloned());
         result
@@ -1875,6 +1950,26 @@ impl Engine {
             self.sandbox_spawn.clone(),
         )
         .with_ask_gate(self.ask_gate.clone())
+    }
+
+    /// Resolve a turn-number range to the messages it contains (T-10, FR-3).
+    /// Returns the engine's normalized, in-memory messages for those turns —
+    /// never raw JSONL. `from`/`to` are inclusive stable turn numbers as shown
+    /// in the elision marker. Returns an empty vec if the range matches no
+    /// turns (e.g. out of bounds or turns retired by compaction).
+    #[must_use]
+    pub fn recall_turns(&self, from: usize, to: usize) -> Vec<Message> {
+        if from > to || self.turn_map.is_empty() {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        for (i, msg) in self.conversation.iter().enumerate() {
+            let turn = self.turn_map[i];
+            if turn >= from && turn <= to {
+                result.push(msg.clone());
+            }
+        }
+        result
     }
 
     fn take_permission_id(&mut self) -> PermissionId {

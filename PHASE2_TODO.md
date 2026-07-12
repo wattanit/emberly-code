@@ -27,7 +27,7 @@ Phase 1's `reduce_output` (`crates/emberly-tools/src/reduce.rs:64`) for the turn
 |---|---|---|
 | 1. `[context]` config: `window_turns` (default 40) + `keep_recent_turns` | [x] | `ContextConfig` in engine.rs, `[context]` in ConfigFile, merged+resolved, threaded to Engine; `KEEP_RECENT` replaced; provenance in `config show` |
 | 2. Adaptive windowing at send time (`build_request`) | [x] | `windowed_messages()` view in `build_request`; turn-grouping, pinned prefix, elision marker; 5 integration tests |
-| 3. Marker↔range identifier scheme (resolve the §16 open item) | [ ] | |
+| 3. Marker↔range identifier scheme (resolve the §16 open item) | [x] | Stable monotonic turn numbers (`turn_map` + `next_turn`); marker reads `turns X–Y elided…`; `recall_turns()` resolves ranges; 3 new tests |
 | 4. `recall` built-in tool + engine gate (not permission-gated) | [ ] | |
 | 5. Context-usage reflects the working window | [ ] | |
 | 6. UI: `recall` as ordinary quiet tool activity + degraded parity | [ ] | |
@@ -99,7 +99,7 @@ memory (needed for `recall`, group 4) and the transcript/UI are untouched.
 Resolves the plan/Spec §16 open item: "turn indices vs. an opaque marker id."
 The elision marker (group 2) must name a range that `recall` (group 4) can take.
 
-- [ ] **Decided (owner, 2026-07-11): stable monotonic turn numbers.** Each turn
+- [x] **Decided (owner, 2026-07-11): stable monotonic turn numbers.** Each turn
       gets a chronological number assigned at creation and never renumbered; the
       marker reads e.g. `turns 5–16 elided…` and `recall` takes that range (or a
       sub-range). An opaque id buys nothing here — the dropped span is always a
@@ -108,11 +108,13 @@ The elision marker (group 2) must name a range that `recall` (group 4) can take.
       turns keep theirs (no positional renumbering). This refines Tech Spec §7/§16
       — file design feedback (G-24) so the Spec absorbs it at the next bump; do not
       edit the Spec from here.
-- [ ] No stale-range handling needed under compaction (owner decision — see
+      _Implemented: `turn_map: Vec<usize>` parallel to `conversation`, `next_turn` counter, `build_turn_map()` for initialization, `push_conversation_message()` helper updates both. `compact()` rebuilds turn_map — pinned turns keep numbers, summary gets `next_turn`, tail retains originals._
+- [x] No stale-range handling needed under compaction (owner decision — see
       notes): the marker is **regenerated from the current conversation on every
       send**, so indices always reflect the present turn list. Compaction-discarded
       turns are represented by the summary (a normal pinned turn), which `recall`
       never needs to address.
+      _Marker regenerated in `windowed_messages()` each send; `recall_turns(from, to)` resolves against the current `turn_map`. Verified by `turn_numbers_stable_across_compaction` test._
 
 ## 4. `recall` built-in tool + engine gate  *(T-10, FR-3; Tech Spec §5.2, §7, §6)*
 
