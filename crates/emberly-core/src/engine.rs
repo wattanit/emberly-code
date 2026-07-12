@@ -36,6 +36,7 @@ use crate::transcript::{
     TranscriptRecord, TranscriptSink,
 };
 use crate::types::{LoopResolution, PermissionRendering, SandboxStatus, TokenUsage};
+use crate::view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
 
 /// The session title is the first user message, clipped to this many chars
 /// (Tech Spec §16 — the heuristic v1 title).
@@ -611,6 +612,7 @@ impl Engine {
                     if let Some(trigger) = self.pending_compaction.take() {
                         self.compact(trigger).await;
                     }
+                    self.write_view_cache();
                 }
                 // No turn is running while idle; these are strays or no-ops here.
                 Command::Cancel
@@ -618,7 +620,10 @@ impl Engine {
                 | Command::AskUserAnswer { .. }
                 | Command::ResolveLoop { .. } => {}
                 // Idle is already a clean boundary — compact immediately.
-                Command::Compact => self.compact(CompactTrigger::Manual).await,
+                Command::Compact => {
+                    self.compact(CompactTrigger::Manual).await;
+                    self.write_view_cache();
+                }
                 // Session switches are only issued at idle (the frontend gates
                 // them while a turn runs), so a clean boundary is guaranteed.
                 Command::NewSession { session_id } => self.start_new_session(session_id).await,
@@ -2067,6 +2072,44 @@ impl Engine {
     fn write_transcript(&mut self, event: TranscriptEvent) {
         let record = TranscriptRecord::new(OffsetDateTime::now_utc(), event);
         self.transcript.record(&record);
+    }
+
+    /// Write the derived conversation-state cache best-effort (FR-5, Tech Spec
+    /// §3.2a). Called after the view settles — a turn completes, a compaction
+    /// runs. Losing this file loses nothing: the replay fallback is always
+    /// correct (HC-7 subordination). Any I/O or serialization error is
+    /// swallowed (HC-3 — never a panic); the cache is never relied upon.
+    fn write_view_cache(&self) {
+        let transcript_path = {
+            let guard = match self.active_session_path.read() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            guard.clone()
+        };
+        let byte_len = match std::fs::metadata(&transcript_path) {
+            Ok(m) => m.len(),
+            Err(_) => return, // no transcript file (e.g. NoopSink in tests)
+        };
+        let cache = ViewCache {
+            version: VIEW_CACHE_VERSION,
+            session_id: self.session_id,
+            conversation: self.conversation.clone(),
+            turn_map: self.turn_map.clone(),
+            next_turn: self.next_turn,
+            compacted: self.compacted,
+            original_task_recorded: self.original_task_recorded,
+            session_usage: self.session_usage,
+            session_cost_usd: self.session_cost_usd,
+            context_tokens_authoritative: self.context_tokens_authoritative,
+            transcript_byte_len: byte_len,
+        };
+        let cache_path = view_cache_path(&transcript_path);
+        let json = match serde_json::to_string(&cache) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let _ = std::fs::write(&cache_path, json);
     }
 
     async fn emit_provider_error(&self, error: &ProviderError) {

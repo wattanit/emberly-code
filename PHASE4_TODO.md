@@ -31,13 +31,13 @@ and the fact that the view types already derive serde (`Message`/`ContentBlock`/
 | Group | Status | Notes |
 |---|---|---|
 | 1. `ViewCache` type, `-view.json` path, own version | [x] | `view_cache.rs` — `ViewCache`, `VIEW_CACHE_VERSION` (1), `view_cache_path()`; 3 unit tests |
-| 2. Write the cache best-effort after the view settles | [ ] | no config key |
-| 3. Staleness guard (transcript byte-length + offset) | [ ] | |
+| 2. Write the cache best-effort after the view settles | [x] | `Engine::write_view_cache()` after turn+compaction and idle `/compact`; best-effort, no config key |
+| 3. Staleness guard (transcript byte-length + offset) | [x] | `try_load_view_cache` in `resume.rs`; byte-length exact match + version + session_id; 7 tests |
 | 4. Cache-first fast-path resume (launch + in-session) | [ ] | also fixes the `adopt_session` turn-state gap |
 | 5. Fallback replay + one dimmed harness-voice notice | [ ] | fast path silent |
 | 6. Tests (offline, deterministic — §14.6) + exit criterion | [ ] | |
 
-**Overall Phase 4: IN PROGRESS (group 1 of 6).**
+**Overall Phase 4: IN PROGRESS (group 3 of 6).**
 
 ---
 
@@ -72,41 +72,53 @@ transcript lacks (HC-7 does not apply to it).
 Rewritten in place each time the view changes; a write failure is swallowed (the
 replay fallback is always correct, so the cache never needs to be reliable).
 
-- [ ] Write after the view has settled: primarily after a user turn completes and
+- [x] Write after the view has settled: primarily after a user turn completes and
       any deferred compaction has run — `engine.rs:607–613` (`TurnEnded` then
       `pending_compaction.take()` → `compact()`); and after an idle `/compact`
       (`engine.rs:621`/`:845`). A best-effort write after each turn suffices
       (Tech Spec §3.2a).
-- [ ] **Best-effort, never fatal.** Serialize + atomic-ish overwrite (write temp,
+      _`write_view_cache()` called after the post-turn compaction block and after
+      idle `/compact`._
+- [x] **Best-effort, never fatal.** Serialize + atomic-ish overwrite (write temp,
       rename, or truncate-write) to the `-view.json` path; on any I/O/serialization
       error, log at most a debug line and continue — HC-3 (no panic) and the
       derived-cache contract (losing it loses nothing).
-- [ ] **No config key** (Tech Spec §8): the cache is always written and always
+      _`std::fs::write` (truncate-overwrite); all errors swallowed silently — no
+      logging framework is wired and a debug line earns nothing here._
+- [x] **No config key** (Tech Spec §8): the cache is always written and always
       guarded on read, so it needs no opt-in. Do **not** add a `[context]` or
       other toggle.
-- [ ] Capture the staleness inputs at write time (group 3): the transcript's
+- [x] Capture the staleness inputs at write time (group 3): the transcript's
       current byte length (after its per-event flush+`sync_data`,
       `transcript.rs:324`). Needs a way to read the active transcript path's size
       (e.g. `fs::metadata(active_session_path).len()`; `active_session_path` at
       `engine.rs:422`).
+      _`std::fs::metadata(&transcript_path).len()` read in `write_view_cache`._
 
 ## 3. Staleness guard  *(FR-5; Tech Spec §3.2a, §3.3)*
 
 The cache is trusted only when it provably matches the log.
 
-- [ ] Record on the cache: the transcript **byte length** and the **byte offset
+- [x] Record on the cache: the transcript **byte length** and the **byte offset
       built-through** at write time. In the append-only model these coincide (the
       cache is always built through the whole current file), so store the length
       and treat it as the offset — document that.
-- [ ] On resume, discard the cache and fall back to replay if: the current
+      _`transcript_byte_len: u64` on `ViewCache` (group 1), populated in
+      `write_view_cache` (group 2). Documented in the struct: doubles as the
+      built-through offset._
+- [x] On resume, discard the cache and fall back to replay if: the current
       transcript has **grown past** the recorded offset (events landed after the
       cache — e.g. a crash mid-next-turn), is **shorter** than recorded
       (truncated/corrupt), is **unreadable**, **parse-fails**, or the
       `VIEW_CACHE_VERSION`/`session_id` mismatches. Only an exact match is
       trusted.
-- [ ] The guard is pure metadata (`fs::metadata().len()`) + a version/id check —
+      _`try_load_view_cache(transcript_path) -> Option<ViewCache>` in `resume.rs`;
+      returns `None` on any of these conditions._
+- [x] The guard is pure metadata (`fs::metadata().len()`) + a version/id check —
       no re-tokenization, so validating the cache is cheap (the whole point of
       FR-5).
+      _7 unit tests: loads-on-match, absent, corrupt, version mismatch, grown,
+      shorter, session-id mismatch._
 
 ## 4. Cache-first fast-path resume  *(FR-5; Tech Spec §3.3)*
 
