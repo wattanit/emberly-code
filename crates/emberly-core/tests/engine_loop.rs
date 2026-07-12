@@ -136,12 +136,13 @@ fn start_with_file_transcript(
 
 fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx) = Engine::new(config, engine_ports.events_tx);
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx) = Engine::new(config, engine_ports.events_tx);
     tokio::spawn(engine.run(
         engine_ports.commands_rx,
         asks_rx,
         user_asks_rx,
         recall_rx,
+        task_rx,
     ));
     Harness {
         commands_tx: frontend.commands_tx,

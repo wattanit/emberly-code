@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 use crate::command::Command;
 use crate::event::UiEvent;
 use crate::factory::{ConfigReloader, ProviderFactory};
-use crate::gate::{AskGate, AskUserAsk, ChannelGate, PermissionAsk, RecallAsk, RecallGateImpl};
+use crate::gate::{AskGate, AskUserAsk, ChannelGate, PermissionAsk, RecallAsk, RecallGateImpl, TaskListAsk, TaskListGateImpl};
 use crate::id::{AskId, PermissionId, SessionId};
 use crate::transcript::{
     CompactTrigger, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent,
@@ -90,6 +90,11 @@ pub struct ContextConfig {
     /// Tech Spec §7/§8). Default `0.85`. In `(0.0, 1.0]`; an out-of-range
     /// value is a config error, not a silent clamp.
     pub auto_compact_threshold: f64,
+    /// Whether the model-maintained task list is pinned in the sent system
+    /// prompt so "what's left" survives compaction and windowing (T-11, Tech
+    /// Spec §7, Requirements §13 resolved). Default `true`; set `false` to
+    /// omit the list from the sent context.
+    pub pin_task_list: bool,
 }
 
 impl Default for ContextConfig {
@@ -99,6 +104,7 @@ impl Default for ContextConfig {
             keep_recent_turns: 6,
             auto_compact: true,
             auto_compact_threshold: 0.85,
+            pin_task_list: true,
         }
     }
 }
@@ -457,6 +463,9 @@ pub struct Engine {
     /// The recall gate (T-10), installed into every `ToolCtx` so the `recall`
     /// tool can retrieve elided turns from the in-memory conversation.
     recall_gate: Arc<RecallGateImpl>,
+    /// The task-list gate (T-11), installed into every `ToolCtx` so the `todo`
+    /// tool can replace the full task list in engine state.
+    task_list_gate: Arc<TaskListGateImpl>,
     events_tx: mpsc::Sender<UiEvent>,
     conversation: Vec<Message>,
     /// Parallel to `conversation`: the stable monotonic turn number of each
@@ -524,6 +533,10 @@ pub struct Engine {
     provider_factory: Option<Arc<dyn ProviderFactory>>,
     /// Re-reads config on an in-app edit (C-5); `None` disables live reload.
     config_reloader: Option<Arc<dyn ConfigReloader>>,
+    /// The model-maintained task list (T-11). Pure engine state — the engine
+    /// stores the last full replace, emits updates to frontends, and records
+    /// them in the transcript (HC-7). Reset on a new session.
+    task_list: Vec<emberly_tools::TaskItem>,
 }
 
 impl Engine {
@@ -539,10 +552,12 @@ impl Engine {
         mpsc::Receiver<PermissionAsk>,
         mpsc::Receiver<AskUserAsk>,
         mpsc::Receiver<RecallAsk>,
+        mpsc::Receiver<TaskListAsk>,
     ) {
         let (asks_tx, asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (user_asks_tx, user_asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (recall_tx, recall_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        let (task_list_tx, task_list_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         // Capture before `config.sandbox` is moved into the struct below.
         let sandbox_spawn: Arc<dyn Sandbox> = config.sandbox_spawn.unwrap_or_else(|| {
             // Fallback (no explicit spawner): confine from the status, but with
@@ -601,6 +616,7 @@ impl Engine {
             gate: Arc::new(ChannelGate { asks: asks_tx }),
             ask_gate: Arc::new(AskGate { asks: user_asks_tx }),
             recall_gate: Arc::new(RecallGateImpl { asks: recall_tx }),
+            task_list_gate: Arc::new(TaskListGateImpl { asks: task_list_tx }),
             events_tx,
             conversation: config.initial_conversation,
             turn_map,
@@ -630,8 +646,9 @@ impl Engine {
             summary_prompt: config.summary_prompt,
             provider_factory: config.provider_factory,
             config_reloader: config.config_reloader,
+            task_list: Vec::new(),
         };
-        (engine, asks_rx, user_asks_rx, recall_rx)
+        (engine, asks_rx, user_asks_rx, recall_rx, task_list_rx)
     }
 
     /// Run the engine until the command channel closes. Idle between turns,
@@ -643,6 +660,7 @@ impl Engine {
         mut asks_rx: mpsc::Receiver<PermissionAsk>,
         mut user_asks_rx: mpsc::Receiver<AskUserAsk>,
         mut recall_rx: mpsc::Receiver<RecallAsk>,
+        mut task_rx: mpsc::Receiver<TaskListAsk>,
     ) {
         if self.resuming {
             // Continuing an existing transcript: no fresh session_start, but
@@ -700,7 +718,7 @@ impl Engine {
                     self.record_user_message(&text);
                     self.push_conversation_message(Message::user_text(text));
                     self.emit_context_usage().await;
-                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx, &mut recall_rx)
+                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx, &mut recall_rx, &mut task_rx)
                         .await;
                     // The engine is idle again; let the frontend stop its
                     // "working" affordance (Design §6.3).
@@ -873,6 +891,7 @@ impl Engine {
         self.session_cost_usd = state.session_cost_usd;
         self.context_tokens_authoritative = state.context_tokens_authoritative;
         self.next_permission_id = 0;
+        self.task_list.clear();
         if let Ok(mut guard) = self.active_session_path.write() {
             *guard = path;
         }
@@ -1026,6 +1045,7 @@ impl Engine {
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
         recall_rx: &mut mpsc::Receiver<RecallAsk>,
+        task_rx: &mut mpsc::Receiver<TaskListAsk>,
     ) {
         let mut drop_attempts = 0u32;
         loop {
@@ -1053,6 +1073,7 @@ impl Engine {
                             asks_rx,
                             user_asks_rx,
                             recall_rx,
+                            task_rx,
                         )
                         .await
                         .is_canceled()
@@ -1266,13 +1287,14 @@ impl Engine {
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
         recall_rx: &mut mpsc::Receiver<RecallAsk>,
+        task_rx: &mut mpsc::Receiver<TaskListAsk>,
     ) -> ToolCallResult {
         // Start a fresh loop-signature observation for this turn (S-5).
         self.turn_obs = TurnObservation::default();
         let mut iter = tool_calls.into_iter();
         while let Some(call) = iter.next() {
             match self
-                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx, recall_rx)
+                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx, recall_rx, task_rx)
                 .await
             {
                 ToolCallResult::Completed(outcome) => self.ingest_tool_result(&call, outcome).await,
@@ -1396,6 +1418,7 @@ impl Engine {
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
         recall_rx: &mut mpsc::Receiver<RecallAsk>,
+        task_rx: &mut mpsc::Receiver<TaskListAsk>,
     ) -> ToolCallResult {
         let args = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
 
@@ -1441,6 +1464,7 @@ impl Engine {
                 Some(ask) = asks_rx.recv() => self.on_permission_ask(ask, &mut pending).await,
                 Some(ask) = user_asks_rx.recv() => self.on_user_ask(ask, &mut pending_user).await,
                 Some(recall) = recall_rx.recv() => self.on_recall(recall).await,
+                Some(task) = task_rx.recv() => self.on_task_list_set(task).await,
                 command = commands_rx.recv(), if commands_open => match command {
                     Some(Command::PermissionAnswer { id, decision }) => {
                         self.answer_permission(id, decision, &mut pending).await;
@@ -1595,6 +1619,20 @@ impl Engine {
             RecallOutcome::Turns { content, count }
         };
         let _ = reply.send(outcome);
+    }
+
+    /// Handle a task-list replace from the `todo` tool (T-11): store the full
+    /// list, emit the UI event for the sidebar/inline render, write the
+    /// additive transcript event (HC-7), and ack the oneshot so the tool
+    /// returns success only after the state is stored.
+    async fn on_task_list_set(&mut self, ask: TaskListAsk) {
+        let TaskListAsk { items, reply } = ask;
+        self.task_list = items.clone();
+        self.emit(UiEvent::TaskListUpdated { items }).await;
+        self.write_transcript(TranscriptEvent::TaskList {
+            items: self.task_list.clone(),
+        });
+        let _ = reply.send(Ok(()));
     }
 
     /// Change the auto-accept mode (Requirements §6.4, §6.7). Auto tiers are
@@ -2147,15 +2185,27 @@ impl Engine {
 
     /// The outgoing system prompt: the stored base (base prompt + project
     /// instructions) with the tool-call explanation instruction appended when
-    /// enabled (T-9).
+    /// enabled (T-9), and the task-list block appended when the list is non-empty
+    /// and pinning is on (T-11, Tech Spec §7).
     fn effective_system(&self) -> Option<String> {
-        if !self.tool_explanations {
-            return self.system.clone();
-        }
-        let instruction = crate::prompts::tool_explanation();
-        match &self.system {
-            Some(base) => Some(format!("{base}\n\n{instruction}")),
-            None => Some(instruction.to_string()),
+        let base = if self.tool_explanations {
+            let instruction = crate::prompts::tool_explanation();
+            match &self.system {
+                Some(b) => Some(format!("{b}\n\n{instruction}")),
+                None => Some(instruction.to_string()),
+            }
+        } else {
+            self.system.clone()
+        };
+
+        if self.context.pin_task_list && !self.task_list.is_empty() {
+            let block = render_task_list_block(&self.task_list);
+            match &base {
+                Some(b) => Some(format!("{b}\n\n{block}")),
+                None => Some(block),
+            }
+        } else {
+            base
         }
     }
 
@@ -2168,6 +2218,7 @@ impl Engine {
         )
         .with_ask_gate(self.ask_gate.clone())
         .with_recall_gate(self.recall_gate.clone())
+        .with_task_list_gate(self.task_list_gate.clone())
     }
 
     /// Resolve a turn-number range to the messages it contains (T-10, FR-3).
@@ -2451,6 +2502,22 @@ fn result_preview(content: &str) -> String {
         preview = preview.chars().take(PREVIEW_CHARS).collect();
     }
     preview
+}
+
+/// Render the current task list as a compact block for the pinned system prompt
+/// (T-11, Tech Spec §7). One line per item with a text status token, so the
+/// standing context cost is trivial.
+fn render_task_list_block(items: &[emberly_tools::TaskItem]) -> String {
+    let mut lines = String::from("## Current task list\n");
+    for item in items {
+        let token = match item.status {
+            emberly_tools::TaskStatus::Pending => "[pending]",
+            emberly_tools::TaskStatus::InProgress => "[in_progress]",
+            emberly_tools::TaskStatus::Done => "[done]",
+        };
+        lines.push_str(&format!("- {token} {}\n", item.text));
+    }
+    lines
 }
 
 /// Enrich a tool's [`PermissionRequest`] into a UI [`PermissionRendering`] with

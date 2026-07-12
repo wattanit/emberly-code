@@ -665,6 +665,7 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
                     .map_or(d.keep_recent_turns, |v| v as usize),
                 auto_compact: merged.context.auto_compact.unwrap_or(d.auto_compact),
                 auto_compact_threshold: threshold,
+                pin_task_list: d.pin_task_list,
             }
         },
     })

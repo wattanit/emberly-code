@@ -35,7 +35,7 @@ pub use emberly_tools::AskUserOutcome;
 pub use engine::{ContextConfig, Engine, EngineConfig, LoopConfig};
 pub use event::UiEvent;
 pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfig};
-pub use gate::{AskUserAsk, PermissionAsk};
+pub use gate::{AskUserAsk, PermissionAsk, TaskListAsk};
 pub use id::{AskId, PermissionId, SessionId, ToolCallId};
 pub use transcript::{
     append_abnormal_exit, CaptureSink, CompactTrigger, ConfigProvenance, FileTranscript, NoopSink,
