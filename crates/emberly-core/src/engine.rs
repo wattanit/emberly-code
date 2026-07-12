@@ -32,7 +32,8 @@ use crate::factory::{ConfigReloader, ProviderFactory};
 use crate::gate::{AskGate, AskUserAsk, ChannelGate, PermissionAsk, RecallAsk, RecallGateImpl};
 use crate::id::{AskId, PermissionId, SessionId};
 use crate::transcript::{
-    ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord, TranscriptSink,
+    CompactTrigger, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent,
+    TranscriptRecord, TranscriptSink,
 };
 use crate::types::{LoopResolution, PermissionRendering, SandboxStatus, TokenUsage};
 
@@ -79,6 +80,15 @@ pub struct ContextConfig {
     /// How many trailing messages `/compact` keeps verbatim (Tech Spec §7).
     /// Also the tail manual and automatic compaction (Phase 3) both keep.
     pub keep_recent_turns: usize,
+    /// Whether automatic compaction is enabled (FR-4, Tech Spec §7/§8). When
+    /// `true` (default), the engine schedules a compaction at the next clean
+    /// boundary once context usage crosses `auto_compact_threshold`. Set
+    /// `false` to compact manually only.
+    pub auto_compact: bool,
+    /// The context-usage fraction that triggers automatic compaction (FR-4,
+    /// Tech Spec §7/§8). Default `0.85`. In `(0.0, 1.0]`; an out-of-range
+    /// value is a config error, not a silent clamp.
+    pub auto_compact_threshold: f64,
 }
 
 impl Default for ContextConfig {
@@ -86,6 +96,8 @@ impl Default for ContextConfig {
         Self {
             window_turns: 40,
             keep_recent_turns: 6,
+            auto_compact: true,
+            auto_compact_threshold: 0.85,
         }
     }
 }
@@ -428,9 +440,14 @@ pub struct Engine {
     /// True once a compaction has run (live or resumed), so the summary at
     /// `conversation[1]` is pinned in the sent context (FR-3 windowing).
     compacted: bool,
-    /// Set when `/compact` arrives mid-turn; performed at the next clean
-    /// boundary (Tech Spec §7).
-    compact_requested: bool,
+    /// Set when `/compact` or the auto-trigger requests a compaction;
+    /// performed at the next clean boundary (Tech Spec §7). `Manual` outranks
+    /// `Auto` — a user `/compact` is never downgraded (FR-4).
+    pending_compaction: Option<CompactTrigger>,
+    /// Hysteresis latch for the auto-trigger (FR-4, Tech Spec §7): after an
+    /// auto-compaction fires the latch disarms and stays disarmed until usage
+    /// has fallen below the threshold and re-crossed it (no thrash).
+    auto_compact_armed: bool,
     /// Optional `/compact` prompt override (P-7).
     summary_prompt: Option<String>,
     /// Builds a provider on an in-session model switch (C-6); `None` disables it.
@@ -517,7 +534,8 @@ impl Engine {
             original_task_recorded: config.resuming,
             resuming: config.resuming,
             compacted: config.compacted,
-            compact_requested: false,
+            pending_compaction: None,
+            auto_compact_armed: true,
             summary_prompt: config.summary_prompt,
             provider_factory: config.provider_factory,
             config_reloader: config.config_reloader,
@@ -587,10 +605,11 @@ impl Engine {
                     // The engine is idle again; let the frontend stop its
                     // "working" affordance (Design §6.3).
                     self.emit(UiEvent::TurnEnded).await;
-                    // A `/compact` sent mid-turn runs now, at the clean boundary
-                    // (every tool_use has its tool_result — Tech Spec §7).
-                    if std::mem::take(&mut self.compact_requested) {
-                        self.compact().await;
+                    // A `/compact` sent mid-turn or an auto-trigger request
+                    // runs now, at the clean boundary (every tool_use has its
+                    // tool_result — Tech Spec §7).
+                    if let Some(trigger) = self.pending_compaction.take() {
+                        self.compact(trigger).await;
                     }
                 }
                 // No turn is running while idle; these are strays or no-ops here.
@@ -599,7 +618,7 @@ impl Engine {
                 | Command::AskUserAnswer { .. }
                 | Command::ResolveLoop { .. } => {}
                 // Idle is already a clean boundary — compact immediately.
-                Command::Compact => self.compact().await,
+                Command::Compact => self.compact(CompactTrigger::Manual).await,
                 // Session switches are only issued at idle (the frontend gates
                 // them while a turn runs), so a clean boundary is guaranteed.
                 Command::NewSession { session_id } => self.start_new_session(session_id).await,
@@ -704,7 +723,8 @@ impl Engine {
         self.conversation = conversation;
         self.original_task_recorded = resuming;
         self.resuming = resuming;
-        self.compact_requested = false;
+        self.pending_compaction = None;
+        self.auto_compact_armed = true;
         self.session_usage = TokenUsage::default();
         self.session_cost_usd = 0.0;
         self.context_tokens_authoritative = None;
@@ -731,13 +751,23 @@ impl Engine {
         }
     }
 
-    /// Manual `/compact` at a clean boundary (Tech Spec §7). Replaces the middle
+    /// Queue a compaction for the next clean boundary (Tech Spec §7). Manual
+    /// outranks Auto — a user `/compact` is never downgraded to `auto` (FR-4).
+    fn request_compaction(&mut self, trigger: CompactTrigger) {
+        if matches!(self.pending_compaction, Some(CompactTrigger::Manual)) {
+            return;
+        }
+        self.pending_compaction = Some(trigger);
+    }
+
+    /// Compaction at a clean boundary (Tech Spec §7). Replaces the middle
     /// of the conversation — everything after the pinned original task and
     /// before the last `context.keep_recent_turns` messages — with a model-written summary,
     /// keeping the session usable when context grows. The pinned content
     /// (system prompt, original task) is never compacted; the JSONL log is
     /// untouched (the compaction is recorded as one event, replayed on resume).
-    async fn compact(&mut self) {
+    /// `trigger` records whether the user or the FR-4 threshold initiated it.
+    async fn compact(&mut self, trigger: CompactTrigger) {
         // Pinned = the original task (the system prompt lives outside the
         // conversation). Keep the tail verbatim; summarize the middle.
         let pinned = usize::from(!self.conversation.is_empty());
@@ -798,6 +828,7 @@ impl Engine {
             summary,
             replaced_from: u32::try_from(from).unwrap_or(u32::MAX),
             replaced_to: u32::try_from(to).unwrap_or(u32::MAX),
+            trigger,
         });
         self.emit(UiEvent::CompactionStatus {
             message: format!("compacted — kept the task, a summary, and the last {keep} messages"),
@@ -994,7 +1025,7 @@ impl Engine {
                     match command {
                         Command::Cancel => break StreamEnd::Interrupted,
                         // Queue a compaction for the clean boundary (Tech Spec §7).
-                        Command::Compact => self.compact_requested = true,
+                        Command::Compact => self.request_compaction(CompactTrigger::Manual),
                         // A mode toggle applies immediately, even mid-stream.
                         Command::SetMode { mode } => self.set_mode(mode).await,
                         // Ignore permission answers / other commands mid-stream.
@@ -1190,7 +1221,7 @@ impl Engine {
                 // A mode toggle applies immediately; keep waiting for a decision.
                 Some(Command::SetMode { mode }) => self.set_mode(mode).await,
                 // Queue a compaction for after we resume (if we do).
-                Some(Command::Compact) => self.compact_requested = true,
+                Some(Command::Compact) => self.request_compaction(CompactTrigger::Manual),
                 // Strays (permission/ask answers with no pending prompt): ignore.
                 Some(_) => {}
                 // Frontend gone: stop, fail-safe (never spin unattended).
@@ -1267,7 +1298,7 @@ impl Engine {
                     }
                     Some(Command::Cancel) => return ToolCallResult::Canceled,
                     // Queue a compaction for the clean boundary (Tech Spec §7).
-                    Some(Command::Compact) => self.compact_requested = true,
+                    Some(Command::Compact) => self.request_compaction(CompactTrigger::Manual),
                     // A mode toggle applies immediately to later asks this turn.
                     Some(Command::SetMode { mode }) => self.set_mode(mode).await,
                     Some(_) => {}
@@ -2042,8 +2073,9 @@ impl Engine {
     /// Emit context usage and, when pricing is configured, the running cost
     /// estimate (Requirements §8.4, P-6; Design §3.1). Uses the provider's
     /// authoritative prompt-token count once available, falling back to a
-    /// chars/4 estimate before the first `Usage`.
-    async fn emit_context_usage(&self) {
+    /// chars/4 estimate before the first `Usage`. Also checks the FR-4
+    /// automatic-compaction threshold and queues a compaction when crossed.
+    async fn emit_context_usage(&mut self) {
         let info = self.provider.model_info();
         let reserve = OUTPUT_RESERVE.min(u64::from(info.max_output_tokens));
         let budget = u64::from(info.context_window)
@@ -2058,6 +2090,24 @@ impl Engine {
             tokens,
         })
         .await;
+
+        // Automatic compaction threshold check (FR-4, Tech Spec §7). The latch
+        // prevents thrash: after an auto-compaction fires the latch disarms and
+        // stays disarmed until usage drops below the threshold, then re-crosses
+        // it. The compaction itself drops usage well below the line, so
+        // re-arming is natural.
+        if self.context.auto_compact {
+            let pct_f = f64::from(u8::try_from(pct).unwrap_or(100));
+            if pct_f >= self.context.auto_compact_threshold * 100.0 {
+                if self.auto_compact_armed {
+                    self.request_compaction(CompactTrigger::Auto);
+                    self.auto_compact_armed = false;
+                }
+            } else {
+                // Usage below threshold: re-arm the latch.
+                self.auto_compact_armed = true;
+            }
+        }
 
         // Cumulative session tokens — always available (independent of pricing).
         self.emit(UiEvent::SessionUsage {

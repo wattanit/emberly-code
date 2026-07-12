@@ -184,6 +184,7 @@ fn transcript_event_variants_roundtrip() -> serde_json::Result<()> {
             summary: "…".into(),
             replaced_from: 0,
             replaced_to: 8,
+            trigger: Default::default(),
         },
         TranscriptEvent::SessionTitle { title: "t".into() },
         TranscriptEvent::SessionEnd { reason: None },

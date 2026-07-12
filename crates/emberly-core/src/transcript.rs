@@ -181,6 +181,11 @@ pub enum TranscriptEvent {
         summary: String,
         replaced_from: u32,
         replaced_to: u32,
+        /// Whether the user or the FR-4 threshold initiated this compaction
+        /// (FR-4, Tech Spec §3.2). Additive — older readers warn-skip it, no
+        /// `SCHEMA_VERSION` bump; absent reads as `Manual`.
+        #[serde(default)]
+        trigger: CompactTrigger,
     },
 
     /// The session title was set or renamed (Requirements §8.2).
@@ -195,6 +200,17 @@ pub enum TranscriptEvent {
     /// Written by the supervisor on an abnormal exit when possible
     /// (Requirements HC-3, S-2).
     AbnormalExit { reason: String },
+}
+
+/// Whether a compaction was started by the user or the automatic threshold
+/// (FR-4, Tech Spec §3.2). Serialized as `trigger` on the `Compaction` event;
+/// absent on older records reads as `Manual` (additive — no `SCHEMA_VERSION`
+/// bump).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CompactTrigger {
+    #[default]
+    Manual,
+    Auto,
 }
 
 /// Records which configuration tier an active piece came from, for provenance
