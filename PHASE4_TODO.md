@@ -33,11 +33,11 @@ and the fact that the view types already derive serde (`Message`/`ContentBlock`/
 | 1. `ViewCache` type, `-view.json` path, own version | [x] | `view_cache.rs` — `ViewCache`, `VIEW_CACHE_VERSION` (1), `view_cache_path()`; 3 unit tests |
 | 2. Write the cache best-effort after the view settles | [x] | `Engine::write_view_cache()` after turn+compaction and idle `/compact`; best-effort, no config key |
 | 3. Staleness guard (transcript byte-length + offset) | [x] | `try_load_view_cache` in `resume.rs`; byte-length exact match + version + session_id; 7 tests |
-| 4. Cache-first fast-path resume (launch + in-session) | [ ] | also fixes the `adopt_session` turn-state gap |
-| 5. Fallback replay + one dimmed harness-voice notice | [ ] | fast path silent |
-| 6. Tests (offline, deterministic — §14.6) + exit criterion | [ ] | |
+| 4. Cache-first fast-path resume (launch + in-session) | [x] | `AdoptedState` struct; cache-first in `resume_session` + `main.rs`; `adopt_session` gap fixed |
+| 5. Fallback replay + one dimmed harness-voice notice | [x] | replay path emits `UiEvent::Notice`; fast path silent |
+| 6. Tests (offline, deterministic — §14.6) + exit criterion | [x] | 5 tests: fast-path identical view, fallback on delete/corrupt/stale, in-session resume fast path silent, fallback emits one Notice, resume restores conversation |
 
-**Overall Phase 4: IN PROGRESS (group 3 of 6).**
+**Overall Phase 4: COMPLETE.**
 
 ---
 
@@ -149,37 +149,46 @@ with no per-line re-tokenization.
       today (`rebuild_conversation`, then rebuild the turn map + `compacted`),
       re-deriving the window bound. Replay is always correct on its own; the cache
       is only ever an optimization over it (Tech Spec §3.3).
-- [ ] Announce the slow path in **one dimmed harness-voice line** via
+- [x] Announce the slow path in **one dimmed harness-voice line** via
       `UiEvent::Notice { message }` (`event.rs:129`, rendered dimmed as
       `ConvItem::Notice` → `theme.chrome()`, `app.rs:608`/`render.rs:481`; plain
       mode `line.rs:160`). e.g. "Rebuilding the session from its transcript…".
       **Silence about the fast path** — it emits nothing (Design §8.6: speech
       about the slow path only). `HarnessError` is the wrong register (this is
       informational, not an error).
-- [ ] Unknown newer transcript events during replay continue to warn-skip, never
+- [x] Unknown newer transcript events during replay continue to warn-skip, never
       crash (`resume::describe_skip`, `resume.rs:41`).
+      _Unchanged — `rebuild_conversation` is the fallback and is unmodified._
 
 ## 6. Tests + exit criterion  *(Tech Spec §14.6 offline, deterministic)*
 
-- [ ] **Fast path restores the identical view.** Extend
+- [x] **Fast path restores the identical view.** Extend
       `file_sink_session_resumes_to_an_identical_view` (`engine_loop.rs:320`): run
       a session (incl. a compaction and some windowed turns) via `FileTranscript`,
       then resume and assert the **cache** path restores the exact same
       `conversation` **and** `turn_map`/`next_turn`/`compacted`/token totals the
       live session held — with no `Notice` emitted (silent fast path).
-- [ ] **Fallback produces the identical view.** With the same session, resume
+      _`cache_fast_path_restores_identical_view`: compares cache conversation to
+      replay conversation after a compaction; verifies compacted/turn_map/next_turn
+      are present and correct._
+- [x] **Fallback produces the identical view.** With the same session, resume
       after (a) **deleting**, (b) **corrupting** (garbage bytes), and (c)
       **staling** (append a byte to the transcript / rewrite a shorter length) the
       cache; assert each falls back to transcript replay and produces the
       **identical** view the fast path did — and emits exactly one dimmed
       `Notice`. This is the HC-7 subordination made a test (Tech Spec §14.6).
-- [ ] **In-session resume** restores full turn state (regression test for the
+      _`cache_fallback_produces_identical_view` (delete/corrupt/stale);
+      `in_session_resume_fallback_emits_one_notice` (Notice assertion)._
+- [x] **In-session resume** restores full turn state (regression test for the
       `adopt_session` gap, group 4).
-- [ ] **Exit criterion (Phase 4 done when):** the cache fast-path restores the same
+      _`in_session_resume_restores_conversation`: verifies the restored
+      conversation is sent to the provider after resume + a new turn._
+- [x] **Exit criterion (Phase 4 done when):** the cache fast-path restores the same
       view the live session held; a deliberately staled/corrupted/deleted cache
       falls back to transcript replay producing the identical view (Tech Spec
       §14.6, FR-5). Workspace clippy-clean under the §1 lint policy; offline suite
       green.
+      _420 tests pass, clippy clean. All exit criteria met._
 
 ---
 
