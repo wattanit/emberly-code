@@ -37,8 +37,8 @@ pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfi
 pub use gate::{AskUserAsk, PermissionAsk};
 pub use id::{AskId, PermissionId, SessionId, ToolCallId};
 pub use transcript::{
-    append_abnormal_exit, CaptureSink, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent,
-    TranscriptRecord, TranscriptSink, SCHEMA_VERSION,
+    append_abnormal_exit, CaptureSink, CompactTrigger, ConfigProvenance, FileTranscript, NoopSink,
+    TranscriptEvent, TranscriptRecord, TranscriptSink, SCHEMA_VERSION,
 };
 pub use types::{
     AskAnswer, Effort, LoopResolution, Mode, PermissionDecision, PermissionRendering,

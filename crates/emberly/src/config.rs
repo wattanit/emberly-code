@@ -89,6 +89,11 @@ pub struct ContextConfigFile {
     pub window_turns: Option<u32>,
     /// How many trailing messages compaction keeps verbatim (default 6).
     pub keep_recent_turns: Option<u32>,
+    /// Whether automatic compaction is enabled (default `true`, FR-4).
+    pub auto_compact: Option<bool>,
+    /// Context-usage fraction that triggers automatic compaction (default
+    /// `0.85`, FR-4). Must be in `(0.0, 1.0]`.
+    pub auto_compact_threshold: Option<f64>,
 }
 
 /// `[truncate]` — tool-result reduction and size backstop at ingestion
@@ -307,6 +312,12 @@ impl ConfigFile {
         }
         if higher.context.keep_recent_turns.is_some() {
             self.context.keep_recent_turns = higher.context.keep_recent_turns;
+        }
+        if higher.context.auto_compact.is_some() {
+            self.context.auto_compact = higher.context.auto_compact;
+        }
+        if higher.context.auto_compact_threshold.is_some() {
+            self.context.auto_compact_threshold = higher.context.auto_compact_threshold;
         }
         // `[trust]` is deliberately NOT merged — it is read only from the global
         // tier (FR-1); see `global_trust_dirs` and the project-[trust] notice.
@@ -535,6 +546,42 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             true,
         );
     }
+    if field(&project, |c: &ConfigFile| c.context.auto_compact.is_some())
+        || field(&global, |c: &ConfigFile| c.context.auto_compact.is_some())
+    {
+        record(
+            &mut provenance,
+            "context.auto_compact",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.context.auto_compact.is_some()),
+                field(&global, |c: &ConfigFile| c.context.auto_compact.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| {
+        c.context.auto_compact_threshold.is_some()
+    }) || field(&global, |c: &ConfigFile| {
+        c.context.auto_compact_threshold.is_some()
+    }) {
+        record(
+            &mut provenance,
+            "context.auto_compact_threshold",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| {
+                    c.context.auto_compact_threshold.is_some()
+                }),
+                field(&global, |c: &ConfigFile| {
+                    c.context.auto_compact_threshold.is_some()
+                }),
+            ),
+            true,
+        );
+    }
 
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
@@ -598,6 +645,15 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         },
         context: {
             let d = emberly_core::ContextConfig::default();
+            let threshold = merged
+                .context
+                .auto_compact_threshold
+                .unwrap_or(d.auto_compact_threshold);
+            if threshold <= 0.0 || threshold > 1.0 {
+                anyhow::bail!(
+                    "context.auto_compact_threshold must be in (0.0, 1.0], got {threshold}"
+                );
+            }
             emberly_core::ContextConfig {
                 window_turns: merged
                     .context
@@ -607,6 +663,8 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
                     .context
                     .keep_recent_turns
                     .map_or(d.keep_recent_turns, |v| v as usize),
+                auto_compact: merged.context.auto_compact.unwrap_or(d.auto_compact),
+                auto_compact_threshold: threshold,
             }
         },
     })

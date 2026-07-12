@@ -104,6 +104,7 @@ pub fn rebuild_conversation(records: &[TranscriptRecord]) -> Vec<Message> {
                 summary,
                 replaced_from,
                 replaced_to,
+                trigger: _,
             } => {
                 // Splice out `[from..to]` (the summarized middle) and insert the
                 // summary, keeping the pinned head and the recent tail — the
@@ -351,6 +352,7 @@ mod tests {
                 summary: "summary so far".into(),
                 replaced_from: 1,
                 replaced_to: 3,
+                trigger: Default::default(),
             }),
             rec(TranscriptEvent::UserMessage {
                 text: "continue".into(),
