@@ -207,6 +207,7 @@ pub enum TranscriptEvent {
 /// absent on older records reads as `Manual` (additive — no `SCHEMA_VERSION`
 /// bump).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum CompactTrigger {
     #[default]
     Manual,

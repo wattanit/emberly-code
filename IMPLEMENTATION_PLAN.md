@@ -1,17 +1,23 @@
 # Emberly Code — Implementation Plan (0.3 feature set)
 
-**Status:** draft (planned) — status is the owner's to advance
-**Date:** 2026-07-11
+**Status:** ✅ **complete (2026-07-12)** — all four phases implemented and
+merged to `version0.3`. The whole 0.3 context-economy feature set (M7) ships:
+FR-2 salient tool-result reduction, FR-3 adaptive context window + T-10 `recall`
+tool, FR-4 automatic compaction + the `/compact` command surface, and FR-5 the
+derived resume cache.
+**Date:** 2026-07-11 (planned); completed 2026-07-12
 **Owner:** Wattanit
 **Source documents** (G-14 as-built pin for the 0.3 release):
 - Requirements Document v0.6 (`docs/emberly-code-requirements.md`) — WHAT/WHY
 - Design Guideline v0.6 (`docs/emberly-code-design-guideline.md`) — UX/voice
 - Technical Specification v0.7 (`docs/emberly-code-tech-spec.md`) — HOW
 
-These three versions are the as-built pin for the 0.3 release. All three are
-`Status: approved` (owner, 2026-07-11), so downstream work may rely on them
-(SFD §3.2). When a source document bumps before 0.3 ships, refresh the pins
-above — a stale pin is a defect (G-16).
+These three versions are the as-built truth for the 0.3 release, all
+`Status: approved` (owner, 2026-07-11); the Technical Specification publishes at
+v0.7 alongside the 0.3 release (owner decision, 2026-07-12 — not bumped). One
+post-merge fix shipped under the *same* versions after an alignment audit: the
+`compaction.trigger` transcript field now serializes as `manual`/`auto` to match
+Tech Spec §3.2 (it was emitting PascalCase). A stale pin is a defect (G-16).
 
 This plan expands Tech Spec §15 milestone **M7** (the 0.3 context-economy
 feature set) into workable phases. It builds on the shipped 0.2 product
