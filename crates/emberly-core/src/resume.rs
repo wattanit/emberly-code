@@ -11,6 +11,7 @@ use emberly_providers::{ContentBlock, Message, Role};
 
 use crate::id::SessionId;
 use crate::transcript::{TranscriptEvent, TranscriptRecord, SCHEMA_VERSION};
+use crate::view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
 
 /// The result of reading a transcript file.
 pub struct Loaded {
@@ -151,6 +152,40 @@ fn gather_tool_calls(records: &[TranscriptRecord], content: &mut Vec<ContentBloc
     consumed
 }
 
+/// Try loading the derived view cache (FR-5, Tech Spec §3.2a/§3.3). Returns
+/// `None` — forcing a fallback replay — on any doubt: the cache file is
+/// absent, unreadable, corrupt, the wrong version, has a session-id mismatch,
+/// or the transcript has grown or shrunk since the cache was written. Only an
+/// exact transcript byte-length match is trusted.
+///
+/// The guard is pure metadata (`fs::metadata().len()`) plus a version/id
+/// check — no re-tokenization, so validating the cache is cheap (FR-5).
+#[must_use]
+pub fn try_load_view_cache(transcript_path: &Path) -> Option<ViewCache> {
+    let cache_path = view_cache_path(transcript_path);
+    let text = std::fs::read_to_string(&cache_path).ok()?;
+    let cache: ViewCache = serde_json::from_str(&text).ok()?;
+    if cache.version != VIEW_CACHE_VERSION {
+        return None;
+    }
+    // Session-id sanity: the transcript filename stem is `<uuid>`. If it
+    // parses and does not match the cache's session id, the cache is from a
+    // different session. A non-UUID stem (unusual path) skips this check —
+    // the byte-length match below is the authoritative guard.
+    if let Some(stem) = transcript_path.file_stem().and_then(|s| s.to_str()) {
+        if let Ok(id) = uuid::Uuid::parse_str(stem) {
+            if id != cache.session_id.0 {
+                return None;
+            }
+        }
+    }
+    let actual_len = std::fs::metadata(transcript_path).map(|m| m.len()).ok()?;
+    if actual_len != cache.transcript_byte_len {
+        return None;
+    }
+    Some(cache)
+}
+
 /// Whether a session ended without a clean `session_end` — a crash, a kill, or
 /// a recorded `abnormal_exit` — so the next launch should offer to resume it
 /// (Design §8.3). An empty or cleanly-ended transcript is not interrupted.
@@ -284,6 +319,8 @@ pub fn latest_session(dir: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::id::ToolCallId;
+    use crate::types::TokenUsage;
+    use std::io::Write;
     use time::OffsetDateTime;
 
     fn rec(event: TranscriptEvent) -> TranscriptRecord {
@@ -473,5 +510,149 @@ mod tests {
         );
 
         assert!(!interrupted(&[]));
+    }
+
+    // --- Staleness guard tests (FR-5, group 3) ---
+
+    /// Write a transcript and a matching `-view.json` cache, return both paths.
+    fn write_cache_fixture(sid: SessionId, transcript_len_delta: i64, cache_overrides: Option<ViewCache>) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("emberly-cache-{}-{sid}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let transcript_path = dir.join(format!("{sid}.jsonl"));
+        // Write a transcript body of a known length.
+        let body = r#"{"v":2,"ts":"1970-01-01T00:00:00Z","type":"session_start","session_id":"00000000-0000-0000-0000-000000000000","provider":"test","model":"test","project_root":"/p","sandbox":{"state":"unavailable","reason":"x"},"config_provenance":[],"prompts_version":1}
+"#;
+        std::fs::write(&transcript_path, body).unwrap();
+        let real_len = std::fs::metadata(&transcript_path).map(|m| m.len()).unwrap();
+        // Adjust the transcript to create the desired delta (grown / shorter / exact).
+        if transcript_len_delta > 0 {
+            // Append bytes to grow the file past the recorded length.
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&transcript_path)
+                .unwrap()
+                .write_all(b"x".repeat(transcript_len_delta as usize).as_slice())
+                .unwrap();
+        }
+        // Build the cache claiming the *original* byte length (before any delta).
+        let cache = cache_overrides.unwrap_or(ViewCache {
+            version: VIEW_CACHE_VERSION,
+            session_id: sid,
+            conversation: vec![Message::user_text("hello")],
+            turn_map: vec![0],
+            next_turn: 1,
+            compacted: false,
+            original_task_recorded: true,
+            session_usage: TokenUsage::default(),
+            session_cost_usd: 0.0,
+            context_tokens_authoritative: None,
+            transcript_byte_len: real_len,
+        });
+        let cache_path = view_cache_path(&transcript_path);
+        std::fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
+        (transcript_path, cache_path)
+    }
+
+    #[test]
+    fn view_cache_loads_when_byte_lengths_match() {
+        let sid = SessionId::new();
+        let (transcript_path, _cache_path) = write_cache_fixture(sid, 0, None);
+        let cache = try_load_view_cache(&transcript_path);
+        assert!(cache.is_some(), "exact byte-length match → trusted");
+        let _ = std::fs::remove_dir_all(transcript_path.parent().unwrap());
+    }
+
+    #[test]
+    fn view_cache_absent_returns_none() {
+        let dir = std::env::temp_dir().join(format!("emberly-cache-absent-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let transcript_path = dir.join("00000000-0000-0000-0000-000000000001.jsonl");
+        std::fs::write(&transcript_path, "some content\n").unwrap();
+        assert!(try_load_view_cache(&transcript_path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_cache_corrupt_returns_none() {
+        let sid = SessionId::new();
+        let dir = std::env::temp_dir().join(format!("emberly-cache-corrupt-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let transcript_path = dir.join(format!("{sid}.jsonl"));
+        std::fs::write(&transcript_path, "some content\n").unwrap();
+        let cache_path = view_cache_path(&transcript_path);
+        std::fs::write(&cache_path, "this is not json {{{").unwrap();
+        assert!(try_load_view_cache(&transcript_path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_cache_version_mismatch_returns_none() {
+        let sid = SessionId::new();
+        let stale = ViewCache {
+            version: 999,
+            session_id: sid,
+            conversation: vec![],
+            turn_map: vec![],
+            next_turn: 0,
+            compacted: false,
+            original_task_recorded: false,
+            session_usage: TokenUsage::default(),
+            session_cost_usd: 0.0,
+            context_tokens_authoritative: None,
+            transcript_byte_len: 0,
+        };
+        let (transcript_path, _cache_path) = write_cache_fixture(sid, 0, Some(stale));
+        assert!(try_load_view_cache(&transcript_path).is_none(), "unknown version → stale");
+        let _ = std::fs::remove_dir_all(transcript_path.parent().unwrap());
+    }
+
+    #[test]
+    fn view_cache_transcript_grown_returns_none() {
+        let sid = SessionId::new();
+        // Delta > 0: append 3 bytes to the transcript after the cache was written.
+        let (transcript_path, _cache_path) = write_cache_fixture(sid, 3, None);
+        let cache = try_load_view_cache(&transcript_path);
+        assert!(cache.is_none(), "transcript grew past the recorded offset → stale");
+        let _ = std::fs::remove_dir_all(transcript_path.parent().unwrap());
+    }
+
+    #[test]
+    fn view_cache_transcript_shorter_returns_none() {
+        let sid = SessionId::new();
+        // Write a fixture, then truncate the transcript to be shorter.
+        let (transcript_path, _cache_path) = write_cache_fixture(sid, 0, None);
+        std::fs::write(&transcript_path, "short").unwrap();
+        assert!(
+            try_load_view_cache(&transcript_path).is_none(),
+            "transcript is shorter than recorded → stale"
+        );
+        let _ = std::fs::remove_dir_all(transcript_path.parent().unwrap());
+    }
+
+    #[test]
+    fn view_cache_session_id_mismatch_returns_none() {
+        let sid = SessionId::new();
+        let wrong_sid = SessionId::new();
+        let cache = ViewCache {
+            version: VIEW_CACHE_VERSION,
+            session_id: wrong_sid,
+            conversation: vec![],
+            turn_map: vec![],
+            next_turn: 0,
+            compacted: false,
+            original_task_recorded: false,
+            session_usage: TokenUsage::default(),
+            session_cost_usd: 0.0,
+            context_tokens_authoritative: None,
+            transcript_byte_len: 0,
+        };
+        let (transcript_path, _cache_path) = write_cache_fixture(sid, 0, Some(cache));
+        // The transcript is named after `sid` but the cache claims `wrong_sid`.
+        assert!(
+            try_load_view_cache(&transcript_path).is_none(),
+            "session-id mismatch → stale"
+        );
+        let _ = std::fs::remove_dir_all(transcript_path.parent().unwrap());
     }
 }

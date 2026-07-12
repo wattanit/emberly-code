@@ -36,6 +36,7 @@ use crate::transcript::{
     TranscriptRecord, TranscriptSink,
 };
 use crate::types::{LoopResolution, PermissionRendering, SandboxStatus, TokenUsage};
+use crate::view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
 
 /// The session title is the first user message, clipped to this many chars
 /// (Tech Spec §16 — the heuristic v1 title).
@@ -164,6 +165,14 @@ pub struct EngineConfig {
     /// summary at `conversation[1]` is pinned in the sent context (FR-3
     /// windowing composition with compaction).
     pub compacted: bool,
+    /// Cached derived state from a prior run (FR-5 fast path). `Some` when a
+    /// valid `-view.json` was loaded at launch — the engine seeds turn_map,
+    /// accounting, and compaction state directly from it instead of deriving
+    /// them. `None` for fresh sessions and fallback-replay resumes.
+    pub initial_cache: Option<ViewCache>,
+    /// True when this resume fell back to transcript replay (no valid cache).
+    /// Drives the one dimmed harness-voice Notice on start (Design §8.6).
+    pub replayed: bool,
     /// A `/compact` summarization-prompt override (P-7); `None` uses the
     /// built-in default.
     pub summary_prompt: Option<String>,
@@ -214,6 +223,64 @@ struct TurnOutput {
     /// `(signature, redacted)` for the reasoning block, when the provider sent
     /// one. `redacted` blocks carry opaque `data` here and have no replay text.
     reasoning_signature: Option<(String, bool)>,
+}
+
+/// The derived session state passed to [`Engine::adopt_session`] — either
+/// freshly computed or restored from the view cache (FR-5).
+struct AdoptedState {
+    turn_map: Vec<usize>,
+    next_turn: usize,
+    compacted: bool,
+    session_usage: TokenUsage,
+    session_cost_usd: f64,
+    context_tokens_authoritative: Option<u64>,
+    original_task_recorded: bool,
+}
+
+impl AdoptedState {
+    /// Defaults for a fresh session (empty conversation, zero accounting).
+    fn fresh() -> Self {
+        Self {
+            turn_map: Vec::new(),
+            next_turn: 0,
+            compacted: false,
+            session_usage: TokenUsage::default(),
+            session_cost_usd: 0.0,
+            context_tokens_authoritative: None,
+            original_task_recorded: false,
+        }
+    }
+
+    /// Derive from a replayed conversation (FR-5 fallback path).
+    fn replayed(conversation: &[Message], compacted: bool) -> Self {
+        let (turn_map, next_turn) = build_turn_map(conversation);
+        Self {
+            turn_map,
+            next_turn,
+            compacted,
+            session_usage: TokenUsage::default(),
+            session_cost_usd: 0.0,
+            context_tokens_authoritative: None,
+            original_task_recorded: true,
+        }
+    }
+
+    /// Restore from a valid view cache (FR-5 fast path). Returns the derived
+    /// state and the cached conversation so the caller can pass both to
+    /// [`Engine::adopt_session`] without a partial-move conflict.
+    fn from_cache(cache: ViewCache) -> (Self, Vec<Message>) {
+        let conversation = cache.conversation;
+        let state = Self {
+            turn_map: cache.turn_map,
+            next_turn: cache.next_turn,
+            compacted: cache.compacted,
+            session_usage: cache.session_usage,
+            session_cost_usd: cache.session_cost_usd,
+            context_tokens_authoritative: cache.context_tokens_authoritative,
+            original_task_recorded: cache.original_task_recorded,
+        };
+        (state, conversation)
+    }
 }
 
 /// Outcome of running one tool call.
@@ -440,6 +507,9 @@ pub struct Engine {
     /// True once a compaction has run (live or resumed), so the summary at
     /// `conversation[1]` is pinned in the sent context (FR-3 windowing).
     compacted: bool,
+    /// True when the resume fell back to transcript replay (FR-5 slow path).
+    /// Drives the one dimmed Notice on engine start (Design §8.6).
+    replayed: bool,
     /// Set when `/compact` or the auto-trigger requests a compaction;
     /// performed at the next clean boundary (Tech Spec §7). `Manual` outranks
     /// `Auto` — a user `/compact` is never downgraded (FR-4).
@@ -487,8 +557,28 @@ impl Engine {
         // Seed the session effort from the model's declared default before the
         // provider is moved into the struct (P-9, Tech Spec §4.6).
         let seed_effort = config.provider.model_info().default_effort;
-        // Build the turn map from the initial conversation (resume or fresh).
-        let (turn_map, next_turn) = build_turn_map(&config.initial_conversation);
+        // Build the turn map from the initial conversation — or restore it
+        // directly from the cache when the FR-5 fast path loaded (FR-5).
+        let (turn_map, next_turn) = match &config.initial_cache {
+            Some(c) => (c.turn_map.clone(), c.next_turn),
+            None => build_turn_map(&config.initial_conversation),
+        };
+        let session_usage = config
+            .initial_cache
+            .as_ref()
+            .map_or(TokenUsage::default(), |c| c.session_usage);
+        let session_cost_usd = config
+            .initial_cache
+            .as_ref()
+            .map_or(0.0, |c| c.session_cost_usd);
+        let context_tokens_authoritative = config
+            .initial_cache
+            .as_ref()
+            .and_then(|c| c.context_tokens_authoritative);
+        let original_task_recorded = config
+            .initial_cache
+            .as_ref()
+            .map_or(config.resuming, |c| c.original_task_recorded);
         let engine = Self {
             provider: config.provider,
             tools: config.tools,
@@ -515,9 +605,9 @@ impl Engine {
             conversation: config.initial_conversation,
             turn_map,
             next_turn,
-            session_usage: TokenUsage::default(),
-            session_cost_usd: 0.0,
-            context_tokens_authoritative: None,
+            session_usage,
+            session_cost_usd,
+            context_tokens_authoritative,
             next_permission_id: 0,
             next_ask_id: 0,
             transcript: config.transcript,
@@ -531,9 +621,10 @@ impl Engine {
             sandbox_spawn,
             config_provenance: config.config_provenance,
             // On resume the original task already lives in the restored history.
-            original_task_recorded: config.resuming,
+            original_task_recorded,
             resuming: config.resuming,
             compacted: config.compacted,
+            replayed: config.replayed,
             pending_compaction: None,
             auto_compact_armed: true,
             summary_prompt: config.summary_prompt,
@@ -556,6 +647,15 @@ impl Engine {
         if self.resuming {
             // Continuing an existing transcript: no fresh session_start, but
             // surface the restored context size right away (Design §8.4).
+            // When the resume fell back to transcript replay (no valid cache),
+            // say so in one dimmed line — speech about the slow path only
+            // (Design §8.6). The fast path is silent.
+            if self.replayed {
+                self.emit(UiEvent::Notice {
+                    message: "Rebuilding the session from its transcript…".into(),
+                })
+                .await;
+            }
             self.emit_context_usage().await;
         } else {
             self.write_transcript(TranscriptEvent::SessionStart {
@@ -611,6 +711,7 @@ impl Engine {
                     if let Some(trigger) = self.pending_compaction.take() {
                         self.compact(trigger).await;
                     }
+                    self.write_view_cache();
                 }
                 // No turn is running while idle; these are strays or no-ops here.
                 Command::Cancel
@@ -618,7 +719,10 @@ impl Engine {
                 | Command::AskUserAnswer { .. }
                 | Command::ResolveLoop { .. } => {}
                 // Idle is already a clean boundary — compact immediately.
-                Command::Compact => self.compact(CompactTrigger::Manual).await,
+                Command::Compact => {
+                    self.compact(CompactTrigger::Manual).await;
+                    self.write_view_cache();
+                }
                 // Session switches are only issued at idle (the frontend gates
                 // them while a turn runs), so a clean boundary is guaranteed.
                 Command::NewSession { session_id } => self.start_new_session(session_id).await,
@@ -634,6 +738,10 @@ impl Engine {
 
         // Command channel closed: the frontend is gone. Clean end of session.
         self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+        // Write the cache one final time so it reflects the final transcript
+        // (the SessionEnd line grew the file; without this the cache would be
+        // stale on the next resume — FR-5).
+        self.write_view_cache();
     }
 
     /// Start a fresh session in place (`/new`): end the current transcript
@@ -657,7 +765,13 @@ impl Engine {
         };
         self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
         self.transcript = Box::new(sink);
-        self.adopt_session(session_id, path, Vec::new(), false);
+        self.adopt_session(
+            session_id,
+            path,
+            Vec::new(),
+            AdoptedState::fresh(),
+            false,
+        );
         self.write_transcript(TranscriptEvent::SessionStart {
             session_id,
             provider: self.provider_label.clone(),
@@ -674,6 +788,8 @@ impl Engine {
     /// transcript, reopen the target for append, and replace the live
     /// conversation with the one rebuilt from it. Reading the target *before*
     /// ending the current session keeps the current one intact on any failure.
+    /// Tries the derived view cache first (FR-5 fast path); falls back to a
+    /// full transcript replay when the cache is absent or stale.
     async fn resume_session(&mut self, session_id: SessionId) {
         let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
         let loaded = match crate::resume::read_records(&path) {
@@ -688,7 +804,6 @@ impl Engine {
                 return;
             }
         };
-        let conversation = crate::resume::rebuild_conversation(&loaded.records);
         let sink = match FileTranscript::open(&path) {
             Ok(file) => file,
             Err(error) => {
@@ -703,31 +818,60 @@ impl Engine {
         };
         self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
         self.transcript = Box::new(sink);
-        // Resuming: the original task lives in the restored history, so no fresh
-        // session_start is written (matches launch-time resume — Tech Spec §3.3).
-        self.adopt_session(session_id, path, conversation, true);
+
+        // FR-5: try the cache first. A valid cache restores the full derived
+        // state directly — no per-line re-tokenization. The fast path is silent
+        // (Design §8.6).
+        if let Some(cache) = crate::resume::try_load_view_cache(&path) {
+            let (state, conversation) = AdoptedState::from_cache(cache);
+            self.adopt_session(session_id, path, conversation, state, true);
+        } else {
+            // Fallback: replay the transcript, re-deriving the view. Announce
+            // the slow path in one dimmed harness-voice line (Design §8.6).
+            self.emit(UiEvent::Notice {
+                message: "Rebuilding the session from its transcript…".into(),
+            })
+            .await;
+            let conversation = crate::resume::rebuild_conversation(&loaded.records);
+            let compacted = crate::resume::has_compaction(&loaded.records);
+            self.adopt_session(
+                session_id,
+                path,
+                conversation.clone(),
+                AdoptedState::replayed(&conversation, compacted),
+                true,
+            );
+        }
         self.emit_context_usage().await;
     }
 
     /// Reset session-scoped state to a freshly adopted session and publish the
     /// new transcript path to the shared handle so the host's panic/exit path
-    /// names the current session (HC-3).
+    /// names the current session (HC-3). Carries the full derived state —
+    /// turn map, compaction flag, and token accounting — so both the cache
+    /// fast path (FR-5) and the replay fallback restore correct turn state
+    /// (fixing the pre-existing `adopt_session` gap).
     fn adopt_session(
         &mut self,
         session_id: SessionId,
         path: PathBuf,
         conversation: Vec<Message>,
+        state: AdoptedState,
         resuming: bool,
     ) {
         self.session_id = session_id;
         self.conversation = conversation;
-        self.original_task_recorded = resuming;
+        self.turn_map = state.turn_map;
+        self.next_turn = state.next_turn;
+        self.compacted = state.compacted;
+        self.original_task_recorded = state.original_task_recorded;
         self.resuming = resuming;
+        self.replayed = false;
         self.pending_compaction = None;
         self.auto_compact_armed = true;
-        self.session_usage = TokenUsage::default();
-        self.session_cost_usd = 0.0;
-        self.context_tokens_authoritative = None;
+        self.session_usage = state.session_usage;
+        self.session_cost_usd = state.session_cost_usd;
+        self.context_tokens_authoritative = state.context_tokens_authoritative;
         self.next_permission_id = 0;
         if let Ok(mut guard) = self.active_session_path.write() {
             *guard = path;
@@ -2067,6 +2211,44 @@ impl Engine {
     fn write_transcript(&mut self, event: TranscriptEvent) {
         let record = TranscriptRecord::new(OffsetDateTime::now_utc(), event);
         self.transcript.record(&record);
+    }
+
+    /// Write the derived conversation-state cache best-effort (FR-5, Tech Spec
+    /// §3.2a). Called after the view settles — a turn completes, a compaction
+    /// runs. Losing this file loses nothing: the replay fallback is always
+    /// correct (HC-7 subordination). Any I/O or serialization error is
+    /// swallowed (HC-3 — never a panic); the cache is never relied upon.
+    fn write_view_cache(&self) {
+        let transcript_path = {
+            let guard = match self.active_session_path.read() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            guard.clone()
+        };
+        let byte_len = match std::fs::metadata(&transcript_path) {
+            Ok(m) => m.len(),
+            Err(_) => return, // no transcript file (e.g. NoopSink in tests)
+        };
+        let cache = ViewCache {
+            version: VIEW_CACHE_VERSION,
+            session_id: self.session_id,
+            conversation: self.conversation.clone(),
+            turn_map: self.turn_map.clone(),
+            next_turn: self.next_turn,
+            compacted: self.compacted,
+            original_task_recorded: self.original_task_recorded,
+            session_usage: self.session_usage,
+            session_cost_usd: self.session_cost_usd,
+            context_tokens_authoritative: self.context_tokens_authoritative,
+            transcript_byte_len: byte_len,
+        };
+        let cache_path = view_cache_path(&transcript_path);
+        let json = match serde_json::to_string(&cache) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let _ = std::fs::write(&cache_path, json);
     }
 
     async fn emit_provider_error(&self, error: &ProviderError) {

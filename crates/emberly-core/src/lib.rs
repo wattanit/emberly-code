@@ -26,6 +26,7 @@ pub mod resume;
 pub mod spawn;
 pub mod transcript;
 pub mod types;
+pub mod view_cache;
 
 pub use channels::{channel, channel_with_capacity, EnginePorts, FrontendPorts};
 pub use command::Command;
@@ -44,6 +45,7 @@ pub use types::{
     AskAnswer, Effort, LoopResolution, Mode, PermissionDecision, PermissionRendering,
     SandboxStatus, TokenUsage,
 };
+pub use view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
 // The rule engine and confinement probe live in the security crate; re-export
 // the pieces the composition root (the binary) wires so it depends only on core.
 pub use emberly_sandbox::probe::probe;
