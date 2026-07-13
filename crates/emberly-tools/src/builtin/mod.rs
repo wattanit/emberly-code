@@ -14,6 +14,7 @@ mod memory;
 mod read;
 mod read_image;
 mod recall;
+mod skill;
 mod task_list;
 mod write;
 
@@ -25,6 +26,7 @@ pub use grep::GrepTool;
 pub use read::ReadFileTool;
 pub use read_image::ReadImageTool;
 pub use recall::RecallTool;
+pub use skill::SkillTool;
 pub use task_list::TaskListTool;
 pub use memory::MemoryTool;
 pub use write::WriteFileTool;
@@ -44,5 +46,6 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(RecallTool));
     registry.register(Arc::new(TaskListTool::new()));
     registry.register(Arc::new(MemoryTool::new()));
+    registry.register(Arc::new(SkillTool::new()));
     registry
 }

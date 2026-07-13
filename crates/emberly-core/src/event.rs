@@ -187,4 +187,10 @@ pub enum UiEvent {
     /// when the root is untrusted — Design §4.9 "silently absent, not
     /// half-loaded"). Additive — older frontends warn-skip it.
     MemoryStatus { user: usize, project: usize },
+
+    /// The skill catalog for the sidebar Skills section (T-15, FR-7, Design
+    /// §4.9). Emitted at session start and when the set changes. Each entry
+    /// carries name, description, and origin (user vs project — origin is how
+    /// the user reads trust). Additive — older frontends warn-skip it.
+    SkillsAvailable { skills: Vec<emberly_tools::SkillMeta> },
 }

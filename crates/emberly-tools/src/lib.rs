@@ -22,6 +22,7 @@ pub mod recall;
 pub mod reduce;
 pub mod registry;
 pub mod sandbox;
+pub mod skills;
 pub mod task_list;
 pub mod tool;
 pub mod truncate;
@@ -32,9 +33,10 @@ pub use task_list::{TaskItem, TaskListError, TaskListGate, TaskStatus};
 pub use memory::{
     MemoryError, MemoryGate, MemoryOp, MemoryOutcome, MemoryRequest, MemoryScope, slug,
 };
+pub use skills::{SkillError, SkillGate, SkillInvocation, SkillMeta, SkillOrigin};
 pub use builtin::{
     default_registry, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, MemoryTool,
-    ReadFileTool, ReadImageTool, RecallTool, TaskListTool, WriteFileTool,
+    ReadFileTool, ReadImageTool, RecallTool, SkillTool, TaskListTool, WriteFileTool,
 };
 pub use ctx::{ToolCtx, TruncateConfig};
 pub use permission::{PermissionGate, PermissionOutcome, PermissionRequest};

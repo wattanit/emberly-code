@@ -715,6 +715,26 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
         )));
     }
 
+    // Skills catalog (T-15, FR-7, Design §4.9): name, description, and origin
+    // per skill. Origin (user vs project) is how the user reads trust. An empty
+    // catalog shows no section (Design §3.1). No color-only signal (Design §7).
+    if !app.skills.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Skills", theme.chrome())));
+        for skill in &app.skills {
+            let origin = match skill.origin {
+                emberly_core::SkillOrigin::User => "user",
+                emberly_core::SkillOrigin::Project => "project",
+            };
+            let desc = if skill.description.is_empty() {
+                format!("{} ({})", skill.name, origin)
+            } else {
+                format!("{} — {} ({})", skill.name, skill.description, origin)
+            };
+            lines.push(Line::from(Span::styled(desc, theme.primary())));
+        }
+    }
+
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 

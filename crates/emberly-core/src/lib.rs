@@ -24,6 +24,7 @@ pub mod id;
 pub mod memory;
 pub mod prompts;
 pub mod resume;
+pub mod skills;
 pub mod spawn;
 pub mod transcript;
 pub mod types;
@@ -34,10 +35,11 @@ pub use command::Command;
 pub use emberly_providers::{Message, RetryPolicy};
 pub use emberly_tools::AskUserOutcome;
 pub use emberly_tools::{TaskItem, TaskStatus};
-pub use engine::{ContextConfig, Engine, EngineConfig, LoopConfig, MemoryConfig};
+pub use emberly_tools::{SkillMeta, SkillOrigin};
+pub use engine::{ContextConfig, Engine, EngineConfig, LoopConfig, MemoryConfig, SkillsConfig};
 pub use event::UiEvent;
 pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfig};
-pub use gate::{AskUserAsk, MemoryAsk, PermissionAsk, TaskListAsk};
+pub use gate::{AskUserAsk, MemoryAsk, PermissionAsk, SkillAsk, TaskListAsk};
 pub use id::{AskId, PermissionId, SessionId, ToolCallId};
 pub use transcript::{
     append_abnormal_exit, CaptureSink, CompactTrigger, ConfigProvenance, FileTranscript, NoopSink,
