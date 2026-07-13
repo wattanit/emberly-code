@@ -22,6 +22,10 @@ grep-regex.workspace = true
 # Image encoding + header-only dimensions for the read_image tool (T-12, P-11).
 base64.workspace = true
 imagesize.workspace = true
+# First-party HTTP client for web_search (T-14, §5.5). Same no-default-features
+# + rustls-tls set as the providers — a new crate→crate edge, not a new external
+# crate (already vetted for emberly-providers; confirm in cargo vet, HC-2).
+reqwest.workspace = true
 
 # Process-group tree-kill for bash (S-4). Unix only; the syscall wrapper is not
 # needed (and `process_group`/signals differ) elsewhere.
@@ -30,3 +34,7 @@ rustix = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+wiremock = "0.6"
+# Under `--workspace` reqwest's rustls feature is unified on; constructing a
+# Client needs a crypto provider (mirror emberly-providers dev-deps).
+rustls-rustcrypto.workspace = true
