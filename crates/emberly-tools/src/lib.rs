@@ -37,7 +37,7 @@ pub use memory::{
 pub use skills::{SkillError, SkillGate, SkillInvocation, SkillMeta, SkillOrigin};
 pub use builtin::{
     default_registry, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, MemoryTool,
-    ReadFileTool, ReadImageTool, RecallTool, SkillTool, TaskListTool, WriteFileTool,
+    ReadFileTool, ReadImageTool, RecallTool, SkillTool, TaskListTool, WebSearchTool, WriteFileTool,
 };
 pub use ctx::{ToolCtx, TruncateConfig};
 pub use permission::{PermissionGate, PermissionOutcome, PermissionRequest};

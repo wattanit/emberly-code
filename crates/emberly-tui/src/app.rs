@@ -566,6 +566,7 @@ impl App {
                 ok,
                 summary,
                 preview,
+                ..
             } => {
                 if let Some(ConvItem::Tool {
                     done,
@@ -2322,6 +2323,7 @@ mod tests {
             ok: true,
             summary: "exit 0".into(),
             preview: "hello\nworld".into(),
+            untrusted: false,
         });
         match &a.conversation[0] {
             ConvItem::Tool {

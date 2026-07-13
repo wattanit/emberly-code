@@ -58,6 +58,7 @@ fn ui_event_variants_roundtrip() -> serde_json::Result<()> {
             ok: true,
             summary: "42 lines".into(),
             preview: "line one\nline two".into(),
+            untrusted: false,
         },
         UiEvent::PermissionRequest {
             id: PermissionId(1),

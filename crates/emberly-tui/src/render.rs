@@ -1413,6 +1413,7 @@ mod tests {
             ok: true,
             summary: "exit 0".into(),
             preview: "total 8\nsrc\nCargo.toml".into(),
+            untrusted: false,
         });
         let screen = draw(&app, 100, 24);
         assert!(screen.contains("run: ls -la"), "shows what the tool did");

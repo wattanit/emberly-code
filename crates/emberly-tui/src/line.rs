@@ -691,6 +691,7 @@ mod tests {
                 ok: true,
                 summary: "exit 0".into(),
                 preview: "total 0".into(),
+                untrusted: false,
             },
             UiEvent::FileDiff {
                 path: "a".into(),
@@ -715,12 +716,14 @@ mod tests {
                 ok: true,
                 summary: "read image mockup.png \u{00b7} 1200\u{00d7}800 \u{00b7} PNG".into(),
                 preview: String::new(),
+                untrusted: false,
             },
             UiEvent::ToolFinished {
                 call_id: ToolCallId::new("img2"),
                 ok: false,
                 summary: "no vision".into(),
                 preview: String::new(),
+                untrusted: false,
             },
         ];
         for e in events {
@@ -736,6 +739,7 @@ mod tests {
             ok: true,
             summary: "wrote a.txt".into(),
             preview: "done".into(),
+            untrusted: false,
         });
         assert!(ok.contains("[ok]"));
         assert!(ok.contains("done"), "preview shown in degraded mode");
@@ -744,6 +748,7 @@ mod tests {
             ok: false,
             summary: "denied".into(),
             preview: String::new(),
+            untrusted: false,
         });
         assert!(failed.contains("[FAILED]"));
     }

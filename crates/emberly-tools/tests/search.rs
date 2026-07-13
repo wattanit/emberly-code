@@ -1,11 +1,20 @@
-//! Client tests for the search backend (Phase 5, group 1), driven against a
-//! `wiremock` server over **plain HTTP** — no API key, no TLS, deterministic.
-//! Proves request shape, auth application, non-2xx mapping, and parsing without
-//! touching the network (mirror `emberly-providers/tests/live_clients.rs`).
+//! Client tests for the search backend (Phase 5, group 1) and tool tests
+//! (group 2), driven against a `wiremock` server over **plain HTTP** — no API
+//! key, no TLS, deterministic. Proves request shape, auth application, non-2xx
+//! mapping, parsing, permission gating, and untrusted tagging without touching
+//! the network (mirror `emberly-providers/tests/live_clients.rs`).
 //!
 //! No `.unwrap()`/`.expect()`: tests thread `Result` or `panic!` with context.
 
-use emberly_tools::{SearchAuth, SearchClient, SearchError};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use emberly_tools::{
+    PermissionGate, PermissionOutcome, PermissionRequest, PlainSandbox, Sandbox, SearchAuth,
+    SearchClient, SearchError, Tool, ToolCtx, TruncateConfig, WebSearchTool,
+};
 use serde_json::json;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -357,4 +366,283 @@ async fn empty_results_is_not_an_error() {
         .await
         .unwrap_or_else(|e| panic!("search failed: {e}"));
     assert!(results.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// web_search tool tests (group 2)
+// ---------------------------------------------------------------------------
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn temp_project() -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("emberly-search-{}-{}", std::process::id(), n));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        panic!("failed to create temp project dir: {e}");
+    }
+    dir
+}
+
+struct AllowGate;
+#[async_trait]
+impl PermissionGate for AllowGate {
+    async fn authorize(&self, _request: PermissionRequest) -> PermissionOutcome {
+        PermissionOutcome::Allow
+    }
+}
+
+struct DenyGate;
+#[async_trait]
+impl PermissionGate for DenyGate {
+    async fn authorize(&self, _request: PermissionRequest) -> PermissionOutcome {
+        PermissionOutcome::Deny
+    }
+}
+
+/// A gate that captures the request for inspection, then returns the configured
+/// outcome.
+struct CapturingGate {
+    last_request: Mutex<Option<PermissionRequest>>,
+    allow: bool,
+}
+
+#[async_trait]
+impl PermissionGate for CapturingGate {
+    async fn authorize(&self, request: PermissionRequest) -> PermissionOutcome {
+        *self.last_request.lock().unwrap_or_else(|e| panic!("{e}")) = Some(request);
+        if self.allow {
+            PermissionOutcome::Allow
+        } else {
+            PermissionOutcome::Deny
+        }
+    }
+}
+
+fn ctx_allow(root: &Path) -> ToolCtx {
+    let gate: Arc<dyn PermissionGate> = Arc::new(AllowGate);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(PlainSandbox);
+    ToolCtx::new(root.to_path_buf(), TruncateConfig::default(), gate, sandbox)
+}
+
+fn ctx_deny(root: &Path) -> ToolCtx {
+    let gate: Arc<dyn PermissionGate> = Arc::new(DenyGate);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(PlainSandbox);
+    ToolCtx::new(root.to_path_buf(), TruncateConfig::default(), gate, sandbox)
+}
+
+fn search_tool(server_uri: &str) -> WebSearchTool {
+    let client = SearchClient::new(
+        http_client(),
+        format!("{}/search", server_uri),
+        "brave",
+        SearchAuth::None,
+        5,
+    );
+    WebSearchTool::new(client)
+}
+
+#[tokio::test]
+async fn web_search_denied_by_gate() {
+    let root = temp_project();
+    let server = MockServer::start().await;
+    let tool = search_tool(&server.uri());
+
+    let outcome = tool
+        .execute(
+            json!({ "query": "rust async" }),
+            &ctx_deny(&root),
+        )
+        .await;
+
+    assert!(!outcome.ok);
+    assert!(
+        outcome.content.contains("denied"),
+        "content should mention denial, got: {}",
+        outcome.content
+    );
+    assert!(!outcome.untrusted, "denied outcomes are not untrusted web content");
+}
+
+#[tokio::test]
+async fn web_search_permission_request_has_outside_root_false() {
+    let root = temp_project();
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"web": {"results": []}})))
+        .mount(&server)
+        .await;
+
+    let gate = Arc::new(CapturingGate {
+        last_request: Mutex::new(None),
+        allow: true,
+    });
+    let sandbox: Arc<dyn Sandbox> = Arc::new(PlainSandbox);
+    let ctx = ToolCtx::new(root, TruncateConfig::default(), gate.clone(), sandbox);
+
+    let tool = search_tool(&server.uri());
+    tool.execute(json!({ "query": "test" }), &ctx).await;
+
+    let request = gate
+        .last_request
+        .lock()
+        .unwrap_or_else(|e| panic!("{e}"))
+        .clone()
+        .unwrap_or_else(|| panic!("no permission request was captured"));
+
+    assert_eq!(request.tool, "web_search");
+    assert!(
+        !request.outside_root,
+        "web_search MUST set outside_root=false (Design §5.2, structural fact 3)"
+    );
+}
+
+#[tokio::test]
+async fn web_search_permission_detail_shows_endpoint_and_untrusted_warning() {
+    let root = temp_project();
+    let server = MockServer::start().await;
+    let endpoint = format!("{}/search", server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"web": {"results": []}})))
+        .mount(&server)
+        .await;
+
+    let gate = Arc::new(CapturingGate {
+        last_request: Mutex::new(None),
+        allow: true,
+    });
+    let sandbox: Arc<dyn Sandbox> = Arc::new(PlainSandbox);
+    let ctx = ToolCtx::new(root, TruncateConfig::default(), gate.clone(), sandbox);
+
+    let tool = search_tool(&server.uri());
+    tool.execute(json!({ "query": "hello world" }), &ctx).await;
+
+    let request = gate
+        .last_request
+        .lock()
+        .unwrap_or_else(|e| panic!("{e}"))
+        .clone()
+        .unwrap_or_else(|| panic!("no permission request was captured"));
+
+    assert!(
+        request.detail.contains(&endpoint),
+        "detail should name the backend endpoint"
+    );
+    assert!(
+        request.detail.contains("untrusted"),
+        "detail should warn results are untrusted"
+    );
+    assert!(
+        request.detail.contains("hello world"),
+        "detail should show the query"
+    );
+}
+
+#[tokio::test]
+async fn web_search_returns_results_tagged_untrusted() {
+    let root = temp_project();
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .and(query_param("q", "rust language"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "web": {
+                "results": [
+                    {"title": "Rust", "url": "https://rust-lang.org", "description": "Fearless concurrency"},
+                    {"title": "Cargo", "url": "https://doc.rust-lang.org/cargo", "description": "Package manager"}
+                ]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let tool = search_tool(&server.uri());
+    let outcome = tool
+        .execute(
+            json!({ "query": "rust language" }),
+            &ctx_allow(&root),
+        )
+        .await;
+
+    assert!(outcome.ok, "should succeed");
+    assert!(
+        outcome.untrusted,
+        "search results MUST be tagged untrusted (Design §4.10)"
+    );
+    assert!(outcome.content.contains("Rust"));
+    assert!(outcome.content.contains("https://rust-lang.org"));
+    assert!(outcome.content.contains("Fearless concurrency"));
+    assert!(outcome.summary.contains("2 results"));
+}
+
+#[tokio::test]
+async fn web_search_failure_is_structured_not_panic() {
+    let root = temp_project();
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+        .mount(&server)
+        .await;
+
+    let tool = search_tool(&server.uri());
+    let outcome = tool
+        .execute(
+            json!({ "query": "test" }),
+            &ctx_allow(&root),
+        )
+        .await;
+
+    assert!(!outcome.ok, "a server error is a structured failure");
+    assert!(
+        outcome.content.contains("failed"),
+        "failure content should describe the error, got: {}",
+        outcome.content
+    );
+    assert!(!outcome.untrusted, "a failure is not untrusted web content");
+}
+
+#[tokio::test]
+async fn web_search_empty_results_is_success() {
+    let root = temp_project();
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "web": {"results": []}
+        })))
+        .mount(&server)
+        .await;
+
+    let tool = search_tool(&server.uri());
+    let outcome = tool
+        .execute(
+            json!({ "query": "nothing here" }),
+            &ctx_allow(&root),
+        )
+        .await;
+
+    assert!(outcome.ok, "empty results is a success, not a failure");
+    assert!(
+        outcome.content.contains("No results"),
+        "should report no results"
+    );
+    assert!(
+        !outcome.untrusted,
+        "empty results are not untrusted web content"
+    );
+}
+
+#[tokio::test]
+async fn web_search_describe_shows_query() {
+    let server = MockServer::start().await;
+    let tool = search_tool(&server.uri());
+    let desc = tool.describe(&json!({ "query": "hello world" }));
+    assert_eq!(desc.as_deref(), Some("search: hello world"));
 }
