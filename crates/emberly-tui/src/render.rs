@@ -418,6 +418,7 @@ fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 done,
                 result,
                 preview,
+                untrusted,
                 ..
             } => {
                 // Header line: mark + the descriptive summary (a verb phrase
@@ -462,7 +463,23 @@ fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 // Result preview: a few indented, dimmed lines of the output so
                 // the user sees what the tool produced (Design §6.1).
                 if let Some(preview) = preview {
-                    let style = if *done == Some(false) {
+                    if *untrusted {
+                        // Untrusted web content (T-14, Design §4.10): rendered as
+                        // fetched web data with a visible label and source URLs —
+                        // never in harness or assistant voice, so a hostile snippet
+                        // reads visibly as quoted web text, not as something the
+                        // agent is telling the user to do.
+                        out.push(Line::from(vec![
+                            Span::raw("    "),
+                            Span::styled(
+                                format!("{} untrusted web content", markers::WEB),
+                                theme.chrome(),
+                            ),
+                        ]));
+                    }
+                    let style = if *untrusted {
+                        theme.chrome()
+                    } else if *done == Some(false) {
                         theme.error()
                     } else {
                         theme.chrome()
@@ -1660,5 +1677,70 @@ mod tests {
         // Width 6 forces three rows.
         let lines = conversation_lines(&app, 6);
         assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn untrusted_web_results_labeled_in_rich_mode() {
+        // Design §4.10: untrusted web content is labeled as fetched web data —
+        // never harness or assistant voice. The WEB marker + "untrusted web
+        // content" label makes a hostile snippet read visibly as quoted web text.
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        let id = emberly_core::ToolCallId::new("ws");
+        app.apply_event(UiEvent::ToolStarted {
+            call_id: id.clone(),
+            tool: "web_search".into(),
+            summary: "search: rust async".into(),
+            explanation: None,
+        });
+        app.apply_event(UiEvent::ToolFinished {
+            call_id: id,
+            ok: true,
+            summary: "searched: \"rust async\" (1 results)".into(),
+            preview: "1. Tokio\n   https://tokio.rs\n   Async runtime".into(),
+            untrusted: true,
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(
+            screen.contains("untrusted web content"),
+            "untrusted label visible in rich mode"
+        );
+        assert!(
+            screen.contains("https://tokio.rs"),
+            "source URL visible"
+        );
+    }
+
+    #[test]
+    fn trusted_tool_results_have_no_untrusted_label() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        let id = emberly_core::ToolCallId::new("c1");
+        app.apply_event(UiEvent::ToolStarted {
+            call_id: id.clone(),
+            tool: "bash".into(),
+            summary: "run: echo hi".into(),
+            explanation: None,
+        });
+        app.apply_event(UiEvent::ToolFinished {
+            call_id: id,
+            ok: true,
+            summary: "exit 0".into(),
+            preview: "hi".into(),
+            untrusted: false,
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(
+            !screen.contains("untrusted web content"),
+            "ordinary tool results have no untrusted label"
+        );
     }
 }

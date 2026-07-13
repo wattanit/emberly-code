@@ -110,14 +110,14 @@ relative to Phase 6. Overlap with other phases is confined to the additive sites
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. Dep (`reqwest` into tools) + search types + adapters/parsers + thin client + auth apply (`emberly-tools`) | [ ] | `SearchResult{title,url,snippet}`; brave/tavily/searxng/json parsers; `query` auth scheme new |
-| 2. `web_search` tool: authorize (outside_root=false) → HTTP → parse → cap → ToolOutcome (`emberly-tools`) | [ ] | first-party HTTP, never `ctx.sandbox`; results tagged untrusted; cap at `max_results` |
-| 3. Permission rule `web_search → ask` + ordinary treatment + allowlist (`emberly-sandbox`) | [ ] | add to `builtin_defaults`; generic `tool_session_grant`/permissions.toml already works |
-| 4. Config `[search]` profile + key resolution + conditional registration (`emberly`) | [ ] | mirror `ProfileFile`/`resolve_auth`; register only when `enabled` + endpoint set |
-| 5. Untrusted-content TUI render (§4.10) + permission prompt copy (§5.2) + degraded (`emberly-tui`) | [ ] | title/URL/snippet as quoted web text; visible source URLs; ASCII in degraded mode |
-| 6. Tests (offline, wiremock plain-HTTP — §14.7) + exit criterion | [ ] | parser tests; gate fires + allowlist suppresses; disabled→unregistered; cap; untrusted render |
+| 1. Dep (`reqwest` into tools) + search types + adapters/parsers + thin client + auth apply (`emberly-tools`) | [x] | `SearchResult{title,url,snippet}`; brave/tavily/searxng/json parsers; `query` auth scheme new |
+| 2. `web_search` tool: authorize (outside_root=false) → HTTP → parse → cap → ToolOutcome (`emberly-tools`) | [x] | first-party HTTP, never `ctx.sandbox`; results tagged untrusted; cap at `max_results` |
+| 3. Permission rule `web_search → ask` + ordinary treatment + allowlist (`emberly-sandbox`) | [x] | add to `builtin_defaults`; generic `tool_session_grant`/permissions.toml already works |
+| 4. Config `[search]` profile + key resolution + conditional registration (`emberly`) | [x] | mirror `ProfileFile`/`resolve_auth`; register only when `enabled` + endpoint set |
+| 5. Untrusted-content TUI render (§4.10) + permission prompt copy (§5.2) + degraded (`emberly-tui`) | [x] | title/URL/snippet as quoted web text; visible source URLs; ASCII in degraded mode |
+| 6. Tests (offline, wiremock plain-HTTP — §14.7) + exit criterion | [x] | parser tests; gate fires + allowlist suppresses; disabled→unregistered; cap; untrusted render |
 
-**Overall Phase 5: NOT STARTED.**
+**Overall Phase 5: COMPLETE.**
 
 ---
 

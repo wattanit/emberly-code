@@ -82,15 +82,20 @@ impl LineRenderer {
                 }
             }
             UiEvent::ToolFinished {
+                call_id: _,
                 ok,
                 summary,
                 preview,
-                ..
+                untrusted,
             } => {
                 let tag = if *ok { "ok" } else { "FAILED" };
                 writeln!(out, "  [{tag}] {summary}")?;
-                // Show the result excerpt, indented, so the plain frontend also
-                // says what the tool produced (Design §6.1).
+                // Untrusted web content (T-14, Design §4.10): labeled as fetched
+                // web data with visible source URLs, ASCII-only — the "untrusted
+                // web content" meaning must survive without colour (Design §7).
+                if *untrusted {
+                    writeln!(out, "    [web]")?;
+                }
                 for line in preview.lines() {
                     writeln!(out, "    {line}")?;
                 }
@@ -832,5 +837,36 @@ mod tests {
         assert!(out.contains("[~] second"), "in-progress item: {out:?}");
         assert!(out.contains("[ ] third"), "pending item: {out:?}");
         assert!(!out.contains('\u{1b}'), "no ANSI in degraded mode");
+    }
+
+    #[test]
+    fn untrusted_web_results_labeled_in_degraded_mode() {
+        // Design §4.10: untrusted web content must be visibly labeled as fetched
+        // web data in degraded mode — ASCII-only, no ANSI, visible source URLs
+        // so the "untrusted web content" meaning survives without colour.
+        let out = render_to_string(&UiEvent::ToolFinished {
+            call_id: ToolCallId::new("ws"),
+            ok: true,
+            summary: "searched: \"rust async\" (2 results)".into(),
+            preview: "Search results for: rust async\n1. Tokio\n   https://tokio.rs\n   Async runtime"
+                .into(),
+            untrusted: true,
+        });
+        assert!(out.contains("[ok]"), "status shown");
+        assert!(out.contains("[web]"), "untrusted label visible in degraded mode");
+        assert!(out.contains("https://tokio.rs"), "source URL visible");
+        assert!(!out.contains('\u{1b}'), "no ANSI in degraded mode");
+    }
+
+    #[test]
+    fn trusted_results_have_no_web_label() {
+        let out = render_to_string(&UiEvent::ToolFinished {
+            call_id: ToolCallId::new("bash"),
+            ok: true,
+            summary: "exit 0".into(),
+            preview: "hello world".into(),
+            untrusted: false,
+        });
+        assert!(!out.contains("[web]"), "ordinary results have no [web] label");
     }
 }
