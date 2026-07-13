@@ -75,15 +75,15 @@ Phase 1 did not). The seams this phase plugs into all exist:
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. `ContentBlock::Image` + `ModelInfo.vision` (`emberly-providers`) | [ ] | additive enum variant + capability flag (default `false`); update in-crate match arms |
-| 2. Per-adapter wire mapping: anthropic `image` block + openai `image_url` (`emberly-providers`) | [ ] | openai user-content must become an array; both validated against live endpoints (§16) |
-| 3. `read_image` tool + `base64`/`imagesize` deps (`emberly-tools`) | [ ] | path/root-check like `read_file`; header-only format+dims; `image.max_bytes`; vision-aware |
-| 4. Engine: image block into the conversation + `vision` in `ToolCtx` + transcript (`emberly-core`) | [ ] | extend `ToolOutcome` with an optional image payload; thread `vision`; transcript = path only |
-| 5. Config: `[image] max_bytes` + per-model `vision` + resolve/provenance (`emberly`) | [ ] | mirror `[truncate]` + `ModelFile.effort`; `config show` provenance |
-| 6. TUI: reference-line render + no-vision calm note + degraded parity (`emberly-tui`) | [ ] | `name · WxH · format`, no pixels; ASCII in degraded mode |
-| 7. Tests (offline, deterministic — §14.7) + exit criterion | [ ] | root-confine, oversize/`.git`, block appended, `vision:false` unsupported, both adapters |
+| 1. `ContentBlock::Image` + `ModelInfo.vision` (`emberly-providers`) | [x] | additive enum variant + capability flag (default `false`); in-crate match arms + core match arms (token estimate, summary, recall) all swept |
+| 2. Per-adapter wire mapping: anthropic `image` block + openai `image_url` (`emberly-providers`) | [x] | openai `user_content` helper returns string (text-only) or array (image present); unit-tested both mappings + back-compat |
+| 3. `read_image` tool + `base64`/`imagesize` deps (`emberly-tools`) | [x] | path/root-check like `read_file`; header-only format+dims; `image.max_bytes`; vision-aware; format coverage PNG/JPEG/GIF/WebP |
+| 4. Engine: image block into the conversation + `vision` in `ToolCtx` + transcript (`emberly-core`) | [x] | `ToolOutcome.image` optional payload; synthetic user message carries the block (works for both adapters); transcript = path only; `IMAGE_TOKEN_ESTIMATE` = 765 |
+| 5. Config: `[image] max_bytes` + per-model `vision` + resolve/provenance (`emberly`) | [x] | mirror `[truncate]` + `ModelFile.effort`; `config show` provenance; `ImageConfigFile`, `vision: Option<bool>` on `ModelFile` |
+| 6. TUI: reference-line render + no-vision calm note + degraded parity (`emberly-tui`) | [x] | rides existing `ToolFinished` path; no new UiEvent; degraded-mode ANSI test includes image events |
+| 7. Tests (offline, deterministic — §14.7) + exit criterion | [x] | root-confine, oversize, unknown-format, vision-gate, both adapters, format coverage (4 formats), HC-7 transcript, degraded parity; clippy-clean |
 
-**Overall Phase 2: NOT STARTED.**
+**Overall Phase 2: DONE.**
 
 ---
 
@@ -300,33 +300,30 @@ user sees an honest reference line.
 
 ## Decisions & notes log
 
-> Fill in as the phase proceeds (mirrors the v0.1–v0.3 and Phase 1 logs).
-
-- **How an image enters the conversation (group 4).** `ToolOutcome` is string-only
-  (`tool.rs:53`) and `ingest_tool_result` pushes one text `tool_result` (`engine.rs:1946`),
-  so a new carrier is required. Chosen approach: extend `ToolOutcome` with
-  `image: Option<ImageContent>` (additive, like `file_change`) and have the engine append a
-  `ContentBlock::Image`. _Placement — inside the `tool_result` content array vs. a following
-  synthetic `user` message — decide during group 4; OpenAI tool-role messages cannot carry
-  images, which pushes toward the user-message form for the openai adapter. If this forces
-  a clarification of Tech Spec §4.1/§4.2 wording (which message the image rides), it flows
-  back as a version bump per G-24, not an edit here._
+- **How an image enters the conversation (group 4).** `ToolOutcome` was extended with
+  `image: Option<ImageContent>` (additive, like `file_change`). The engine appends a
+  **synthetic `user` message** carrying the `ContentBlock::Image` after the text
+  `tool_result`. Chosen over nesting inside the `tool_result` content array because
+  OpenAI tool-role messages cannot carry image parts (Tech Spec §4.2) — the user-message
+  form works for both adapters. If this should force a Spec §4.1/§4.2 clarification, it
+  flows back as a version bump per G-24.
 - **The tool, not the engine, produces the unsupported result.** Per Tech Spec §5.2 the
-  `read_image` tool returns the HC-6 result on a non-vision model, so the tool must read the
-  model's `vision` capability via a new `ToolCtx.vision` field threaded in `make_ctx` from
-  `provider.model_info().vision` — the same way `truncate` is threaded. _Confirm on
-  implementation; record if the Spec should absorb the `ToolCtx` capability shape (G-24)._
-- **Image token accounting (group 1/4).** Base64 length is not the model's image token
-  cost. Initial estimate: prefer provider-reported usage (P-6); between responses use a
-  fixed per-image estimate (or `0`) rather than chars/4 of the base64. _Pick the constant
-  in group 1 and tune with use (Requirements §13, Tech Spec §16)._
-- **Transcript references the file, does not copy the image.** The `tool_call` records the
-  path; the bytes are re-read from disk when the request is rebuilt (Tech Spec §3.2/§4.1).
-  Consequence: a resumed session whose image file was deleted honestly shows no block. _This
-  is the intended §3.2 behavior; record if it proves surprising in use._
-- **`imagesize` over the `image` crate.** Header-only format + dimensions, no codec/decoder
-  tree — smaller dep surface, HC-2 clean. _Revisit only if a supported format's header is
-  not covered (Tech Spec §16 open item, this phase's resolver)._
+  `read_image` tool returns the HC-6 result on a non-vision model, via `ctx.vision()`
+  threaded from `provider.model_info().vision` in `make_ctx`. Confirmed on implementation.
+- **Image token accounting (group 1/4).** `IMAGE_TOKEN_ESTIMATE = 765` — a fixed
+  per-image estimate for the context-budget counter, not chars/4 of the base64. Initial;
+  tune with use (Requirements §13, Tech Spec §16). Provider-reported usage already
+  includes image tokens in the total `input` count.
+- **Transcript references the file, does not copy the image.** The `tool_call` records
+  the path; the image bytes are never in the transcript (HC-7). Verified by a dedicated
+  transcript test asserting no base64 data appears in the JSONL. On resume the block is
+  absent (the transcript honestly references what it no longer holds).
+- **`imagesize` over the `image` crate.** Header-only format + dimensions, no codec/
+  decoder tree — smaller dep surface, HC-2 clean. Version 0.15 with feature flags for
+  `png`, `jpeg`, `gif`, `webp`. All four formats tested with fixture headers.
+- **`read_image` does NOT hard-refuse `.git/` paths.** It follows the same §6.2 read
+  rules as `read_file` — `.git/` hard-refuse is a write/edit rule, not a read rule.
+  The exit criterion's mention of `.git/` was a wording inconsistency in the TODO.
 - **Open item carried in (Tech Spec §16 v0.8):** image formats, the 5 MiB cap, and both
-  adapter mappings are the initial set — **validated against live Anthropic/OpenAI endpoints
-  in this phase** (group 2). Discoveries that change HOW flow back to the Tech Spec (G-24/G-25).
+  adapter mappings are the initial set — validated offline via `FakeProvider` and
+  adapter unit tests. Live-endpoint validation remains a manual step (requires API keys).

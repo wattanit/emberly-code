@@ -653,3 +653,61 @@ async fn read_image_missing_file_is_a_failure_not_a_crash() {
     assert!(!outcome.ok);
     assert!(outcome.content.contains("nope.png"));
 }
+
+// ---- read_image format coverage (Tech Spec §5.2: PNG, JPEG, GIF, WebP) -----
+
+fn decode_b64(s: &str) -> Vec<u8> {
+    use base64::{engine::general_purpose, Engine as _};
+    general_purpose::STANDARD.decode(s).unwrap_or_default()
+}
+
+fn tiny_jpeg_bytes() -> Vec<u8> {
+    decode_b64("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/9oACAEBAAA/APvSiiig/9k=")
+}
+
+fn tiny_gif_bytes() -> Vec<u8> {
+    decode_b64("R0lGODlhAQABAIAAAP///yH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==")
+}
+
+fn tiny_webp_bytes() -> Vec<u8> {
+    decode_b64("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAAACvACEBHwE=")
+}
+
+#[tokio::test]
+async fn read_image_detects_jpeg_format() {
+    let root = temp_project();
+    write_bytes(&root, "img.jpg", &tiny_jpeg_bytes());
+    let outcome = ReadImageTool
+        .execute(json!({ "path": "img.jpg" }), &ctx_vision(&root, true))
+        .await;
+    assert!(outcome.ok, "JPEG should succeed: {}", outcome.content);
+    let image = outcome.image.as_ref().expect("image payload");
+    assert_eq!(image.media_type, "image/jpeg");
+    assert!(outcome.summary.contains("JPEG"));
+}
+
+#[tokio::test]
+async fn read_image_detects_gif_format() {
+    let root = temp_project();
+    write_bytes(&root, "img.gif", &tiny_gif_bytes());
+    let outcome = ReadImageTool
+        .execute(json!({ "path": "img.gif" }), &ctx_vision(&root, true))
+        .await;
+    assert!(outcome.ok, "GIF should succeed: {}", outcome.content);
+    let image = outcome.image.as_ref().expect("image payload");
+    assert_eq!(image.media_type, "image/gif");
+    assert!(outcome.summary.contains("GIF"));
+}
+
+#[tokio::test]
+async fn read_image_detects_webp_format() {
+    let root = temp_project();
+    write_bytes(&root, "img.webp", &tiny_webp_bytes());
+    let outcome = ReadImageTool
+        .execute(json!({ "path": "img.webp" }), &ctx_vision(&root, true))
+        .await;
+    assert!(outcome.ok, "WebP should succeed: {}", outcome.content);
+    let image = outcome.image.as_ref().expect("image payload");
+    assert_eq!(image.media_type, "image/webp");
+    assert!(outcome.summary.contains("WebP"));
+}

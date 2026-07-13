@@ -3774,6 +3774,59 @@ async fn read_image_on_non_vision_model_returns_unsupported_result() {
     assert!(!has_image, "no Image block sent to a non-vision model");
 }
 
+#[tokio::test]
+async fn read_image_transcript_records_path_not_bytes() {
+    // HC-7: the transcript records the tool_call args (the path) and the
+    // tool_result text (the reference line), but NEVER the image bytes.
+    let root = temp_project();
+    let _ = std::fs::write(root.join("pic.png"), tiny_png());
+    let sink = CaptureSink::new();
+    let fake = Arc::new(
+        FakeProvider::new(vec![
+            ScriptedResponse::tool_call("c1", "read_image", r#"{"path":"pic.png"}"#),
+            ScriptedResponse::text("I see it."),
+        ])
+        .with_model_info(vision_model_info()),
+    );
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = make_config(provider, root, Box::new(sink.clone()));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "look at pic.png".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    // The transcript has a ToolCall for read_image with the path.
+    let records = sink.records();
+    let tool_call = records.iter().find(|r| {
+        matches!(&r.event, TranscriptEvent::ToolCall { tool, .. } if tool == "read_image")
+    });
+    assert!(tool_call.is_some(), "tool_call recorded");
+    if let Some(r) = tool_call {
+        if let TranscriptEvent::ToolCall { args, .. } = &r.event {
+            assert!(args.to_string().contains("pic.png"), "path in tool_call args");
+        }
+    }
+
+    // The tool_result is recorded with ok=true (the reference line text).
+    let tool_result = records.iter().find(|r| {
+        matches!(&r.event, TranscriptEvent::ToolResult { call_id, .. } if call_id.0 == "c1")
+    });
+    assert!(tool_result.is_some(), "tool_result recorded");
+
+    // No transcript record contains base64 image data (the bytes are not in the JSONL).
+    let all_text: String = records
+        .iter()
+        .map(|r| format!("{:?}", r.event))
+        .collect();
+    assert!(
+        !all_text.contains("iVBOR"),
+        "image bytes must not appear in the transcript (HC-7)"
+    );
+}
+
 // ---- memory round-trip (FR-6, T-13) ---------------------------------------
 
 /// A config with memory enabled and temp dirs for both scopes.

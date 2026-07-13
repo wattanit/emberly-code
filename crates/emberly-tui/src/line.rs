@@ -708,6 +708,20 @@ mod tests {
                     status: emberly_core::TaskStatus::InProgress,
                 }],
             },
+            // read_image reference line (P-11, Design §4.8): ASCII-only in
+            // degraded mode, no ANSI. No-vision failure also ASCII-only.
+            UiEvent::ToolFinished {
+                call_id: ToolCallId::new("img"),
+                ok: true,
+                summary: "read image mockup.png \u{00b7} 1200\u{00d7}800 \u{00b7} PNG".into(),
+                preview: String::new(),
+            },
+            UiEvent::ToolFinished {
+                call_id: ToolCallId::new("img2"),
+                ok: false,
+                summary: "no vision".into(),
+                preview: String::new(),
+            },
         ];
         for e in events {
             let s = render_to_string(&e);
