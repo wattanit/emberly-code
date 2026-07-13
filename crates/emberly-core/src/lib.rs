@@ -24,6 +24,7 @@ pub mod id;
 pub mod memory;
 pub mod prompts;
 pub mod resume;
+pub mod skills;
 pub mod spawn;
 pub mod transcript;
 pub mod types;

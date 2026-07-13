@@ -9,6 +9,7 @@ use crate::memory::{DropMemoryGate, MemoryError, MemoryGate, MemoryOutcome, Memo
 use crate::permission::{PermissionGate, PermissionOutcome, PermissionRequest};
 use crate::recall::{DeclineRecallGate, RecallGate, RecallOutcome};
 use crate::sandbox::Sandbox;
+use crate::skills::{DropSkillGate, SkillError, SkillGate, SkillInvocation};
 use crate::task_list::{DropTaskListGate, TaskItem, TaskListError, TaskListGate};
 
 /// Truncation-at-ingestion configuration (Requirements §8.1, Tech Spec §5.3).
@@ -61,6 +62,7 @@ pub struct ToolCtx {
     recall: Arc<dyn RecallGate>,
     task_list: Arc<dyn TaskListGate>,
     memory: Arc<dyn MemoryGate>,
+    skill: Arc<dyn SkillGate>,
     /// Whether the active model accepts image input (P-11). `read_image`
     /// checks this to produce the HC-6 unsupported result before encoding.
     vision: bool,
@@ -89,6 +91,7 @@ impl ToolCtx {
             recall: Arc::new(DeclineRecallGate),
             task_list: Arc::new(DropTaskListGate),
             memory: Arc::new(DropMemoryGate),
+            skill: Arc::new(DropSkillGate),
             vision: false,
             image_max_bytes: IMAGE_MAX_BYTES_DEFAULT,
         }
@@ -123,6 +126,14 @@ impl ToolCtx {
     #[must_use]
     pub fn with_memory_gate(mut self, memory: Arc<dyn MemoryGate>) -> Self {
         self.memory = memory;
+        self
+    }
+
+    /// Install the skill gate (T-15). Kept a builder so existing callers and
+    /// tests, which never invoke skills, need no change.
+    #[must_use]
+    pub fn with_skill_gate(mut self, skill: Arc<dyn SkillGate>) -> Self {
+        self.skill = skill;
         self
     }
 
@@ -197,6 +208,17 @@ impl ToolCtx {
         req: MemoryRequest,
     ) -> Result<MemoryOutcome, MemoryError> {
         self.memory.memory_op(req).await
+    }
+
+    /// Invoke a skill — load its `SKILL.md` body and resource paths (T-15).
+    /// The single path to the skill gate; reads instruction text from
+    /// trust-resolved dirs, executes nothing, and is not permission-gated
+    /// (FR-7 honesty clause, Tech Spec §8.2).
+    pub async fn invoke_skill(
+        &self,
+        name: String,
+    ) -> Result<Option<SkillInvocation>, SkillError> {
+        self.skill.invoke_skill(name).await
     }
 
     /// Whether the active model accepts image input (P-11).
