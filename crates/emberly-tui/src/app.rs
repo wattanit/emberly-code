@@ -67,6 +67,10 @@ pub enum ConvItem {
         result: Option<String>,
         /// A short excerpt of the tool's output (Design §6.1).
         preview: Option<String>,
+        /// Whether the result is untrusted web content (T-14, Design §4.10).
+        /// When `true`, the render styles it as fetched web data with visible
+        /// source URLs — never harness or assistant voice.
+        untrusted: bool,
     },
     /// A harness-world line (error, retry) — rendered out-of-band from the
     /// conversation voice (Design §6.1).
@@ -474,6 +478,7 @@ impl App {
                         done: None,
                         result: None,
                         preview: None,
+                        untrusted: false,
                     });
                 }
                 TranscriptEvent::ToolResult {
@@ -559,6 +564,7 @@ impl App {
                     done: None,
                     result: None,
                     preview: None,
+                    untrusted: false,
                 });
             }
             UiEvent::ToolFinished {
@@ -566,11 +572,13 @@ impl App {
                 ok,
                 summary,
                 preview,
+                untrusted,
             } => {
                 if let Some(ConvItem::Tool {
                     done,
                     result,
                     preview: p,
+                    untrusted: u,
                     ..
                 }) = self.find_tool_mut(&call_id)
                 {
@@ -579,6 +587,7 @@ impl App {
                     // a preview of the output separately.
                     *result = (!summary.is_empty()).then_some(summary);
                     *p = (!preview.is_empty()).then_some(preview);
+                    *u = untrusted;
                 }
             }
             UiEvent::PermissionRequest { id, rendering } => {
@@ -2322,6 +2331,7 @@ mod tests {
             ok: true,
             summary: "exit 0".into(),
             preview: "hello\nworld".into(),
+            untrusted: false,
         });
         match &a.conversation[0] {
             ConvItem::Tool {

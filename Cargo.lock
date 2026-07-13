@@ -626,12 +626,15 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "imagesize",
+ "reqwest",
  "rustix 1.1.4",
+ "rustls-rustcrypto",
  "serde",
  "serde_json",
  "similar",
  "thiserror",
  "tokio",
+ "wiremock",
 ]
 
 [[package]]

@@ -2122,6 +2122,7 @@ impl Engine {
             ok: outcome.ok,
             summary: outcome.summary,
             preview: result_preview(&outcome.content),
+            untrusted: outcome.untrusted,
         })
         .await;
 
@@ -2165,6 +2166,7 @@ impl Engine {
             ok: false,
             summary: "canceled".into(),
             preview: String::new(),
+            untrusted: false,
         })
         .await;
     }

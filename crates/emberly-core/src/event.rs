@@ -56,6 +56,11 @@ pub enum UiEvent {
         ok: bool,
         summary: String,
         preview: String,
+        /// Whether the result is untrusted web content (T-14, Design §4.10).
+        /// When `true`, the frontend renders it with the untrusted-content
+        /// styling — fetched web data, never harness or assistant voice.
+        #[serde(default)]
+        untrusted: bool,
     },
 
     /// The engine needs a permission decision before proceeding. The frontend

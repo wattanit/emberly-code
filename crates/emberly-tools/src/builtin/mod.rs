@@ -16,6 +16,7 @@ mod read_image;
 mod recall;
 mod skill;
 mod task_list;
+mod web_search;
 mod write;
 
 pub use ask_user::AskUserTool;
@@ -29,6 +30,7 @@ pub use recall::RecallTool;
 pub use skill::SkillTool;
 pub use task_list::TaskListTool;
 pub use memory::MemoryTool;
+pub use web_search::WebSearchTool;
 pub use write::WriteFileTool;
 
 /// A registry with all built-in tools registered (bash with defaults).

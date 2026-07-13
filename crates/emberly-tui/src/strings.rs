@@ -119,6 +119,9 @@ pub mod markers {
     pub const TASK_PENDING: &str = "○";
     pub const TASK_IN_PROGRESS: &str = "◐";
     pub const TASK_DONE: &str = "✓";
+    /// Leads the label marking untrusted web-content results (T-14, Design
+    /// §4.10) so the block reads visibly as fetched web data, not tool output.
+    pub const WEB: &str = "↩";
 }
 
 /// One-line orientation shown on clean exit (Design §8.3). The richer summary
