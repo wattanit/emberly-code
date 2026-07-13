@@ -15,6 +15,7 @@ pub mod ask_user;
 pub mod builtin;
 pub mod ctx;
 pub mod diff;
+pub mod memory;
 pub mod path;
 pub mod permission;
 pub mod recall;
@@ -28,14 +29,17 @@ pub mod truncate;
 pub use ask_user::{AskUserGate, AskUserOutcome};
 pub use recall::{RecallGate, RecallOutcome};
 pub use task_list::{TaskItem, TaskListError, TaskListGate, TaskStatus};
+pub use memory::{
+    MemoryError, MemoryGate, MemoryOp, MemoryOutcome, MemoryRequest, MemoryScope, slug,
+};
 pub use builtin::{
-    default_registry, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool,
-    RecallTool, TaskListTool, WriteFileTool,
+    default_registry, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, MemoryTool,
+    ReadFileTool, ReadImageTool, RecallTool, TaskListTool, WriteFileTool,
 };
 pub use ctx::{ToolCtx, TruncateConfig};
 pub use permission::{PermissionGate, PermissionOutcome, PermissionRequest};
 pub use registry::ToolRegistry;
 pub use sandbox::{BashInvocation, PlainSandbox, Sandbox};
-pub use tool::{FileChange, Tool, ToolOutcome, ToolSpec};
+pub use tool::{FileChange, ImageContent, Tool, ToolOutcome, ToolSpec};
 pub use reduce::{reduce_output, Reduction};
 pub use truncate::{truncate_output, Truncation};

@@ -171,7 +171,7 @@ fn message_to_openai(message: &Message) -> Value {
             msg
         }
         Role::System => json!({ "role": "system", "content": joined_text(message) }),
-        Role::User => json!({ "role": "user", "content": joined_text(message) }),
+        Role::User => json!({ "role": "user", "content": user_content(message) }),
     }
 }
 
@@ -185,6 +185,37 @@ fn joined_text(message: &Message) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// Build the `content` value for a `user`-role message (P-11, Tech Spec §4.2).
+/// When the message carries any image block, returns an array of text + image
+/// parts; otherwise returns a plain string for back-compat with every existing
+/// text-only turn. OpenAI tool-role messages cannot carry image parts.
+fn user_content(message: &Message) -> Value {
+    let has_image = message
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }));
+    if !has_image {
+        return Value::String(joined_text(message));
+    }
+    let parts: Vec<Value> = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => {
+                Some(json!({ "type": "text", "text": text }))
+            }
+            ContentBlock::Image { media_type, data } => Some(json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{media_type};base64,{data}")
+                }
+            })),
+            _ => None,
+        })
+        .collect();
+    Value::Array(parts)
 }
 
 fn tool_result_fields(message: &Message) -> (String, String) {
@@ -382,5 +413,47 @@ mod tests {
     fn plain_content_delta_emits_no_reasoning() {
         let events = map_one(r#"{"choices":[{"delta":{"content":"hi"},"index":0}]}"#);
         assert_eq!(events, vec![StreamEvent::TextDelta { text: "hi".into() }]);
+    }
+
+    #[test]
+    fn text_only_user_message_stays_a_plain_string() {
+        // Back-compat: no image ⇒ `content` is a string, not an array (P-11).
+        let msg = Message::user_text("hello");
+        let content = user_content(&msg);
+        assert_eq!(content, Value::String("hello".into()));
+    }
+
+    #[test]
+    fn image_in_user_message_produces_image_url_data_uri() {
+        // P-11, Tech Spec §4.2: an image in a user message maps to an
+        // `image_url` part with a `data:` URI.
+        let msg = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "what is this?".into(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: "iVBOR".into(),
+                },
+            ],
+        };
+        let content = user_content(&msg);
+        let parts = content.as_array().expect("array when image present");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[0].get("type").and_then(Value::as_str),
+            Some("text")
+        );
+        assert_eq!(
+            parts[1].get("type").and_then(Value::as_str),
+            Some("image_url")
+        );
+        let url = parts[1]
+            .get("image_url")
+            .and_then(|iu| iu.get("url"))
+            .and_then(Value::as_str);
+        assert_eq!(url, Some("data:image/png;base64,iVBOR"));
     }
 }

@@ -8,8 +8,9 @@
 
 use async_trait::async_trait;
 use emberly_tools::{
-    AskUserGate, AskUserOutcome, PermissionGate, PermissionOutcome, PermissionRequest,
-    RecallGate, RecallOutcome, TaskItem, TaskListError, TaskListGate,
+    AskUserGate, AskUserOutcome, MemoryError, MemoryGate, MemoryOutcome, MemoryRequest,
+    PermissionGate, PermissionOutcome, PermissionRequest, RecallGate, RecallOutcome, TaskItem,
+    TaskListError, TaskListGate,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -155,5 +156,40 @@ impl TaskListGate for TaskListGateImpl {
             return Err(TaskListError);
         }
         reply_rx.await.unwrap_or(Err(TaskListError))
+    }
+}
+
+/// A memory op in flight from a tool to the engine, carrying the oneshot the
+/// engine replies on (T-13). Like [`TaskListAsk`], opaque to callers of the
+/// engine.
+pub struct MemoryAsk {
+    pub(crate) req: MemoryRequest,
+    pub(crate) reply: oneshot::Sender<Result<MemoryOutcome, MemoryError>>,
+}
+
+/// The memory gate installed into every
+/// [`ToolCtx`](emberly_tools::ToolCtx). Fails closed: if the engine is gone or
+/// the reply is dropped, the answer is `Err` (the safe default — the tool maps
+/// it to a structured failure, HC-6).
+pub(crate) struct MemoryGateImpl {
+    pub(crate) asks: mpsc::Sender<MemoryAsk>,
+}
+
+#[async_trait]
+impl MemoryGate for MemoryGateImpl {
+    async fn memory_op(&self, req: MemoryRequest) -> Result<MemoryOutcome, MemoryError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .asks
+            .send(MemoryAsk {
+                req,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(MemoryError);
+        }
+        reply_rx.await.unwrap_or(Err(MemoryError))
     }
 }

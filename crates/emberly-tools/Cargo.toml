@@ -19,6 +19,9 @@ ignore.workspace = true
 globset.workspace = true
 grep-searcher.workspace = true
 grep-regex.workspace = true
+# Image encoding + header-only dimensions for the read_image tool (T-12, P-11).
+base64.workspace = true
+imagesize.workspace = true
 
 # Process-group tree-kill for bash (S-4). Unix only; the syscall wrapper is not
 # needed (and `process_group`/signals differ) elsewhere.

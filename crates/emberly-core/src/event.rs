@@ -181,4 +181,10 @@ pub enum UiEvent {
     TaskListUpdated {
         items: Vec<emberly_tools::TaskItem>,
     },
+
+    /// Memory entry counts for the sidebar inspector (T-13, FR-6, Design §4.9).
+    /// `user` is the global count; `project` is the project-scoped count (0
+    /// when the root is untrusted — Design §4.9 "silently absent, not
+    /// half-loaded"). Additive — older frontends warn-skip it.
+    MemoryStatus { user: usize, project: usize },
 }

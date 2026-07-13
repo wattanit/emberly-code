@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::ask_user::{AskUserGate, AskUserOutcome, DeclineAskGate};
+use crate::memory::{DropMemoryGate, MemoryError, MemoryGate, MemoryOutcome, MemoryRequest};
 use crate::permission::{PermissionGate, PermissionOutcome, PermissionRequest};
 use crate::recall::{DeclineRecallGate, RecallGate, RecallOutcome};
 use crate::sandbox::Sandbox;
@@ -40,6 +41,9 @@ impl Default for TruncateConfig {
     }
 }
 
+/// Default maximum image file size: 5 MiB (Tech Spec §5.2).
+const IMAGE_MAX_BYTES_DEFAULT: usize = 5 * 1024 * 1024;
+
 /// Everything a tool needs to run: the project root (for confinement checks),
 /// the truncation config, and the permission gate. Cheap to clone (the gate is
 /// an `Arc`).
@@ -56,6 +60,12 @@ pub struct ToolCtx {
     ask: Arc<dyn AskUserGate>,
     recall: Arc<dyn RecallGate>,
     task_list: Arc<dyn TaskListGate>,
+    memory: Arc<dyn MemoryGate>,
+    /// Whether the active model accepts image input (P-11). `read_image`
+    /// checks this to produce the HC-6 unsupported result before encoding.
+    vision: bool,
+    /// Maximum image file size in bytes (Tech Spec §5.2, default 5 MiB).
+    image_max_bytes: usize,
 }
 
 impl ToolCtx {
@@ -78,6 +88,9 @@ impl ToolCtx {
             ask: Arc::new(DeclineAskGate),
             recall: Arc::new(DeclineRecallGate),
             task_list: Arc::new(DropTaskListGate),
+            memory: Arc::new(DropMemoryGate),
+            vision: false,
+            image_max_bytes: IMAGE_MAX_BYTES_DEFAULT,
         }
     }
 
@@ -102,6 +115,29 @@ impl ToolCtx {
     #[must_use]
     pub fn with_task_list_gate(mut self, task_list: Arc<dyn TaskListGate>) -> Self {
         self.task_list = task_list;
+        self
+    }
+
+    /// Install the memory gate (T-13). Kept a builder so existing callers and
+    /// tests, which never persist memory, need no change.
+    #[must_use]
+    pub fn with_memory_gate(mut self, memory: Arc<dyn MemoryGate>) -> Self {
+        self.memory = memory;
+        self
+    }
+
+    /// Set whether the active model accepts image input (P-11). Kept a builder
+    /// so existing callers and tests default to `false`.
+    #[must_use]
+    pub fn with_vision(mut self, vision: bool) -> Self {
+        self.vision = vision;
+        self
+    }
+
+    /// Set the maximum image file size in bytes (Tech Spec §5.2).
+    #[must_use]
+    pub fn with_image_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.image_max_bytes = max_bytes;
         self
     }
 
@@ -151,5 +187,27 @@ impl ToolCtx {
         items: Vec<TaskItem>,
     ) -> Result<(), TaskListError> {
         self.task_list.set_task_list(items).await
+    }
+
+    /// Read or write a durable memory entry (T-13). The single path to the
+    /// memory gate; harness-managed persistence that does not widen HC-4
+    /// (FR-6). Not permission-gated.
+    pub async fn memory_op(
+        &self,
+        req: MemoryRequest,
+    ) -> Result<MemoryOutcome, MemoryError> {
+        self.memory.memory_op(req).await
+    }
+
+    /// Whether the active model accepts image input (P-11).
+    #[must_use]
+    pub fn vision(&self) -> bool {
+        self.vision
+    }
+
+    /// Maximum image file size in bytes (Tech Spec §5.2).
+    #[must_use]
+    pub fn image_max_bytes(&self) -> usize {
+        self.image_max_bytes
     }
 }

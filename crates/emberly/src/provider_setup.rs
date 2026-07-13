@@ -103,6 +103,7 @@ fn build_profile(
             .and_then(|m| m.effort.as_deref())
             .and_then(Effort::parse),
         effort_levels: effort_levels_from(meta),
+        vision: meta.and_then(|m| m.vision).unwrap_or(false),
     };
     let client = build_https_client()?;
 
@@ -323,6 +324,7 @@ mod tests {
                 pricing: None,
                 effort: None,
                 effort_levels: None,
+                vision: None,
             },
         );
         let mut providers = HashMap::new();
