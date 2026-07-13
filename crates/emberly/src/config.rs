@@ -58,6 +58,9 @@ pub struct ConfigFile {
     /// `[skills]` skill system (FR-7, Tech Spec §8.2).
     #[serde(default)]
     pub skills: SkillsConfigFile,
+    /// `[search]` web-search backend (T-14, Tech Spec §5.5).
+    #[serde(default)]
+    pub search: SearchConfigFile,
 }
 
 /// `[ui]` — presentation toggles that shape what the interface shows without
@@ -132,6 +135,25 @@ pub struct MemoryConfigFile {
 pub struct SkillsConfigFile {
     /// Whether the skill system is enabled (default `true`).
     pub enabled: Option<bool>,
+}
+
+/// `[search]` — web-search backend (T-14, Tech Spec §5.5). Mirrors the provider
+/// profile pattern (P-8): a new search service is config, not code. All
+/// optional; the binary applies defaults when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct SearchConfigFile {
+    /// Whether the web-search tool is registered at all (default `true`; when
+    /// `false` the tool is absent from `registry.specs()` — Tech Spec §5.5).
+    pub enabled: Option<bool>,
+    /// Response-shape parser: `"brave"` | `"tavily"` | `"searxng"` | `"json"`.
+    pub adapter: Option<String>,
+    /// The search service endpoint URL.
+    pub endpoint: Option<String>,
+    /// Authentication scheme + key reference (never an inline secret). Reuses
+    /// [`AuthFile`]; the `"query"` scheme is search-side (Tech Spec §5.5).
+    pub auth: Option<AuthFile>,
+    /// Maximum results sent to the model (default 5, Tech Spec §5.5).
+    pub max_results: Option<usize>,
 }
 
 /// `[truncate]` — tool-result reduction and size backstop at ingestion
@@ -378,6 +400,25 @@ impl ConfigFile {
         if higher.skills.enabled.is_some() {
             self.skills.enabled = higher.skills.enabled;
         }
+        // `[search]` (T-14) merges field-by-field, including nested auth.
+        if higher.search.enabled.is_some() {
+            self.search.enabled = higher.search.enabled;
+        }
+        if higher.search.adapter.is_some() {
+            self.search.adapter = higher.search.adapter;
+        }
+        if higher.search.endpoint.is_some() {
+            self.search.endpoint = higher.search.endpoint;
+        }
+        if higher.search.max_results.is_some() {
+            self.search.max_results = higher.search.max_results;
+        }
+        if let Some(higher_auth) = higher.search.auth {
+            match &mut self.search.auth {
+                Some(cur) => cur.merge(higher_auth),
+                None => self.search.auth = Some(higher_auth),
+            }
+        }
         // `[trust]` is deliberately NOT merged — it is read only from the global
         // tier (FR-1); see `global_trust_dirs` and the project-[trust] notice.
     }
@@ -426,6 +467,26 @@ pub struct Resolved {
     pub memory: emberly_core::MemoryConfig,
     /// Resolved skills config (FR-7, Tech Spec §8.2), ready for the engine.
     pub skills: emberly_core::SkillsConfig,
+    /// Resolved search config (T-14, Tech Spec §5.5). The binary conditionally
+    /// registers the `web_search` tool when `enabled` and an endpoint is set.
+    pub search: SearchConfig,
+}
+
+/// Resolved web-search configuration (T-14, Tech Spec §5.5). Carried in
+/// [`Resolved`] for the binary composition root; the tool itself is built from
+/// this when `enabled && endpoint.is_some()`.
+pub struct SearchConfig {
+    /// Whether the web-search tool should be registered (default `true`).
+    pub enabled: bool,
+    /// Response-shape parser (`brave`/`tavily`/`searxng`/`json`).
+    pub adapter: Option<String>,
+    /// The search service endpoint URL.
+    pub endpoint: Option<String>,
+    /// Auth config (key reference, not the resolved secret — the binary resolves
+    /// the key at tool-build time via `config::api_key`).
+    pub auth: Option<AuthFile>,
+    /// Maximum results sent to the model (default 5).
+    pub max_results: usize,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -732,6 +793,69 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         );
     }
 
+    // Search (T-14): record provenance when a user tier sets any `[search]`
+    // field (speech about deviations from the defaults).
+    if field(&project, |c: &ConfigFile| c.search.enabled.is_some())
+        || field(&global, |c: &ConfigFile| c.search.enabled.is_some())
+    {
+        record(
+            &mut provenance,
+            "search.enabled",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.search.enabled.is_some()),
+                field(&global, |c: &ConfigFile| c.search.enabled.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| c.search.adapter.is_some())
+        || field(&global, |c: &ConfigFile| c.search.adapter.is_some())
+    {
+        record(
+            &mut provenance,
+            "search.adapter",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.search.adapter.is_some()),
+                field(&global, |c: &ConfigFile| c.search.adapter.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| c.search.endpoint.is_some())
+        || field(&global, |c: &ConfigFile| c.search.endpoint.is_some())
+    {
+        record(
+            &mut provenance,
+            "search.endpoint",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.search.endpoint.is_some()),
+                field(&global, |c: &ConfigFile| c.search.endpoint.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| c.search.max_results.is_some())
+        || field(&global, |c: &ConfigFile| c.search.max_results.is_some())
+    {
+        record(
+            &mut provenance,
+            "search.max_results",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.search.max_results.is_some()),
+                field(&global, |c: &ConfigFile| c.search.max_results.is_some()),
+            ),
+            true,
+        );
+    }
+
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
     let mut notices = Vec::new();
@@ -833,6 +957,13 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             emberly_core::SkillsConfig {
                 enabled: merged.skills.enabled.unwrap_or(d.enabled),
             }
+        },
+        search: SearchConfig {
+            enabled: merged.search.enabled.unwrap_or(true),
+            adapter: merged.search.adapter,
+            endpoint: merged.search.endpoint,
+            auth: merged.search.auth,
+            max_results: merged.search.max_results.unwrap_or(5),
         },
     })
 }
@@ -1029,6 +1160,34 @@ pub fn show(project_root: &Path) -> anyhow::Result<()> {
                 }
             }
         }
+    }
+
+    // Web search (T-14, Tech Spec §5.5): show adapter, endpoint, and key status
+    // — never the key itself (mirror the provider profile block above).
+    println!();
+    println!("web search:");
+    if !resolved.search.enabled {
+        println!("  disabled (search.enabled = false)");
+    } else {
+        let adapter = resolved.search.adapter.as_deref().unwrap_or("(unset)");
+        let endpoint = resolved
+            .search
+            .endpoint
+            .as_deref()
+            .unwrap_or("(unset — tool not registered)");
+        let key_ref = resolved.search.auth.as_ref().and_then(|a| a.key.as_deref());
+        let key = key_ref.map_or_else(
+            || "no key".to_string(),
+            |r| format!("key '{r}' {}", key_status(r)),
+        );
+        println!("  adapter: {adapter}");
+        println!("  endpoint: {endpoint}");
+        println!("  {key}");
+        let registered = resolved.search.enabled && resolved.search.endpoint.is_some();
+        println!(
+            "  status: {}",
+            if registered { "registered" } else { "not registered" }
+        );
     }
 
     Ok(())

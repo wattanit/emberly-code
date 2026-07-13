@@ -18,6 +18,7 @@ use emberly_providers::{
 };
 
 use crate::config::{self, AuthFile, CliOverrides, ProfileFile, Resolved};
+use emberly_tools::{SearchAuth, SearchClient, WebSearchTool};
 
 /// A chosen live provider plus display/label info.
 pub struct Selection {
@@ -255,6 +256,59 @@ fn build_https_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .build()
         .context("failed to build the HTTPS client")
+}
+
+/// Turn a search `[search].auth` config into a [`SearchAuth`], resolving the
+/// key *reference* from env / `keys.toml` (mirror [`resolve_auth`]). Handles the
+/// search-side `query` scheme the provider `Auth` lacks (Tech Spec §5.5).
+pub fn resolve_search_auth(auth: Option<&AuthFile>) -> anyhow::Result<SearchAuth> {
+    let Some(auth) = auth else {
+        return Ok(SearchAuth::None);
+    };
+    let scheme = auth.scheme.as_deref().unwrap_or("none");
+    let key = match &auth.key {
+        Some(reference) => config::api_key(reference)?.ok_or_else(|| {
+            anyhow!(
+                "search needs the '{reference}' key, but none is set \
+                 (export {}_API_KEY or add `{reference} = \"…\"` to keys.toml)",
+                reference.to_ascii_uppercase()
+            )
+        })?,
+        None => String::new(),
+    };
+    Ok(match scheme {
+        "none" => SearchAuth::None,
+        "bearer" => SearchAuth::Bearer(key),
+        "header" => SearchAuth::Header {
+            name: auth.header.clone().unwrap_or_default(),
+            value: key,
+        },
+        // The new search-side scheme: append `?param=<key>` to the URL (Tech
+        // Spec §5.5). The provider `Auth` lacks `query` — G-24 candidate.
+        "query" => SearchAuth::Query {
+            param: auth.header.clone().unwrap_or_else(|| "key".to_string()),
+            value: key,
+        },
+        other => bail!(
+            "unknown auth scheme '{other}' in [search] \
+             (expected bearer, header, query, or none)"
+        ),
+    })
+}
+
+/// Build the `web_search` tool from resolved config (Tech Spec §5.5). Called by
+/// the binary composition root when `search.enabled && endpoint.is_some()`.
+/// Mirrors [`build_profile`]: resolve auth, build the client, construct the tool.
+pub fn build_search_tool(
+    endpoint: &str,
+    adapter: &str,
+    auth: Option<&AuthFile>,
+    max_results: usize,
+) -> anyhow::Result<WebSearchTool> {
+    let client = build_https_client()?;
+    let search_auth = resolve_search_auth(auth)?;
+    let search_client = SearchClient::new(client, endpoint, adapter, search_auth, max_results);
+    Ok(WebSearchTool::new(search_client))
 }
 
 #[cfg(test)]
