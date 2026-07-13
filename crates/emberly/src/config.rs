@@ -55,6 +55,9 @@ pub struct ConfigFile {
     /// `[memory]` persistent memory (FR-6, Tech Spec §8.1).
     #[serde(default)]
     pub memory: MemoryConfigFile,
+    /// `[skills]` skill system (FR-7, Tech Spec §8.2).
+    #[serde(default)]
+    pub skills: SkillsConfigFile,
 }
 
 /// `[ui]` — presentation toggles that shape what the interface shows without
@@ -121,6 +124,14 @@ pub struct MemoryConfigFile {
     pub enabled: Option<bool>,
     /// Soft warn threshold for index growth (Tech Spec §16).
     pub max_index_entries: Option<usize>,
+}
+
+/// `[skills]` — skill system (FR-7, Tech Spec §8.2). All optional; the engine
+/// applies defaults when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct SkillsConfigFile {
+    /// Whether the skill system is enabled (default `true`).
+    pub enabled: Option<bool>,
 }
 
 /// `[truncate]` — tool-result reduction and size backstop at ingestion
@@ -363,6 +374,10 @@ impl ConfigFile {
         if higher.memory.max_index_entries.is_some() {
             self.memory.max_index_entries = higher.memory.max_index_entries;
         }
+        // `[skills]` (FR-7) merges field-by-field.
+        if higher.skills.enabled.is_some() {
+            self.skills.enabled = higher.skills.enabled;
+        }
         // `[trust]` is deliberately NOT merged — it is read only from the global
         // tier (FR-1); see `global_trust_dirs` and the project-[trust] notice.
     }
@@ -409,6 +424,8 @@ pub struct Resolved {
     pub image_max_bytes: usize,
     /// Resolved memory config (FR-6, Tech Spec §8.1), ready for the engine.
     pub memory: emberly_core::MemoryConfig,
+    /// Resolved skills config (FR-7, Tech Spec §8.2), ready for the engine.
+    pub skills: emberly_core::SkillsConfig,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -683,6 +700,23 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         );
     }
 
+    // Skills (FR-7): record provenance when a user tier sets `[skills] enabled`.
+    if field(&project, |c: &ConfigFile| c.skills.enabled.is_some())
+        || field(&global, |c: &ConfigFile| c.skills.enabled.is_some())
+    {
+        record(
+            &mut provenance,
+            "skills.enabled",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.skills.enabled.is_some()),
+                field(&global, |c: &ConfigFile| c.skills.enabled.is_some()),
+            ),
+            true,
+        );
+    }
+
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
     let mut notices = Vec::new();
@@ -777,6 +811,12 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
                     .memory
                     .max_index_entries
                     .unwrap_or(d.max_index_entries),
+            }
+        },
+        skills: {
+            let d = emberly_core::SkillsConfig::default();
+            emberly_core::SkillsConfig {
+                enabled: merged.skills.enabled.unwrap_or(d.enabled),
             }
         },
     })
@@ -954,6 +994,28 @@ pub fn show(project_root: &Path) -> anyhow::Result<()> {
             println!("  {} ← {}", entry.piece, entry.source);
         }
     }
+
+    // Skill shadow notices (FR-7, Tech Spec §8.2): when a project skill
+    // shadows a user-global skill of the same name, surface it so the override
+    // is visible, not silent. Discovery scans project skills only when a
+    // project skills dir exists (always trusted here — `config show` runs after
+    // the trust gate, or the user invoked it explicitly).
+    if resolved.skills.enabled {
+        if let (Some(user_dir), Some(project_dir)) =
+            (skills_dir(), Some(project_root.join(".agents").join("skills")))
+        {
+            let catalog = emberly_core::skills::SkillCatalog::new(user_dir, Some(project_dir));
+            let (_, shadows) = catalog.discover();
+            if !shadows.is_empty() {
+                println!();
+                println!("skill overrides (project shadows user-global):");
+                for shadow in &shadows {
+                    println!("  skill `{}`: project shadows user-global", shadow.name);
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

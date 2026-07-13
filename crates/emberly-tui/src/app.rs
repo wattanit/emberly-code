@@ -11,7 +11,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use emberly_core::{
     resume, AskAnswer, AskId, Command, Effort, LoopResolution, Mode, PermissionDecision,
-    PermissionId, PermissionRendering, SandboxStatus, SessionId, TaskItem, TokenUsage,
+    PermissionId, PermissionRendering, SandboxStatus, SessionId, SkillMeta, TaskItem, TokenUsage,
     ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
 };
 
@@ -318,6 +318,9 @@ pub struct App {
     /// from `UiEvent::MemoryStatus`; cleared on a new session.
     pub memory_user: usize,
     pub memory_project: usize,
+    /// The skill catalog for the sidebar (T-15, FR-7, Design §4.9). Updated
+    /// from `UiEvent::SkillsAvailable`; cleared on a new session.
+    pub skills: Vec<SkillMeta>,
     /// The permission prompt currently awaiting an answer, if any. While set,
     /// the prompt owns the screen and normal input is suspended (Design §5).
     pub pending_permission: Option<(PermissionId, PermissionRendering)>,
@@ -394,6 +397,7 @@ impl App {
             tasks: Vec::new(),
             memory_user: 0,
             memory_project: 0,
+            skills: Vec::new(),
             pending_permission: None,
             pending_ask: None,
             pending_loop_halt: None,
@@ -675,6 +679,9 @@ impl App {
             UiEvent::MemoryStatus { user, project } => {
                 self.memory_user = user;
                 self.memory_project = project;
+            }
+            UiEvent::SkillsAvailable { skills } => {
+                self.skills = skills;
             }
             // `#[non_exhaustive]`: unknown future events are ignored, not fatal.
             _ => {}
@@ -1662,6 +1669,7 @@ impl App {
         self.tasks.clear();
         self.memory_user = 0;
         self.memory_project = 0;
+        self.skills.clear();
         self.latest_diffs.clear();
         self.last_modified = None;
         self.scroll = 0;

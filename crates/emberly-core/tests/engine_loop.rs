@@ -3901,3 +3901,288 @@ async fn memory_name_escape_is_rejected() {
         "path-escape in name was rejected"
     );
 }
+
+// ---- skill round-trip (FR-7, T-15) ----------------------------------------
+
+/// A config with skills enabled and temp dirs for both scopes.
+fn skills_config(
+    provider: Arc<dyn Provider>,
+    root: PathBuf,
+    user_dir: PathBuf,
+    project_dir: Option<PathBuf>,
+) -> EngineConfig {
+    let mut config = make_config(provider, root, EngineConfig::no_transcript());
+    config.skills = emberly_core::SkillsConfig::default();
+    config.user_skills_dir = Some(user_dir);
+    config.project_skills_dir = project_dir;
+    config
+}
+
+fn skill_temp_dir(label: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("emberly-skill-{label}-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Write a skill folder with `+++` frontmatter + body.
+fn write_skill(dir: &Path, name: &str, description: &str, body: &str) {
+    let skill_dir = dir.join(name);
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let content = format!("+++\nname = \"{name}\"\ndescription = \"{description}\"\n+++\n{body}");
+    std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+}
+
+/// Write a bundled resource into a skill folder.
+fn write_skill_resource(dir: &Path, skill_name: &str, resource_name: &str, content: &str) {
+    let skill_dir = dir.join(skill_name);
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join(resource_name), content).unwrap();
+}
+
+#[tokio::test]
+async fn skill_invoke_loads_body_and_resources() {
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    write_skill(&user_dir, "pdf-fill", "Fill PDF forms", "Step 1: open the template.");
+    write_skill_resource(&user_dir, "pdf-fill", "template.txt", "Template content");
+
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call("c1", "skill", r#"{"name":"pdf-fill"}"#),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = skills_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "use the pdf skill".into() }).await;
+    let events = h.collect(None).await;
+
+    assert_eq!(deltas(&events), "done");
+
+    // SkillsAvailable was emitted at session start with the catalog.
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::SkillsAvailable { skills } if skills.len() == 1
+                && skills[0].name == "pdf-fill"
+                && skills[0].description == "Fill PDF forms")),
+        "SkillsAvailable emitted with the catalog"
+    );
+
+    // The skill tool finished successfully with origin on the summary line.
+    let skill_finish = events.iter().find(|e| matches!(e,
+        UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("skill") && summary.contains("pdf-fill")));
+    assert!(skill_finish.is_some(), "skill tool finished with origin on summary");
+
+    // The tool result contains the body (assert via ToolFinished preview).
+    let finish = events.iter().find(|e| matches!(e,
+        UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("pdf-fill")));
+    if let Some(UiEvent::ToolFinished { preview, .. }) = finish {
+        assert!(preview.contains("Step 1: open the template."), "body in tool result preview");
+        assert!(preview.contains("template.txt"), "resource listed in tool result");
+    }
+
+    // The catalog (metadata) is pinned in the system prompt.
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(system.contains("pdf-fill"), "skill name pinned in system prompt");
+    assert!(system.contains("Fill PDF forms"), "skill description pinned in system prompt");
+
+    // The body is NOT pinned (progressive disclosure).
+    assert!(!system.contains("Step 1: open the template."), "body not pinned in system prompt");
+}
+
+#[tokio::test]
+async fn skill_catalog_pinned_when_enabled_absent_when_disabled() {
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    write_skill(&user_dir, "linter", "Run linters", "Use eslint.");
+
+    // --- enabled: catalog is pinned ---
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::text("ok"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = skills_config(provider, root.clone(), user_dir.clone(), None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::SkillsAvailable { skills } if !skills.is_empty())),
+        "SkillsAvailable emitted with non-empty catalog when enabled"
+    );
+
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(system.contains("linter"), "catalog pinned when skills enabled");
+
+    // --- disabled: no catalog pinned, skill tool fails ---
+    let fake2 = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call("c1", "skill", r#"{"name":"linter"}"#),
+        ScriptedResponse::text("ok"),
+    ]));
+    let provider2: Arc<dyn Provider> = fake2.clone();
+    let mut config2 = skills_config(provider2, root, user_dir, None);
+    config2.skills = emberly_core::SkillsConfig { enabled: false };
+    let mut h2 = spawn(config2);
+
+    h2.send(Command::UserInput { text: "use skill".into() }).await;
+    let events2 = h2.collect(None).await;
+
+    // No SkillsAvailable with skills (empty or absent).
+    let skills_event = events2.iter().find(|e| matches!(e, UiEvent::SkillsAvailable { .. }));
+    if let Some(UiEvent::SkillsAvailable { skills }) = skills_event {
+        assert!(skills.is_empty(), "no skills cataloged when disabled");
+    }
+
+    // The skill tool call fails (unknown skill — no catalog).
+    assert!(
+        events2.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { ok: false, .. })),
+        "skill tool fails when skills disabled"
+    );
+
+    let req2 = fake2.last_request().expect("request sent");
+    let system2 = req2.system.as_deref().unwrap_or("");
+    assert!(!system2.contains("linter"), "catalog not pinned when skills disabled");
+}
+
+#[tokio::test]
+async fn skill_untrusted_project_absent() {
+    // project_skills_dir = None simulates an untrusted root: a project skill
+    // is neither cataloged nor invocable, while user-global skills still work.
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    let project_dir = skill_temp_dir("p");
+    write_skill(&user_dir, "user-skill", "User skill", "User body.");
+    write_skill(&project_dir, "project-skill", "Project skill", "Project body.");
+
+    let fake = Arc::new(FakeProvider::new(vec![
+        // Try to invoke the project skill — should fail.
+        ScriptedResponse::tool_call("c1", "skill", r#"{"name":"project-skill"}"#),
+        // Invoke the user skill — should succeed.
+        ScriptedResponse::tool_call("c2", "skill", r#"{"name":"user-skill"}"#),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    // project_skills_dir = None (untrusted root).
+    let config = skills_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "use skills".into() }).await;
+    let events = h.collect(None).await;
+
+    assert_eq!(deltas(&events), "done");
+
+    // SkillsAvailable contains only the user skill, not the project skill.
+    let skills_avail = events.iter().find_map(|e| match e {
+        UiEvent::SkillsAvailable { skills } => Some(skills),
+        _ => None,
+    });
+    if let Some(skills) = skills_avail {
+        assert_eq!(skills.len(), 1, "only user skill cataloged");
+        assert_eq!(skills[0].name, "user-skill");
+    }
+
+    // The project skill invoke fails (not cataloged).
+    let finishes: Vec<_> = events.iter().filter_map(|e| match e {
+        UiEvent::ToolFinished { ok, summary, .. } => Some((*ok, summary.clone())),
+        _ => None,
+    }).collect();
+    assert_eq!(finishes.len(), 2, "two tool finishes");
+    assert!(!finishes[0].0, "project skill invoke fails (not cataloged)");
+    assert!(finishes[1].0, "user skill invoke succeeds");
+
+    // The project skill is not in the pinned system prompt.
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(!system.contains("project-skill"), "project skill not pinned");
+    assert!(system.contains("user-skill"), "user skill pinned");
+}
+
+#[tokio::test]
+async fn skill_not_permission_gated() {
+    // A skill invoke never raises a PermissionRequest and never spawns a
+    // process. The tool reads instruction text only — not permission-gated
+    // (FR-7 honesty clause).
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    write_skill(&user_dir, "safe-skill", "A safe skill", "Do nothing.");
+
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call("c1", "skill", r#"{"name":"safe-skill"}"#),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = skills_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "use skill".into() }).await;
+    let events = h.collect(None).await;
+
+    // No PermissionRequest was emitted.
+    assert!(
+        !events.iter().any(|e| matches!(e, UiEvent::PermissionRequest { .. })),
+        "skill invoke never raises a PermissionRequest"
+    );
+
+    // The skill tool succeeded.
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("safe-skill"))),
+        "skill tool succeeded without permission gate"
+    );
+}
+
+#[tokio::test]
+async fn skill_precedence_project_over_user() {
+    // A skill present in both scopes resolves to the project variant with
+    // origin: Project, and a ShadowNotice is produced.
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    let project_dir = skill_temp_dir("p");
+    write_skill(&user_dir, "shared", "User version", "User body.");
+    write_skill(&project_dir, "shared", "Project version", "Project body.");
+
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call("c1", "skill", r#"{"name":"shared"}"#),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = skills_config(provider, root, user_dir, Some(project_dir));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "use shared skill".into() }).await;
+    let events = h.collect(None).await;
+
+    // SkillsAvailable shows the project variant.
+    let skills_avail = events.iter().find_map(|e| match e {
+        UiEvent::SkillsAvailable { skills } => Some(skills),
+        _ => None,
+    });
+    if let Some(skills) = skills_avail {
+        assert_eq!(skills.len(), 1, "one skill (project wins)");
+        assert_eq!(skills[0].name, "shared");
+        assert_eq!(skills[0].description, "Project version");
+        assert_eq!(skills[0].origin, emberly_core::SkillOrigin::Project);
+    }
+
+    // The invoke returns the project body.
+    let finish = events.iter().find(|e| matches!(e,
+        UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("shared")));
+    assert!(finish.is_some(), "skill invoke succeeded");
+    if let Some(UiEvent::ToolFinished { preview, .. }) = finish {
+        assert!(preview.contains("Project body."), "project body returned on invoke");
+        assert!(!preview.contains("User body."), "user body not returned");
+    }
+
+    // The pinned catalog shows the project variant.
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(system.contains("Project version"), "project description pinned");
+    assert!(!system.contains("User version"), "user description not pinned");
+}

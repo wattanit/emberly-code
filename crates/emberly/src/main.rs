@@ -557,7 +557,7 @@ async fn run() -> anyhow::Result<()> {
         // is the structural fallback for a future untrusted session path (Tech
         // Spec §6.7).
         project_memory_dir: Some(project_memory_dir),
-        skills: emberly_core::SkillsConfig::default(),
+        skills: resolved.skills.clone(),
         user_skills_dir: config::skills_dir(),
         project_skills_dir: Some(project_skills_dir),
     };
