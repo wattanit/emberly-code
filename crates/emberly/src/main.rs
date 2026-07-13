@@ -512,6 +512,7 @@ async fn run() -> anyhow::Result<()> {
         ));
 
     let project_memory_dir = project_root.join(".agents").join("memory");
+    let project_skills_dir = project_root.join(".agents").join("skills");
     let config = EngineConfig {
         provider,
         tools: default_registry(),
@@ -556,10 +557,13 @@ async fn run() -> anyhow::Result<()> {
         // is the structural fallback for a future untrusted session path (Tech
         // Spec §6.7).
         project_memory_dir: Some(project_memory_dir),
+        skills: emberly_core::SkillsConfig::default(),
+        user_skills_dir: config::skills_dir(),
+        project_skills_dir: Some(project_skills_dir),
     };
 
     let (engine_ports, frontend_ports) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx) = Engine::new(config, engine_ports.events_tx);
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx) = Engine::new(config, engine_ports.events_tx);
     let engine_task = tokio::spawn(engine.run(
         engine_ports.commands_rx,
         asks_rx,
@@ -567,6 +571,7 @@ async fn run() -> anyhow::Result<()> {
         recall_rx,
         task_rx,
         memory_rx,
+        skill_rx,
     ));
 
     // Drive the session until the user quits or the engine closes its events.

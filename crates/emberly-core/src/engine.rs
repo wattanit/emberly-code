@@ -29,9 +29,10 @@ use tokio::sync::mpsc;
 use crate::command::Command;
 use crate::event::UiEvent;
 use crate::factory::{ConfigReloader, ProviderFactory};
-use crate::gate::{AskGate, AskUserAsk, ChannelGate, MemoryAsk, MemoryGateImpl, PermissionAsk, RecallAsk, RecallGateImpl, TaskListAsk, TaskListGateImpl};
+use crate::gate::{AskGate, AskUserAsk, ChannelGate, MemoryAsk, MemoryGateImpl, PermissionAsk, RecallAsk, RecallGateImpl, SkillAsk, SkillGateImpl, TaskListAsk, TaskListGateImpl};
 use crate::id::{AskId, PermissionId, SessionId};
 use crate::memory::MemoryStore;
+use crate::skills::{render_catalog, ShadowNotice, SkillCatalog};
 use crate::transcript::{
     CompactTrigger, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent,
     TranscriptRecord, TranscriptSink,
@@ -130,6 +131,20 @@ impl Default for MemoryConfig {
     }
 }
 
+/// Skills config (FR-7, Tech Spec §8.2). Resolved from `[skills]` config.
+#[derive(Debug, Clone)]
+pub struct SkillsConfig {
+    /// Whether the skill system is enabled (default `true`). When `false`, no
+    /// catalog is built or pinned, and the `skill` tool returns failures.
+    pub enabled: bool,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Everything needed to construct an [`Engine`].
 pub struct EngineConfig {
     pub provider: Arc<dyn Provider>,
@@ -220,6 +235,14 @@ pub struct EngineConfig {
     /// Project memory directory (`<root>/.agents/memory/`). `None` on an
     /// untrusted root — structural trust-gating (FR-1, Tech Spec §6.7).
     pub project_memory_dir: Option<PathBuf>,
+    /// Skills config (FR-7, Tech Spec §8.2).
+    pub skills: SkillsConfig,
+    /// User-global skills directory (`~/.config/emberly/skills/`). Always `Some`
+    /// when a home directory exists.
+    pub user_skills_dir: Option<PathBuf>,
+    /// Project skills directory (`<root>/.agents/skills/`). `None` on an
+    /// untrusted root — structural trust-gating (FR-1, Tech Spec §6.7).
+    pub project_skills_dir: Option<PathBuf>,
 }
 
 impl EngineConfig {
@@ -501,6 +524,9 @@ pub struct Engine {
     /// The memory gate (T-13), installed into every `ToolCtx` so the `memory`
     /// tool can read and write durable memory entries.
     memory_gate: Arc<MemoryGateImpl>,
+    /// The skill gate (T-15), installed into every `ToolCtx` so the `skill`
+    /// tool can load instruction bodies.
+    skill_gate: Arc<SkillGateImpl>,
     events_tx: mpsc::Sender<UiEvent>,
     conversation: Vec<Message>,
     /// Parallel to `conversation`: the stable monotonic turn number of each
@@ -584,6 +610,17 @@ pub struct Engine {
     memory_user_index: String,
     /// Cached project memory index text for pinning (empty when untrusted).
     memory_project_index: String,
+    /// Skills config (FR-7, Tech Spec §8.2).
+    skills_config: SkillsConfig,
+    /// The skill catalog (FR-7, T-15). `None` when skills are disabled or no
+    /// home directory exists.
+    skill_catalog: Option<SkillCatalog>,
+    /// The built skill metadata for pinning + `SkillsAvailable`.
+    skill_metas: Vec<emberly_tools::SkillMeta>,
+    /// Cached catalog text for pinning (Tech Spec §7).
+    skill_catalog_text: String,
+    /// Shadow notices for `emberly config show` (Tech Spec §8.2).
+    skill_shadows: Vec<ShadowNotice>,
 }
 
 impl Engine {
@@ -601,13 +638,16 @@ impl Engine {
         mpsc::Receiver<RecallAsk>,
         mpsc::Receiver<TaskListAsk>,
         mpsc::Receiver<MemoryAsk>,
+        mpsc::Receiver<SkillAsk>,
     ) {
         let (asks_tx, asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (user_asks_tx, user_asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (recall_tx, recall_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (task_list_tx, task_list_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (memory_tx, memory_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        let (skill_tx, skill_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let memory_store = build_memory_store(&config);
+        let skill_catalog = build_skill_catalog(&config);
         // Capture before `config.sandbox` is moved into the struct below.
         let sandbox_spawn: Arc<dyn Sandbox> = config.sandbox_spawn.unwrap_or_else(|| {
             // Fallback (no explicit spawner): confine from the status, but with
@@ -668,6 +708,7 @@ impl Engine {
             recall_gate: Arc::new(RecallGateImpl { asks: recall_tx }),
             task_list_gate: Arc::new(TaskListGateImpl { asks: task_list_tx }),
             memory_gate: Arc::new(MemoryGateImpl { asks: memory_tx }),
+            skill_gate: Arc::new(SkillGateImpl { asks: skill_tx }),
             events_tx,
             conversation: config.initial_conversation,
             turn_map,
@@ -703,6 +744,11 @@ impl Engine {
             memory_store,
             memory_user_index: String::new(),
             memory_project_index: String::new(),
+            skills_config: config.skills.clone(),
+            skill_catalog,
+            skill_metas: Vec::new(),
+            skill_catalog_text: String::new(),
+            skill_shadows: Vec::new(),
         };
         // Load memory indexes at session start (Tech Spec §8.1).
         engine.refresh_memory_indexes();
@@ -716,7 +762,13 @@ impl Engine {
                 user: user_count,
                 project: project_count,
             });
-        (engine, asks_rx, user_asks_rx, recall_rx, task_list_rx, memory_rx)
+        // Build the skill catalog and emit SkillsAvailable at session start
+        // (Tech Spec §8.2, §3.1).
+        engine.refresh_skill_catalog();
+        let _ = engine.events_tx.try_send(UiEvent::SkillsAvailable {
+            skills: engine.skill_metas.clone(),
+        });
+        (engine, asks_rx, user_asks_rx, recall_rx, task_list_rx, memory_rx, skill_rx)
     }
 
     /// Run the engine until the command channel closes. Idle between turns,
@@ -730,6 +782,7 @@ impl Engine {
         mut recall_rx: mpsc::Receiver<RecallAsk>,
         mut task_rx: mpsc::Receiver<TaskListAsk>,
         mut memory_rx: mpsc::Receiver<MemoryAsk>,
+        mut skill_rx: mpsc::Receiver<SkillAsk>,
     ) {
         if self.resuming {
             // Continuing an existing transcript: no fresh session_start, but
@@ -787,7 +840,7 @@ impl Engine {
                     self.record_user_message(&text);
                     self.push_conversation_message(Message::user_text(text));
                     self.emit_context_usage().await;
-                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx, &mut recall_rx, &mut task_rx, &mut memory_rx)
+                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx, &mut recall_rx, &mut task_rx, &mut memory_rx, &mut skill_rx)
                         .await;
                     // The engine is idle again; let the frontend stop its
                     // "working" affordance (Design §6.3).
@@ -965,6 +1018,14 @@ impl Engine {
         // project re-pointed to the new root). The store reads from disk, so a
         // resumed session re-reads the current store (Tech Spec §8.1).
         self.refresh_memory_indexes();
+        // Re-derive the skill catalog for the new session (user-global
+        // unchanged, project re-pointed to the new root). Emit
+        // `SkillsAvailable` so the TUI Skills section is never stale after a
+        // session switch (Tech Spec §8.2, §3.1).
+        self.refresh_skill_catalog();
+        let _ = self.events_tx.try_send(UiEvent::SkillsAvailable {
+            skills: self.skill_metas.clone(),
+        });
         if let Ok(mut guard) = self.active_session_path.write() {
             *guard = path;
         }
@@ -1120,6 +1181,7 @@ impl Engine {
         recall_rx: &mut mpsc::Receiver<RecallAsk>,
         task_rx: &mut mpsc::Receiver<TaskListAsk>,
         memory_rx: &mut mpsc::Receiver<MemoryAsk>,
+        skill_rx: &mut mpsc::Receiver<SkillAsk>,
     ) {
         let mut drop_attempts = 0u32;
         loop {
@@ -1149,6 +1211,7 @@ impl Engine {
                             recall_rx,
                             task_rx,
                             memory_rx,
+                            skill_rx,
                         )
                         .await
                         .is_canceled()
@@ -1364,13 +1427,14 @@ impl Engine {
         recall_rx: &mut mpsc::Receiver<RecallAsk>,
         task_rx: &mut mpsc::Receiver<TaskListAsk>,
         memory_rx: &mut mpsc::Receiver<MemoryAsk>,
+        skill_rx: &mut mpsc::Receiver<SkillAsk>,
     ) -> ToolCallResult {
         // Start a fresh loop-signature observation for this turn (S-5).
         self.turn_obs = TurnObservation::default();
         let mut iter = tool_calls.into_iter();
         while let Some(call) = iter.next() {
             match self
-                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx)
+                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx)
                 .await
             {
                 ToolCallResult::Completed(outcome) => self.ingest_tool_result(&call, outcome).await,
@@ -1496,6 +1560,7 @@ impl Engine {
         recall_rx: &mut mpsc::Receiver<RecallAsk>,
         task_rx: &mut mpsc::Receiver<TaskListAsk>,
         memory_rx: &mut mpsc::Receiver<MemoryAsk>,
+        skill_rx: &mut mpsc::Receiver<SkillAsk>,
     ) -> ToolCallResult {
         let args = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
 
@@ -1543,6 +1608,7 @@ impl Engine {
                 Some(recall) = recall_rx.recv() => self.on_recall(recall).await,
                 Some(task) = task_rx.recv() => self.on_task_list_set(task).await,
                 Some(mem) = memory_rx.recv() => self.on_memory_op(mem).await,
+                Some(skill) = skill_rx.recv() => self.on_skill_invoke(skill).await,
                 command = commands_rx.recv(), if commands_open => match command {
                     Some(Command::PermissionAnswer { id, decision }) => {
                         self.answer_permission(id, decision, &mut pending).await;
@@ -2307,7 +2373,7 @@ impl Engine {
         // index is standing context; entry bodies load via the `recall` op
         // (progressive disclosure). Project memory is absent on an untrusted
         // root (Design §4.9).
-        if self.memory_config.enabled {
+        let base = if self.memory_config.enabled {
             let block = render_memory_block(
                 &self.memory_user_index,
                 &self.memory_project_index,
@@ -2319,6 +2385,18 @@ impl Engine {
                 }
             } else {
                 base
+            }
+        } else {
+            base
+        };
+
+        // Pin the skill catalog (FR-7, Tech Spec §7/§8.2). Only metadata is
+        // standing context; bodies load via the `skill` tool (progressive
+        // disclosure). Project skills are absent on an untrusted root.
+        if self.skills_config.enabled && !self.skill_catalog_text.is_empty() {
+            match &base {
+                Some(b) => Some(format!("{b}\n\n{}", self.skill_catalog_text)),
+                None => Some(self.skill_catalog_text.clone()),
             }
         } else {
             base
@@ -2336,6 +2414,7 @@ impl Engine {
         .with_recall_gate(self.recall_gate.clone())
         .with_task_list_gate(self.task_list_gate.clone())
         .with_memory_gate(self.memory_gate.clone())
+        .with_skill_gate(self.skill_gate.clone())
         .with_vision(self.provider.model_info().vision)
         .with_image_max_bytes(self.image_max_bytes)
     }
@@ -2348,6 +2427,23 @@ impl Engine {
         } else {
             self.memory_user_index.clear();
             self.memory_project_index.clear();
+        }
+    }
+
+    /// Rebuild the skill catalog from disk and refresh the cached fields
+    /// (Tech Spec §8.2). Called at session start and on session switch so a new
+    /// root re-scans project skills. When skills are disabled or no user dir
+    /// exists, the catalog is cleared.
+    fn refresh_skill_catalog(&mut self) {
+        if let Some(catalog) = &self.skill_catalog {
+            let (metas, shadows) = catalog.discover();
+            self.skill_catalog_text = render_catalog(&metas);
+            self.skill_metas = metas;
+            self.skill_shadows = shadows;
+        } else {
+            self.skill_catalog_text.clear();
+            self.skill_metas.clear();
+            self.skill_shadows.clear();
         }
     }
 
@@ -2380,6 +2476,20 @@ impl Engine {
             }),
         };
         let _ = ask.reply.send(outcome);
+    }
+
+    /// Handle a skill invoke from the `skill` tool (T-15, FR-7). Resolves the
+    /// body via the catalog and replies over the oneshot. An unknown/untrusted-
+    /// absent skill returns `Ok(None)` which the tool maps to an HC-6 failure
+    /// (never a panic). **Read-only — emits nothing** (the catalog does not
+    /// change on invoke; contrast `on_memory_op` which refreshes `MemoryStatus`).
+    async fn on_skill_invoke(&mut self, ask: SkillAsk) {
+        let result = if self.skills_config.enabled {
+            self.skill_catalog.as_ref().and_then(|cat| cat.invoke(&ask.name))
+        } else {
+            None
+        };
+        let _ = ask.reply.send(Ok(result));
     }
 
     /// Resolve a turn-number range to the messages it contains (T-10, FR-3).
@@ -2725,6 +2835,19 @@ fn build_memory_store(config: &EngineConfig) -> Option<MemoryStore> {
     Some(MemoryStore::new(
         user_dir.clone(),
         config.project_memory_dir.clone(),
+    ))
+}
+
+/// Build the skill catalog from the engine config (FR-7, Tech Spec §8.2).
+/// Returns `None` when skills are disabled or no home directory exists.
+fn build_skill_catalog(config: &EngineConfig) -> Option<SkillCatalog> {
+    if !config.skills.enabled {
+        return None;
+    }
+    let user_dir = config.user_skills_dir.as_ref()?;
+    Some(SkillCatalog::new(
+        user_dir.clone(),
+        config.project_skills_dir.clone(),
     ))
 }
 

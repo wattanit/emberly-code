@@ -9,8 +9,8 @@
 use async_trait::async_trait;
 use emberly_tools::{
     AskUserGate, AskUserOutcome, MemoryError, MemoryGate, MemoryOutcome, MemoryRequest,
-    PermissionGate, PermissionOutcome, PermissionRequest, RecallGate, RecallOutcome, TaskItem,
-    TaskListError, TaskListGate,
+    PermissionGate, PermissionOutcome, PermissionRequest, RecallGate, RecallOutcome,
+    SkillError, SkillGate, SkillInvocation, TaskItem, TaskListError, TaskListGate,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -191,5 +191,40 @@ impl MemoryGate for MemoryGateImpl {
             return Err(MemoryError);
         }
         reply_rx.await.unwrap_or(Err(MemoryError))
+    }
+}
+
+/// A skill invoke in flight from a tool to the engine, carrying the oneshot
+/// the engine replies on (T-15). Like [`MemoryAsk`], opaque to callers of the
+/// engine.
+pub struct SkillAsk {
+    pub(crate) name: String,
+    pub(crate) reply: oneshot::Sender<Result<Option<SkillInvocation>, SkillError>>,
+}
+
+/// The skill gate installed into every
+/// [`ToolCtx`](emberly_tools::ToolCtx). Fails closed: if the engine is gone or
+/// the reply is dropped, the answer is `Err` (the safe default — the tool maps
+/// it to a structured failure, HC-6).
+pub(crate) struct SkillGateImpl {
+    pub(crate) asks: mpsc::Sender<SkillAsk>,
+}
+
+#[async_trait]
+impl SkillGate for SkillGateImpl {
+    async fn invoke_skill(&self, name: String) -> Result<Option<SkillInvocation>, SkillError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .asks
+            .send(SkillAsk {
+                name,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(SkillError);
+        }
+        reply_rx.await.unwrap_or(Err(SkillError))
     }
 }

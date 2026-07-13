@@ -101,6 +101,9 @@ fn make_config(
         memory: emberly_core::MemoryConfig::default(),
         user_memory_dir: None,
         project_memory_dir: None,
+        skills: emberly_core::SkillsConfig::default(),
+        user_skills_dir: None,
+        project_skills_dir: None,
     }
 }
 
@@ -140,7 +143,7 @@ fn start_with_file_transcript(
 
 fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx) = Engine::new(config, engine_ports.events_tx);
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx) = Engine::new(config, engine_ports.events_tx);
     tokio::spawn(engine.run(
         engine_ports.commands_rx,
         asks_rx,
@@ -148,6 +151,7 @@ fn spawn(config: EngineConfig) -> Harness {
         recall_rx,
         task_rx,
         memory_rx,
+        skill_rx,
     ));
     Harness {
         commands_tx: frontend.commands_tx,

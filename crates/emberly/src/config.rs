@@ -1030,6 +1030,13 @@ pub fn memory_dir() -> Option<PathBuf> {
     config_dir().map(|d| d.join("memory"))
 }
 
+/// The user-global skills directory (FR-7, Tech Spec §8.2):
+/// `~/.config/emberly/skills/`. Always loaded when a home directory exists.
+#[must_use]
+pub fn skills_dir() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("skills"))
+}
+
 /// The `trust.trusted_dirs` pre-trust allowlist, read **only** from the global
 /// config tier (FR-1 — project config cannot contribute). Missing/unparyable
 /// global config yields an empty list; the gate then relies on the store alone.
