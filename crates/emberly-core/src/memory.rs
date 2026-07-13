@@ -75,6 +75,13 @@ impl MemoryStore {
         };
 
         let entry_path = dir.join(format!("{slugified}.md"));
+        // Belt-and-braces over the group-1 slug guard: assert the resolved
+        // path stays under the scope dir (Tech Spec §8.1).
+        if !entry_path.starts_with(dir) {
+            return MemoryOutcome::Rejected {
+                reason: "entry path escapes the scope directory".into(),
+            };
+        }
         match req.op {
             MemoryOp::Write => {
                 if entry_path.exists() {

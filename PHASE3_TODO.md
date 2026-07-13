@@ -115,15 +115,15 @@ writers) and by pinning an *index string* rather than a full list. The seams:
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. Shared types + name→slug/validate + `MemoryGate` trait + `memory` tool skeleton (`emberly-tools`) | [ ] | mirror `TaskListGate`; reject `..`/absolute/separators in `name` (HC-4 boundary, testable) |
-| 2. Memory store: dirs, frontmatter split, entry read/write, `MEMORY.md` index gen (`emberly-core`) | [ ] | new `memory.rs`; `toml` frontmatter, no YAML (HC-2); index = one line per entry |
-| 3. Engine wiring: gate impl + select-loop arm + `on_memory_op` + load-at-start + pin index + reset (`emberly-core`) | [ ] | FS write engine-side; refresh index; emit `MemoryStatus`; append index in `effective_system()` |
-| 4. Trust-gated project scope + store dirs from the binary (`emberly`) | [ ] | user-global always; project dir `Some` only under trusted root; XDG `config_dir()/memory` |
-| 5. Config: `[memory] enabled + max_index_entries` + resolve/provenance + `EngineConfig` (`emberly`/`emberly-core`) | [ ] | mirror `[context]`; `max_index_entries` soft warn (§16 open item) |
-| 6. Events + TUI: `MemoryStatus` UiEvent + sidebar Memory section + origin on tool line + degraded (`emberly-core`/`emberly-tui`) | [ ] | counts (not bodies) in sidebar; `user`/`project` origin per Design §4.9 |
-| 7. Tests (offline, deterministic — §14.7) + exit criterion | [ ] | write/recall round-trip; path-escape rejected; index pinned; project absent when untrusted |
+| 1. Shared types + name→slug/validate + `MemoryGate` trait + `memory` tool skeleton (`emberly-tools`) | [x] | `MemoryScope`, `MemoryOp`, `MemoryRequest`, `MemoryOutcome`, `slug()` rejecting `..`/absolute/separators; `MemoryGate` trait + `DropMemoryGate`; `MemoryTool` registered in `default_registry()` |
+| 2. Memory store: dirs, frontmatter, entry read/write, `MEMORY.md` index gen (`emberly-core`) | [x] | `+++` TOML fence; write/update/remove/recall; `regenerate_index`; belt-and-braces path-escape assertion; `split_frontmatter` round-trips |
+| 3. Engine wiring: gate impl + select-loop arm + `on_memory_op` + load-at-start + pin index + reset (`emberly-core`) | [x] | `MemoryGateImpl`; select-loop arm in all three select loops; `effective_system()` pins index; `max_index_entries` soft warn; `adopt_session` reloads |
+| 4. Trust-gated project scope + store dirs from the binary (`emberly`) | [x] | `memory_dir()` helper; project dir `Some` only under trusted root (gate exits on decline); dirs not created eagerly |
+| 5. Config: `[memory] enabled + max_index_entries` + resolve/provenance + `EngineConfig` (`emberly`/`emberly-core`) | [x] | `MemoryConfigFile`; resolved into `MemoryConfig`; provenance for both `enabled` and `max_index_entries` |
+| 6. Events + TUI: `MemoryStatus` UiEvent + sidebar Memory section + origin on tool line + degraded (`emberly-core`/`emberly-tui`) | [x] | `MemoryStatus { user, project }`; sidebar count section; origin on tool summary; degraded frontend handles via `_ => {}` |
+| 7. Tests (offline, deterministic — §14.7) + exit criterion | [x] | slug unit tests; store unit tests; write/recall round-trip; index pinned; disabled=false absent; not-gated; project absent untrusted; name-escape; HC-7 no bytes; clippy-clean |
 
-**Overall Phase 3: NOT STARTED.**
+**Overall Phase 3: DONE.**
 
 ---
 
@@ -342,39 +342,38 @@ No new per-op UiEvent (Tech Spec §3.1: memory writes/recalls flow through the e
 
 ## Decisions & notes log
 
-> Fill in as the phase proceeds (mirrors the v0.1–v0.3, Phase 1, and Phase 2 logs).
-
-- **Gate shape.** `memory` reaches the engine via a new `MemoryGate` returning a
-  `MemoryOutcome` — structurally a hybrid of `TaskListGate` (ack + engine mutation, not
-  permission-gated) and `RecallGate` (returns data, for the `recall` op). It never calls
-  `ctx.authorize` — the only mechanism that marks a tool gated (confirmed: no boolean flag
-  exists). _If the Spec should absorb the gate/outcome shape, it flows back as a version
-  bump per G-24, not an edit here._
+- **Gate shape.** `memory` reaches the engine via `MemoryGate` returning `MemoryOutcome` —
+  a hybrid of `TaskListGate` (engine mutation, not permission-gated) and `RecallGate` (returns
+  data, for the `recall` op). It never calls `ctx.authorize` — confirmed by a dedicated test
+  asserting no `PermissionRequest` is ever raised.
 - **Trust-gating is structural, not a runtime re-check.** The binary passes
   `project_memory_dir: None` on an untrusted root; the engine never re-checks trust
-  (`trust::gate` already exited on decline). Chosen because trust is a pre-engine gate
-  (Tech Spec §6.7) and this keeps the honesty clause testable (construct with `None`).
-  _Record if a future non-interactive "proceed-untrusted" mode ever lets a session run
-  untrusted — then this `None` path becomes load-bearing at runtime, not just future-proofing._
+  (`trust::gate` already exited on decline). Tested by constructing the engine with `None`
+  and asserting the project scope returns `Rejected`.
 - **`memory` recall op vs the `recall` tool (T-10).** Deliberately kept distinct: the
   memory op returns an entry *body*; the T-10 tool returns dropped *conversation turns*.
-  Same word, two gates. _Watch the tool descriptions so the model does not confuse them._
-- **Frontmatter delimiter.** Leaning to `+++` (TOML's conventional fence) over `---`
-  (YAML/markdown-ambiguous), Tech Spec §8.1 says "TOML frontmatter" without pinning the
-  fence. _Confirm in group 2; if §8.1 should pin the delimiter, that is G-24 feedback._
+  Same word, two gates. Tool descriptions disambiguate.
+- **Frontmatter delimiter: `+++` (TOML).** Chosen over `---` (YAML/markdown-ambiguous).
+  Tech Spec §8.1 says "TOML frontmatter" without pinning the fence. If §8.1 should pin the
+  delimiter, that is G-24 feedback.
+- **`write` vs `update` semantics.** `write` fails if the entry already exists (forces the
+  model to be intentional about overwrites); `update` is create-or-overwrite (the common
+  case). A `remove` of a missing entry is a clean no-op (no error).
 - **Index pinned via the system prompt, not a message pin.** The memory index is engine
-  state, so it rides `effective_system()` (the task-list precedent) rather than the message
-  pin prefix (`pinned_count`/`windowed_messages`). Bodies are never pinned (Tech Spec §7).
+  state, so it rides `effective_system()` (the task-list precedent). Bodies are never pinned
+  (Tech Spec §7).
+- **`max_index_entries` soft warn.** Default 50. When the combined user+project index
+  exceeds the cap, a one-time dim `Notice` is emitted — the index is not truncated.
+  Initial value; tune with use (Requirements §13, Tech Spec §16).
 - **No transcript type / no bytes in the JSONL (HC-7).** The durable fact is the
   user-inspectable `<slug>.md`; the transcript keeps only the `tool_call`/`tool_result`
-  pair. Resume re-reads the store from disk. _Consequence: editing a memory file between
-  sessions is honored on next load — intended (Tech Spec §8.1 "plain text the user edits")._
+  pair. The tool_call args naturally contain the body (the model sent it), but the
+  tool_result does not duplicate it. Verified by a dedicated test. Resume re-reads the
+  store from disk.
+- **Belt-and-braces path guard.** In addition to the `slug()` validation in the tool, the
+  store asserts `entry_path.starts_with(dir)` before any op — defense in depth over the
+  group-1 slug guard.
 - **Sidebar shows counts now; the editable overlay is a later affordance.** Design §4.9
-  describes an editable entry inspector via the §4.6 in-app path; this phase ships the
-  read-only count section (the `MemoryStatus` surface) and leaves the overlay to a
-  follow-up, since files are already user-editable on disk. _Record if the owner wants the
-  overlay in-scope for 0.4._
-- **Open items carried in (Tech Spec §16 v0.8, this phase's resolver):**
-  `memory.max_index_entries` is a soft warn threshold — determine the point at which a large
-  always-pinned index itself wants the §7 economy (description truncation or an on-demand
-  index tier); pick the initial default in group 5 and tune with use (Requirements §13).
+  describes an editable entry inspector; this phase ships the read-only count section and
+  leaves the overlay to a follow-up.
+- **No new external dependency** — `toml` is already in the tree (HC-2).

@@ -584,6 +584,9 @@ pub struct Engine {
     memory_user_index: String,
     /// Cached project memory index text for pinning (empty when untrusted).
     memory_project_index: String,
+    /// Whether the max_index_entries soft-cap warning has been emitted this
+    /// session (Tech Spec §16 — warn once, do not truncate).
+    memory_warn_emitted: bool,
 }
 
 impl Engine {
@@ -591,6 +594,7 @@ impl Engine {
     /// ask-user channels. The caller passes both straight back into
     /// [`run`](Engine::run); they are opaque otherwise.
     #[must_use]
+    #[allow(clippy::type_complexity)]
     pub fn new(
         config: EngineConfig,
         events_tx: mpsc::Sender<UiEvent>,
@@ -703,6 +707,7 @@ impl Engine {
             memory_store,
             memory_user_index: String::new(),
             memory_project_index: String::new(),
+            memory_warn_emitted: false,
         };
         // Load memory indexes at session start (Tech Spec §8.1).
         engine.refresh_memory_indexes();
@@ -1355,6 +1360,7 @@ impl Engine {
     /// Execute tool calls sequentially, appending each result to the
     /// conversation. Stops early on cancellation, backfilling canceled results
     /// so the conversation stays well-formed (every tool_use has a result).
+    #[allow(clippy::too_many_arguments)]
     async fn run_tool_calls(
         &mut self,
         tool_calls: Vec<PendingToolCall>,
@@ -1487,6 +1493,7 @@ impl Engine {
 
     /// Run one tool call, driving its execution concurrently with permission
     /// asks and cancellation.
+    #[allow(clippy::too_many_arguments)]
     async fn run_one_tool_call(
         &mut self,
         call: &PendingToolCall,
@@ -2373,6 +2380,21 @@ impl Engine {
                     project: project_count,
                 })
                 .await;
+                // Soft-cap warn (Tech Spec §16): warn once when the combined
+                // index exceeds `max_index_entries`. Do not truncate.
+                let total = user_count + project_count;
+                if !self.memory_warn_emitted
+                    && total > self.memory_config.max_index_entries
+                {
+                    self.memory_warn_emitted = true;
+                    self.emit(UiEvent::Notice {
+                        message: format!(
+                            "memory index has {total} entries (soft cap {}) — consider trimming or consolidating",
+                            self.memory_config.max_index_entries
+                        ),
+                    })
+                    .await;
+                }
                 Ok(result)
             }
             None => Ok(emberly_tools::MemoryOutcome::Rejected {

@@ -3950,3 +3950,129 @@ async fn memory_name_escape_is_rejected() {
         "path-escape in name was rejected"
     );
 }
+
+#[tokio::test]
+async fn memory_disabled_does_not_pin_index() {
+    // When memory.enabled = false, the index is absent from the system prompt
+    // and a memory op returns Rejected.
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    // Pre-seed a memory file so the index would be non-empty.
+    let _ = std::fs::create_dir_all(&user_dir);
+    let _ = std::fs::write(
+        user_dir.join("seed.md"),
+        "+++\nname = \"Seed\"\ndescription = \"seed entry\"\n+++\nbody\n",
+    );
+    let _ = std::fs::write(
+        user_dir.join("MEMORY.md"),
+        "- Seed — seed entry\n",
+    );
+
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "memory",
+            r#"{"op":"recall","scope":"user","name":"Seed"}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let mut config = memory_config(provider, root, user_dir, None);
+    config.memory.enabled = false;
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "recall".into() }).await;
+    let events = h.collect(None).await;
+
+    // The tool finished with ok=false (memory disabled).
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { ok: false, .. })),
+        "memory op rejected when disabled"
+    );
+
+    // The index is NOT in the system prompt.
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(
+        !system.contains("Seed"),
+        "memory index absent when disabled"
+    );
+}
+
+#[tokio::test]
+async fn memory_op_never_raises_permission_request() {
+    // A memory op is not permission-gated — it never raises a
+    // PermissionRequest (mirror the todo/recall not-gated assertions).
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "memory",
+            r#"{"op":"write","scope":"user","name":"Note","description":"x","body":"y"}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = memory_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "write memory".into() }).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        !events.iter().any(|e| matches!(e, UiEvent::PermissionRequest { .. })),
+        "memory op never raises a PermissionRequest"
+    );
+}
+
+#[tokio::test]
+async fn memory_hc7_no_bytes_in_transcript() {
+    // HC-7: the durable fact lives in <slug>.md, not duplicated into the JSONL.
+    // The transcript records only the tool_call/tool_result pair.
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    let sink = CaptureSink::new();
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "memory",
+            r#"{"op":"write","scope":"user","name":"Secret","description":"desc","body":"the answer is 42"}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = memory_config(provider, root, user_dir.clone(), None);
+    let config = {
+        let mut c = config;
+        c.transcript = Box::new(sink.clone());
+        c
+    };
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "remember".into() }).await;
+    let _ = h.collect(None).await;
+
+    // The memory file exists on disk with the body.
+    let entry = std::fs::read_to_string(user_dir.join("secret.md")).unwrap_or_default();
+    assert!(entry.contains("the answer is 42"), "body in the .md file");
+
+    // The transcript records the tool_call and tool_result but the tool_result
+    // does NOT duplicate the body — only the summary.
+    let records = sink.records();
+    let tool_result = records.iter().find(|r| {
+        matches!(&r.event, TranscriptEvent::ToolResult { call_id, .. } if call_id.0 == "c1")
+    });
+    assert!(tool_result.is_some(), "tool_result recorded");
+    if let Some(r) = tool_result {
+        if let TranscriptEvent::ToolResult { output, .. } = &r.event {
+            assert!(
+                !output.contains("the answer is 42"),
+                "memory body must not be duplicated in the tool_result (HC-7)"
+            );
+        }
+    }
+    // The body IS in the .md file on disk.
+    assert!(entry.contains("the answer is 42"), "body in the .md file");
+}

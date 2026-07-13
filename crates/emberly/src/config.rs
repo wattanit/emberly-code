@@ -682,6 +682,21 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             true,
         );
     }
+    if field(&project, |c: &ConfigFile| c.memory.max_index_entries.is_some())
+        || field(&global, |c: &ConfigFile| c.memory.max_index_entries.is_some())
+    {
+        record(
+            &mut provenance,
+            "memory.max_index_entries",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.memory.max_index_entries.is_some()),
+                field(&global, |c: &ConfigFile| c.memory.max_index_entries.is_some()),
+            ),
+            true,
+        );
+    }
 
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
