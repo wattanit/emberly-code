@@ -1106,6 +1106,26 @@ impl App {
                 self.set_choice_selection(row);
                 self.on_choice_picker_key(KeyEvent::from(KeyCode::Enter))
             }
+            ClickTarget::SessionRow(row) => {
+                // Focus + Enter on the session picker (resume).
+                self.set_picker_selection(row);
+                self.on_session_picker_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::MemoryRow(row) => {
+                // Focus + Enter on the memory inspector (view the entry).
+                self.set_memory_selection(row);
+                self.on_memory_inspector_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::SkillRow(row) => {
+                // Focus + Enter on the skills inspector (read-only body view).
+                self.set_skill_selection(row);
+                self.on_skills_inspector_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::ReasoningToggle => {
+                // Exactly the Ctrl+R action — toggle the most recent trail.
+                self.toggle_reasoning();
+                Action::None
+            }
         }
     }
 
@@ -3099,6 +3119,65 @@ mod tests {
         // An empty hit-map (nothing rendered clickable) → no action, no panic.
         let mut a = app();
         assert_eq!(a.on_click(5, 5), Action::None);
+    }
+
+    #[test]
+    fn click_reasoning_toggle_matches_ctrl_r() {
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+        let mut a = app();
+        a.apply_event(UiEvent::ReasoningDelta { text: "hmm".into() });
+        a.apply_event(UiEvent::AssistantDelta { text: "a".into() }); // settle → collapsed
+        a.hit_map.push(region, ClickTarget::ReasoningToggle);
+        // A click expands the trail — exactly Ctrl+R.
+        assert_eq!(a.on_click(0, 0), Action::None);
+        assert!(matches!(
+            a.conversation.first(),
+            Some(ConvItem::Reasoning { expanded: true, .. })
+        ));
+        // A second click collapses it (parity with a second Ctrl+R).
+        a.on_click(0, 0);
+        assert!(matches!(
+            a.conversation.first(),
+            Some(ConvItem::Reasoning { expanded: false, .. })
+        ));
+    }
+
+    #[test]
+    fn click_memory_row_is_focus_plus_enter() {
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+        let entries = || {
+            (
+                vec![mem_summary("Alpha", "a", MemoryScope::User)],
+                vec![mem_summary("Proj", "p", MemoryScope::Project)],
+            )
+        };
+
+        let mut by_click = app();
+        let (user, project) = entries();
+        by_click.apply_event(UiEvent::MemoryEntries { user, project });
+        by_click.hit_map.push(region, ClickTarget::MemoryRow(1)); // project entry
+        let click_action = by_click.on_click(0, 0);
+
+        let mut by_key = app();
+        let (user, project) = entries();
+        by_key.apply_event(UiEvent::MemoryEntries { user, project });
+        by_key.on_key(key(KeyCode::Down)); // focus flattened row 1
+        let key_action = by_key.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            click_action, key_action,
+            "clicking a memory entry == arrow + Enter"
+        );
     }
 
     #[test]

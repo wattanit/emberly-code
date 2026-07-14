@@ -95,11 +95,11 @@ surfaces the prior phases built and is otherwise self-contained in `emberly-tui`
 | 1. `ui.mouse` config + threading + single capture gate (rich && ui.mouse) + crossterm feature (`emberly`/`emberly-tui`) | [x] | mirrored `tool_explanations` + the §6.4 ticker control point; gated the *existing* capture; no new dep (`Cargo.lock` unchanged) |
 | 2. Wheel-scroll parity: route wheel to the palette list; confirm overlay/permission/conversation (`emberly-tui`) | [x] | added palette branch to `on_scroll` (moves `selected`, == Up/Down); confirmed overlay/permission/conversation routing with tests |
 | 3. Click hit-testing infrastructure: retained `HitMap` of `Rect → Target` (`emberly-tui`) | [x] | `hit.rs` (`HitMap`/`ClickTarget`); `frame` builds it (out-param); `on_click` = focus+Enter; tui click arm; palette+choice rows wired (rest → group 4) |
-| 4. Click = focus+Enter on keyboard-parity surfaces: palette rows, picker rows, reasoning expand, modified-files diff (`emberly-tui`) | [ ] | each maps to an existing handler; Memory/Skills row-open deferred (no keyboard parity yet) |
+| 4. Click = focus+Enter on keyboard-parity surfaces: palette rows, picker rows, reasoning expand, overlay rows (`emberly-tui`) | [x] | palette/choice (grp 3) + session/memory/skill overlay rows + reasoning toggle, all via synthetic-Enter; **sidebar clicks deferred** (wrapped Paragraph — see log) |
 | 5. Permission-prompt click safety + native Shift-selection passthrough + `ui.mouse=false` off switch (`emberly-tui`) | [ ] | click reuses `on_permission_key`; never auto-approve; preserve terminal copy |
 | 6. Tests (offline — §14.7) + exit criterion (`emberly-tui`) | [ ] | capture-off predicate, wheel routing, click→action, click-never-approves, degraded |
 
-**Overall Phase 6: IN PROGRESS — Groups 1–3 done (capture gate + wheel parity + click hit-testing).**
+**Overall Phase 6: IN PROGRESS — Groups 1–4 done (capture gate + wheel parity + click hit-testing + click dispatch). Remaining: group 5 (permission click safety + Shift passthrough) + group 6 (tests/exit). Sidebar-open clicks deferred (see log).**
 
 ---
 
@@ -199,32 +199,44 @@ each target — the mouse adds no capability the keyboard lacks (the invariant).
       Enter. **Done in group 3** — `on_click` calls `set_choice_selection(row)` then a
       synthetic `Enter` to `on_choice_picker_key`. Parity test: click row 2 == Down·Down +
       Enter.
-- [ ] **Collapsed reasoning trail** → expand/collapse, reusing `toggle_reasoning`
-      (`app.rs:1357`, the Ctrl+R action). (The inline task list is always-expanded today —
-      no collapse affordance exists, so there is nothing to toggle; a click is a no-op
-      unless/until a task-list collapse lands — note in log, do not invent one.)
-- [ ] **Modified-files entry** → open its diff, reusing the existing diff-overlay open
-      (`open_last_diff` `app.rs:1168`). Today only the *last* modified file is keyboard-
-      openable (Ctrl+O). A click naming a *specific* row would exceed keyboard parity
-      unless per-file open exists for the keyboard too. **Decide (notes log):** either
-      (a) scope the click to "open the diff overlay" (parity-safe, opens the same view Ctrl+O
-      does) or (b) add a keyboard-selectable modified-files list *first* so click-a-row has a
-      keyboard twin. Default to (a) to preserve the invariant this phase.
-- [ ] **Out of scope this phase — Memory/Skills inspector click targets (honesty clause).**
-      Design §4.9 *does* specify inspectors: the sidebar Memory section "opens an overlay
-      listing entries grouped by scope, each editable/deletable" and the Skills section
-      "selecting one shows its instruction body read-only" (tied to the FR-6/FR-7 trust
-      rationale — memory the user cannot see/correct is memory they cannot trust). **But
-      those inspector overlays were never built in Phase 3/4** — today the sidebar Memory/
-      Skills sections are counts/catalog lines only, there is no inspector overlay, and no
-      `/memory` / `/skills` palette command. So the blocker for a mouse click here is **the
-      overlay itself does not exist yet**, not a missing keyboard-selection model. This is a
-      pre-existing Phase 3/4 gap against Design §4.9, **independent of Phase 6**. Once the
-      inspector overlay lands and is palette-openable (§3.3 "reachable three ways"), a
-      sidebar click opens it parity-safely — the *exact* modified-files-diff pattern
-      (group 4 above), the mouse being the §3.4 "fourth, optional way." Until then, a click
-      on those sidebar rows is an inert no-op (they carry no keyboard action to mirror). Do
-      **not** build the inspector or a mouse-only selection in this phase.
+- [x] **Collapsed/expanded reasoning trail** → toggle, reusing `toggle_reasoning` (the Ctrl+R
+      action). `conversation_lines` now reports the **most recent** reasoning header's line
+      index (out-param — overwritten each item so it ends at the last, matching Ctrl+R's
+      "toggle the most recent"); `render_conversation` pushes a `ReasoningToggle` region when
+      it is on screen (the conversation is pre-wrapped, so screen row == line offset). Only the
+      *last* trail is clickable, so the click never exceeds Ctrl+R's parity. (Inline task list
+      is always-expanded — nothing to toggle; left alone per the note below.) Tests:
+      `click_reasoning_toggle_matches_ctrl_r` (app), `reasoning_trail_is_clickable` (render).
+- [x] **Overlay picker rows: sessions / memory / skills** → select + Enter, reusing
+      `on_session_picker_key` / `on_memory_inspector_key` / `on_skills_inspector_key`. The four
+      overlay list-builders now return a `row_of_line` map (header/spacer → `None`);
+      `render_overlay` pushes one region per selectable line via a `RowKind` → `ClickTarget`
+      map (unified with group 3's choice path). `on_click` dispatches each via the
+      synthetic-Enter pattern. Tests: `click_memory_row_is_focus_plus_enter` (app),
+      `memory_inspector_rows_populate_the_hit_map` (render); sessions/skills share the identical
+      mechanism.
+- [~] **Modified-files entry → open its diff — DEFERRED with the sidebar clicks (below).**
+      Decision, had it landed, would be **(a)**: a click opens the same diff overlay Ctrl+O
+      opens (parity-safe; per-file open has no keyboard twin so it would exceed parity). But
+      the modified-files list lives in the sidebar (a wrapped `Paragraph`), so it shares the
+      deferral below.
+- [x] **Memory/Skills inspector *rows* are now clickable (the honesty clause is resolved).**
+      The Phase-3/4 gap this section flagged is closed: Part 2 shipped the `/memory` `/skills`
+      inspector overlays, and group 4 makes their **rows** clickable (above) — clicking a
+      memory/skill entry views it, parity-safe (Enter twin). What remains deferred is only the
+      **sidebar-section → open-inspector** click (open `/memory` `/skills` from the sidebar),
+      which is a *sidebar* click, deferred for the geometry reason below — not a parity gap
+      (the inspectors are palette-openable).
+- [~] **Sidebar clicks (modified-files diff, Memory/Skills-section open) — DEFERRED to a
+      small follow-up.** The sidebar is a single `Paragraph` with `Wrap { trim:false }`, and
+      some lines wrap (skill descriptions, the tokens line), so a screen row does **not** map
+      reliably to a logical line without either (i) refactoring the sidebar to per-section
+      sub-areas, or (ii) self-pre-wrapping its multi-span styled lines (as the conversation
+      does). Shipping coarse/guessed rects would risk clicking the wrong target — worse than
+      no click. **No parity is lost:** the diff is on Ctrl+O and the inspectors are on
+      `/memory` `/skills` (palette). _Follow-up: refactor the sidebar for stable geometry, then
+      push `OpenDiff` / `OpenMemoryInspector` / `OpenSkillsInspector` regions — the mouse being
+      §3.4's "fourth, optional way." Owner: confirm whether to do it now or after Phase 6._
 
 ## 5. Permission-prompt click safety + native selection + off switch  *(Design §3.4, §5, §7)*
 
@@ -325,6 +337,25 @@ each target — the mouse adds no capability the keyboard lacks (the invariant).
   whose return is discarded, so a returned map can't escape the closure — the out-param is the
   clean way to get geometry out of the draw. Single source of truth preserved (built *in* the
   draw, never a second recompute).
+- **Group 4 DONE (click dispatch on the overlay + conversation surfaces).** Wired
+  session/memory/skill **overlay rows** (the four list-builders now return a `row_of_line`
+  map; `render_overlay` pushes one region per selectable line via `RowKind → ClickTarget`,
+  unifying group 3's choice path) and the **reasoning-trail toggle** (`conversation_lines`
+  reports the last reasoning header's line index; `render_conversation` pushes a
+  `ReasoningToggle` region). All dispatch via the synthetic-Enter pattern → parity by
+  construction. +4 tests (183 green), `emberly-tui` clippy-clean, no new dep.
+- **Sidebar clicks DEFERRED (modified-files diff + Memory/Skills-section open).** The sidebar
+  is one `Paragraph` with `Wrap{trim:false}` and some lines wrap (skill descriptions, tokens
+  line), so screen-row → logical-line is unreliable without a render refactor (per-section
+  sub-areas or self-pre-wrapped lines). Deferred rather than ship guessed rects. **No parity
+  lost** — the diff is Ctrl+O and the inspectors are `/memory`/`/skills` in the palette. The
+  Design §4.9 "sidebar Memory click opens the inspector" is thus a UI *convenience* still open,
+  not a capability gap. _Follow-up: sidebar geometry refactor, then push OpenDiff/OpenMemory/
+  OpenSkills regions. Owner: now vs. after Phase 6._
+- **Memory/Skills honesty-clause resolved.** The original group-4 note said memory/skills
+  clicks were out of scope because the inspector overlays didn't exist. Part 2 shipped them, so
+  group 4 makes the inspector **rows** clickable (parity-safe). Only the sidebar-*section* open
+  click remains (deferred above, for geometry — not parity).
 - **Part 2 (memory/skills inspectors) already merged into this branch — group 4 sidebar-click
   target is now UNBLOCKED.** `PHASE6_TODO.md` groups 2/4 and the notes below were written before
   `phase6b/memory-skills-inspector` landed; the inspectors now exist and are palette-openable

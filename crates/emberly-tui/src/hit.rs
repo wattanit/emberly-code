@@ -25,6 +25,18 @@ pub enum ClickTarget {
     /// A choice-picker row (model/effort/mode) — index into the picker's rows.
     /// Click = select it + picker Enter.
     ChoiceRow(usize),
+    /// A session-picker row — index into the sessions list. Click = select it +
+    /// picker Enter (resume).
+    SessionRow(usize),
+    /// A memory-inspector row — index into the flattened user-then-project
+    /// entry list. Click = select it + inspector Enter (view).
+    MemoryRow(usize),
+    /// A skills-inspector row — index into the skills list. Click = select it +
+    /// inspector Enter (read-only body view).
+    SkillRow(usize),
+    /// The collapsed/expanded reasoning-trail line in the conversation. Click =
+    /// toggle it, exactly as Ctrl+R does (`toggle_reasoning`).
+    ReasoningToggle,
 }
 
 /// A per-frame map from screen rectangles to click targets, rebuilt every draw
