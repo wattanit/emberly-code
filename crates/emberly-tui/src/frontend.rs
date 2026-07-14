@@ -67,6 +67,7 @@ pub async fn run(
     profiles: Vec<String>,
     config_template: String,
     reasoning: Option<String>,
+    mouse: bool,
 ) -> io::Result<()> {
     let reasoning_view = crate::app::ReasoningView::parse(reasoning.as_deref().unwrap_or(""));
     match kind {
@@ -79,6 +80,7 @@ pub async fn run(
                 profiles,
                 config_template,
                 reasoning_view,
+                mouse,
             )
             .await
         }

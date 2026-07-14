@@ -51,6 +51,14 @@ pub const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/co
 # by the model. On by default. Set false to defeat it — the schema property and
 # the prompt instruction are both dropped, so no tokens are spent on it.
 # tool_explanations = true
+#
+# Pointer (mouse) interaction in the rich TUI (Design §3.4): wheel scroll and
+# click-to-select, additive to the keyboard and never the sole path to anything.
+# On by default. Set false to release the mouse entirely — the terminal keeps
+# its native click-drag selection everywhere. Degraded mode (--plain/NO_COLOR/
+# TERM=dumb) never captures the mouse regardless. With capture on, hold your
+# terminal's selection modifier (usually Shift) to drag-select and copy as usual.
+# mouse = true
 "#;
 
 /// A documented `permissions.toml`. The rule engine is Phase 2; this reserves

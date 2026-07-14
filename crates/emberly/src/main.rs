@@ -616,6 +616,7 @@ async fn run() -> anyhow::Result<()> {
         profiles,
         init::CONFIG_TEMPLATE.to_string(),
         resolved.reasoning.clone(),
+        resolved.mouse,
     )
     .await?;
 

@@ -92,41 +92,45 @@ surfaces the prior phases built and is otherwise self-contained in `emberly-tui`
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. `ui.mouse` config + threading + single capture gate (rich && ui.mouse) + crossterm feature (`emberly`/`emberly-tui`) | [ ] | mirror `tool_explanations` + the §6.4 ticker control point; gate the *existing* capture |
+| 1. `ui.mouse` config + threading + single capture gate (rich && ui.mouse) + crossterm feature (`emberly`/`emberly-tui`) | [x] | mirrored `tool_explanations` + the §6.4 ticker control point; gated the *existing* capture; no new dep (`Cargo.lock` unchanged) |
 | 2. Wheel-scroll parity: route wheel to the palette list; confirm overlay/permission/conversation (`emberly-tui`) | [ ] | small gap — `on_scroll` doesn't route to the open palette today |
 | 3. Click hit-testing infrastructure: retained `HitMap` of `Rect → Target` (`emberly-tui`) | [ ] | layout is transient in draw; build a hit-map from render geometry |
 | 4. Click = focus+Enter on keyboard-parity surfaces: palette rows, picker rows, reasoning expand, modified-files diff (`emberly-tui`) | [ ] | each maps to an existing handler; Memory/Skills row-open deferred (no keyboard parity yet) |
 | 5. Permission-prompt click safety + native Shift-selection passthrough + `ui.mouse=false` off switch (`emberly-tui`) | [ ] | click reuses `on_permission_key`; never auto-approve; preserve terminal copy |
 | 6. Tests (offline — §14.7) + exit criterion (`emberly-tui`) | [ ] | capture-off predicate, wheel routing, click→action, click-never-approves, degraded |
 
-**Overall Phase 6: NOT STARTED.**
+**Overall Phase 6: IN PROGRESS — Group 1 done (config + threading + capture gate).**
 
 ---
 
 ## 1. `ui.mouse` config + threading + single capture gate  *(Design §3.4; Tech Spec §9, §8)*
 
-- [ ] `crates/emberly/src/config.rs`: add `pub mouse: Option<bool>` to `UiConfig` (:66,
-      beside `tool_explanations` :74). Merge (:343 block), resolve default **`true`**
-      (:892 pattern — `merged.ui.mouse.unwrap_or(true)`), provenance for a non-default
-      (:612 pattern), and surface in `config show`. Add a `mouse` field to `Resolved`
-      (or a `ui_mouse: bool`), mirroring how `tool_explanations` is carried.
-- [ ] Thread it to the TUI. `tool_explanations` is engine-only, so `ui.mouse` is the first
-      `[ui]` flag the TUI needs — pass it through `frontend::run` → `tui::run` → `App`
-      (mirror the `reasoning` thread, `main.rs:618` → `tui.rs:45`). Store `mouse_enabled:
-      bool` on `App` (or pass to `tui::run` for the capture decision only).
-- [ ] **Single capture gate (Tech Spec §9, the §6.4-ticker pattern).** In `enter_modes`
-      (`terminal.rs:48`) make `EnableMouseCapture` conditional on one predicate `rich &&
-      ui.mouse`. Since `enter_modes` is only reached from `tui::run` (rich), the predicate
-      reduces to `ui.mouse` at that call site — pass a `capture_mouse: bool` into
-      `TerminalGuard::enter(...)`/`enter_modes` and emit `EnableMouseCapture` only when
-      set; **always** `DisableMouseCapture` on teardown (harmless if never enabled, and
-      safe across `resume`). Degraded/`--plain` never enters `tui::run`, so it is
-      structurally capture-free (`frontend.rs:72`) — do not touch `line.rs`.
-- [ ] Confirm the crossterm mouse-event reader is enabled. Mouse events already arrive
-      (`tui.rs:125`), riding ratatui's crossterm backend via feature unification; make it
-      explicit — declare the needed feature on the `crossterm` workspace dep
-      (`Cargo.toml:57`) so it is not accidentally dropped. No new external crate (HC-2;
-      `crossterm` already locked, Tech Spec §12).
+- [x] `crates/emberly/src/config.rs`: added `pub mouse: Option<bool>` to `UiConfig` (beside
+      `tool_explanations`, with a §3.4 doc comment). Merge block mirrors `tool_explanations`;
+      `Resolved` gains `pub mouse: bool` resolved `merged.ui.mouse.unwrap_or(true)`; provenance
+      recorded under `"ui.mouse"` only on a deviation from the default (the `record()`/
+      `source_of` pattern), so `config show`'s generic "overrides (non-default sources)" list
+      surfaces it automatically — no bespoke `show` code, exactly like `tool_explanations`.
+      Documented `# mouse = true` in the `init` `[ui]` config template. Test
+      `ui_mouse_parses_and_merges` added (parse / merge / independence from
+      `tool_explanations`).
+- [x] Threaded to the TUI: `resolved.mouse` → `frontend::run(..)` → `tui::run(.., mouse)` →
+      `TerminalGuard::enter(mouse)` (mirrors the `reasoning` thread). **Not** stored on `App` —
+      `App` needs no capture knowledge; the flag is consumed at the terminal-guard call site
+      only (per the group-1 "or pass to `tui::run` for the capture decision only" option). The
+      plain frontend ignores it (degraded is structurally capture-free — `frontend.rs` Rich arm
+      only; `line.rs` untouched).
+- [x] **Single capture gate (Tech Spec §9, the §6.4-ticker pattern).** `TerminalGuard` now
+      carries `capture_mouse: bool`; `enter_modes(capture_mouse)` emits `EnableMouseCapture`
+      **only when set**, and `resume` re-applies the stored flag (so an `$EDITOR` handoff
+      restores the same decision). Teardown keeps the **unconditional** `DisableMouseCapture`
+      (harmless if never enabled, safe across `resume`). Reaching `tui::run` already means rich,
+      so `rich && ui.mouse` reduces to `ui.mouse` at the call site (documented inline). `line.rs`
+      untouched.
+- [x] Made the crossterm `events` reader **explicit**: added `"events"` to the `crossterm`
+      workspace-dep feature list (it was already active as a crossterm default; naming it keeps
+      key/resize/**mouse** capture from being dropped if defaults ever change). **No new external
+      crate and `Cargo.lock` is unchanged** (HC-2; `crossterm` already locked, Tech Spec §12).
 
 ## 2. Wheel-scroll parity  *(Design §3.4)*
 
@@ -263,6 +267,24 @@ each target — the mouse adds no capability the keyboard lacks (the invariant).
 
 > Fill in as the phase proceeds (mirrors the v0.1–v0.3, Phase 1–5 logs).
 
+- **Group 1 DONE (config + threading + capture gate).** `ui.mouse` (default `true`) mirrors the
+  `tool_explanations` pattern end-to-end: `UiConfig` field → merge → `Resolved.mouse` →
+  provenance (`"ui.mouse"`, surfaced generically by `config show`) → `init` template doc. Threaded
+  `resolved.mouse` → `frontend::run` → `tui::run` → `TerminalGuard::enter(capture_mouse)`; the
+  existing unconditional `EnableMouseCapture` is now conditional on the flag, `resume` re-applies
+  it, teardown still always `DisableMouseCapture`s. Made the crossterm `events` feature explicit
+  (no new dep; `Cargo.lock` unchanged, HC-2). Not stored on `App` — capture is decided only at the
+  guard call site. Verified: `emberly`+`emberly-tui` build clean; config tests (13, incl. new
+  `ui_mouse_parses_and_merges`) and the full `emberly-tui` suite (167) green; `emberly-tui --lib`
+  clippy clean (the only workspace clippy warnings are the 2 pre-existing `emberly-core/engine.rs`
+  `too_many_arguments`, unrelated).
+- **Part 2 (memory/skills inspectors) already merged into this branch — group 4 sidebar-click
+  target is now UNBLOCKED.** `PHASE6_TODO.md` groups 2/4 and the notes below were written before
+  `phase6b/memory-skills-inspector` landed; the inspectors now exist and are palette-openable
+  (`/memory`, `/skills`), so a sidebar Memory/Skills click has a keyboard twin (open the same
+  overlay, the modified-files-diff pattern) and is no longer an inert no-op. _Owner decision
+  pending (asked): fold the sidebar Memory/Skills click into group 4, or keep group 4 to the
+  original scope. Until decided, proceeding with the original group order._
 - **Not greenfield — gate, don't add.** Mouse capture is already unconditionally on in
   rich mode and wheel scroll already routes. Phase 6 gates the existing capture on
   `rich && ui.mouse` (one control point, §9) and adds click handling. _Do not duplicate

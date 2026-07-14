@@ -31,30 +31,39 @@ use ratatui::Terminal;
 /// restores everything (HC-3).
 pub struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    /// Whether mouse capture is enabled (`ui.mouse`, Design §3.4). Retained so
+    /// [`resume`](Self::resume) re-applies the same decision after an `$EDITOR`
+    /// handoff. Teardown always *disables* capture regardless (harmless if it
+    /// was never enabled).
+    capture_mouse: bool,
 }
 
 impl TerminalGuard {
     /// Enter raw mode + the alternate screen, hide the cursor, and enable
-    /// bracketed paste. Installs the panic-safe restore hook.
-    pub fn enter() -> io::Result<Self> {
-        Self::enter_modes()?;
+    /// bracketed paste. Installs the panic-safe restore hook. `capture_mouse`
+    /// (`ui.mouse` && rich, Design §3.4 / Tech Spec §9) gates the single mouse
+    /// capture control point: `EnableMouseCapture` is emitted only when set, so
+    /// with `ui.mouse = false` the terminal keeps its native pointer behavior.
+    pub fn enter(capture_mouse: bool) -> io::Result<Self> {
+        Self::enter_modes(capture_mouse)?;
         install_panic_hook();
         let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-        Ok(Self { terminal })
+        Ok(Self { terminal, capture_mouse })
     }
 
-    /// Apply the TUI terminal modes (raw + alternate screen + capture + cursor
-    /// hide). Shared by [`enter`](Self::enter) and [`resume`](Self::resume).
-    fn enter_modes() -> io::Result<()> {
+    /// Apply the TUI terminal modes (raw + alternate screen + optional mouse
+    /// capture + cursor hide). Shared by [`enter`](Self::enter) and
+    /// [`resume`](Self::resume); `capture_mouse` is the §3.4 gate.
+    fn enter_modes(capture_mouse: bool) -> io::Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            EnableMouseCapture,
-            cursor::Hide
-        )?;
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, cursor::Hide)?;
+        // The single mouse-capture control point (Tech Spec §9, like the §6.4
+        // animation ticker): capture the pointer only when `ui.mouse` is on.
+        // Off ⇒ the terminal owns the mouse (native selection everywhere).
+        if capture_mouse {
+            execute!(stdout, EnableMouseCapture)?;
+        }
         // Ask the terminal to disambiguate escape codes (the kitty keyboard
         // protocol) where supported, so modified keys like Shift+Enter are
         // reported distinctly from plain Enter. Best-effort: terminals without
@@ -78,7 +87,7 @@ impl TerminalGuard {
     /// Re-enter the TUI modes after [`suspend`](Self::suspend) and clear for a
     /// full redraw.
     pub fn resume(&mut self) -> io::Result<()> {
-        Self::enter_modes()?;
+        Self::enter_modes(self.capture_mouse)?;
         self.terminal.clear()
     }
 
