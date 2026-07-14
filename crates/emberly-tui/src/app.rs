@@ -10,9 +10,9 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use emberly_core::{
-    resume, AskAnswer, AskId, Command, Effort, LoopResolution, Mode, PermissionDecision,
-    PermissionId, PermissionRendering, SandboxStatus, SessionId, SkillMeta, TaskItem, TokenUsage,
-    ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
+    resume, AskAnswer, AskId, Command, Effort, EntrySummary, LoopResolution, MemoryOp, MemoryScope,
+    Mode, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus, SessionId,
+    SkillMeta, TaskItem, TokenUsage, ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
 };
 
 use std::collections::HashMap;
@@ -115,6 +115,41 @@ pub enum OverlayContent {
         rows: Vec<ChoiceRow>,
         selected: usize,
     },
+    /// The memory inspector (`/memory`, FR-6, Design §4.9): entries grouped by
+    /// scope, each viewable/editable/deletable via the in-app edit path (§4.6).
+    /// Unlike the pickers, Enter/`e`/`d` have distinct actions, so it is its own
+    /// variant rather than a `Choices` reuse. `selected` indexes the flattened
+    /// entry list (user entries, then project entries); `confirm_delete` gates
+    /// the destructive delete behind an explicit y/N step (never a lone key).
+    MemoryEntries {
+        user: Vec<EntrySummary>,
+        project: Vec<EntrySummary>,
+        selected: usize,
+        confirm_delete: bool,
+    },
+}
+
+/// Whether an inspector body-fetch is for read-only viewing or for editing
+/// (FR-6, §4.6). Recorded when a [`Command::MemoryView`] is issued; consumed
+/// when the [`UiEvent::MemoryBody`] reply arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryFetchIntent {
+    View,
+    Edit,
+}
+
+/// A memory edit staged for the frontend loop's `$EDITOR` handoff (FR-6, §4.6).
+/// The loop opens `$EDITOR` on the body, then commits via
+/// [`Command::MemoryMutate`] — the harness performs the write, never the TUI.
+/// `description`/`type_` are carried through unchanged so a body edit never
+/// silently erases the entry's metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMemoryEdit {
+    pub scope: MemoryScope,
+    pub name: String,
+    pub description: Option<String>,
+    pub type_: Option<String>,
+    pub body: String,
 }
 
 /// What a [`OverlayContent::Choices`] picker selects, so Enter knows which
@@ -325,6 +360,14 @@ pub struct App {
     /// The skill catalog for the sidebar (T-15, FR-7, Design §4.9). Updated
     /// from `UiEvent::SkillsAvailable`; cleared on a new session.
     pub skills: Vec<SkillMeta>,
+    /// The inspector's in-flight body fetch (FR-6, §4.6): the selected entry
+    /// and whether the user wants to view or edit it. Set when a `MemoryView`
+    /// is issued; consumed when the `MemoryBody` reply arrives.
+    memory_fetch: Option<(MemoryFetchIntent, EntrySummary)>,
+    /// A memory edit whose body has arrived and is ready for the `$EDITOR`
+    /// handoff (FR-6, §4.6). The frontend loop drains this, runs the editor, and
+    /// commits via `MemoryMutate` (the harness writes, not the TUI).
+    pending_memory_edit: Option<PendingMemoryEdit>,
     /// The permission prompt currently awaiting an answer, if any. While set,
     /// the prompt owns the screen and normal input is suspended (Design §5).
     pub pending_permission: Option<(PermissionId, PermissionRendering)>,
@@ -402,6 +445,8 @@ impl App {
             memory_user: 0,
             memory_project: 0,
             skills: Vec::new(),
+            memory_fetch: None,
+            pending_memory_edit: None,
             pending_permission: None,
             pending_ask: None,
             pending_loop_halt: None,
@@ -691,6 +736,12 @@ impl App {
             }
             UiEvent::SkillsAvailable { skills } => {
                 self.skills = skills;
+            }
+            UiEvent::MemoryEntries { user, project } => {
+                self.apply_memory_entries(user, project);
+            }
+            UiEvent::MemoryBody { scope, name, body } => {
+                self.apply_memory_body(scope, &name, body);
             }
             // `#[non_exhaustive]`: unknown future events are ignored, not fatal.
             _ => {}
@@ -1188,6 +1239,205 @@ impl App {
         });
     }
 
+    // ---- memory inspector (`/memory`, FR-6, Design §4.9) ------------------
+
+    /// `/memory` — open the memory inspector. Requests the grouped entry list;
+    /// the overlay opens (or refreshes) when the `MemoryEntries` reply arrives.
+    /// The engine owns the store, so the TUI never reads memory files directly.
+    fn open_memory_inspector(&mut self) -> Action {
+        Action::Command(Command::MemoryList)
+    }
+
+    /// Apply a `MemoryEntries` reply: refresh an already-open inspector in place
+    /// (so a post-mutation re-list updates the list without a flash), or open a
+    /// fresh one. The project group is simply empty on an untrusted root (FR-1).
+    fn apply_memory_entries(&mut self, user: Vec<EntrySummary>, project: Vec<EntrySummary>) {
+        let total = user.len() + project.len();
+        let existing = self
+            .overlays
+            .iter()
+            .rposition(|o| matches!(o.content, OverlayContent::MemoryEntries { .. }));
+        match existing {
+            Some(i) => {
+                if let OverlayContent::MemoryEntries {
+                    user: u,
+                    project: p,
+                    selected,
+                    confirm_delete,
+                } = &mut self.overlays[i].content
+                {
+                    *u = user;
+                    *p = project;
+                    *selected = (*selected).min(total.saturating_sub(1));
+                    // A refresh cancels any half-finished confirm — the list it
+                    // referred to just changed under it.
+                    *confirm_delete = false;
+                }
+            }
+            None => self.push_overlay(Overlay {
+                title: crate::strings::memory::TITLE.into(),
+                content: OverlayContent::MemoryEntries {
+                    user,
+                    project,
+                    selected: 0,
+                    confirm_delete: false,
+                },
+                scroll: 0,
+            }),
+        }
+    }
+
+    /// Apply a `MemoryBody` reply, dispatched by the intent recorded when the
+    /// fetch was issued: view opens the body read-only; edit stages it for the
+    /// `$EDITOR` handoff the frontend loop performs. A reply that no longer
+    /// matches the recorded target (a stale/late arrival) is ignored.
+    fn apply_memory_body(&mut self, scope: MemoryScope, name: &str, body: String) {
+        let Some((intent, target)) = self.memory_fetch.take() else {
+            return;
+        };
+        if target.scope != scope || target.name != name {
+            return;
+        }
+        match intent {
+            MemoryFetchIntent::View => {
+                let title = format!("{} · {}", target.name, memory_scope_label(scope));
+                let shown = if body.trim().is_empty() {
+                    crate::strings::memory::EMPTY_BODY.to_string()
+                } else {
+                    body
+                };
+                self.open_text_overlay(title, shown);
+            }
+            MemoryFetchIntent::Edit => {
+                self.pending_memory_edit = Some(PendingMemoryEdit {
+                    scope,
+                    name: target.name.clone(),
+                    description: Some(target.description.clone()).filter(|d| !d.is_empty()),
+                    type_: target.type_.clone(),
+                    body,
+                });
+            }
+        }
+    }
+
+    /// The entry currently highlighted in the memory inspector (flattened over
+    /// the user then project groups), if any.
+    fn selected_memory_entry(&self) -> Option<EntrySummary> {
+        match self.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::MemoryEntries {
+                user,
+                project,
+                selected,
+                ..
+            }) => user.iter().chain(project.iter()).nth(*selected).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Issue a `MemoryView` for the highlighted entry, recording the intent so
+    /// the `MemoryBody` reply is routed to view or edit.
+    fn begin_memory_fetch(&mut self, intent: MemoryFetchIntent) -> Action {
+        match self.selected_memory_entry() {
+            Some(target) => {
+                let cmd = Command::MemoryView {
+                    scope: target.scope,
+                    name: target.name.clone(),
+                };
+                self.memory_fetch = Some((intent, target));
+                Action::Command(cmd)
+            }
+            None => Action::None,
+        }
+    }
+
+    fn set_memory_selection(&mut self, next: usize) {
+        if let Some(Overlay {
+            content: OverlayContent::MemoryEntries { selected, .. },
+            ..
+        }) = self.overlays.last_mut()
+        {
+            *selected = next;
+        }
+    }
+
+    fn set_memory_confirm(&mut self, on: bool) {
+        if let Some(Overlay {
+            content: OverlayContent::MemoryEntries { confirm_delete, .. },
+            ..
+        }) = self.overlays.last_mut()
+        {
+            *confirm_delete = on;
+        }
+    }
+
+    /// Drain a staged memory edit for the frontend loop's `$EDITOR` handoff
+    /// (FR-6, §4.6).
+    pub fn take_pending_memory_edit(&mut self) -> Option<PendingMemoryEdit> {
+        self.pending_memory_edit.take()
+    }
+
+    /// Keys for the memory inspector (FR-6, Design §4.9): ↑/↓ move, Enter views
+    /// the body, `e` edits it via `$EDITOR`, `d` starts a confirmed delete,
+    /// Esc/q dismiss. Delete is destructive, so it takes an explicit y/N step —
+    /// never a lone key (§3.4 spirit).
+    fn on_memory_inspector_key(&mut self, key: KeyEvent) -> Action {
+        let (user_len, project_len, selected, confirm) =
+            match self.overlays.last().map(|o| &o.content) {
+                Some(OverlayContent::MemoryEntries {
+                    user,
+                    project,
+                    selected,
+                    confirm_delete,
+                }) => (user.len(), project.len(), *selected, *confirm_delete),
+                _ => return Action::None,
+            };
+        let total = user_len + project_len;
+
+        // The confirm-delete step owns the keyboard until resolved: only `y`
+        // deletes; every other key cancels (deny-by-default for a destructive
+        // action).
+        if confirm {
+            self.set_memory_confirm(false);
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                if let Some(target) = self.selected_memory_entry() {
+                    return Action::Command(Command::MemoryMutate {
+                        op: MemoryOp::Remove,
+                        scope: target.scope,
+                        name: target.name,
+                        description: None,
+                        type_: None,
+                        body: None,
+                    });
+                }
+            }
+            return Action::None;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+                Action::None
+            }
+            KeyCode::Up => {
+                self.set_memory_selection(selected.saturating_sub(1));
+                Action::None
+            }
+            KeyCode::Down => {
+                self.set_memory_selection((selected + 1).min(total.saturating_sub(1)));
+                Action::None
+            }
+            KeyCode::Enter => self.begin_memory_fetch(MemoryFetchIntent::View),
+            KeyCode::Char('e') => self.begin_memory_fetch(MemoryFetchIntent::Edit),
+            KeyCode::Char('d') => {
+                if total > 0 {
+                    self.set_memory_confirm(true);
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
     /// Open the model/provider picker (`/model` with no args, the palette, or a
     /// keybinding — C-6). Rows are the configured profiles, the active one
     /// marked; Enter issues a `SwitchModel`.
@@ -1595,6 +1845,7 @@ impl App {
                 self.open_effort_picker();
                 Action::None
             }
+            AppCommand::Memory => self.open_memory_inspector(),
             AppCommand::Config => self.edit_config(),
             AppCommand::Prompt => self.edit_prompt("system"),
             AppCommand::Reload => Action::Command(Command::ReloadConfig),
@@ -1679,6 +1930,8 @@ impl App {
         self.memory_user = 0;
         self.memory_project = 0;
         self.skills.clear();
+        self.memory_fetch = None;
+        self.pending_memory_edit = None;
         self.latest_diffs.clear();
         self.last_modified = None;
         self.scroll = 0;
@@ -1769,6 +2022,12 @@ impl App {
             Some(OverlayContent::Choices { .. })
         ) {
             return self.on_choice_picker_key(key);
+        }
+        if matches!(
+            self.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::MemoryEntries { .. })
+        ) {
+            return self.on_memory_inspector_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
@@ -1989,6 +2248,16 @@ fn parse_mode(s: &str) -> Option<Mode> {
         "auto-accept-edits" | "auto-accept" | "edits" => Some(Mode::AutoAcceptEdits),
         "auto" => Some(Mode::Auto),
         _ => None,
+    }
+}
+
+/// The user-facing label for a memory scope (origin is how the user reads
+/// trust, Design §4.9). Centralized so the inspector and any future surface
+/// agree.
+fn memory_scope_label(scope: MemoryScope) -> &'static str {
+    match scope {
+        MemoryScope::User => crate::strings::memory::SCOPE_USER,
+        MemoryScope::Project => crate::strings::memory::SCOPE_PROJECT,
     }
 }
 
@@ -3143,5 +3412,216 @@ mod tests {
         assert!(crate::commands::COMMANDS
             .iter()
             .any(|c| c.name == "compact"));
+    }
+
+    // ---- memory inspector (`/memory`, FR-6, Design §4.9) ------------------
+
+    fn mem_summary(name: &str, desc: &str, scope: MemoryScope) -> EntrySummary {
+        EntrySummary {
+            name: name.into(),
+            description: desc.into(),
+            type_: None,
+            scope,
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn memory_command_requests_the_list() {
+        let mut a = app();
+        // Reachable three ways (§3.3): slash, palette dispatch, and registry.
+        assert_eq!(a.run_slash("memory"), Action::Command(Command::MemoryList));
+        assert_eq!(
+            a.run_command(AppCommand::Memory),
+            Action::Command(Command::MemoryList)
+        );
+        assert!(commands::COMMANDS.iter().any(|c| c.name == "memory"));
+    }
+
+    #[test]
+    fn memory_entries_open_grouped_overlay_with_origin() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "first", MemoryScope::User)],
+            project: vec![mem_summary("Proj", "p", MemoryScope::Project)],
+        });
+        match a.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::MemoryEntries {
+                user,
+                project,
+                selected,
+                confirm_delete,
+            }) => {
+                assert_eq!(user.len(), 1);
+                assert_eq!(project.len(), 1);
+                assert_eq!(user[0].scope, MemoryScope::User);
+                assert_eq!(project[0].scope, MemoryScope::Project);
+                assert_eq!(*selected, 0);
+                assert!(!confirm_delete);
+            }
+            other => panic!("expected MemoryEntries overlay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_enter_issues_view_for_the_selected_entry() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![
+                mem_summary("Alpha", "first", MemoryScope::User),
+                mem_summary("Beta", "second", MemoryScope::User),
+            ],
+            project: vec![],
+        });
+        a.on_key(key(KeyCode::Down)); // move to Beta
+        assert_eq!(
+            a.on_key(key(KeyCode::Enter)),
+            Action::Command(Command::MemoryView {
+                scope: MemoryScope::User,
+                name: "Beta".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn memory_delete_requires_explicit_confirmation() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "first", MemoryScope::User)],
+            project: vec![],
+        });
+        // A single `d` arms the confirm — it does NOT delete.
+        assert_eq!(a.on_key(key(KeyCode::Char('d'))), Action::None);
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::MemoryEntries {
+                confirm_delete: true,
+                ..
+            })
+        ));
+        // `y` confirms → the delete is issued (harness performs the write).
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('y'))),
+            Action::Command(Command::MemoryMutate {
+                op: MemoryOp::Remove,
+                scope: MemoryScope::User,
+                name: "Alpha".into(),
+                description: None,
+                type_: None,
+                body: None,
+            })
+        );
+    }
+
+    #[test]
+    fn memory_delete_is_cancelled_by_any_other_key() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "first", MemoryScope::User)],
+            project: vec![],
+        });
+        a.on_key(key(KeyCode::Char('d')));
+        // Anything but `y` cancels: no command, confirm cleared, entry intact.
+        assert_eq!(a.on_key(key(KeyCode::Char('n'))), Action::None);
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::MemoryEntries {
+                confirm_delete: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn memory_edit_stages_a_pending_edit_when_body_arrives() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "first", MemoryScope::User)],
+            project: vec![],
+        });
+        // `e` issues a body fetch with the edit intent.
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('e'))),
+            Action::Command(Command::MemoryView {
+                scope: MemoryScope::User,
+                name: "Alpha".into(),
+            })
+        );
+        // The body reply stages a pending edit for the loop's $EDITOR handoff,
+        // carrying the metadata through unchanged (so a body edit never erases
+        // the description).
+        a.apply_event(UiEvent::MemoryBody {
+            scope: MemoryScope::User,
+            name: "Alpha".into(),
+            body: "the body".into(),
+        });
+        let edit = a.take_pending_memory_edit().expect("edit staged");
+        assert_eq!(edit.name, "Alpha");
+        assert_eq!(edit.scope, MemoryScope::User);
+        assert_eq!(edit.description, Some("first".into()));
+        assert_eq!(edit.body, "the body");
+        // An edit does not open a read-only overlay (that's the view path).
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::MemoryEntries { .. })
+        ));
+    }
+
+    #[test]
+    fn memory_view_opens_a_read_only_body_overlay() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "first", MemoryScope::User)],
+            project: vec![],
+        });
+        a.on_key(key(KeyCode::Enter)); // view intent
+        a.apply_event(UiEvent::MemoryBody {
+            scope: MemoryScope::User,
+            name: "Alpha".into(),
+            body: "hello body".into(),
+        });
+        match a.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::Text(body)) => assert!(body.contains("hello body")),
+            other => panic!("expected a Text overlay, got {other:?}"),
+        }
+        // A view never stages an edit.
+        assert!(a.take_pending_memory_edit().is_none());
+    }
+
+    #[test]
+    fn memory_entries_refresh_in_place_and_clamp_selection() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![
+                mem_summary("Alpha", "a", MemoryScope::User),
+                mem_summary("Beta", "b", MemoryScope::User),
+            ],
+            project: vec![],
+        });
+        a.on_key(key(KeyCode::Down)); // select Beta (index 1)
+        // A re-list with fewer entries reuses the overlay and clamps selection.
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "a", MemoryScope::User)],
+            project: vec![],
+        });
+        assert_eq!(a.overlays.len(), 1);
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::MemoryEntries { selected: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn memory_inspector_esc_dismisses() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "a", MemoryScope::User)],
+            project: vec![],
+        });
+        assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
+        assert!(a.overlays.is_empty());
     }
 }

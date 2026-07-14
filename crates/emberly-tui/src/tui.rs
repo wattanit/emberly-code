@@ -16,10 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::Event;
-use emberly_core::{resume, Command, FrontendPorts, SessionId, TranscriptRecord};
+use emberly_core::{resume, Command, FrontendPorts, MemoryOp, SessionId, TranscriptRecord};
 use tokio::sync::mpsc;
 
-use crate::app::{Action, App, SessionInfo};
+use crate::app::{Action, App, PendingMemoryEdit, SessionInfo};
 use crate::render;
 use crate::terminal::TerminalGuard;
 
@@ -75,6 +75,18 @@ pub async fn run(
             event = events_rx.recv() => match event {
                 Some(event) => {
                     app.apply_event(event);
+                    // A memory-body reply for an edit stages a `$EDITOR` handoff
+                    // (FR-6, §4.6): run it here, off the input path, then redraw.
+                    if let Some(edit) = app.take_pending_memory_edit() {
+                        run_memory_edit(
+                            &mut app,
+                            &commands_tx,
+                            &input_paused,
+                            &mut guard,
+                            edit,
+                        )
+                        .await?;
+                    }
                     guard.terminal().draw(|f| render::frame(f, &app))?;
                 }
                 None => break, // engine finished and closed its events
@@ -84,7 +96,14 @@ pub async fn run(
                     match app.on_key(key) {
                         Action::Quit => break,
                         Action::Command(cmd) => {
+                            // A memory mutation (inspector delete/edit-commit)
+                            // re-emits only MemoryStatus; re-list so the open
+                            // inspector refreshes its rows (FR-6, group 2 note).
+                            let refresh_memory = matches!(cmd, Command::MemoryMutate { .. });
                             let _ = commands_tx.send(cmd).await;
+                            if refresh_memory {
+                                let _ = commands_tx.send(Command::MemoryList).await;
+                            }
                         }
                         Action::NewSession => {
                             // Mint the id here so the view can update without a
@@ -140,6 +159,70 @@ pub async fn run(
         }
     }
 
+    Ok(())
+}
+
+/// Perform the memory-edit `$EDITOR` handoff (FR-6, §4.6): stage the current
+/// body to a temp file, hand the terminal to `$EDITOR`, and — on a saved edit —
+/// commit the new body through the engine via `MemoryMutate` (the harness
+/// performs the write, never the TUI), then re-list so the inspector refreshes.
+/// `description`/`type_` ride through unchanged so a body edit never erases the
+/// entry's metadata.
+async fn run_memory_edit(
+    app: &mut App,
+    commands_tx: &mpsc::Sender<Command>,
+    input_paused: &Arc<AtomicBool>,
+    guard: &mut TerminalGuard,
+    edit: PendingMemoryEdit,
+) -> io::Result<()> {
+    // A stable temp path per entry; the name is sanitized for the filesystem.
+    let slug: String = edit
+        .name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let path = std::env::temp_dir().join(format!(
+        "emberly-memory-{}-{slug}.md",
+        std::process::id()
+    ));
+    if let Err(e) = std::fs::write(&path, &edit.body) {
+        app.notice(format!("could not stage memory edit: {e}"));
+        return Ok(());
+    }
+    // Hand the terminal to $EDITOR (mirrors the config/prompt edit path).
+    input_paused.store(true, Ordering::Relaxed);
+    guard.suspend()?;
+    let status = crate::edit::run_editor(&path);
+    guard.resume()?;
+    input_paused.store(false, Ordering::Relaxed);
+    match status {
+        crate::edit::EditStatus::Edited => match std::fs::read_to_string(&path) {
+            Ok(new_body) => {
+                let _ = commands_tx
+                    .send(Command::MemoryMutate {
+                        op: MemoryOp::Update,
+                        scope: edit.scope,
+                        name: edit.name.clone(),
+                        description: edit.description.clone(),
+                        type_: edit.type_.clone(),
+                        body: Some(new_body),
+                    })
+                    .await;
+                // Refresh the open inspector list (mutate re-emits MemoryStatus
+                // only; the frontend re-lists — group 2 note).
+                let _ = commands_tx.send(Command::MemoryList).await;
+                app.notice(format!("updated memory: {}", edit.name));
+            }
+            Err(e) => app.notice(format!("could not read the edited memory entry: {e}")),
+        },
+        crate::edit::EditStatus::NoEditor => {
+            app.notice("no editor configured — set $EDITOR or $VISUAL, then try again");
+        }
+        crate::edit::EditStatus::Failed(why) => {
+            app.notice(format!("editor failed: {why}"));
+        }
+    }
+    let _ = std::fs::remove_file(&path);
     Ok(())
 }
 

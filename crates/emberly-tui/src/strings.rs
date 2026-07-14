@@ -93,6 +93,26 @@ pub mod mode {
     pub const AUTO: &str = "auto";
 }
 
+/// Memory inspector (`/memory`, FR-6, Design §4.9). Origin (scope) is how the
+/// user reads trust, so it labels every group.
+pub mod memory {
+    pub const TITLE: &str = "memory";
+    pub const SCOPE_USER: &str = "user";
+    pub const SCOPE_PROJECT: &str = "project";
+    /// Group headers (dimmed chrome, not accent — §2).
+    pub const HEADER_USER: &str = "user memory";
+    pub const HEADER_PROJECT: &str = "project memory";
+    /// Shown when neither scope has any entries.
+    pub const EMPTY: &str = "(no stored memory yet)";
+    /// Shown when a viewed entry has an empty body.
+    pub const EMPTY_BODY: &str = "(this entry has an empty body)";
+    /// The action hint at the foot of the inspector.
+    pub const HINT: &str = " Enter view · e edit · d delete · Esc close";
+    /// Confirm-delete prompt (the entry name is inserted between the two).
+    pub const CONFIRM_PREFIX: &str = " delete ";
+    pub const CONFIRM_SUFFIX: &str = "?  y confirm · any other key cancels";
+}
+
 /// Keybinding hints for the status bar (Design §3.1, §6.2 — 2–5 words each).
 /// Hints change with state; the permission set is shown while a prompt is open.
 pub mod hints {

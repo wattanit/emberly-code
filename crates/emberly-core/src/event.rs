@@ -211,6 +211,19 @@ pub enum UiEvent {
         project: Vec<crate::memory::EntrySummary>,
     },
 
+    /// A single memory entry's body for the inspector's view/edit step (FR-6,
+    /// §4.6), sent in reply to [`Command::MemoryView`](crate::command::Command::MemoryView).
+    /// The body is fetched on demand and never pinned (progressive disclosure).
+    /// `scope`/`name` echo the request so the frontend correlates it with the
+    /// summary it selected. An empty `body` means the entry has none (or was
+    /// removed between listing and viewing). Additive — older frontends
+    /// warn-skip it.
+    MemoryBody {
+        scope: emberly_tools::MemoryScope,
+        name: String,
+        body: String,
+    },
+
     /// A skill's instruction body for the inspector (FR-7, Design §4.9), sent in
     /// reply to [`Command::InspectSkill`](crate::command::Command::InspectSkill).
     /// This is the §4.9 promise — "what could this skill tell the model to do"

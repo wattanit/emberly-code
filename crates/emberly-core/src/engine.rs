@@ -913,6 +913,7 @@ impl Engine {
                     }
                     self.write_view_cache();
                 }
+                Command::MemoryView { scope, name } => self.emit_memory_body(scope, name).await,
                 Command::InspectSkill { name } => self.inspect_skill(name).await,
             }
         }
@@ -2578,6 +2579,37 @@ impl Engine {
             _ => (Vec::new(), Vec::new()),
         };
         self.emit(UiEvent::MemoryEntries { user, project }).await;
+    }
+
+    /// Fetch a single memory entry's body for the inspector (FR-6, §4.6) and
+    /// emit it as `MemoryBody`. Read-only — a `Recall` through the store, which
+    /// applies the same trust gating (an untrusted project scope has no store
+    /// dir, so its body reads back empty). The body is fetched on demand and
+    /// never pinned (progressive disclosure).
+    async fn emit_memory_body(&self, scope: emberly_tools::MemoryScope, name: String) {
+        let body = if self.memory_config.enabled {
+            self.memory_store.as_ref().and_then(|store| {
+                match store.execute(&emberly_tools::MemoryRequest {
+                    op: emberly_tools::MemoryOp::Recall,
+                    scope,
+                    name: name.clone(),
+                    description: None,
+                    type_: None,
+                    body: None,
+                }) {
+                    emberly_tools::MemoryOutcome::Recalled { body, .. } => body,
+                    _ => None,
+                }
+            })
+        } else {
+            None
+        };
+        self.emit(UiEvent::MemoryBody {
+            scope,
+            name,
+            body: body.unwrap_or_default(),
+        })
+        .await;
     }
 
     /// Fetch a skill's instruction body for the inspector (FR-7, Design §4.9)

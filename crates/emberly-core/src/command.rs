@@ -109,6 +109,14 @@ pub enum Command {
         body: Option<String>,
     },
 
+    /// Fetch a single memory entry's body for the inspector's view/edit step
+    /// (FR-6, §4.6). Issued at idle; the engine reads the body via the store's
+    /// `Recall` and replies with [`UiEvent::MemoryBody`](crate::event::UiEvent::MemoryBody).
+    /// Kept off the model-facing `MemoryOp` enum (the model has its own `recall`);
+    /// this is a user/TUI read like `MemoryList`. The body is fetched on demand
+    /// so it never enters standing context (progressive disclosure).
+    MemoryView { scope: MemoryScope, name: String },
+
     /// Fetch a skill's instruction body for the inspector (FR-7, Design §4.9).
     /// Issued at idle; the engine resolves it through the catalog (project
     /// precedence + untrusted-root gating still apply) and replies with

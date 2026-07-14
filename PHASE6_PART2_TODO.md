@@ -94,7 +94,7 @@ And the FR-6 mandate:
 |---|---|---|
 | 1. Engine/store data model: memory listing + skill-body fetch (`emberly-core`, `emberly-tools`) | [x] | `EntrySummary` + `MemoryStore::list_entries`; Recall/invoke reused as-is |
 | 2. TUI→engine command + event plumbing: new `Command`/`UiEvent` variants; adopt_session fix (`emberly-core`) | [x] | idle-loop handlers; shared `execute_memory_op`; adopt_session `MemoryStatus` fix; 7 round-trip tests |
-| 3. Memory inspector overlay: `/memory`, grouped list, view/edit/delete (`emberly-tui`) | [ ] | edit via `$EDITOR`→`Update`; delete confirmed; scope/origin shown (FR-6, §4.6) |
+| 3. Memory inspector overlay: `/memory`, grouped list, view/edit/delete (`emberly-tui`) | [x] | `OverlayContent::MemoryEntries`; view/edit(`$EDITOR`→`Update`)/confirmed-delete; +`MemoryView`/`MemoryBody`; 9 app tests |
 | 4. Skills inspector overlay: `/skills`, list, read-only body (`emberly-tui`) | [ ] | body fetched via engine (progressive disclosure); origin visible (FR-7) |
 | 5. Degraded parity + rendering + strings (`emberly-tui`) | [ ] | overlays are rich-only; define plain-mode `/memory` `/skills` behavior |
 | 6. Tests (offline — §14.7) + exit criterion (`emberly-core`, `emberly-tui`) | [ ] | round-trips, trust-absence, delete-confirm, body-not-pinned preserved |
@@ -156,31 +156,30 @@ And the FR-6 mandate:
 
 ## 3. Memory inspector overlay  *(Design §4.9, §4.6; FR-6, C-5, C-3, FR-1)*
 
-- [ ] **Palette + slash command.** Add `AppCommand::Memory` (`commands.rs:12`) + a `COMMANDS`
-      entry (`commands.rs:63`) `"memory" — "Inspect, edit, and delete stored memory"`, and a
-      `run_command` arm (`app.rs:1532`) → `open_memory_inspector()`. Auto-appears in
-      `help_text` (`app.rs:1995`) and is thus "reachable three ways" (§3.3); the Phase 6
-      sidebar click becomes the optional fourth way once merged.
-- [ ] **Open + list.** `open_memory_inspector()` sends `Command::MemoryList`; on
-      `UiEvent::MemoryEntries`, push an overlay listing entries **grouped by scope**
-      (user-global, then project), **origin on every line** (FR-6/§4.9 — origin is how the
-      user reads trust), showing `name — description`. **Decide (notes log):** a new
-      `OverlayContent::MemoryEntries { … , selected }` vs. reusing `Choices` with a new
-      `ChoiceKind::MemoryEntry` — a new variant is cleaner because Enter here has two
-      actions (edit / delete), not the single "apply" of the pickers.
-- [ ] **View / edit an entry (§4.6 full-edit).** Selecting an entry shows its body
-      (`Recall`) and its scope/provenance (C-3 — the user sees which scope before changing
-      it). Edit uses the `$EDITOR` handoff exactly like `edit_config` (`app.rs:1376` →
-      `Action::EditFile` → `tui.rs:101`), but on save commits via
-      `Command::MemoryMutate { op: Update, … }` — **not** `ReloadConfig`. Edits land in the
-      entry's existing scope (C-1: never silently mutate another tier).
-- [ ] **Delete an entry — confirmed.** Deletion is destructive, so it requires an explicit
-      confirm step (a `y/N` line in the overlay), never a single unconfirmed key/click; on
-      confirm send `Command::MemoryMutate { op: Remove, … }`. On success the store re-emits
-      `MemoryStatus`; refresh the open list.
-- [ ] **Untrusted project root (FR-1).** The project group is simply absent when the store's
-      `project_dir` is `None` — inherited from the engine, no TUI-side trust check. Show only
-      what exists; absence is the correct quiet signal (§4.9).
+- [x] **Palette + slash command.** Added `AppCommand::Memory` + `COMMANDS` entry
+      `"memory" — "Inspect, edit, and delete stored memory"` + `run_command` arm →
+      `open_memory_inspector()`. Auto-appears in `help_text` (iterates `COMMANDS`) and the
+      palette — "reachable three ways" (§3.3), asserted in a test.
+- [x] **Open + list.** `open_memory_inspector()` returns `Action::Command(MemoryList)`; on
+      `UiEvent::MemoryEntries` the overlay opens (or refreshes in place). Entries are
+      **grouped by scope** (user then project) with a dimmed scope **header per group**
+      (origin is how the user reads trust) and `name — description` rows. **Decided:** a
+      dedicated `OverlayContent::MemoryEntries { user, project, selected, confirm_delete }`
+      (not a `Choices` reuse) — Enter/`e`/`d` have distinct actions plus a confirm step.
+- [x] **View / edit an entry (§4.6 full-edit).** Added `Command::MemoryView` +
+      `UiEvent::MemoryBody` (the per-entry body fetch — conceptually group 2, landed here).
+      Enter → view (read-only `Text` overlay titled `name · scope`); `e` → edit. Edit fetches
+      the body then hands off to `$EDITOR` in the frontend loop (`run_memory_edit`), and on
+      save commits via `Command::MemoryMutate { op: Update, … }` — **not** `ReloadConfig`.
+      Edits land in the entry's existing scope (C-1); **`description`/`type_` ride through
+      unchanged** so a body edit never erases metadata (see notes — body-only edit for v1).
+- [x] **Delete an entry — confirmed.** `d` arms a `y/N` confirm rendered in the overlay hint;
+      **a lone key never deletes** (asserted); only `y` sends `Command::MemoryMutate {
+      op: Remove, … }`, any other key cancels. After any mutate the frontend re-issues
+      `MemoryList` (the engine re-emits only `MemoryStatus`), refreshing the open list.
+- [x] **Untrusted project root (FR-1).** The project group is simply empty when the store's
+      `project_dir` is `None` — `list_entries` returns empty for it; no TUI-side trust check.
+      The renderer omits an empty group's header, so an untrusted root shows only user memory.
 
 ## 4. Skills inspector overlay  *(Design §4.9; FR-7, §8.6)*
 
@@ -234,10 +233,12 @@ And the FR-6 mandate:
       - `adopt_session_reemits_memory_status` — regression for the `/resume` `/new` gap.
 - [ ] **Store units** (`memory.rs:299`): `list_entries` returns summaries (no bodies) for
       each scope; empty project when `project_dir` is `None`.
-- [ ] **TUI** (`app.rs` `#[cfg(test)]`): `/memory` and `/skills` open their overlays; memory
-      list groups by scope with origin; selecting a memory entry shows body + offers
-      edit/delete; **delete requires confirmation** (a single key does not delete);
-      selecting a skill issues `InspectSkill` and renders the returned body read-only.
+- [~] **TUI** (`app.rs` `#[cfg(test)]`): memory side **done** (9 tests) — `/memory` reachable
+      three ways; grouped-by-scope overlay with origin; Enter issues `MemoryView`; view opens
+      a read-only body overlay; edit stages a pending `$EDITOR` handoff carrying metadata;
+      **delete requires confirmation** (a lone key does not delete); re-list refreshes in
+      place. Skills side (selecting a skill issues `InspectSkill`, body read-only) is
+      **group 4**.
 - [ ] **Trust (FR-1)** (`engine_loop.rs` or `app.rs`): with an untrusted project root, the
       inspector shows **no** project memory and **no** project skills.
 - [ ] **Degraded parity** (`line.rs:672` neighborhood): plain-mode `/memory` `/skills`
@@ -280,10 +281,29 @@ And the FR-6 mandate:
   `deny(unwrap_used)` gate is on **non-test** code (`cargo clippy -p emberly-core --lib`
   clean — no new warnings), and local 1.96 `--all-targets`/`fmt` noise on untouched files is
   toolchain skew, not a regression.
-- **Overlay variant for the memory list.** Leaning to a dedicated
-  `OverlayContent::MemoryEntries` over reusing `Choices`, because Enter has two follow-on
-  actions (edit / delete) plus a confirm step, unlike the single-apply pickers. _Decide in
-  group 3._
+- **Overlay variant for the memory list.** _CONFIRMED (group 3):_ dedicated
+  `OverlayContent::MemoryEntries { user, project, selected, confirm_delete }`. `selected`
+  indexes the flattened user-then-project list; the renderer inserts dimmed scope headers.
+- **Group 3 decisions:**
+  - **`MemoryView`/`MemoryBody` added in group 3, not group 2.** The per-entry body fetch
+    the inspector's view/edit needs was implicit in the group-1/2 spec ("reuse `Recall`") but
+    had no command/event. Added `Command::MemoryView { scope, name }` →
+    `UiEvent::MemoryBody { scope, name, body }` (engine `emit_memory_body` runs a read-only
+    store `Recall`). Mirrors `InspectSkill`/`SkillBody`. Kept off `MemoryOp` (user/TUI read).
+  - **Body-only edit (metadata preserved).** The `$EDITOR` handoff edits the markdown body;
+    `description`/`type_`/`name`/`scope` ride through the resulting `MemoryMutate{Update}`
+    unchanged (the store's `write_entry` would otherwise reset description to empty). Editing
+    metadata in the overlay is out of scope for v1 — a later nicety, not a requirement.
+  - **Async edit handoff via a staged field.** `apply_event(MemoryBody)` can't return an
+    `Action`, so an edit-intent body reply sets `pending_memory_edit`; the frontend loop
+    drains it (`take_pending_memory_edit`) right after `apply_event` and runs the `$EDITOR`
+    handoff off the input path. View-intent replies just push a read-only `Text` overlay.
+  - **Refresh-after-mutate lives in the loop.** The engine re-emits only `MemoryStatus` after
+    a mutate (it doesn't know the inspector is open); the frontend loop re-issues
+    `MemoryList` after any `MemoryMutate` (delete and edit-commit), which refreshes the open
+    overlay in place via `apply_memory_entries`.
+  - **Confirmed delete.** `d` arms `confirm_delete`; only `y`/`Y` deletes, every other key
+    cancels (deny-by-default for a destructive action). A lone key never deletes (tested).
 - **Skill inspector is read-only.** Skills are externally-authored on-disk folders; the
   inspector shows the body to judge trust before invocation (§4.9/FR-7) but does not edit
   them. Fetching the body for display is not script execution (FR-7). _If skill editing is
