@@ -12,7 +12,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use emberly_core::{
     resume, AskAnswer, AskId, Command, Effort, EntrySummary, LoopResolution, MemoryOp, MemoryScope,
     Mode, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus, SessionId,
-    SkillMeta, TaskItem, TokenUsage, ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
+    SkillMeta, SkillOrigin, TaskItem, TokenUsage, ToolCallId, TranscriptEvent, TranscriptRecord,
+    UiEvent,
 };
 
 use std::collections::HashMap;
@@ -126,6 +127,16 @@ pub enum OverlayContent {
         project: Vec<EntrySummary>,
         selected: usize,
         confirm_delete: bool,
+    },
+    /// The skills inspector (`/skills`, FR-7, Design §4.9): the available skills
+    /// as a selectable list; Enter fetches the selected skill's instruction body
+    /// to view **read-only**. There is no edit/delete — a skill is an
+    /// externally-authored on-disk folder; the inspector shows what it could
+    /// tell the model to do before it ever runs. The catalog is already cached
+    /// in `App::skills`, so this needs no engine round-trip to open.
+    SkillList {
+        skills: Vec<SkillMeta>,
+        selected: usize,
     },
 }
 
@@ -742,6 +753,14 @@ impl App {
             }
             UiEvent::MemoryBody { scope, name, body } => {
                 self.apply_memory_body(scope, &name, body);
+            }
+            UiEvent::SkillBody {
+                name,
+                origin,
+                body,
+                resources,
+            } => {
+                self.apply_skill_body(&name, origin, body, &resources);
             }
             // `#[non_exhaustive]`: unknown future events are ignored, not fatal.
             _ => {}
@@ -1438,6 +1457,92 @@ impl App {
         }
     }
 
+    // ---- skills inspector (`/skills`, FR-7, Design §4.9) ------------------
+
+    /// `/skills` — open the skills inspector. The catalog is already cached
+    /// (`SkillsAvailable`), so the list overlay opens immediately with no engine
+    /// round-trip; only a selected skill's *body* is fetched on demand (§8.6).
+    fn open_skills_inspector(&mut self) -> Action {
+        self.push_overlay(Overlay {
+            title: crate::strings::skills::TITLE.into(),
+            content: OverlayContent::SkillList {
+                skills: self.skills.clone(),
+                selected: 0,
+            },
+            scroll: 0,
+        });
+        Action::None
+    }
+
+    /// Apply a `SkillBody` reply: open the instruction body **read-only** on top
+    /// of the list (§4.9 — inspectable before it ever runs). Bundled resource
+    /// paths are appended so "what the skill bundles" is visible too. Fetching
+    /// the body for display runs no bundled script (FR-7).
+    fn apply_skill_body(
+        &mut self,
+        name: &str,
+        origin: SkillOrigin,
+        body: String,
+        resources: &[String],
+    ) {
+        let title = format!("{name} · {}", skill_origin_label(origin));
+        let mut text = if body.trim().is_empty() {
+            crate::strings::skills::EMPTY_BODY.to_string()
+        } else {
+            body
+        };
+        if !resources.is_empty() {
+            text.push_str("\n\n");
+            text.push_str(crate::strings::skills::RESOURCES_HEADER);
+            text.push('\n');
+            for r in resources {
+                text.push_str(&format!("- {r}\n"));
+            }
+        }
+        self.open_text_overlay(title, text);
+    }
+
+    fn set_skill_selection(&mut self, next: usize) {
+        if let Some(Overlay {
+            content: OverlayContent::SkillList { selected, .. },
+            ..
+        }) = self.overlays.last_mut()
+        {
+            *selected = next;
+        }
+    }
+
+    /// Keys for the skills inspector (FR-7, Design §4.9): ↑/↓ move, Enter fetches
+    /// and shows the selected skill's body read-only, Esc/q dismiss. There is no
+    /// edit or delete — skills are externally-authored folders (read-only here).
+    fn on_skills_inspector_key(&mut self, key: KeyEvent) -> Action {
+        let (len, selected, chosen) = match self.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::SkillList { skills, selected }) => {
+                (skills.len(), *selected, skills.get(*selected).cloned())
+            }
+            _ => return Action::None,
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+                Action::None
+            }
+            KeyCode::Up => {
+                self.set_skill_selection(selected.saturating_sub(1));
+                Action::None
+            }
+            KeyCode::Down => {
+                self.set_skill_selection((selected + 1).min(len.saturating_sub(1)));
+                Action::None
+            }
+            KeyCode::Enter => match chosen {
+                Some(skill) => Action::Command(Command::InspectSkill { name: skill.name }),
+                None => Action::None,
+            },
+            _ => Action::None,
+        }
+    }
+
     /// Open the model/provider picker (`/model` with no args, the palette, or a
     /// keybinding — C-6). Rows are the configured profiles, the active one
     /// marked; Enter issues a `SwitchModel`.
@@ -1846,6 +1951,7 @@ impl App {
                 Action::None
             }
             AppCommand::Memory => self.open_memory_inspector(),
+            AppCommand::Skills => self.open_skills_inspector(),
             AppCommand::Config => self.edit_config(),
             AppCommand::Prompt => self.edit_prompt("system"),
             AppCommand::Reload => Action::Command(Command::ReloadConfig),
@@ -2028,6 +2134,12 @@ impl App {
             Some(OverlayContent::MemoryEntries { .. })
         ) {
             return self.on_memory_inspector_key(key);
+        }
+        if matches!(
+            self.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::SkillList { .. })
+        ) {
+            return self.on_skills_inspector_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
@@ -2258,6 +2370,15 @@ fn memory_scope_label(scope: MemoryScope) -> &'static str {
     match scope {
         MemoryScope::User => crate::strings::memory::SCOPE_USER,
         MemoryScope::Project => crate::strings::memory::SCOPE_PROJECT,
+    }
+}
+
+/// The user-facing label for a skill's origin (user vs project — origin is how
+/// the user reads trust, FR-7/§4.9).
+fn skill_origin_label(origin: SkillOrigin) -> &'static str {
+    match origin {
+        SkillOrigin::User => crate::strings::skills::ORIGIN_USER,
+        SkillOrigin::Project => crate::strings::skills::ORIGIN_PROJECT,
     }
 }
 
@@ -3621,6 +3742,112 @@ mod tests {
             user: vec![mem_summary("Alpha", "a", MemoryScope::User)],
             project: vec![],
         });
+        assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
+        assert!(a.overlays.is_empty());
+    }
+
+    // ---- skills inspector (`/skills`, FR-7, Design §4.9) ------------------
+
+    fn skill_meta(name: &str, desc: &str, origin: SkillOrigin) -> SkillMeta {
+        SkillMeta {
+            name: name.into(),
+            description: desc.into(),
+            origin,
+        }
+    }
+
+    #[test]
+    fn skills_command_opens_inspector_from_cached_catalog() {
+        let mut a = app();
+        a.skills = vec![
+            skill_meta("pdf-fill", "Fill PDF forms", SkillOrigin::User),
+            skill_meta("linter", "Run linters", SkillOrigin::Project),
+        ];
+        // No engine round-trip — the catalog is already cached, so the overlay
+        // opens immediately.
+        assert_eq!(a.run_slash("skills"), Action::None);
+        match a.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::SkillList { skills, selected }) => {
+                assert_eq!(skills.len(), 2);
+                assert_eq!(skills[0].origin, SkillOrigin::User);
+                assert_eq!(skills[1].origin, SkillOrigin::Project);
+                assert_eq!(*selected, 0);
+            }
+            other => panic!("expected SkillList overlay, got {other:?}"),
+        }
+        // Reachable three ways (§3.3): palette dispatch and the registry too.
+        assert_eq!(a.run_command(AppCommand::Skills), Action::None);
+        assert!(commands::COMMANDS.iter().any(|c| c.name == "skills"));
+    }
+
+    #[test]
+    fn skills_enter_issues_inspect_for_the_selected_skill() {
+        let mut a = app();
+        a.skills = vec![
+            skill_meta("pdf-fill", "Fill PDF forms", SkillOrigin::User),
+            skill_meta("linter", "Run linters", SkillOrigin::Project),
+        ];
+        a.run_command(AppCommand::Skills);
+        a.on_key(key(KeyCode::Down)); // select linter
+        assert_eq!(
+            a.on_key(key(KeyCode::Enter)),
+            Action::Command(Command::InspectSkill {
+                name: "linter".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn skill_body_opens_a_read_only_overlay_with_resources() {
+        let mut a = app();
+        a.skills = vec![skill_meta("pdf-fill", "Fill PDF forms", SkillOrigin::User)];
+        a.run_command(AppCommand::Skills);
+        a.on_key(key(KeyCode::Enter));
+        a.apply_event(UiEvent::SkillBody {
+            name: "pdf-fill".into(),
+            origin: SkillOrigin::User,
+            body: "Step 1: open the template.".into(),
+            resources: vec!["/abs/template.txt".into()],
+        });
+        match a.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::Text(body)) => {
+                assert!(body.contains("Step 1: open the template."));
+                assert!(body.contains("template.txt"), "bundled resource listed");
+            }
+            other => panic!("expected a Text overlay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skills_inspector_has_no_edit_or_delete() {
+        let mut a = app();
+        a.skills = vec![skill_meta("pdf-fill", "Fill PDF forms", SkillOrigin::User)];
+        a.run_command(AppCommand::Skills);
+        // `e`/`d` are inert for skills (read-only) — no command, overlay stays.
+        assert_eq!(a.on_key(key(KeyCode::Char('e'))), Action::None);
+        assert_eq!(a.on_key(key(KeyCode::Char('d'))), Action::None);
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::SkillList { .. })
+        ));
+    }
+
+    #[test]
+    fn skills_empty_catalog_opens_an_empty_overlay() {
+        let mut a = app();
+        a.skills.clear();
+        a.run_command(AppCommand::Skills);
+        match a.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::SkillList { skills, .. }) => assert!(skills.is_empty()),
+            other => panic!("expected an empty SkillList overlay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skills_inspector_esc_dismisses() {
+        let mut a = app();
+        a.skills = vec![skill_meta("pdf-fill", "Fill PDF forms", SkillOrigin::User)];
+        a.run_command(AppCommand::Skills);
         assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
         assert!(a.overlays.is_empty());
     }

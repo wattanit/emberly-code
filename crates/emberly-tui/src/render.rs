@@ -8,7 +8,7 @@
 //! (context %, mode) live only on the status bar (Design §3.2) — everything the
 //! sidebar shows is also reachable by command, so nothing is sidebar-exclusive.
 
-use emberly_core::{EntrySummary, Mode, SandboxStatus, TaskStatus};
+use emberly_core::{EntrySummary, Mode, SandboxStatus, SkillMeta, SkillOrigin, TaskStatus};
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::text::{Line, Span};
@@ -237,6 +237,10 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
             };
             (lines, Some(sel_line), hint)
         }
+        OverlayContent::SkillList { skills, selected } => {
+            let (lines, sel_line) = skill_list_lines(skills, *selected, theme);
+            (lines, Some(sel_line), strings::skills::HINT.to_string())
+        }
     };
 
     let total = lines.len();
@@ -403,6 +407,55 @@ fn memory_inspector_lines(
             gi += 1;
         }
         lines.push(Line::from(String::new()));
+    }
+    (lines, sel_line)
+}
+
+/// Render the skills inspector (`/skills`, FR-7, Design §4.9): the available
+/// skills as `name — description` rows with a dimmed `(origin)` suffix (origin
+/// is how the user reads trust). The selected row is marked and accented.
+/// Returns the lines and the selected row's line index (to scroll it into
+/// view).
+fn skill_list_lines(
+    skills: &[SkillMeta],
+    selected: usize,
+    theme: &crate::theme::Theme,
+) -> (Vec<Line<'static>>, usize) {
+    let mut lines: Vec<Line> = Vec::new();
+    if skills.is_empty() {
+        lines.push(Line::from(Span::styled(
+            strings::skills::EMPTY.to_string(),
+            theme.chrome(),
+        )));
+        return (lines, 0);
+    }
+    let mut sel_line = 0;
+    for (i, skill) in skills.iter().enumerate() {
+        if i == selected {
+            sel_line = lines.len();
+        }
+        let marker = if i == selected { "▶ " } else { "  " };
+        let name_style = if i == selected {
+            theme.strong()
+        } else {
+            theme.primary()
+        };
+        let origin = match skill.origin {
+            SkillOrigin::User => strings::skills::ORIGIN_USER,
+            SkillOrigin::Project => strings::skills::ORIGIN_PROJECT,
+        };
+        let mut spans = vec![
+            Span::styled(marker.to_string(), theme.accent()),
+            Span::styled(skill.name.clone(), name_style),
+        ];
+        if !skill.description.is_empty() {
+            spans.push(Span::styled(
+                format!(" — {}", skill.description),
+                theme.chrome(),
+            ));
+        }
+        spans.push(Span::styled(format!("  ({origin})"), theme.chrome()));
+        lines.push(Line::from(spans));
     }
     (lines, sel_line)
 }

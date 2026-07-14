@@ -95,11 +95,11 @@ And the FR-6 mandate:
 | 1. Engine/store data model: memory listing + skill-body fetch (`emberly-core`, `emberly-tools`) | [x] | `EntrySummary` + `MemoryStore::list_entries`; Recall/invoke reused as-is |
 | 2. TUI→engine command + event plumbing: new `Command`/`UiEvent` variants; adopt_session fix (`emberly-core`) | [x] | idle-loop handlers; shared `execute_memory_op`; adopt_session `MemoryStatus` fix; 7 round-trip tests |
 | 3. Memory inspector overlay: `/memory`, grouped list, view/edit/delete (`emberly-tui`) | [x] | `OverlayContent::MemoryEntries`; view/edit(`$EDITOR`→`Update`)/confirmed-delete; +`MemoryView`/`MemoryBody`; 9 app tests |
-| 4. Skills inspector overlay: `/skills`, list, read-only body (`emberly-tui`) | [ ] | body fetched via engine (progressive disclosure); origin visible (FR-7) |
+| 4. Skills inspector overlay: `/skills`, list, read-only body (`emberly-tui`) | [x] | `OverlayContent::SkillList` from cached catalog; Enter→`InspectSkill`→read-only body+resources; origin per row; 6 app tests |
 | 5. Degraded parity + rendering + strings (`emberly-tui`) | [ ] | overlays are rich-only; define plain-mode `/memory` `/skills` behavior |
 | 6. Tests (offline — §14.7) + exit criterion (`emberly-core`, `emberly-tui`) | [ ] | round-trips, trust-absence, delete-confirm, body-not-pinned preserved |
 
-**Overall Phase 6 Part 2: NOT STARTED.**
+**Overall Phase 6 Part 2: Groups 1–4 done; Groups 5–6 remain (degraded parity + strings, and the offline test suite / exit criterion — engine round-trips and rich-TUI tests already landed alongside their groups).**
 
 ---
 
@@ -183,19 +183,18 @@ And the FR-6 mandate:
 
 ## 4. Skills inspector overlay  *(Design §4.9; FR-7, §8.6)*
 
-- [ ] **Palette + slash command.** Add `AppCommand::Skills` + `COMMANDS` entry `"skills" —
+- [x] **Palette + slash command.** Added `AppCommand::Skills` + `COMMANDS` entry `"skills" —
       "List available skills and inspect a skill's instructions"` + `run_command` arm →
-      `open_skills_inspector()` (same registration pattern as group 3).
-- [ ] **List.** `open_skills_inspector()` lists from the already-cached `app.skills`
-      (`SkillsAvailable`, `app.rs:325`) — name, description, **origin** (user vs project;
-      FR-7 trust) — as a selectable overlay (mirror the session picker `app.rs:1797`).
-- [ ] **Read-only body on select.** Selecting a skill sends `Command::InspectSkill { name }`;
-      on `UiEvent::SkillBody`, open the body **read-only** via `open_text_overlay`
-      (`app.rs:1182`, `OverlayContent::Text`) with a title naming the skill + origin. This is
-      the §4.9 promise: "what could this skill tell the model to do is always inspectable
-      before it ever runs." **No edit** — a skill is an on-disk folder authored externally;
-      editing is out of scope (note in log). Fetching the body for display never runs a
-      bundled script (FR-7 — running a script is still an ordinary permission-gated command).
+      `open_skills_inspector()`. Auto-listed in `/help`/palette (reachable three ways, §3.3).
+- [x] **List.** `open_skills_inspector()` pushes `OverlayContent::SkillList { skills, selected }`
+      from the already-cached `app.skills` (**no engine round-trip** — the catalog is
+      standing context). Rows show `name — description` with a dimmed `(origin)` suffix
+      (user vs project; FR-7 trust). Empty catalog → an empty overlay with a calm message.
+- [x] **Read-only body on select.** Enter sends `Command::InspectSkill { name }`; on
+      `UiEvent::SkillBody` the body opens **read-only** via `open_text_overlay` titled
+      `name · origin`, with any bundled resource paths appended under a "bundled files:"
+      header. **No edit/delete** — `e`/`d` are inert (asserted); skills are externally-authored
+      folders. Fetching the body for display runs no bundled script (FR-7).
 
 ## 5. Degraded parity + rendering + strings  *(Design §7, §4.9)*
 
@@ -233,12 +232,13 @@ And the FR-6 mandate:
       - `adopt_session_reemits_memory_status` — regression for the `/resume` `/new` gap.
 - [ ] **Store units** (`memory.rs:299`): `list_entries` returns summaries (no bodies) for
       each scope; empty project when `project_dir` is `None`.
-- [~] **TUI** (`app.rs` `#[cfg(test)]`): memory side **done** (9 tests) — `/memory` reachable
-      three ways; grouped-by-scope overlay with origin; Enter issues `MemoryView`; view opens
-      a read-only body overlay; edit stages a pending `$EDITOR` handoff carrying metadata;
+- [x] **TUI** (`app.rs` `#[cfg(test)]`): memory side (9 tests) — `/memory` reachable three
+      ways; grouped-by-scope overlay with origin; Enter issues `MemoryView`; view opens a
+      read-only body overlay; edit stages a pending `$EDITOR` handoff carrying metadata;
       **delete requires confirmation** (a lone key does not delete); re-list refreshes in
-      place. Skills side (selecting a skill issues `InspectSkill`, body read-only) is
-      **group 4**.
+      place. Skills side (6 tests) — `/skills` reachable three ways; overlay from the cached
+      catalog with per-row origin; Enter issues `InspectSkill`; `SkillBody` opens read-only
+      with resources; `e`/`d` inert (no edit/delete); empty catalog handled.
 - [ ] **Trust (FR-1)** (`engine_loop.rs` or `app.rs`): with an untrusted project root, the
       inspector shows **no** project memory and **no** project skills.
 - [ ] **Degraded parity** (`line.rs:672` neighborhood): plain-mode `/memory` `/skills`
@@ -307,7 +307,20 @@ And the FR-6 mandate:
 - **Skill inspector is read-only.** Skills are externally-authored on-disk folders; the
   inspector shows the body to judge trust before invocation (§4.9/FR-7) but does not edit
   them. Fetching the body for display is not script execution (FR-7). _If skill editing is
-  ever wanted, it is a separate task._
+  ever wanted, it is a separate task._ _CONFIRMED (group 4): `e`/`d` are inert on the skills
+  overlay (asserted); Enter is the only action → `InspectSkill`._
+- **Group 4 decisions:**
+  - **Dedicated `OverlayContent::SkillList { skills, selected }`** (parallels `MemoryEntries`
+    but simpler — one action). The catalog is already standing context (`app.skills` from
+    `SkillsAvailable`), so opening the list needs **no engine round-trip**; only the body is
+    fetched on demand (`InspectSkill` → `SkillBody`), preserving §8.6 progressive disclosure.
+  - **Origin per row.** Skills mix user/project in one flat list (precedence already
+    resolved at discovery), so origin is a dimmed `(origin)` suffix per row, not a group
+    header (contrast memory, where scope is the grouping).
+  - **Body view appends bundled resource paths** under a "bundled files:" header — FR-7:
+    what the skill bundles is part of "what it could tell the model to do". Read-only; the
+    paths are not executed (running a bundled script remains an ordinary permission-gated
+    `bash` call).
 - **Delete is confirmed.** Destructive; requires an explicit confirm (never a lone
   key/click), consistent with the "mouse never weakens a decision" spirit (§3.4) and the
   general care around irreversible actions.

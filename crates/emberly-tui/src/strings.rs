@@ -113,6 +113,23 @@ pub mod memory {
     pub const CONFIRM_SUFFIX: &str = "?  y confirm · any other key cancels";
 }
 
+/// Skills inspector (`/skills`, FR-7, Design §4.9). Read-only: skills are
+/// externally-authored folders; the inspector shows what a skill could tell the
+/// model to do before it ever runs. Origin is how the user reads trust.
+pub mod skills {
+    pub const TITLE: &str = "skills";
+    pub const ORIGIN_USER: &str = "user";
+    pub const ORIGIN_PROJECT: &str = "project";
+    /// Shown when no skills are available.
+    pub const EMPTY: &str = "(no skills available)";
+    /// Shown when a skill's instruction body is empty.
+    pub const EMPTY_BODY: &str = "(this skill has an empty instruction body)";
+    /// Header before the bundled-resource list in the body view.
+    pub const RESOURCES_HEADER: &str = "bundled files:";
+    /// The action hint at the foot of the inspector.
+    pub const HINT: &str = " Enter view · ↑↓ move · Esc close";
+}
+
 /// Keybinding hints for the status bar (Design §3.1, §6.2 — 2–5 words each).
 /// Hints change with state; the permission set is shown while a prompt is open.
 pub mod hints {
