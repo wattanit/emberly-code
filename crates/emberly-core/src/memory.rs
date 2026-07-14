@@ -28,6 +28,20 @@ pub struct MemoryEntry {
     pub body: String,
 }
 
+/// A one-line summary of a memory entry for the inspector listing (FR-6,
+/// Design §4.9). **Metadata only** — the body loads on demand via `Recall`, so
+/// listing an entry never pulls its body into standing context (progressive
+/// disclosure, Tech Spec §7/§8.6). `scope` records which store the entry lives
+/// in so the inspector can group by scope and show origin on every line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntrySummary {
+    pub name: String,
+    pub description: String,
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub type_: Option<String>,
+    pub scope: MemoryScope,
+}
+
 /// The durable memory store. `project_dir` is `None` on an untrusted root
 /// (structural trust-gating, Tech Spec §6.7).
 pub struct MemoryStore {
@@ -178,6 +192,31 @@ impl MemoryStore {
     pub fn status_counts(&self) -> (usize, usize) {
         self.counts()
     }
+
+    /// List entry summaries for a scope, sorted by name (FR-6, Design §4.9).
+    /// **Summaries only** — bodies are *not* read here, so listing preserves
+    /// progressive disclosure (Tech Spec §7/§8.6); a body loads only on an
+    /// explicit `Recall`. Returns an empty vec when the scope is unavailable
+    /// (untrusted project root — `project_dir` is `None`), which is how the
+    /// inspector's project section becomes silently absent (FR-1).
+    #[must_use]
+    pub fn list_entries(&self, scope: MemoryScope) -> Vec<EntrySummary> {
+        let dir = match self.dir_for(scope) {
+            Some(d) => d,
+            None => return Vec::new(),
+        };
+        let mut summaries: Vec<EntrySummary> = scan_entry_metas(dir)
+            .into_iter()
+            .map(|meta| EntrySummary {
+                name: meta.name,
+                description: meta.description,
+                type_: meta.type_,
+                scope,
+            })
+            .collect();
+        summaries.sort_by_key(|s| s.name.to_lowercase());
+        summaries
+    }
 }
 
 /// Count `.md` entry files in a dir (excluding `MEMORY.md`).
@@ -224,13 +263,17 @@ fn regenerate_index(dir: &Path) -> (String, usize) {
     (text, count)
 }
 
-/// Build the one-line-per-entry index from the `.md` files in a dir.
-fn build_index(dir: &Path) -> (String, usize) {
+/// Scan a dir for entry metadata (parsed frontmatter), skipping `MEMORY.md`
+/// and any file without a readable/valid frontmatter (warn-skip, not a crash).
+/// The body is deliberately dropped — this reads metadata only, so callers
+/// never pull bodies into standing context. Shared by [`build_index`] and
+/// [`MemoryStore::list_entries`].
+fn scan_entry_metas(dir: &Path) -> Vec<EntryMeta> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return (String::new(), 0),
+        Err(_) => return Vec::new(),
     };
-    let mut items: Vec<(String, String)> = Vec::new();
+    let mut metas = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|ext| ext != "md") {
@@ -247,11 +290,20 @@ fn build_index(dir: &Path) -> (String, usize) {
             let (front, _) = split_frontmatter(&text);
             if let Some(front) = front {
                 if let Ok(meta) = toml::from_str::<EntryMeta>(front) {
-                    items.push((meta.name, meta.description));
+                    metas.push(meta);
                 }
             }
         }
     }
+    metas
+}
+
+/// Build the one-line-per-entry index from the `.md` files in a dir.
+fn build_index(dir: &Path) -> (String, usize) {
+    let mut items: Vec<(String, String)> = scan_entry_metas(dir)
+        .into_iter()
+        .map(|meta| (meta.name, meta.description))
+        .collect();
     // Stable sort by name.
     items.sort_by_key(|(name, _)| name.to_lowercase());
     let count = items.len();
@@ -428,6 +480,47 @@ mod tests {
             MemoryOutcome::Rejected { reason } => assert!(reason.contains("untrusted")),
             other => panic!("expected Rejected, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_entries_returns_sorted_summaries_without_bodies() {
+        let dir = temp_dir();
+        let store = MemoryStore::new(dir.clone(), None);
+        for (name, desc, body) in [
+            ("Zebra", "the last one", "z body"),
+            ("Alpha", "the first one", "a body"),
+        ] {
+            store.execute(&MemoryRequest {
+                op: MemoryOp::Write,
+                scope: MemoryScope::User,
+                name: name.into(),
+                description: Some(desc.into()),
+                type_: Some("fact".into()),
+                body: Some(body.into()),
+            });
+        }
+        let summaries = store.list_entries(MemoryScope::User);
+        assert_eq!(summaries.len(), 2);
+        // Sorted by name, case-insensitively.
+        assert_eq!(summaries[0].name, "Alpha");
+        assert_eq!(summaries[1].name, "Zebra");
+        // Metadata is carried; scope is tagged.
+        assert_eq!(summaries[0].description, "the first one");
+        assert_eq!(summaries[0].type_, Some("fact".into()));
+        assert_eq!(summaries[0].scope, MemoryScope::User);
+        // The summary type has no body field at all — progressive disclosure
+        // is structural, not merely convention (no body reaches the listing).
+        let _ = &summaries; // bodies live only on disk / behind Recall
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_entries_empty_when_scope_unavailable() {
+        let dir = temp_dir();
+        // project_dir = None simulates an untrusted root.
+        let store = MemoryStore::new(dir.clone(), None);
+        assert!(store.list_entries(MemoryScope::Project).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

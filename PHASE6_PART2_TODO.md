@@ -92,7 +92,7 @@ And the FR-6 mandate:
 
 | Group | Status | Notes |
 |---|---|---|
-| 1. Engine/store data model: memory listing + skill-body fetch (`emberly-core`, `emberly-tools`) | [ ] | add list capability; reuse `SkillCatalog::invoke` for body |
+| 1. Engine/store data model: memory listing + skill-body fetch (`emberly-core`, `emberly-tools`) | [x] | `EntrySummary` + `MemoryStore::list_entries`; Recall/invoke reused as-is |
 | 2. TUI→engine command + event plumbing: new `Command`/`UiEvent` variants; adopt_session fix (`emberly-core`) | [ ] | idle-loop handlers mirroring `ReloadConfig`; no direct TUI writes |
 | 3. Memory inspector overlay: `/memory`, grouped list, view/edit/delete (`emberly-tui`) | [ ] | edit via `$EDITOR`→`Update`; delete confirmed; scope/origin shown (FR-6, §4.6) |
 | 4. Skills inspector overlay: `/skills`, list, read-only body (`emberly-tui`) | [ ] | body fetched via engine (progressive disclosure); origin visible (FR-7) |
@@ -105,24 +105,25 @@ And the FR-6 mandate:
 
 ## 1. Engine/store data model — memory listing + skill-body fetch  *(FR-6, FR-7, §8.6)*
 
-- [ ] **Memory listing.** Add a store-side list that returns entry *summaries* (not bodies —
-      keep progressive disclosure): `MemoryStore::list_entries(scope) -> Vec<EntrySummary
-      { name, description, type_, scope }>`, reusing the directory scan in `build_index`
-      (`core/src/memory.rs:227`). **Decide (notes log):** expose this as a store method
-      driven by a new engine command (preferred — keeps the *model-facing* `MemoryOp` enum
-      unchanged; the model never needs `List`) **vs.** adding `MemoryOp::List` to the tool
-      enum. Lean to a store method + engine command, since listing is a TUI/user action, not
-      a model turn.
-- [ ] **Memory body read** for the edit/view step reuses the existing `MemoryOp::Recall`
-      semantics (`memory.rs:105`) — read the body + origin on demand for one named entry.
-- [ ] **Skill-body fetch** reuses `SkillCatalog::invoke(name)` (`core/src/skills.rs:123`),
-      which already loads the post-frontmatter body (and lists bundled resources) under the
-      engine's trust/precedence rules. No new discovery logic — the inspector fetch is a
-      read-only invoke-for-display (it must **not** run any bundled script — invoking a
-      skill's *body for display* is not executing its scripts; §4.9 / FR-7).
-- [ ] Keep bodies **out of standing context** — listing/summary only in the catalog/index;
-      bodies flow only in response to an explicit inspector fetch (preserve the
-      `engine_loop.rs:4121` "body is NOT pinned" invariant).
+- [x] **Memory listing.** Added `MemoryStore::list_entries(scope) -> Vec<EntrySummary
+      { name, description, type_, scope }>` (`core/src/memory.rs`), a **store method** (not a
+      model-facing `MemoryOp::List` — confirmed decision below). Refactored the `build_index`
+      scan into a shared `scan_entry_metas(dir)` helper; both `build_index` and
+      `list_entries` use it (no duplicated dir-scan). `EntrySummary` lives in
+      `core/src/memory.rs` beside `MemoryEntry`, derives Serialize/Deserialize/Clone/Eq (so
+      it can ride a `UiEvent` in group 2) and **has no `body` field** — progressive
+      disclosure is structural, not convention.
+- [x] **Memory body read** for the edit/view step reuses the existing `MemoryOp::Recall`
+      semantics (`memory.rs`) unchanged — read the body + origin on demand for one named
+      entry. No new code (verified).
+- [x] **Skill-body fetch** reuses `SkillCatalog::invoke(name)` (`core/src/skills.rs:130`)
+      as-is — already loads the post-frontmatter body + resource paths under trust/precedence
+      rules. No new discovery logic; the group-2 `InspectSkill` command calls it. Invoking a
+      skill body **for display** runs no bundled script (§4.9 / FR-7).
+- [x] Bodies stay **out of standing context** — `list_entries` reads metadata only
+      (`scan_entry_metas` drops the body); `EntrySummary` carries no body. Bodies flow only
+      via an explicit `Recall`/`InspectSkill` fetch (group 2). The `engine_loop.rs:4121`
+      "body is NOT pinned" invariant is untouched.
 
 ## 2. TUI→engine command + event plumbing  *(C-5; the harness-owned-store rule, FR-6)*
 
@@ -255,7 +256,16 @@ And the FR-6 mandate:
   transcript and trust store. _Extract the shared path from `on_memory_op` so tool and
   inspector cannot diverge._
 - **Listing: store method + engine command, not a model-facing `MemoryOp::List`.** Listing
-  is a user/TUI action; keep the model's tool enum unchanged. _Confirm during group 1._
+  is a user/TUI action; keep the model's tool enum unchanged. _CONFIRMED (group 1):_ added
+  `MemoryStore::list_entries`; `MemoryOp` stays `Write|Update|Remove|Recall`. `EntrySummary`
+  placed in `core/src/memory.rs` (not `emberly-tools`) — it is a TUI/engine listing type the
+  model never sees, and `event.rs` (core) can carry it directly on the group-2 `UiEvent`.
+- **Group 1 verification (local toolchain caveat).** `cargo test -p emberly-core` green (47
+  lib unit incl. 2 new `list_entries` tests + 92 `engine_loop`). CI runs **stable**
+  (`ci.yml` → `dtolnay/rust-toolchain@stable`), not the pinned 1.96; the library
+  `deny(unwrap_used)` gate is on **non-test** code (`cargo clippy -p emberly-core --lib`
+  clean — no new warnings), and local 1.96 `--all-targets`/`fmt` noise on untouched files is
+  toolchain skew, not a regression.
 - **Overlay variant for the memory list.** Leaning to a dedicated
   `OverlayContent::MemoryEntries` over reusing `Choices`, because Enter has two follow-on
   actions (edit / delete) plus a confirm step, unlike the single-apply pickers. _Decide in
