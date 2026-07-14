@@ -49,6 +49,18 @@ pub struct ConfigFile {
     /// `[context]` adaptive window + compaction tail (FR-3, Tech Spec §7/§8).
     #[serde(default)]
     pub context: ContextConfigFile,
+    /// `[image]` read_image size cap (P-11, Tech Spec §5.2).
+    #[serde(default)]
+    pub image: ImageConfigFile,
+    /// `[memory]` persistent memory (FR-6, Tech Spec §8.1).
+    #[serde(default)]
+    pub memory: MemoryConfigFile,
+    /// `[skills]` skill system (FR-7, Tech Spec §8.2).
+    #[serde(default)]
+    pub skills: SkillsConfigFile,
+    /// `[search]` web-search backend (T-14, Tech Spec §5.5).
+    #[serde(default)]
+    pub search: SearchConfigFile,
 }
 
 /// `[ui]` — presentation toggles that shape what the interface shows without
@@ -60,6 +72,14 @@ pub struct UiConfig {
     /// prompt instruction are both omitted so no tokens are spent. Default
     /// `true`.
     pub tool_explanations: Option<bool>,
+    /// Pointer (mouse) interaction in the rich TUI (Design §3.4, Tech Spec §9).
+    /// When on (the default), wheel scroll and click-to-select are enabled and
+    /// the terminal's mouse is captured; when off, the terminal keeps its native
+    /// pointer behavior (selection everywhere) and no capture happens. Additive
+    /// convenience only — the keyboard can always do everything the mouse can.
+    /// Ignored in degraded mode, which never captures the mouse (§7). Default
+    /// `true`.
+    pub mouse: Option<bool>,
 }
 
 /// `[trust]` — workspace trust (FR-1). `trusted_dirs` pre-declares folders
@@ -94,6 +114,54 @@ pub struct ContextConfigFile {
     /// Context-usage fraction that triggers automatic compaction (default
     /// `0.85`, FR-4). Must be in `(0.0, 1.0]`.
     pub auto_compact_threshold: Option<f64>,
+    /// Whether the task list is pinned in the sent context (default `true`,
+    /// T-11). When `false`, the task list is not appended to the system prompt.
+    pub pin_task_list: Option<bool>,
+}
+
+/// `[image]` — the `read_image` size cap (P-11, Tech Spec §5.2). All optional;
+/// the engine applies the 5 MiB default when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct ImageConfigFile {
+    /// Maximum image file size in bytes (default 5 MiB).
+    pub max_bytes: Option<usize>,
+}
+
+/// `[memory]` — persistent memory (FR-6, Tech Spec §8.1). All optional; the
+/// engine applies defaults when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct MemoryConfigFile {
+    /// Whether the memory system is enabled (default `true`).
+    pub enabled: Option<bool>,
+    /// Soft warn threshold for index growth (Tech Spec §16).
+    pub max_index_entries: Option<usize>,
+}
+
+/// `[skills]` — skill system (FR-7, Tech Spec §8.2). All optional; the engine
+/// applies defaults when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct SkillsConfigFile {
+    /// Whether the skill system is enabled (default `true`).
+    pub enabled: Option<bool>,
+}
+
+/// `[search]` — web-search backend (T-14, Tech Spec §5.5). Mirrors the provider
+/// profile pattern (P-8): a new search service is config, not code. All
+/// optional; the binary applies defaults when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct SearchConfigFile {
+    /// Whether the web-search tool is registered at all (default `true`; when
+    /// `false` the tool is absent from `registry.specs()` — Tech Spec §5.5).
+    pub enabled: Option<bool>,
+    /// Response-shape parser: `"brave"` | `"tavily"` | `"searxng"` | `"json"`.
+    pub adapter: Option<String>,
+    /// The search service endpoint URL.
+    pub endpoint: Option<String>,
+    /// Authentication scheme + key reference (never an inline secret). Reuses
+    /// [`AuthFile`]; the `"query"` scheme is search-side (Tech Spec §5.5).
+    pub auth: Option<AuthFile>,
+    /// Maximum results sent to the model (default 5, Tech Spec §5.5).
+    pub max_results: Option<usize>,
 }
 
 /// `[truncate]` — tool-result reduction and size backstop at ingestion
@@ -155,6 +223,9 @@ pub struct ModelFile {
     /// The effort levels this model offers, if a subset. Omitted ⇒ the full
     /// ladder (`low|medium|high|max`) when `effort` is set.
     pub effort_levels: Option<Vec<String>>,
+    /// Whether the model accepts image input (P-11, Tech Spec §4.2). Default
+    /// `false`; set `true` for a vision-capable model.
+    pub vision: Option<bool>,
 }
 
 impl ProfileFile {
@@ -280,6 +351,9 @@ impl ConfigFile {
         if higher.ui.tool_explanations.is_some() {
             self.ui.tool_explanations = higher.ui.tool_explanations;
         }
+        if higher.ui.mouse.is_some() {
+            self.ui.mouse = higher.ui.mouse;
+        }
         // `[loop]` (S-5) merges normally — a project may tune the guardrail.
         if higher.loop_.enabled.is_some() {
             self.loop_.enabled = higher.loop_.enabled;
@@ -319,6 +393,43 @@ impl ConfigFile {
         if higher.context.auto_compact_threshold.is_some() {
             self.context.auto_compact_threshold = higher.context.auto_compact_threshold;
         }
+        if higher.context.pin_task_list.is_some() {
+            self.context.pin_task_list = higher.context.pin_task_list;
+        }
+        // `[image]` (P-11) merges field-by-field.
+        if higher.image.max_bytes.is_some() {
+            self.image.max_bytes = higher.image.max_bytes;
+        }
+        // `[memory]` (FR-6) merges field-by-field.
+        if higher.memory.enabled.is_some() {
+            self.memory.enabled = higher.memory.enabled;
+        }
+        if higher.memory.max_index_entries.is_some() {
+            self.memory.max_index_entries = higher.memory.max_index_entries;
+        }
+        // `[skills]` (FR-7) merges field-by-field.
+        if higher.skills.enabled.is_some() {
+            self.skills.enabled = higher.skills.enabled;
+        }
+        // `[search]` (T-14) merges field-by-field, including nested auth.
+        if higher.search.enabled.is_some() {
+            self.search.enabled = higher.search.enabled;
+        }
+        if higher.search.adapter.is_some() {
+            self.search.adapter = higher.search.adapter;
+        }
+        if higher.search.endpoint.is_some() {
+            self.search.endpoint = higher.search.endpoint;
+        }
+        if higher.search.max_results.is_some() {
+            self.search.max_results = higher.search.max_results;
+        }
+        if let Some(higher_auth) = higher.search.auth {
+            match &mut self.search.auth {
+                Some(cur) => cur.merge(higher_auth),
+                None => self.search.auth = Some(higher_auth),
+            }
+        }
         // `[trust]` is deliberately NOT merged — it is read only from the global
         // tier (FR-1); see `global_trust_dirs` and the project-[trust] notice.
     }
@@ -354,12 +465,44 @@ pub struct Resolved {
     /// `true`; when `false` the schema property and prompt instruction are both
     /// omitted (no tokens spent).
     pub tool_explanations: bool,
+    /// Whether pointer (mouse) interaction is enabled in the rich TUI (Design
+    /// §3.4, Tech Spec §9). Default `true`; when `false` the TUI never captures
+    /// the mouse, leaving native terminal selection everywhere. Degraded mode
+    /// ignores this and never captures regardless (§7).
+    pub mouse: bool,
     /// Resolved loop-breaking guardrail tunables (S-5), ready for the engine.
     pub loop_config: emberly_core::LoopConfig,
     /// Resolved truncation/reduction config (FR-2, §8.1), ready for the engine.
     pub truncate: emberly_tools::TruncateConfig,
     /// Resolved adaptive context-window config (FR-3, Tech Spec §7/§8).
     pub context: emberly_core::ContextConfig,
+    /// Resolved image size limit in bytes for `read_image` (P-11, Tech Spec
+    /// §5.2). Default 5 MiB.
+    pub image_max_bytes: usize,
+    /// Resolved memory config (FR-6, Tech Spec §8.1), ready for the engine.
+    pub memory: emberly_core::MemoryConfig,
+    /// Resolved skills config (FR-7, Tech Spec §8.2), ready for the engine.
+    pub skills: emberly_core::SkillsConfig,
+    /// Resolved search config (T-14, Tech Spec §5.5). The binary conditionally
+    /// registers the `web_search` tool when `enabled` and an endpoint is set.
+    pub search: SearchConfig,
+}
+
+/// Resolved web-search configuration (T-14, Tech Spec §5.5). Carried in
+/// [`Resolved`] for the binary composition root; the tool itself is built from
+/// this when `enabled && endpoint.is_some()`.
+pub struct SearchConfig {
+    /// Whether the web-search tool should be registered (default `true`).
+    pub enabled: bool,
+    /// Response-shape parser (`brave`/`tavily`/`searxng`/`json`).
+    pub adapter: Option<String>,
+    /// The search service endpoint URL.
+    pub endpoint: Option<String>,
+    /// Auth config (key reference, not the resolved secret — the binary resolves
+    /// the key at tool-build time via `config::api_key`).
+    pub auth: Option<AuthFile>,
+    /// Maximum results sent to the model (default 5).
+    pub max_results: usize,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -496,6 +639,20 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         merged.ui.tool_explanations.is_some(),
     );
 
+    // Mouse interaction (Design §3.4): on unless a user tier turned it off;
+    // record provenance only on a deviation from the default `true`.
+    record(
+        &mut provenance,
+        "ui.mouse",
+        source_of(
+            false,
+            false,
+            field(&project, |c| c.ui.mouse.is_some()),
+            field(&global, |c| c.ui.mouse.is_some()),
+        ),
+        merged.ui.mouse.is_some(),
+    );
+
     // Truncation/reduction (FR-2): record provenance when a user tier sets any
     // `[truncate]` field (speech about deviations from the baked-in defaults).
     if field(&project, |c| c.truncate.reduce.is_some())
@@ -582,6 +739,152 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             true,
         );
     }
+    if field(&project, |c: &ConfigFile| c.context.pin_task_list.is_some())
+        || field(&global, |c: &ConfigFile| c.context.pin_task_list.is_some())
+    {
+        record(
+            &mut provenance,
+            "context.pin_task_list",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.context.pin_task_list.is_some()),
+                field(&global, |c: &ConfigFile| c.context.pin_task_list.is_some()),
+            ),
+            true,
+        );
+    }
+
+    // Image size cap (P-11): record provenance when a user tier sets
+    // `[image] max_bytes` (speech about deviations, silent on the default).
+    if field(&project, |c: &ConfigFile| c.image.max_bytes.is_some())
+        || field(&global, |c: &ConfigFile| c.image.max_bytes.is_some())
+    {
+        record(
+            &mut provenance,
+            "image.max_bytes",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.image.max_bytes.is_some()),
+                field(&global, |c: &ConfigFile| c.image.max_bytes.is_some()),
+            ),
+            true,
+        );
+    }
+
+    // Memory (FR-6): record provenance when a user tier sets any `[memory]`
+    // field.
+    if field(&project, |c: &ConfigFile| c.memory.enabled.is_some())
+        || field(&global, |c: &ConfigFile| c.memory.enabled.is_some())
+    {
+        record(
+            &mut provenance,
+            "memory.enabled",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.memory.enabled.is_some()),
+                field(&global, |c: &ConfigFile| c.memory.enabled.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| c.memory.max_index_entries.is_some())
+        || field(&global, |c: &ConfigFile| c.memory.max_index_entries.is_some())
+    {
+        record(
+            &mut provenance,
+            "memory.max_index_entries",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.memory.max_index_entries.is_some()),
+                field(&global, |c: &ConfigFile| c.memory.max_index_entries.is_some()),
+            ),
+            true,
+        );
+    }
+
+    // Skills (FR-7): record provenance when a user tier sets `[skills] enabled`.
+    if field(&project, |c: &ConfigFile| c.skills.enabled.is_some())
+        || field(&global, |c: &ConfigFile| c.skills.enabled.is_some())
+    {
+        record(
+            &mut provenance,
+            "skills.enabled",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.skills.enabled.is_some()),
+                field(&global, |c: &ConfigFile| c.skills.enabled.is_some()),
+            ),
+            true,
+        );
+    }
+
+    // Search (T-14): record provenance when a user tier sets any `[search]`
+    // field (speech about deviations from the defaults).
+    if field(&project, |c: &ConfigFile| c.search.enabled.is_some())
+        || field(&global, |c: &ConfigFile| c.search.enabled.is_some())
+    {
+        record(
+            &mut provenance,
+            "search.enabled",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.search.enabled.is_some()),
+                field(&global, |c: &ConfigFile| c.search.enabled.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| c.search.adapter.is_some())
+        || field(&global, |c: &ConfigFile| c.search.adapter.is_some())
+    {
+        record(
+            &mut provenance,
+            "search.adapter",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.search.adapter.is_some()),
+                field(&global, |c: &ConfigFile| c.search.adapter.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| c.search.endpoint.is_some())
+        || field(&global, |c: &ConfigFile| c.search.endpoint.is_some())
+    {
+        record(
+            &mut provenance,
+            "search.endpoint",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.search.endpoint.is_some()),
+                field(&global, |c: &ConfigFile| c.search.endpoint.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| c.search.max_results.is_some())
+        || field(&global, |c: &ConfigFile| c.search.max_results.is_some())
+    {
+        record(
+            &mut provenance,
+            "search.max_results",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.search.max_results.is_some()),
+                field(&global, |c: &ConfigFile| c.search.max_results.is_some()),
+            ),
+            true,
+        );
+    }
 
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
@@ -617,6 +920,7 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         sandbox_require: merged.sandbox.require.unwrap_or(false),
         reasoning: merged.reasoning,
         tool_explanations: merged.ui.tool_explanations.unwrap_or(true),
+        mouse: merged.ui.mouse.unwrap_or(true),
         loop_config: {
             // Override only the fields the user set; the engine owns the
             // defaults (S-5, Tech Spec §7 — "initial; tune with use").
@@ -665,7 +969,32 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
                     .map_or(d.keep_recent_turns, |v| v as usize),
                 auto_compact: merged.context.auto_compact.unwrap_or(d.auto_compact),
                 auto_compact_threshold: threshold,
+                pin_task_list: merged.context.pin_task_list.unwrap_or(d.pin_task_list),
             }
+        },
+        image_max_bytes: merged.image.max_bytes.unwrap_or(5 * 1024 * 1024),
+        memory: {
+            let d = emberly_core::MemoryConfig::default();
+            emberly_core::MemoryConfig {
+                enabled: merged.memory.enabled.unwrap_or(d.enabled),
+                max_index_entries: merged
+                    .memory
+                    .max_index_entries
+                    .unwrap_or(d.max_index_entries),
+            }
+        },
+        skills: {
+            let d = emberly_core::SkillsConfig::default();
+            emberly_core::SkillsConfig {
+                enabled: merged.skills.enabled.unwrap_or(d.enabled),
+            }
+        },
+        search: SearchConfig {
+            enabled: merged.search.enabled.unwrap_or(true),
+            adapter: merged.search.adapter,
+            endpoint: merged.search.endpoint,
+            auth: merged.search.auth,
+            max_results: merged.search.max_results.unwrap_or(5),
         },
     })
 }
@@ -842,6 +1171,56 @@ pub fn show(project_root: &Path) -> anyhow::Result<()> {
             println!("  {} ← {}", entry.piece, entry.source);
         }
     }
+
+    // Skill shadow notices (FR-7, Tech Spec §8.2): when a project skill
+    // shadows a user-global skill of the same name, surface it so the override
+    // is visible, not silent. Discovery scans project skills only when a
+    // project skills dir exists (always trusted here — `config show` runs after
+    // the trust gate, or the user invoked it explicitly).
+    if resolved.skills.enabled {
+        if let (Some(user_dir), Some(project_dir)) =
+            (skills_dir(), Some(project_root.join(".agents").join("skills")))
+        {
+            let catalog = emberly_core::skills::SkillCatalog::new(user_dir, Some(project_dir));
+            let (_, shadows) = catalog.discover();
+            if !shadows.is_empty() {
+                println!();
+                println!("skill overrides (project shadows user-global):");
+                for shadow in &shadows {
+                    println!("  skill `{}`: project shadows user-global", shadow.name);
+                }
+            }
+        }
+    }
+
+    // Web search (T-14, Tech Spec §5.5): show adapter, endpoint, and key status
+    // — never the key itself (mirror the provider profile block above).
+    println!();
+    println!("web search:");
+    if !resolved.search.enabled {
+        println!("  disabled (search.enabled = false)");
+    } else {
+        let adapter = resolved.search.adapter.as_deref().unwrap_or("(unset)");
+        let endpoint = resolved
+            .search
+            .endpoint
+            .as_deref()
+            .unwrap_or("(unset — tool not registered)");
+        let key_ref = resolved.search.auth.as_ref().and_then(|a| a.key.as_deref());
+        let key = key_ref.map_or_else(
+            || "no key".to_string(),
+            |r| format!("key '{r}' {}", key_status(r)),
+        );
+        println!("  adapter: {adapter}");
+        println!("  endpoint: {endpoint}");
+        println!("  {key}");
+        let registered = resolved.search.enabled && resolved.search.endpoint.is_some();
+        println!(
+            "  status: {}",
+            if registered { "registered" } else { "not registered" }
+        );
+    }
+
     Ok(())
 }
 
@@ -909,6 +1288,20 @@ fn global_keys_path() -> Option<PathBuf> {
 #[must_use]
 pub fn global_trust_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("trust.toml"))
+}
+
+/// The user-global memory directory (FR-6, Tech Spec §8.1):
+/// `~/.config/emberly/memory/`. Always loaded when a home directory exists.
+#[must_use]
+pub fn memory_dir() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("memory"))
+}
+
+/// The user-global skills directory (FR-7, Tech Spec §8.2):
+/// `~/.config/emberly/skills/`. Always loaded when a home directory exists.
+#[must_use]
+pub fn skills_dir() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("skills"))
 }
 
 /// The `trust.trusted_dirs` pre-trust allowlist, read **only** from the global
@@ -1119,6 +1512,21 @@ mod tests {
         let mut base = ConfigFile::parse("[ui]\ntool_explanations = true").expect("base");
         base.merge(off);
         assert_eq!(base.ui.tool_explanations, Some(false));
+    }
+
+    #[test]
+    fn ui_mouse_parses_and_merges() {
+        // Absent unless set (resolves to the `true` default in `load`, Design §3.4).
+        assert_eq!(ConfigFile::parse("").expect("empty").ui.mouse, None);
+        // Parsed from the `[ui]` table.
+        let off = ConfigFile::parse("[ui]\nmouse = false").expect("ui");
+        assert_eq!(off.ui.mouse, Some(false));
+        // A higher tier overrides a lower one, independently of tool_explanations.
+        let mut base =
+            ConfigFile::parse("[ui]\nmouse = true\ntool_explanations = true").expect("base");
+        base.merge(off);
+        assert_eq!(base.ui.mouse, Some(false));
+        assert_eq!(base.ui.tool_explanations, Some(true)); // untouched
     }
 
     #[test]

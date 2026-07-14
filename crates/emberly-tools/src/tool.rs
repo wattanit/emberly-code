@@ -42,6 +42,15 @@ pub struct FileChange {
     pub diff: Option<String>,
 }
 
+/// An image payload carried on a [`ToolOutcome`] so the engine can append a
+/// `ContentBlock::Image` to the conversation (P-11, T-12). `data` is the
+/// base64-encoded file bytes; `media_type` is the MIME string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageContent {
+    pub media_type: String,
+    pub data: String,
+}
+
 /// The result of running a tool, always handed to the model as data (HC-6).
 ///
 /// `ok == false` is a *structured failure* (file not found, no edit match,
@@ -60,6 +69,16 @@ pub struct ToolOutcome {
     /// A file change to surface, if this tool wrote or edited a file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_change: Option<FileChange>,
+    /// An image to append to the conversation (P-11, T-12). When `Some`, the
+    /// engine adds a `ContentBlock::Image` alongside the text `tool_result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageContent>,
+    /// Whether the result is **untrusted web content** (T-14, Design §4.10).
+    /// When `true`, the TUI renders it as fetched web data with visible source
+    /// URLs — never in harness or assistant voice. Reusable by a future
+    /// web-fetch source, not tied to the `web_search` tool name.
+    #[serde(default)]
+    pub untrusted: bool,
 }
 
 impl ToolOutcome {
@@ -71,6 +90,8 @@ impl ToolOutcome {
             content: content.into(),
             summary: summary.into(),
             file_change: None,
+            image: None,
+            untrusted: false,
         }
     }
 
@@ -83,6 +104,8 @@ impl ToolOutcome {
             content: content.into(),
             summary: summary.into(),
             file_change: None,
+            image: None,
+            untrusted: false,
         }
     }
 
@@ -90,6 +113,22 @@ impl ToolOutcome {
     #[must_use]
     pub fn with_file_change(mut self, change: FileChange) -> Self {
         self.file_change = Some(change);
+        self
+    }
+
+    /// Attach an image payload so the engine appends a `ContentBlock::Image`
+    /// to the conversation (P-11, T-12).
+    #[must_use]
+    pub fn with_image(mut self, image: ImageContent) -> Self {
+        self.image = Some(image);
+        self
+    }
+
+    /// Mark the result as untrusted web content so the TUI renders it with the
+    /// §4.10 untrusted-content styling (T-14, Design §4.10).
+    #[must_use]
+    pub fn with_untrusted(mut self) -> Self {
+        self.untrusted = true;
         self
     }
 

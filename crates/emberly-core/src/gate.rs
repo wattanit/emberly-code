@@ -8,8 +8,9 @@
 
 use async_trait::async_trait;
 use emberly_tools::{
-    AskUserGate, AskUserOutcome, PermissionGate, PermissionOutcome, PermissionRequest,
-    RecallGate, RecallOutcome,
+    AskUserGate, AskUserOutcome, MemoryError, MemoryGate, MemoryOutcome, MemoryRequest,
+    PermissionGate, PermissionOutcome, PermissionRequest, RecallGate, RecallOutcome,
+    SkillError, SkillGate, SkillInvocation, TaskItem, TaskListError, TaskListGate,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -119,5 +120,111 @@ impl RecallGate for RecallGateImpl {
             return RecallOutcome::Empty;
         }
         reply_rx.await.unwrap_or(RecallOutcome::Empty)
+    }
+}
+
+/// A task-list update in flight from a tool to the engine, carrying the
+/// oneshot the engine acks on (T-11). Like [`RecallAsk`], opaque to callers of
+/// the engine — they only route the receiver back into
+/// [`Engine::run`](crate::engine::Engine::run).
+pub struct TaskListAsk {
+    pub(crate) items: Vec<TaskItem>,
+    pub(crate) reply: oneshot::Sender<Result<(), TaskListError>>,
+}
+
+/// The task-list gate installed into every
+/// [`ToolCtx`](emberly_tools::ToolCtx). Fails closed: if the engine is gone or
+/// the reply is dropped, the answer is `Err` (the safe default — the tool maps
+/// it to a structured failure, HC-6).
+pub(crate) struct TaskListGateImpl {
+    pub(crate) asks: mpsc::Sender<TaskListAsk>,
+}
+
+#[async_trait]
+impl TaskListGate for TaskListGateImpl {
+    async fn set_task_list(&self, items: Vec<TaskItem>) -> Result<(), TaskListError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .asks
+            .send(TaskListAsk {
+                items,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(TaskListError);
+        }
+        reply_rx.await.unwrap_or(Err(TaskListError))
+    }
+}
+
+/// A memory op in flight from a tool to the engine, carrying the oneshot the
+/// engine replies on (T-13). Like [`TaskListAsk`], opaque to callers of the
+/// engine.
+pub struct MemoryAsk {
+    pub(crate) req: MemoryRequest,
+    pub(crate) reply: oneshot::Sender<Result<MemoryOutcome, MemoryError>>,
+}
+
+/// The memory gate installed into every
+/// [`ToolCtx`](emberly_tools::ToolCtx). Fails closed: if the engine is gone or
+/// the reply is dropped, the answer is `Err` (the safe default — the tool maps
+/// it to a structured failure, HC-6).
+pub(crate) struct MemoryGateImpl {
+    pub(crate) asks: mpsc::Sender<MemoryAsk>,
+}
+
+#[async_trait]
+impl MemoryGate for MemoryGateImpl {
+    async fn memory_op(&self, req: MemoryRequest) -> Result<MemoryOutcome, MemoryError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .asks
+            .send(MemoryAsk {
+                req,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(MemoryError);
+        }
+        reply_rx.await.unwrap_or(Err(MemoryError))
+    }
+}
+
+/// A skill invoke in flight from a tool to the engine, carrying the oneshot
+/// the engine replies on (T-15). Like [`MemoryAsk`], opaque to callers of the
+/// engine.
+pub struct SkillAsk {
+    pub(crate) name: String,
+    pub(crate) reply: oneshot::Sender<Result<Option<SkillInvocation>, SkillError>>,
+}
+
+/// The skill gate installed into every
+/// [`ToolCtx`](emberly_tools::ToolCtx). Fails closed: if the engine is gone or
+/// the reply is dropped, the answer is `Err` (the safe default — the tool maps
+/// it to a structured failure, HC-6).
+pub(crate) struct SkillGateImpl {
+    pub(crate) asks: mpsc::Sender<SkillAsk>,
+}
+
+#[async_trait]
+impl SkillGate for SkillGateImpl {
+    async fn invoke_skill(&self, name: String) -> Result<Option<SkillInvocation>, SkillError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .asks
+            .send(SkillAsk {
+                name,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(SkillError);
+        }
+        reply_rx.await.unwrap_or(Err(SkillError))
     }
 }

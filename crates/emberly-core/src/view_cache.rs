@@ -128,8 +128,9 @@ mod tests {
             context_tokens_authoritative: None,
             transcript_byte_len: 1024,
         };
-        let json = serde_json::to_string(&cache).expect("serialize");
-        let restored: ViewCache = serde_json::from_str(&json).expect("deserialize");
+        let json = serde_json::to_string(&cache).unwrap_or_else(|e| panic!("serialize: {e}"));
+        let restored: ViewCache =
+            serde_json::from_str(&json).unwrap_or_else(|e| panic!("deserialize: {e}"));
         assert_eq!(restored.version, VIEW_CACHE_VERSION);
         assert_eq!(restored.conversation.len(), 2);
         assert_eq!(restored.transcript_byte_len, 1024);

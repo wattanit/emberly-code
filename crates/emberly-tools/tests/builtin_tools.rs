@@ -11,8 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use emberly_tools::{
     AskUserGate, AskUserOutcome, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool,
-    PermissionGate, PermissionOutcome, PermissionRequest, PlainSandbox, ReadFileTool, Sandbox,
-    Tool, ToolCtx, TruncateConfig, WriteFileTool,
+    PermissionGate, PermissionOutcome, PermissionRequest, PlainSandbox, ReadFileTool,
+    ReadImageTool, Sandbox, Tool, ToolCtx, TruncateConfig, WriteFileTool,
 };
 use serde_json::json;
 
@@ -43,6 +43,18 @@ fn read_back(root: &Path, rel: &str) -> String {
     match std::fs::read_to_string(root.join(rel)) {
         Ok(s) => s,
         Err(e) => panic!("failed to read back {rel}: {e}"),
+    }
+}
+
+fn write_bytes(root: &Path, rel: &str, data: &[u8]) {
+    let path = root.join(rel);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            panic!("failed to create dir: {e}");
+        }
+    }
+    if let Err(e) = std::fs::write(&path, data) {
+        panic!("failed to seed file {rel}: {e}");
     }
 }
 
@@ -531,4 +543,171 @@ async fn ask_user_default_gate_declines() {
     // A decline is structured data, not a failure (HC-6).
     assert!(outcome.ok);
     assert!(outcome.content.contains("declined"));
+}
+
+// ---- read_image (T-12, P-11) -----------------------------------------------
+
+/// A minimal 1×1 red PNG for fixture use.
+fn tiny_png_bytes() -> Vec<u8> {
+    use base64::{engine::general_purpose, Engine as _};
+    general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+        .unwrap_or_default()
+}
+
+/// A ctx with vision enabled (P-11).
+fn ctx_vision(root: &Path, allow: bool) -> ToolCtx {
+    ctx(root, allow).with_vision(true)
+}
+
+#[tokio::test]
+async fn read_image_on_non_vision_model_returns_unsupported() {
+    // HC-6: the model learns it could not see, rather than assuming it saw.
+    let root = temp_project();
+    write_bytes(&root, "img.png", &tiny_png_bytes());
+    let outcome = ReadImageTool
+        .execute(json!({ "path": "img.png" }), &ctx(&root, true)) // vision=false
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("no vision") || outcome.content.contains("vision"));
+    assert!(outcome.image.is_none());
+}
+
+#[tokio::test]
+async fn read_image_success_appends_image_payload() {
+    let root = temp_project();
+    write_bytes(&root, "img.png", &tiny_png_bytes());
+    let outcome = ReadImageTool
+        .execute(json!({ "path": "img.png" }), &ctx_vision(&root, true))
+        .await;
+    assert!(outcome.ok);
+    assert!(outcome.image.is_some());
+    let image = outcome.image.as_ref().expect("image payload");
+    assert_eq!(image.media_type, "image/png");
+    assert!(!image.data.is_empty());
+    // Summary matches the Design §4.8 reference-line form.
+    assert!(outcome.summary.contains("·"));
+    assert!(outcome.summary.contains("PNG"));
+    assert!(outcome.summary.contains("1×1"));
+}
+
+#[tokio::test]
+async fn read_image_rejects_oversize() {
+    let root = temp_project();
+    let png = tiny_png_bytes();
+    write_bytes(&root, "img.png", &png);
+    let ctx_small = ctx_vision(&root, true).with_image_max_bytes(1);
+    let outcome = ReadImageTool
+        .execute(json!({ "path": "img.png" }), &ctx_small)
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("exceeds") || outcome.content.contains("limit"));
+}
+
+#[tokio::test]
+async fn read_image_rejects_unknown_format() {
+    let root = temp_project();
+    write_file(&root, "data.bin", "this is not an image");
+    let outcome = ReadImageTool
+        .execute(json!({ "path": "data.bin" }), &ctx_vision(&root, true))
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("not") || outcome.content.contains("format"));
+}
+
+#[tokio::test]
+async fn read_image_outside_root_requests_permission() {
+    let root = temp_project();
+    let png = tiny_png_bytes();
+    // Write a file in a sibling dir (outside the project root).
+    let outside = std::env::temp_dir().join(format!(
+        "emberly-outside-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::create_dir_all(&outside);
+    let _ = std::fs::write(outside.join("ext.png"), &png);
+    let abs = outside.join("ext.png").display().to_string();
+
+    // Denied → the tool returns a denied outcome.
+    let outcome = ReadImageTool
+        .execute(json!({ "path": abs }), &ctx_vision(&root, false))
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("denied"));
+
+    // Allow → the image loads.
+    let outcome2 = ReadImageTool
+        .execute(json!({ "path": abs }), &ctx_vision(&root, true))
+        .await;
+    assert!(outcome2.ok);
+    assert!(outcome2.image.is_some());
+}
+
+#[tokio::test]
+async fn read_image_missing_file_is_a_failure_not_a_crash() {
+    let root = temp_project();
+    let outcome = ReadImageTool
+        .execute(json!({ "path": "nope.png" }), &ctx_vision(&root, true))
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("nope.png"));
+}
+
+// ---- read_image format coverage (Tech Spec §5.2: PNG, JPEG, GIF, WebP) -----
+
+fn decode_b64(s: &str) -> Vec<u8> {
+    use base64::{engine::general_purpose, Engine as _};
+    general_purpose::STANDARD.decode(s).unwrap_or_default()
+}
+
+fn tiny_jpeg_bytes() -> Vec<u8> {
+    decode_b64("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/9oACAEBAAA/APvSiiig/9k=")
+}
+
+fn tiny_gif_bytes() -> Vec<u8> {
+    decode_b64("R0lGODlhAQABAIAAAP///yH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==")
+}
+
+fn tiny_webp_bytes() -> Vec<u8> {
+    decode_b64("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAAACvACEBHwE=")
+}
+
+#[tokio::test]
+async fn read_image_detects_jpeg_format() {
+    let root = temp_project();
+    write_bytes(&root, "img.jpg", &tiny_jpeg_bytes());
+    let outcome = ReadImageTool
+        .execute(json!({ "path": "img.jpg" }), &ctx_vision(&root, true))
+        .await;
+    assert!(outcome.ok, "JPEG should succeed: {}", outcome.content);
+    let image = outcome.image.as_ref().expect("image payload");
+    assert_eq!(image.media_type, "image/jpeg");
+    assert!(outcome.summary.contains("JPEG"));
+}
+
+#[tokio::test]
+async fn read_image_detects_gif_format() {
+    let root = temp_project();
+    write_bytes(&root, "img.gif", &tiny_gif_bytes());
+    let outcome = ReadImageTool
+        .execute(json!({ "path": "img.gif" }), &ctx_vision(&root, true))
+        .await;
+    assert!(outcome.ok, "GIF should succeed: {}", outcome.content);
+    let image = outcome.image.as_ref().expect("image payload");
+    assert_eq!(image.media_type, "image/gif");
+    assert!(outcome.summary.contains("GIF"));
+}
+
+#[tokio::test]
+async fn read_image_detects_webp_format() {
+    let root = temp_project();
+    write_bytes(&root, "img.webp", &tiny_webp_bytes());
+    let outcome = ReadImageTool
+        .execute(json!({ "path": "img.webp" }), &ctx_vision(&root, true))
+        .await;
+    assert!(outcome.ok, "WebP should succeed: {}", outcome.content);
+    let image = outcome.image.as_ref().expect("image payload");
+    assert_eq!(image.media_type, "image/webp");
+    assert!(outcome.summary.contains("WebP"));
 }

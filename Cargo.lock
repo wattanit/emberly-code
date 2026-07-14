@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "emberly"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -570,9 +570,10 @@ dependencies = [
 
 [[package]]
 name = "emberly-core"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
+ "base64",
  "emberly-providers",
  "emberly-sandbox",
  "emberly-tools",
@@ -582,12 +583,13 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "toml",
  "uuid",
 ]
 
 [[package]]
 name = "emberly-providers"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -604,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "emberly-sandbox"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "landlock",
  "serde",
@@ -615,24 +617,29 @@ dependencies = [
 
 [[package]]
 name = "emberly-tools"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
+ "base64",
  "globset",
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "imagesize",
+ "reqwest",
  "rustix 1.1.4",
+ "rustls-rustcrypto",
  "serde",
  "serde_json",
  "similar",
  "thiserror",
  "tokio",
+ "wiremock",
 ]
 
 [[package]]
 name = "emberly-tui"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "crossterm",
  "emberly-core",
@@ -1255,6 +1262,12 @@ dependencies = [
  "walkdir",
  "winapi-util",
 ]
+
+[[package]]
+name = "imagesize"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
 
 [[package]]
 name = "indexmap"

@@ -22,7 +22,7 @@ use emberly_providers::{
     ContentBlock, Effort, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
     ScriptOutcome, ScriptedResponse, StopReason, StreamEvent, TokenUsage, ToolCallId,
 };
-use emberly_tools::{default_registry, TruncateConfig};
+use emberly_tools::{default_registry, MemoryOp, MemoryScope, SkillOrigin, TruncateConfig};
 use tokio::sync::mpsc;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -97,6 +97,13 @@ fn make_config(
         summary_prompt: None,
         provider_factory: None,
         config_reloader: None,
+        image_max_bytes: 5 * 1024 * 1024,
+        memory: emberly_core::MemoryConfig::default(),
+        user_memory_dir: None,
+        project_memory_dir: None,
+        skills: emberly_core::SkillsConfig::default(),
+        user_skills_dir: None,
+        project_skills_dir: None,
     }
 }
 
@@ -136,12 +143,15 @@ fn start_with_file_transcript(
 
 fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx) = Engine::new(config, engine_ports.events_tx);
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx) = Engine::new(config, engine_ports.events_tx);
     tokio::spawn(engine.run(
         engine_ports.commands_rx,
         asks_rx,
         user_asks_rx,
         recall_rx,
+        task_rx,
+        memory_rx,
+        skill_rx,
     ));
     Harness {
         commands_tx: frontend.commands_tx,
@@ -570,6 +580,7 @@ async fn cost_and_context_use_authoritative_usage() {
         }),
         effort_levels: Vec::new(),
         default_effort: None,
+        vision: false,
     };
     let response = ScriptedResponse {
         events: vec![
@@ -625,6 +636,7 @@ async fn usage_chunk_after_done_still_counts() {
         }),
         effort_levels: Vec::new(),
         default_effort: None,
+        vision: false,
     };
     // `drop_after` appends no terminal event, so this is exactly the wire
     // order: content delta → finish_reason (Done) → usage chunk → EOF.
@@ -1143,6 +1155,7 @@ impl emberly_core::ProviderFactory for ReseedFactory {
             pricing: None,
             effort_levels: Effort::ALL.to_vec(),
             default_effort: Some(Effort::High),
+            vision: false,
         };
         Ok(emberly_core::ProviderChoice {
             provider: Arc::new(FakeProvider::new(Vec::new()).with_model_info(info)),
@@ -1360,6 +1373,7 @@ async fn set_effort_on_a_model_without_a_control_declines_calmly() {
         pricing: None,
         effort_levels: Vec::new(),
         default_effort: None,
+        vision: false,
     };
     let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(Vec::new()).with_model_info(info));
     let sink = CaptureSink::new();
@@ -1977,7 +1991,7 @@ async fn bash_reduction_collapses_progress_in_context() {
     let path = root.join("session.jsonl");
     let cmd = "for i in $(seq 1 100); do echo 'Downloading '$i'%'; done; echo 'Done'";
     let scripts = vec![
-        ScriptedResponse::tool_call("c1", "bash", &format!(r#"{{"command":"{cmd}"}}"#)),
+        ScriptedResponse::tool_call("c1", "bash", format!(r#"{{"command":"{cmd}"}}"#)),
         ScriptedResponse::text("done"),
     ];
     let mut h = start_with_truncate(scripts, root.clone(), &path, TruncateConfig::default());
@@ -2897,6 +2911,7 @@ fn auto_compact_provider(scripts: Vec<ScriptedResponse>) -> Arc<FakeProvider> {
         pricing: None,
         effort_levels: Vec::new(),
         default_effort: None,
+        vision: false,
     };
     Arc::new(FakeProvider::new(scripts).with_model_info(info))
 }
@@ -3408,5 +3423,1248 @@ async fn in_session_resume_restores_conversation() {
     assert!(
         user_texts.iter().any(|t| t.contains("remember this")),
         "restored conversation includes the prior user message: {user_texts:?}"
+    );
+}
+
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ T-11 — Task-list ("todo") tool tests (Phase 1, Group 6)                 ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+/// A `todo` round-trip emits `TaskListUpdated` and a `task_list` transcript
+/// event with the full list (replace semantics — a second call replaces).
+#[tokio::test]
+async fn todo_round_trip_emits_event_and_transcript() {
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "t1",
+            "todo",
+            r#"{"items":[{"text":"step one","status":"in_progress"},{"text":"step two","status":"pending"}]}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, temp_project());
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // Must emit TaskListUpdated with the full list.
+    let updated = events.iter().find_map(|e| match e {
+        UiEvent::TaskListUpdated { items } => Some(items),
+        _ => None,
+    });
+    assert!(updated.is_some(), "todo emits TaskListUpdated");
+    let items = updated.expect("checked some");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].text, "step one");
+    assert_eq!(items[1].text, "step two");
+
+    // The transcript records the task_list event (HC-7).
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::TaskList { items } if items.len() == 2
+    )));
+}
+
+/// Replace semantics: a second `todo` call with fewer items replaces the list.
+#[tokio::test]
+async fn todo_second_call_replaces_not_merges() {
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "t1",
+            "todo",
+            r#"{"items":[{"text":"a","status":"pending"},{"text":"b","status":"pending"},{"text":"c","status":"pending"}]}"#,
+        ),
+        ScriptedResponse::tool_call(
+            "t2",
+            "todo",
+            r#"{"items":[{"text":"only a","status":"done"}]}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ];
+    let (mut h, sink) = start_capturing(scripts, temp_project());
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    // The last task_list transcript event must have exactly 1 item — replace,
+    // not merge.
+    let records = sink.records();
+    let last_task = records
+        .iter()
+        .rev()
+        .find_map(|r| match &r.event {
+            TranscriptEvent::TaskList { items } => Some(items),
+            _ => None,
+        })
+        .expect("at least one task_list event");
+    assert_eq!(last_task.len(), 1);
+    assert_eq!(last_task[0].text, "only a");
+}
+
+/// The `todo` call is not permission-gated: no PermissionRequest ever raised.
+#[tokio::test]
+async fn todo_is_not_permission_gated() {
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "t1",
+            "todo",
+            r#"{"items":[{"text":"do thing","status":"in_progress"}]}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let mut h = start(scripts, temp_project());
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    let has_permission = events
+        .iter()
+        .any(|e| matches!(e, UiEvent::PermissionRequest { .. }));
+    assert!(
+        !has_permission,
+        "todo never raises a permission prompt"
+    );
+}
+
+/// With `pin_task_list = true`, the task list survives compaction in the
+/// system prompt. With `false`, it is absent from the sent context.
+#[tokio::test]
+async fn todo_pinned_across_compaction() {
+    let scripts = vec![
+        // Turn 1: set the task list.
+        ScriptedResponse::tool_call(
+            "t1",
+            "todo",
+            r#"{"items":[{"text":"survive compaction","status":"in_progress"}]}"#,
+        ),
+        // Turns 2–5: text turns to build enough messages for compaction.
+        ScriptedResponse::text("r2"),
+        ScriptedResponse::text("r3"),
+        ScriptedResponse::text("r4"),
+        ScriptedResponse::text("r5"),
+        // Turn 6: the summarization call for `/compact`.
+        ScriptedResponse::text("SUMMARY"),
+        // Turn 7: a final call whose request we inspect.
+        ScriptedResponse::text("final"),
+    ];
+    let fake = Arc::new(FakeProvider::new(scripts));
+    let root = temp_project();
+
+    let mut config = make_config(fake.clone(), root, EngineConfig::no_transcript());
+    config.context = ContextConfig {
+        pin_task_list: true,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn(config);
+
+    // Send the first message — sets the task list.
+    h.send(Command::UserInput {
+        text: "start".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    // Build up messages for compaction.
+    for i in 0..4 {
+        h.send(Command::UserInput {
+            text: format!("msg {i}"),
+        })
+        .await;
+        let _ = h.collect(None).await;
+    }
+
+    // Trigger compaction.
+    h.send(Command::Compact).await;
+    let _ = h.collect(None).await;
+
+    // Send a final message and inspect the request.
+    h.send(Command::UserInput {
+        text: "check".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(
+        system.contains("survive compaction"),
+        "pinned task list should survive compaction in the system prompt"
+    );
+}
+
+/// With `pin_task_list = false`, the task list is absent from the sent context.
+#[tokio::test]
+async fn todo_unpinned_absent_from_context() {
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "t1",
+            "todo",
+            r#"{"items":[{"text":"should not be pinned","status":"pending"}]}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ];
+    let fake = Arc::new(FakeProvider::new(scripts));
+    let root = temp_project();
+
+    let mut config = make_config(fake.clone(), root, EngineConfig::no_transcript());
+    config.context = ContextConfig {
+        pin_task_list: false,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(
+        !system.contains("should not be pinned"),
+        "unpinned task list should be absent from the system prompt"
+    );
+}
+
+/// HC-7: the `task_list` transcript event is additive — resume tolerates it
+/// without crashing.
+#[tokio::test]
+async fn todo_transcript_event_is_additive_for_resume() {
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "t1",
+            "todo",
+            r#"{"items":[{"text":"task","status":"done"}]}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ];
+    let root = temp_project();
+    let session_dir = root.join(".agents").join("sessions");
+    let _ = std::fs::create_dir_all(&session_dir);
+    let sid = SessionId::new();
+    let path = session_dir.join(format!("{sid}.jsonl"));
+    let mut h = start_with_file_transcript(scripts, root.clone(), &path);
+    h.send(Command::UserInput {
+        text: "go".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    // The transcript file contains the task_list event. Reading it back for
+    // resume should not crash — the resume reader warn-skips unknown events.
+    let records = emberly_core::resume::read_records(&path);
+    assert!(
+        records.is_ok(),
+        "resume reader tolerates the task_list event"
+    );
+    let loaded = records.expect("checked ok");
+    assert!(
+        loaded.records.iter().any(|r| matches!(
+            &r.event,
+            TranscriptEvent::TaskList { .. }
+        )),
+        "transcript contains the task_list event"
+    );
+}
+
+// ---- read_image round-trip (P-11, T-12) -----------------------------------
+
+/// A minimal 1×1 red PNG for fixture use.
+fn tiny_png() -> Vec<u8> {
+    use base64::{engine::general_purpose, Engine as _};
+    general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+        .unwrap_or_default()
+}
+
+/// A ModelInfo with vision enabled.
+fn vision_model_info() -> ModelInfo {
+    ModelInfo {
+        model: "vision-1".into(),
+        context_window: 200_000,
+        max_output_tokens: 8_192,
+        pricing: None,
+        effort_levels: Vec::new(),
+        default_effort: None,
+        vision: true,
+    }
+}
+
+#[tokio::test]
+async fn read_image_round_trip_appends_image_block() {
+    // P-11: on a vision model, `read_image` appends a ContentBlock::Image to
+    // the sent context.
+    let root = temp_project();
+    let _ = std::fs::write(root.join("pic.png"), tiny_png());
+    let fake = Arc::new(
+        FakeProvider::new(vec![
+            ScriptedResponse::tool_call("c1", "read_image", r#"{"path":"pic.png"}"#),
+            ScriptedResponse::text("I see a red pixel."),
+        ])
+        .with_model_info(vision_model_info()),
+    );
+    let provider: Arc<dyn Provider> = fake.clone();
+    let sink = CaptureSink::new();
+    let config = make_config(provider, root, Box::new(sink.clone()));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "what is in this image?".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // The model's closing message arrived.
+    assert_eq!(deltas(&events), "I see a red pixel.");
+
+    // The last request sent to the provider contains an Image block.
+    let req = fake
+        .last_request()
+        .expect("at least one request was sent");
+    let has_image = req.messages.iter().any(|m| {
+        m.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. }))
+    });
+    assert!(has_image, "ContentBlock::Image is in the sent context");
+}
+
+#[tokio::test]
+async fn read_image_on_non_vision_model_returns_unsupported_result() {
+    // HC-6: on a non-vision model the tool returns the structured unsupported
+    // result and NO image block is sent (P-11).
+    let root = temp_project();
+    let _ = std::fs::write(root.join("pic.png"), tiny_png());
+    // Default FakeProvider has vision: false.
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call("c1", "read_image", r#"{"path":"pic.png"}"#),
+        ScriptedResponse::text("I cannot see images."),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let sink = CaptureSink::new();
+    let config = make_config(provider, root, Box::new(sink.clone()));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "describe the image".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // The tool finished with ok=false (the unsupported result).
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { ok: false, summary, .. }
+            if summary.contains("no vision") || summary.contains("vision"))),
+        "unsupported-vision result emitted as a failed tool outcome"
+    );
+
+    // No Image block in the sent context.
+    let req = fake
+        .last_request()
+        .expect("at least one request was sent");
+    let has_image = req.messages.iter().any(|m| {
+        m.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. }))
+    });
+    assert!(!has_image, "no Image block sent to a non-vision model");
+}
+
+#[tokio::test]
+async fn read_image_transcript_records_path_not_bytes() {
+    // HC-7: the transcript records the tool_call args (the path) and the
+    // tool_result text (the reference line), but NEVER the image bytes.
+    let root = temp_project();
+    let _ = std::fs::write(root.join("pic.png"), tiny_png());
+    let sink = CaptureSink::new();
+    let fake = Arc::new(
+        FakeProvider::new(vec![
+            ScriptedResponse::tool_call("c1", "read_image", r#"{"path":"pic.png"}"#),
+            ScriptedResponse::text("I see it."),
+        ])
+        .with_model_info(vision_model_info()),
+    );
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = make_config(provider, root, Box::new(sink.clone()));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "look at pic.png".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    // The transcript has a ToolCall for read_image with the path.
+    let records = sink.records();
+    let tool_call = records.iter().find(|r| {
+        matches!(&r.event, TranscriptEvent::ToolCall { tool, .. } if tool == "read_image")
+    });
+    assert!(tool_call.is_some(), "tool_call recorded");
+    if let Some(r) = tool_call {
+        if let TranscriptEvent::ToolCall { args, .. } = &r.event {
+            assert!(args.to_string().contains("pic.png"), "path in tool_call args");
+        }
+    }
+
+    // The tool_result is recorded with ok=true (the reference line text).
+    let tool_result = records.iter().find(|r| {
+        matches!(&r.event, TranscriptEvent::ToolResult { call_id, .. } if call_id.0 == "c1")
+    });
+    assert!(tool_result.is_some(), "tool_result recorded");
+
+    // No transcript record contains base64 image data (the bytes are not in the JSONL).
+    let all_text: String = records
+        .iter()
+        .map(|r| format!("{:?}", r.event))
+        .collect();
+    assert!(
+        !all_text.contains("iVBOR"),
+        "image bytes must not appear in the transcript (HC-7)"
+    );
+}
+
+// ---- memory round-trip (FR-6, T-13) ---------------------------------------
+
+/// A config with memory enabled and temp dirs for both scopes.
+fn memory_config(provider: Arc<dyn Provider>, root: PathBuf, user_dir: PathBuf, project_dir: Option<PathBuf>) -> EngineConfig {
+    let mut config = make_config(provider, root, EngineConfig::no_transcript());
+    config.memory = emberly_core::MemoryConfig::default();
+    config.user_memory_dir = Some(user_dir);
+    config.project_memory_dir = project_dir;
+    config
+}
+
+fn mem_temp_dir(label: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("emberly-mem-{label}-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+#[tokio::test]
+async fn memory_write_recall_round_trip() {
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "memory",
+            r#"{"op":"write","scope":"user","name":"Build","description":"how to build","body":"cargo build"}"#,
+        ),
+        ScriptedResponse::tool_call(
+            "c2",
+            "memory",
+            r#"{"op":"recall","scope":"user","name":"Build"}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = memory_config(provider, root, user_dir.clone(), None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "remember and recall".into() }).await;
+    let events = h.collect(None).await;
+
+    // The model produced its closing message.
+    assert_eq!(deltas(&events), "done");
+
+    // A MemoryStatus event was emitted with the updated count.
+    assert!(
+        events.iter().any(|e| matches!(e, UiEvent::MemoryStatus { user: 1, .. })),
+        "MemoryStatus with user count 1 was emitted"
+    );
+
+    // The recall returned the body — the tool_result content contains it.
+    // The second tool's result ("cargo build") should appear in a ToolFinished.
+    let recall_finish = events.iter().find(|e| matches!(e,
+        UiEvent::ToolFinished { summary, .. } if summary.contains("recalled")));
+    assert!(recall_finish.is_some(), "recall tool finished with origin");
+
+    // The index is pinned in the system prompt of the next request.
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(system.contains("Build"), "memory index pinned in system prompt");
+    assert!(system.contains("how to build"), "description in pinned index");
+}
+
+#[tokio::test]
+async fn memory_project_scope_absent_when_untrusted() {
+    // When project_memory_dir is None, a project-scope op returns Rejected
+    // and the project index never enters the pinned context.
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "memory",
+            r#"{"op":"write","scope":"project","name":"Note","description":"test","body":"body"}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    // project_memory_dir = None (untrusted root).
+    let config = memory_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "write project memory".into() }).await;
+    let events = h.collect(None).await;
+
+    // The tool finished with ok=false (Rejected — project unavailable).
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { ok: false, .. })),
+        "project memory rejected on untrusted root"
+    );
+}
+
+#[tokio::test]
+async fn memory_name_escape_is_rejected() {
+    // The HC-4 boundary: a name with path separators is rejected by the tool
+    // before it reaches the engine.
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "memory",
+            r#"{"op":"write","scope":"user","name":"../etc/passwd","description":"x","body":"y"}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = memory_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "write bad memory".into() }).await;
+    let events = h.collect(None).await;
+
+    // The tool finished with ok=false (path escape rejected).
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { ok: false, .. })),
+        "path-escape in name was rejected"
+    );
+}
+
+#[tokio::test]
+async fn memory_disabled_does_not_pin_index() {
+    // When memory.enabled = false, the index is absent from the system prompt
+    // and a memory op returns Rejected.
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    // Pre-seed a memory file so the index would be non-empty.
+    let _ = std::fs::create_dir_all(&user_dir);
+    let _ = std::fs::write(
+        user_dir.join("seed.md"),
+        "+++\nname = \"Seed\"\ndescription = \"seed entry\"\n+++\nbody\n",
+    );
+    let _ = std::fs::write(
+        user_dir.join("MEMORY.md"),
+        "- Seed — seed entry\n",
+    );
+
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "memory",
+            r#"{"op":"recall","scope":"user","name":"Seed"}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let mut config = memory_config(provider, root, user_dir, None);
+    config.memory.enabled = false;
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "recall".into() }).await;
+    let events = h.collect(None).await;
+
+    // The tool finished with ok=false (memory disabled).
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { ok: false, .. })),
+        "memory op rejected when disabled"
+    );
+
+    // The index is NOT in the system prompt.
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(
+        !system.contains("Seed"),
+        "memory index absent when disabled"
+    );
+}
+
+#[tokio::test]
+async fn memory_op_never_raises_permission_request() {
+    // A memory op is not permission-gated — it never raises a
+    // PermissionRequest (mirror the todo/recall not-gated assertions).
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "memory",
+            r#"{"op":"write","scope":"user","name":"Note","description":"x","body":"y"}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = memory_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "write memory".into() }).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        !events.iter().any(|e| matches!(e, UiEvent::PermissionRequest { .. })),
+        "memory op never raises a PermissionRequest"
+    );
+}
+
+// ---- skill round-trip (FR-7, T-15) ----------------------------------------
+
+/// A config with skills enabled and temp dirs for both scopes.
+fn skills_config(
+    provider: Arc<dyn Provider>,
+    root: PathBuf,
+    user_dir: PathBuf,
+    project_dir: Option<PathBuf>,
+) -> EngineConfig {
+    let mut config = make_config(provider, root, EngineConfig::no_transcript());
+    config.skills = emberly_core::SkillsConfig::default();
+    config.user_skills_dir = Some(user_dir);
+    config.project_skills_dir = project_dir;
+    config
+}
+
+fn skill_temp_dir(label: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("emberly-skill-{label}-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Write a skill folder with `+++` frontmatter + body.
+fn write_skill(dir: &Path, name: &str, description: &str, body: &str) {
+    let skill_dir = dir.join(name);
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let content = format!("+++\nname = \"{name}\"\ndescription = \"{description}\"\n+++\n{body}");
+    std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+}
+
+/// Write a bundled resource into a skill folder.
+fn write_skill_resource(dir: &Path, skill_name: &str, resource_name: &str, content: &str) {
+    let skill_dir = dir.join(skill_name);
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join(resource_name), content).unwrap();
+}
+
+#[tokio::test]
+async fn skill_invoke_loads_body_and_resources() {
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    write_skill(&user_dir, "pdf-fill", "Fill PDF forms", "Step 1: open the template.");
+    write_skill_resource(&user_dir, "pdf-fill", "template.txt", "Template content");
+
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call("c1", "skill", r#"{"name":"pdf-fill"}"#),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = skills_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "use the pdf skill".into() }).await;
+    let events = h.collect(None).await;
+
+    assert_eq!(deltas(&events), "done");
+
+    // SkillsAvailable was emitted at session start with the catalog.
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::SkillsAvailable { skills } if skills.len() == 1
+                && skills[0].name == "pdf-fill"
+                && skills[0].description == "Fill PDF forms")),
+        "SkillsAvailable emitted with the catalog"
+    );
+
+    // The skill tool finished successfully with origin on the summary line.
+    let skill_finish = events.iter().find(|e| matches!(e,
+        UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("skill") && summary.contains("pdf-fill")));
+    assert!(skill_finish.is_some(), "skill tool finished with origin on summary");
+
+    // The tool result contains the body (assert via ToolFinished preview).
+    let finish = events.iter().find(|e| matches!(e,
+        UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("pdf-fill")));
+    if let Some(UiEvent::ToolFinished { preview, .. }) = finish {
+        assert!(preview.contains("Step 1: open the template."), "body in tool result preview");
+        assert!(preview.contains("template.txt"), "resource listed in tool result");
+    }
+
+    // The catalog (metadata) is pinned in the system prompt.
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(system.contains("pdf-fill"), "skill name pinned in system prompt");
+    assert!(system.contains("Fill PDF forms"), "skill description pinned in system prompt");
+
+    // The body is NOT pinned (progressive disclosure).
+    assert!(!system.contains("Step 1: open the template."), "body not pinned in system prompt");
+}
+
+#[tokio::test]
+async fn skill_catalog_pinned_when_enabled_absent_when_disabled() {
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    write_skill(&user_dir, "linter", "Run linters", "Use eslint.");
+
+    // --- enabled: catalog is pinned ---
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::text("ok"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = skills_config(provider, root.clone(), user_dir.clone(), None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::SkillsAvailable { skills } if !skills.is_empty())),
+        "SkillsAvailable emitted with non-empty catalog when enabled"
+    );
+
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(system.contains("linter"), "catalog pinned when skills enabled");
+
+    // --- disabled: no catalog pinned, skill tool fails ---
+    let fake2 = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call("c1", "skill", r#"{"name":"linter"}"#),
+        ScriptedResponse::text("ok"),
+    ]));
+    let provider2: Arc<dyn Provider> = fake2.clone();
+    let mut config2 = skills_config(provider2, root, user_dir, None);
+    config2.skills = emberly_core::SkillsConfig { enabled: false };
+    let mut h2 = spawn(config2);
+
+    h2.send(Command::UserInput { text: "use skill".into() }).await;
+    let events2 = h2.collect(None).await;
+
+    // No SkillsAvailable with skills (empty or absent).
+    let skills_event = events2.iter().find(|e| matches!(e, UiEvent::SkillsAvailable { .. }));
+    if let Some(UiEvent::SkillsAvailable { skills }) = skills_event {
+        assert!(skills.is_empty(), "no skills cataloged when disabled");
+    }
+
+    // The skill tool call fails (unknown skill — no catalog).
+    assert!(
+        events2.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { ok: false, .. })),
+        "skill tool fails when skills disabled"
+    );
+
+    let req2 = fake2.last_request().expect("request sent");
+    let system2 = req2.system.as_deref().unwrap_or("");
+    assert!(!system2.contains("linter"), "catalog not pinned when skills disabled");
+}
+
+#[tokio::test]
+async fn skill_untrusted_project_absent() {
+    // project_skills_dir = None simulates an untrusted root: a project skill
+    // is neither cataloged nor invocable, while user-global skills still work.
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    let project_dir = skill_temp_dir("p");
+    write_skill(&user_dir, "user-skill", "User skill", "User body.");
+    write_skill(&project_dir, "project-skill", "Project skill", "Project body.");
+
+    let fake = Arc::new(FakeProvider::new(vec![
+        // Try to invoke the project skill — should fail.
+        ScriptedResponse::tool_call("c1", "skill", r#"{"name":"project-skill"}"#),
+        // Invoke the user skill — should succeed.
+        ScriptedResponse::tool_call("c2", "skill", r#"{"name":"user-skill"}"#),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    // project_skills_dir = None (untrusted root).
+    let config = skills_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "use skills".into() }).await;
+    let events = h.collect(None).await;
+
+    assert_eq!(deltas(&events), "done");
+
+    // SkillsAvailable contains only the user skill, not the project skill.
+    let skills_avail = events.iter().find_map(|e| match e {
+        UiEvent::SkillsAvailable { skills } => Some(skills),
+        _ => None,
+    });
+    if let Some(skills) = skills_avail {
+        assert_eq!(skills.len(), 1, "only user skill cataloged");
+        assert_eq!(skills[0].name, "user-skill");
+    }
+
+    // The project skill invoke fails (not cataloged).
+    let finishes: Vec<_> = events.iter().filter_map(|e| match e {
+        UiEvent::ToolFinished { ok, summary, .. } => Some((*ok, summary.clone())),
+        _ => None,
+    }).collect();
+    assert_eq!(finishes.len(), 2, "two tool finishes");
+    assert!(!finishes[0].0, "project skill invoke fails (not cataloged)");
+    assert!(finishes[1].0, "user skill invoke succeeds");
+
+    // The project skill is not in the pinned system prompt.
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(!system.contains("project-skill"), "project skill not pinned");
+    assert!(system.contains("user-skill"), "user skill pinned");
+}
+
+#[tokio::test]
+async fn skill_not_permission_gated() {
+    // A skill invoke never raises a PermissionRequest and never spawns a
+    // process. The tool reads instruction text only — not permission-gated
+    // (FR-7 honesty clause).
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    write_skill(&user_dir, "safe-skill", "A safe skill", "Do nothing.");
+
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call("c1", "skill", r#"{"name":"safe-skill"}"#),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = skills_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "use skill".into() }).await;
+    let events = h.collect(None).await;
+
+    // No PermissionRequest was emitted.
+    assert!(
+        !events.iter().any(|e| matches!(e, UiEvent::PermissionRequest { .. })),
+        "skill invoke never raises a PermissionRequest"
+    );
+
+    // The skill tool succeeded.
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("safe-skill"))),
+        "skill tool succeeded without permission gate"
+    );
+}
+
+#[tokio::test]
+async fn memory_hc7_no_bytes_in_transcript() {
+    // HC-7: the durable fact lives in <slug>.md, not duplicated into the JSONL.
+    // The transcript records only the tool_call/tool_result pair.
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    let sink = CaptureSink::new();
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "memory",
+            r#"{"op":"write","scope":"user","name":"Secret","description":"desc","body":"the answer is 42"}"#,
+        ),
+        ScriptedResponse::text("ok"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = memory_config(provider, root, user_dir.clone(), None);
+    let config = {
+        let mut c = config;
+        c.transcript = Box::new(sink.clone());
+        c
+    };
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "remember".into() }).await;
+    let _ = h.collect(None).await;
+
+    // The memory file exists on disk with the body.
+    let entry = std::fs::read_to_string(user_dir.join("secret.md")).unwrap_or_default();
+    assert!(entry.contains("the answer is 42"), "body in the .md file");
+
+    // The transcript records the tool_call and tool_result but the tool_result
+    // does NOT duplicate the body — only the summary.
+    let records = sink.records();
+    let tool_result = records.iter().find(|r| {
+        matches!(&r.event, TranscriptEvent::ToolResult { call_id, .. } if call_id.0 == "c1")
+    });
+    assert!(tool_result.is_some(), "tool_result recorded");
+    if let Some(r) = tool_result {
+        if let TranscriptEvent::ToolResult { output, .. } = &r.event {
+            assert!(
+                !output.contains("the answer is 42"),
+                "memory body must not be duplicated in the tool_result (HC-7)"
+            );
+        }
+    }
+    // The body IS in the .md file on disk.
+    assert!(entry.contains("the answer is 42"), "body in the .md file");
+}
+
+#[tokio::test]
+async fn skill_precedence_project_over_user() {
+    // A skill present in both scopes resolves to the project variant with
+    // origin: Project, and a ShadowNotice is produced.
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    let project_dir = skill_temp_dir("p");
+    write_skill(&user_dir, "shared", "User version", "User body.");
+    write_skill(&project_dir, "shared", "Project version", "Project body.");
+
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call("c1", "skill", r#"{"name":"shared"}"#),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = skills_config(provider, root, user_dir, Some(project_dir));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "use shared skill".into() }).await;
+    let events = h.collect(None).await;
+
+    // SkillsAvailable shows the project variant.
+    let skills_avail = events.iter().find_map(|e| match e {
+        UiEvent::SkillsAvailable { skills } => Some(skills),
+        _ => None,
+    });
+    if let Some(skills) = skills_avail {
+        assert_eq!(skills.len(), 1, "one skill (project wins)");
+        assert_eq!(skills[0].name, "shared");
+        assert_eq!(skills[0].description, "Project version");
+        assert_eq!(skills[0].origin, emberly_core::SkillOrigin::Project);
+    }
+
+    // The invoke returns the project body.
+    let finish = events.iter().find(|e| matches!(e,
+        UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("shared")));
+    assert!(finish.is_some(), "skill invoke succeeded");
+    if let Some(UiEvent::ToolFinished { preview, .. }) = finish {
+        assert!(preview.contains("Project body."), "project body returned on invoke");
+        assert!(!preview.contains("User body."), "user body not returned");
+    }
+
+    // The pinned catalog shows the project variant.
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(system.contains("Project version"), "project description pinned");
+    assert!(!system.contains("User version"), "user description not pinned");
+}
+
+// ---- inspector round-trips (Phase 6b: /memory & /skills, FR-6/FR-7) --------
+
+/// Write a memory entry file with `+++` frontmatter + body directly (sets up a
+/// store state without going through the tool).
+fn write_mem_entry(dir: &Path, slug: &str, name: &str, description: &str, body: &str) {
+    let content = format!("+++\nname = \"{name}\"\ndescription = \"{description}\"\n+++\n{body}");
+    std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
+}
+
+/// Pull the `MemoryEntries` payload out of a collected event stream.
+fn memory_entries(
+    events: &[UiEvent],
+) -> Option<(
+    Vec<emberly_core::memory::EntrySummary>,
+    Vec<emberly_core::memory::EntrySummary>,
+)> {
+    events.iter().find_map(|e| match e {
+        UiEvent::MemoryEntries { user, project } => Some((user.clone(), project.clone())),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn memory_list_command_groups_entries_by_scope() {
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    let project_dir = mem_temp_dir("p");
+    write_mem_entry(&user_dir, "zebra", "Zebra", "the last", "z body");
+    write_mem_entry(&user_dir, "alpha", "Alpha", "the first", "a body");
+    write_mem_entry(&project_dir, "proj", "Proj", "a project note", "p body");
+
+    let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
+    let config = memory_config(fake, root, user_dir, Some(project_dir));
+    let mut h = spawn(config);
+
+    h.send(Command::MemoryList).await;
+    let events = h.collect(None).await;
+
+    let (user, project) = memory_entries(&events).expect("MemoryEntries emitted");
+    // User scope: two entries, sorted case-insensitively by name.
+    assert_eq!(user.len(), 2);
+    assert_eq!(user[0].name, "Alpha");
+    assert_eq!(user[1].name, "Zebra");
+    assert_eq!(user[0].description, "the first");
+    assert_eq!(user[0].scope, MemoryScope::User);
+    // Project scope: one entry, tagged Project (origin on every line, §4.9).
+    assert_eq!(project.len(), 1);
+    assert_eq!(project[0].name, "Proj");
+    assert_eq!(project[0].scope, MemoryScope::Project);
+}
+
+#[tokio::test]
+async fn memory_list_project_empty_when_untrusted() {
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    write_mem_entry(&user_dir, "note", "Note", "a user note", "body");
+
+    let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
+    // project_dir = None → untrusted root.
+    let config = memory_config(fake, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::MemoryList).await;
+    let events = h.collect(None).await;
+
+    let (user, project) = memory_entries(&events).expect("MemoryEntries emitted");
+    assert_eq!(user.len(), 1);
+    assert!(
+        project.is_empty(),
+        "no project memory on an untrusted root (FR-1) — the section is silently absent"
+    );
+}
+
+#[tokio::test]
+async fn memory_mutate_update_edits_body_and_reemits_status() {
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    write_mem_entry(&user_dir, "build", "Build", "old desc", "old body");
+
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = memory_config(provider, root, user_dir.clone(), None);
+    let mut h = spawn(config);
+
+    h.send(Command::MemoryMutate {
+        op: MemoryOp::Update,
+        scope: MemoryScope::User,
+        name: "Build".into(),
+        description: Some("new desc".into()),
+        type_: None,
+        body: Some("new body".into()),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // The harness performed the write (FR-6) and re-emitted MemoryStatus.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::MemoryStatus { user: 1, .. })),
+        "MemoryStatus re-emitted after the inspector edit"
+    );
+    // The body was rewritten on disk in its existing scope (C-1).
+    let on_disk = std::fs::read_to_string(user_dir.join("build.md")).unwrap_or_default();
+    assert!(on_disk.contains("new body"), "body updated on disk");
+    assert!(on_disk.contains("new desc"), "description updated on disk");
+
+    // The pinned one-line index reflects the new description, but the body
+    // stays OFF standing context (progressive disclosure preserved).
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(system.contains("new desc"), "updated description pinned in index");
+    assert!(
+        !system.contains("new body"),
+        "body not pinned (progressive disclosure, §8.6)"
+    );
+}
+
+#[tokio::test]
+async fn memory_mutate_remove_deletes_and_reemits_counts() {
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    write_mem_entry(&user_dir, "temp", "Temp", "temp desc", "temp body");
+
+    let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
+    let config = memory_config(fake, root, user_dir.clone(), None);
+    let mut h = spawn(config);
+
+    h.send(Command::MemoryMutate {
+        op: MemoryOp::Remove,
+        scope: MemoryScope::User,
+        name: "Temp".into(),
+        description: None,
+        type_: None,
+        body: None,
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::MemoryStatus { user: 0, .. })),
+        "MemoryStatus re-emitted with count 0 after remove"
+    );
+    assert!(!user_dir.join("temp.md").exists(), "entry file deleted");
+}
+
+#[tokio::test]
+async fn inspect_skill_returns_body_and_stays_off_context() {
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    write_skill(&user_dir, "pdf-fill", "Fill PDF forms", "Step 1: open the template.");
+    write_skill_resource(&user_dir, "pdf-fill", "template.txt", "content");
+
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = skills_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::InspectSkill {
+        name: "pdf-fill".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    let (name, origin, body, resources) = events
+        .iter()
+        .find_map(|e| match e {
+            UiEvent::SkillBody {
+                name,
+                origin,
+                body,
+                resources,
+            } => Some((name.clone(), *origin, body.clone(), resources.clone())),
+            _ => None,
+        })
+        .expect("SkillBody emitted");
+    assert_eq!(name, "pdf-fill");
+    assert_eq!(origin, SkillOrigin::User);
+    assert_eq!(body, "Step 1: open the template.");
+    assert!(
+        resources.iter().any(|r| r.ends_with("template.txt")),
+        "bundled resource listed"
+    );
+
+    // The body stays OFF standing context — only the catalog metadata is
+    // pinned (progressive disclosure preserved, §8.6).
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(system.contains("pdf-fill"), "skill name pinned in catalog");
+    assert!(
+        !system.contains("Step 1: open the template."),
+        "skill body not pinned (fetched only on inspect)"
+    );
+}
+
+#[tokio::test]
+async fn inspect_skill_unknown_emits_notice_not_body() {
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
+    let config = skills_config(fake, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::InspectSkill {
+        name: "nonexistent".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        !events.iter().any(|e| matches!(e, UiEvent::SkillBody { .. })),
+        "no SkillBody for an unknown skill"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::Notice { message } if message.contains("nonexistent"))),
+        "a Notice explains the skill is unavailable"
+    );
+}
+
+#[tokio::test]
+async fn adopt_session_reemits_memory_status() {
+    // Regression: adopt_session previously re-emitted only SkillsAvailable, so
+    // the memory count/inspector went stale after /resume or /new (Design §4.9).
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    write_mem_entry(&user_dir, "note", "Note", "a note", "body");
+    let sessions_dir = mem_temp_dir("sessions");
+    let first_id = SessionId::new();
+    let path = sessions_dir.join(format!("{first_id}.jsonl"));
+    let sink = match FileTranscript::open(&path) {
+        Ok(s) => s,
+        Err(e) => panic!("open transcript {}: {e}", path.display()),
+    };
+    let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
+    let mut config = memory_config(fake, root, user_dir, None);
+    config.transcript = Box::new(sink);
+    config.session_id = first_id;
+    config.sessions_dir = sessions_dir.clone();
+    config.active_session_path = std::sync::Arc::new(std::sync::RwLock::new(path));
+    let mut h = spawn(config);
+
+    // Drain the session-start events (which include the first MemoryStatus).
+    let _ = h.collect(None).await;
+
+    // Switch sessions — adopt_session must re-emit MemoryStatus.
+    let second_id = SessionId::new();
+    h.send(Command::NewSession {
+        session_id: second_id,
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::MemoryStatus { user: 1, .. })),
+        "adopt_session re-emits MemoryStatus after a session switch"
+    );
+
+    let _ = std::fs::remove_dir_all(&sessions_dir);
+}
+
+#[tokio::test]
+async fn inspect_skill_untrusted_project_emits_notice_not_body() {
+    // FR-1: a project skill under an untrusted root is neither cataloged nor
+    // invocable — the inspector's InspectSkill returns a Notice, never a body,
+    // even though the SKILL.md exists on disk.
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    let project_dir = skill_temp_dir("p");
+    write_skill(&project_dir, "proj-only", "Project skill", "secret instructions");
+
+    let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
+    // project_dir = None simulates an untrusted root: the skill is on disk but
+    // the engine's catalog never sees it.
+    let config = skills_config(fake, root, user_dir, None);
+    let mut h = spawn(config);
+    let _ = h.collect(None).await; // drain session-start events
+
+    h.send(Command::InspectSkill {
+        name: "proj-only".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        !events.iter().any(|e| matches!(e, UiEvent::SkillBody { .. })),
+        "no SkillBody for a project skill on an untrusted root (FR-1)"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::Notice { message } if message.contains("proj-only"))),
+        "a Notice explains the skill is unavailable"
     );
 }

@@ -53,6 +53,14 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "is_false")]
         redacted: bool,
     },
+    /// An image to send to the model (P-11, Tech Spec §4.1). `data` is the
+    /// base64 encoding of the file bytes; `media_type` is the MIME string
+    /// (`image/png`, `image/jpeg`, `image/gif`, `image/webp`). Each adapter maps
+    /// this to its provider's native image content shape (Tech Spec §4.2).
+    Image {
+        media_type: String,
+        data: String,
+    },
 }
 
 /// `skip_serializing_if` helper: omit `redacted` from the wire when false.

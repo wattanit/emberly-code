@@ -24,7 +24,7 @@ use emberly_core::{
     TranscriptRecord, TranscriptSink,
 };
 use emberly_providers::Provider;
-use emberly_tools::default_registry;
+use emberly_tools::{default_registry, ToolRegistry};
 use emberly_tui::{frontend, SessionInfo};
 
 mod config;
@@ -511,9 +511,34 @@ async fn run() -> anyhow::Result<()> {
             resolved.sandbox_require,
         ));
 
+    // Build the tool registry: the built-in suite always, plus `web_search`
+    // only when `search.enabled` and an endpoint is configured (Tech Spec §5.5,
+    // structural fact 1 — web_search is the first config-conditionally-registered
+    // tool). `default_registry()` stays config-free for tests.
+    let mut tools: ToolRegistry = default_registry();
+    if resolved.search.enabled {
+        if let Some(endpoint) = &resolved.search.endpoint {
+            let adapter = resolved.search.adapter.as_deref().unwrap_or("json");
+            let tool = provider_setup::build_search_tool(
+                endpoint,
+                adapter,
+                resolved.search.auth.as_ref(),
+                resolved.search.max_results,
+            )
+            .context("failed to build the web_search tool")?;
+            tools.register(std::sync::Arc::new(tool));
+        } else if resolved.search.adapter.is_some() {
+            eprintln!(
+                "emberly: [search] has an adapter but no endpoint — set endpoint = \"…\" or search.enabled = false"
+            );
+        }
+    }
+
+    let project_memory_dir = project_root.join(".agents").join("memory");
+    let project_skills_dir = project_root.join(".agents").join("skills");
     let config = EngineConfig {
         provider,
-        tools: default_registry(),
+        tools,
         project_root,
         model,
         system: resolved.system_prompt.clone(),
@@ -547,15 +572,29 @@ async fn run() -> anyhow::Result<()> {
             &resolved,
         ))),
         config_reloader: Some(config_reloader),
+        image_max_bytes: resolved.image_max_bytes,
+        memory: resolved.memory.clone(),
+        user_memory_dir: config::memory_dir(),
+        // The trust gate exits on decline (FR-1), so reaching this point means
+        // the root is trusted. Project memory dir is always `Some` here; `None`
+        // is the structural fallback for a future untrusted session path (Tech
+        // Spec §6.7).
+        project_memory_dir: Some(project_memory_dir),
+        skills: resolved.skills.clone(),
+        user_skills_dir: config::skills_dir(),
+        project_skills_dir: Some(project_skills_dir),
     };
 
     let (engine_ports, frontend_ports) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx) = Engine::new(config, engine_ports.events_tx);
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx) = Engine::new(config, engine_ports.events_tx);
     let engine_task = tokio::spawn(engine.run(
         engine_ports.commands_rx,
         asks_rx,
         user_asks_rx,
         recall_rx,
+        task_rx,
+        memory_rx,
+        skill_rx,
     ));
 
     // Drive the session until the user quits or the engine closes its events.
@@ -577,6 +616,7 @@ async fn run() -> anyhow::Result<()> {
         profiles,
         init::CONFIG_TEMPLATE.to_string(),
         resolved.reasoning.clone(),
+        resolved.mouse,
     )
     .await?;
 

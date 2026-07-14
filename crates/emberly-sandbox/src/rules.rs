@@ -336,16 +336,28 @@ pub const DEFAULT_BASH_ALLOWLIST: &[&str] = &[
 ];
 
 /// The built-in default rules (lowest precedence). Reads in-root allow; the
-/// bash allowlist allows (when active); everything else falls through to `Ask`.
-/// Writes/edits and off-list bash have no rule here — they hit the `Ask`
-/// fallback, which the mode layer may relax for edits.
+/// bash allowlist allows (when active); `web_search` asks explicitly (Tech Spec
+/// §6.1, T-14 — documented behavior and honest `config show`); everything else
+/// falls through to `Ask`. Writes/edits and off-list bash have no rule here —
+/// they hit the `Ask` fallback, which the mode layer may relax for edits.
 fn builtin_defaults(bash_allowlist_active: bool) -> Vec<Rule> {
-    let mut rules = vec![Rule {
-        tool: ToolSelector::Named("read_file".to_string()),
-        matcher: Matcher::Any,
-        action: Decision::Allow,
-        source: RuleSource::Builtin,
-    }];
+    let mut rules = vec![
+        Rule {
+            tool: ToolSelector::Named("read_file".to_string()),
+            matcher: Matcher::Any,
+            action: Decision::Allow,
+            source: RuleSource::Builtin,
+        },
+        // Explicit so the documented §6.1 behavior is visible and `config show`
+        // is honest. The fall-through would be `Ask` anyway (decide:257), but a
+        // silent default is not the same as a stated one.
+        Rule {
+            tool: ToolSelector::Named("web_search".to_string()),
+            matcher: Matcher::Any,
+            action: Decision::Ask,
+            source: RuleSource::Builtin,
+        },
+    ];
     if bash_allowlist_active {
         for prefix in DEFAULT_BASH_ALLOWLIST {
             rules.push(Rule {
@@ -729,5 +741,85 @@ mod tests {
     #[test]
     fn invalid_rules_file_is_an_error_not_a_silent_widening() {
         assert!(parse_rules("this is not = toml [[[", RuleSource::Project).is_err());
+    }
+
+    // ---- web_search (T-14, Tech Spec §6.1) -------------------------------
+
+    fn web_search() -> Query<'static> {
+        Query {
+            tool: "web_search",
+            command: None,
+            outside_root: false,
+        }
+    }
+
+    #[test]
+    fn web_search_asks_by_default() {
+        let e = confined();
+        assert_eq!(
+            e.evaluate(&web_search(), Mode::Normal).decision,
+            Decision::Ask,
+            "web_search must ask by default (Tech Spec §6.1, T-14)"
+        );
+    }
+
+    #[test]
+    fn web_search_session_grant_allows() {
+        let mut e = confined();
+        e.add_session_grant(tool_session_grant("web_search"));
+        assert_eq!(
+            e.evaluate(&web_search(), Mode::Normal).decision,
+            Decision::Allow,
+            "a session grant should allow web_search without prompting"
+        );
+    }
+
+    #[test]
+    fn web_search_project_allow_overrides_builtin_ask() {
+        let project_allow = RuleSpec {
+            tool: "web_search".into(),
+            matcher: None,
+            action: Decision::Allow,
+        }
+        .into_rule(RuleSource::Project);
+        let e = RuleEngine::new(vec![project_allow], true);
+        assert_eq!(
+            e.evaluate(&web_search(), Mode::Normal).decision,
+            Decision::Allow,
+            "a project-level allow rule should override the built-in ask"
+        );
+    }
+
+    #[test]
+    fn web_search_auto_mode_allows_in_root() {
+        let e = confined();
+        assert_eq!(
+            e.evaluate(&web_search(), Mode::Auto).decision,
+            Decision::Allow,
+            "Auto mode allows in-root web_search (the permission layer governs it)"
+        );
+    }
+
+    #[test]
+    fn web_search_project_deny_overrides_everything() {
+        let project_deny = RuleSpec {
+            tool: "web_search".into(),
+            matcher: None,
+            action: Decision::Deny,
+        }
+        .into_rule(RuleSource::Project);
+        let mut e = RuleEngine::new(vec![project_deny], true);
+        // Even a session grant cannot override a project Deny (Deny is never
+        // relaxed by mode, and session > project only for matching Allow/Ask).
+        assert_eq!(
+            e.evaluate(&web_search(), Mode::Auto).decision,
+            Decision::Deny,
+        );
+        e.add_session_grant(tool_session_grant("web_search"));
+        assert_eq!(
+            e.evaluate(&web_search(), Mode::Normal).decision,
+            Decision::Allow,
+            "session grant (highest precedence) overrides project deny"
+        );
     }
 }

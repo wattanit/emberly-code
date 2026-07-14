@@ -41,6 +41,13 @@ pub enum AppCommand {
     /// Re-read config + prompts from disk and apply them (C-5) — useful after
     /// editing a file outside emberly.
     Reload,
+    /// Inspect, edit, and delete stored memory (FR-6, Design §4.9). Opens the
+    /// memory inspector overlay grouped by scope.
+    Memory,
+    /// List available skills and inspect a skill's instructions read-only
+    /// (FR-7, Design §4.9) — "what could this skill tell the model to do" is
+    /// inspectable before it ever runs.
+    Skills,
     /// Manually compact the conversation — summarize older turns into a
     /// summary at a clean boundary (Requirements §8.3, Tech Spec §7).
     Compact,
@@ -133,6 +140,18 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "Re-read config & prompts from disk and apply them",
         cmd: AppCommand::Reload,
+    },
+    CommandSpec {
+        name: "memory",
+        key: None,
+        desc: "Inspect, edit, and delete stored memory",
+        cmd: AppCommand::Memory,
+    },
+    CommandSpec {
+        name: "skills",
+        key: None,
+        desc: "List available skills and inspect a skill's instructions",
+        cmd: AppCommand::Skills,
     },
     CommandSpec {
         name: "compact",

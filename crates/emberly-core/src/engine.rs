@@ -29,8 +29,10 @@ use tokio::sync::mpsc;
 use crate::command::Command;
 use crate::event::UiEvent;
 use crate::factory::{ConfigReloader, ProviderFactory};
-use crate::gate::{AskGate, AskUserAsk, ChannelGate, PermissionAsk, RecallAsk, RecallGateImpl};
+use crate::gate::{AskGate, AskUserAsk, ChannelGate, MemoryAsk, MemoryGateImpl, PermissionAsk, RecallAsk, RecallGateImpl, SkillAsk, SkillGateImpl, TaskListAsk, TaskListGateImpl};
 use crate::id::{AskId, PermissionId, SessionId};
+use crate::memory::MemoryStore;
+use crate::skills::{render_catalog, ShadowNotice, SkillCatalog};
 use crate::transcript::{
     CompactTrigger, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent,
     TranscriptRecord, TranscriptSink,
@@ -90,6 +92,11 @@ pub struct ContextConfig {
     /// Tech Spec §7/§8). Default `0.85`. In `(0.0, 1.0]`; an out-of-range
     /// value is a config error, not a silent clamp.
     pub auto_compact_threshold: f64,
+    /// Whether the model-maintained task list is pinned in the sent system
+    /// prompt so "what's left" survives compaction and windowing (T-11, Tech
+    /// Spec §7, Requirements §13 resolved). Default `true`; set `false` to
+    /// omit the list from the sent context.
+    pub pin_task_list: bool,
 }
 
 impl Default for ContextConfig {
@@ -99,7 +106,42 @@ impl Default for ContextConfig {
             keep_recent_turns: 6,
             auto_compact: true,
             auto_compact_threshold: 0.85,
+            pin_task_list: true,
         }
+    }
+}
+
+/// Memory config (FR-6, Tech Spec §8.1). Resolved from `[memory]` config.
+#[derive(Debug, Clone)]
+pub struct MemoryConfig {
+    /// Whether the memory system is enabled (default `true`). When `false`,
+    /// memory ops are rejected and no index is pinned.
+    pub enabled: bool,
+    /// Soft warn threshold for index growth (Tech Spec §16, initial). Does not
+    /// truncate — only emits a one-time dim harness line.
+    pub max_index_entries: usize,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_index_entries: 50,
+        }
+    }
+}
+
+/// Skills config (FR-7, Tech Spec §8.2). Resolved from `[skills]` config.
+#[derive(Debug, Clone)]
+pub struct SkillsConfig {
+    /// Whether the skill system is enabled (default `true`). When `false`, no
+    /// catalog is built or pinned, and the `skill` tool returns failures.
+    pub enabled: bool,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -182,6 +224,25 @@ pub struct EngineConfig {
     /// Re-reads config + prompts from disk on an in-app edit (C-5). `None`
     /// disables live reload (the edit still lands on disk for the next session).
     pub config_reloader: Option<Arc<dyn ConfigReloader>>,
+    /// Maximum image file size in bytes for the `read_image` tool (Tech Spec
+    /// §5.2, default 5 MiB).
+    pub image_max_bytes: usize,
+    /// Memory config (FR-6, Tech Spec §8.1).
+    pub memory: MemoryConfig,
+    /// User-global memory directory (`~/.config/emberly/memory/`). Always `Some`
+    /// when a home directory exists.
+    pub user_memory_dir: Option<PathBuf>,
+    /// Project memory directory (`<root>/.agents/memory/`). `None` on an
+    /// untrusted root — structural trust-gating (FR-1, Tech Spec §6.7).
+    pub project_memory_dir: Option<PathBuf>,
+    /// Skills config (FR-7, Tech Spec §8.2).
+    pub skills: SkillsConfig,
+    /// User-global skills directory (`~/.config/emberly/skills/`). Always `Some`
+    /// when a home directory exists.
+    pub user_skills_dir: Option<PathBuf>,
+    /// Project skills directory (`<root>/.agents/skills/`). `None` on an
+    /// untrusted root — structural trust-gating (FR-1, Tech Spec §6.7).
+    pub project_skills_dir: Option<PathBuf>,
 }
 
 impl EngineConfig {
@@ -457,6 +518,15 @@ pub struct Engine {
     /// The recall gate (T-10), installed into every `ToolCtx` so the `recall`
     /// tool can retrieve elided turns from the in-memory conversation.
     recall_gate: Arc<RecallGateImpl>,
+    /// The task-list gate (T-11), installed into every `ToolCtx` so the `todo`
+    /// tool can replace the full task list in engine state.
+    task_list_gate: Arc<TaskListGateImpl>,
+    /// The memory gate (T-13), installed into every `ToolCtx` so the `memory`
+    /// tool can read and write durable memory entries.
+    memory_gate: Arc<MemoryGateImpl>,
+    /// The skill gate (T-15), installed into every `ToolCtx` so the `skill`
+    /// tool can load instruction bodies.
+    skill_gate: Arc<SkillGateImpl>,
     events_tx: mpsc::Sender<UiEvent>,
     conversation: Vec<Message>,
     /// Parallel to `conversation`: the stable monotonic turn number of each
@@ -524,6 +594,36 @@ pub struct Engine {
     provider_factory: Option<Arc<dyn ProviderFactory>>,
     /// Re-reads config on an in-app edit (C-5); `None` disables live reload.
     config_reloader: Option<Arc<dyn ConfigReloader>>,
+    /// The model-maintained task list (T-11). Pure engine state — the engine
+    /// stores the last full replace, emits updates to frontends, and records
+    /// them in the transcript (HC-7). Reset on a new session.
+    task_list: Vec<emberly_tools::TaskItem>,
+    /// Maximum image file size in bytes (Tech Spec §5.2). Threaded to the
+    /// `read_image` tool via `ToolCtx`.
+    image_max_bytes: usize,
+    /// Memory config (FR-6, Tech Spec §8.1).
+    memory_config: MemoryConfig,
+    /// The durable memory store (FR-6, T-13). `None` when memory is disabled
+    /// or no home directory exists.
+    memory_store: Option<MemoryStore>,
+    /// Cached user-global memory index text for pinning (Tech Spec §7).
+    memory_user_index: String,
+    /// Cached project memory index text for pinning (empty when untrusted).
+    memory_project_index: String,
+    /// Whether the max_index_entries soft-cap warning has been emitted this
+    /// session (Tech Spec §16 — warn once, do not truncate).
+    memory_warn_emitted: bool,
+    /// Skills config (FR-7, Tech Spec §8.2).
+    skills_config: SkillsConfig,
+    /// The skill catalog (FR-7, T-15). `None` when skills are disabled or no
+    /// home directory exists.
+    skill_catalog: Option<SkillCatalog>,
+    /// The built skill metadata for pinning + `SkillsAvailable`.
+    skill_metas: Vec<emberly_tools::SkillMeta>,
+    /// Cached catalog text for pinning (Tech Spec §7).
+    skill_catalog_text: String,
+    /// Shadow notices for `emberly config show` (Tech Spec §8.2).
+    skill_shadows: Vec<ShadowNotice>,
 }
 
 impl Engine {
@@ -531,6 +631,7 @@ impl Engine {
     /// ask-user channels. The caller passes both straight back into
     /// [`run`](Engine::run); they are opaque otherwise.
     #[must_use]
+    #[allow(clippy::type_complexity)]
     pub fn new(
         config: EngineConfig,
         events_tx: mpsc::Sender<UiEvent>,
@@ -539,10 +640,18 @@ impl Engine {
         mpsc::Receiver<PermissionAsk>,
         mpsc::Receiver<AskUserAsk>,
         mpsc::Receiver<RecallAsk>,
+        mpsc::Receiver<TaskListAsk>,
+        mpsc::Receiver<MemoryAsk>,
+        mpsc::Receiver<SkillAsk>,
     ) {
         let (asks_tx, asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (user_asks_tx, user_asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (recall_tx, recall_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        let (task_list_tx, task_list_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        let (memory_tx, memory_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        let (skill_tx, skill_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        let memory_store = build_memory_store(&config);
+        let skill_catalog = build_skill_catalog(&config);
         // Capture before `config.sandbox` is moved into the struct below.
         let sandbox_spawn: Arc<dyn Sandbox> = config.sandbox_spawn.unwrap_or_else(|| {
             // Fallback (no explicit spawner): confine from the status, but with
@@ -579,7 +688,7 @@ impl Engine {
             .initial_cache
             .as_ref()
             .map_or(config.resuming, |c| c.original_task_recorded);
-        let engine = Self {
+        let mut engine = Self {
             provider: config.provider,
             tools: config.tools,
             project_root: config.project_root,
@@ -601,6 +710,9 @@ impl Engine {
             gate: Arc::new(ChannelGate { asks: asks_tx }),
             ask_gate: Arc::new(AskGate { asks: user_asks_tx }),
             recall_gate: Arc::new(RecallGateImpl { asks: recall_tx }),
+            task_list_gate: Arc::new(TaskListGateImpl { asks: task_list_tx }),
+            memory_gate: Arc::new(MemoryGateImpl { asks: memory_tx }),
+            skill_gate: Arc::new(SkillGateImpl { asks: skill_tx }),
             events_tx,
             conversation: config.initial_conversation,
             turn_map,
@@ -630,19 +742,56 @@ impl Engine {
             summary_prompt: config.summary_prompt,
             provider_factory: config.provider_factory,
             config_reloader: config.config_reloader,
+            task_list: Vec::new(),
+            image_max_bytes: config.image_max_bytes,
+            memory_config: config.memory.clone(),
+            memory_store,
+            memory_user_index: String::new(),
+            memory_project_index: String::new(),
+            memory_warn_emitted: false,
+            skills_config: config.skills.clone(),
+            skill_catalog,
+            skill_metas: Vec::new(),
+            skill_catalog_text: String::new(),
+            skill_shadows: Vec::new(),
         };
-        (engine, asks_rx, user_asks_rx, recall_rx)
+        // Load memory indexes at session start (Tech Spec §8.1).
+        engine.refresh_memory_indexes();
+        let (user_count, project_count) = engine
+            .memory_store
+            .as_ref()
+            .map_or((0, 0), |s| s.status_counts());
+        let _ = engine
+            .events_tx
+            .try_send(UiEvent::MemoryStatus {
+                user: user_count,
+                project: project_count,
+            });
+        // Build the skill catalog and emit SkillsAvailable at session start
+        // (Tech Spec §8.2, §3.1).
+        engine.refresh_skill_catalog();
+        let _ = engine.events_tx.try_send(UiEvent::SkillsAvailable {
+            skills: engine.skill_metas.clone(),
+        });
+        (engine, asks_rx, user_asks_rx, recall_rx, task_list_rx, memory_rx, skill_rx)
     }
 
     /// Run the engine until the command channel closes. Idle between turns,
     /// waiting for a `UserInput`; a turn owns `commands_rx`/`asks_rx` for its
     /// duration (permission answers and cancellation arrive through them).
+    // Each receiver is an independent per-turn channel (permission, ask-user,
+    // recall, task-list, memory, skill); bundling them into a struct would only
+    // relocate the list. Same rationale as the frontend `run` (Design §7).
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         mut self,
         mut commands_rx: mpsc::Receiver<Command>,
         mut asks_rx: mpsc::Receiver<PermissionAsk>,
         mut user_asks_rx: mpsc::Receiver<AskUserAsk>,
         mut recall_rx: mpsc::Receiver<RecallAsk>,
+        mut task_rx: mpsc::Receiver<TaskListAsk>,
+        mut memory_rx: mpsc::Receiver<MemoryAsk>,
+        mut skill_rx: mpsc::Receiver<SkillAsk>,
     ) {
         if self.resuming {
             // Continuing an existing transcript: no fresh session_start, but
@@ -700,7 +849,7 @@ impl Engine {
                     self.record_user_message(&text);
                     self.push_conversation_message(Message::user_text(text));
                     self.emit_context_usage().await;
-                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx, &mut recall_rx)
+                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx, &mut recall_rx, &mut task_rx, &mut memory_rx, &mut skill_rx)
                         .await;
                     // The engine is idle again; let the frontend stop its
                     // "working" affordance (Design §6.3).
@@ -733,6 +882,43 @@ impl Engine {
                 }
                 Command::SetEffort { effort } => self.set_effort(effort).await,
                 Command::ReloadConfig => self.reload_config().await,
+                // Inspector reads/mutations — user/TUI actions, issued at idle
+                // (a clean boundary), mirroring the config/effort commands above.
+                Command::MemoryList => self.emit_memory_entries().await,
+                Command::MemoryMutate {
+                    op,
+                    scope,
+                    name,
+                    description,
+                    type_,
+                    body,
+                } => {
+                    // The harness performs the write via the shared validated
+                    // path (FR-6) — never the TUI. `MemoryStatus` re-emits
+                    // inside on success; the inspector re-issues `MemoryList` to
+                    // refresh its open list.
+                    let req = emberly_tools::MemoryRequest {
+                        op,
+                        scope,
+                        name,
+                        description,
+                        type_,
+                        body,
+                    };
+                    if let emberly_tools::MemoryOutcome::Rejected { reason } =
+                        self.execute_memory_op(&req).await
+                    {
+                        // Surface a rejection (disabled memory, untrusted scope,
+                        // invalid name) so the user sees why (Design §6.1).
+                        self.emit(UiEvent::Notice {
+                            message: format!("memory change rejected: {reason}"),
+                        })
+                        .await;
+                    }
+                    self.write_view_cache();
+                }
+                Command::MemoryView { scope, name } => self.emit_memory_body(scope, name).await,
+                Command::InspectSkill { name } => self.inspect_skill(name).await,
             }
         }
 
@@ -873,6 +1059,31 @@ impl Engine {
         self.session_cost_usd = state.session_cost_usd;
         self.context_tokens_authoritative = state.context_tokens_authoritative;
         self.next_permission_id = 0;
+        self.task_list.clear();
+        // Reload memory indexes for the new session (user-global unchanged,
+        // project re-pointed to the new root). The store reads from disk, so a
+        // resumed session re-reads the current store (Tech Spec §8.1). Re-emit
+        // `MemoryStatus` so the sidebar/inspector are never stale after a
+        // session switch — matching the `SkillsAvailable` re-emit below (this
+        // closes a pre-existing gap where `/resume` left the memory count
+        // stale, Design §4.9).
+        self.refresh_memory_indexes();
+        let (user_count, project_count) = self
+            .memory_store
+            .as_ref()
+            .map_or((0, 0), |s| s.status_counts());
+        let _ = self.events_tx.try_send(UiEvent::MemoryStatus {
+            user: user_count,
+            project: project_count,
+        });
+        // Re-derive the skill catalog for the new session (user-global
+        // unchanged, project re-pointed to the new root). Emit
+        // `SkillsAvailable` so the TUI Skills section is never stale after a
+        // session switch (Tech Spec §8.2, §3.1).
+        self.refresh_skill_catalog();
+        let _ = self.events_tx.try_send(UiEvent::SkillsAvailable {
+            skills: self.skill_metas.clone(),
+        });
         if let Ok(mut guard) = self.active_session_path.write() {
             *guard = path;
         }
@@ -1020,12 +1231,18 @@ impl Engine {
 
     /// Drive completions until the model stops without requesting tools, an
     /// error/drop occurs, or the user cancels.
+    // Threads the same per-turn channel receivers as `run`; bundling them would
+    // only move the argument list. See `run` above.
+    #[allow(clippy::too_many_arguments)]
     async fn run_turn(
         &mut self,
         commands_rx: &mut mpsc::Receiver<Command>,
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
         recall_rx: &mut mpsc::Receiver<RecallAsk>,
+        task_rx: &mut mpsc::Receiver<TaskListAsk>,
+        memory_rx: &mut mpsc::Receiver<MemoryAsk>,
+        skill_rx: &mut mpsc::Receiver<SkillAsk>,
     ) {
         let mut drop_attempts = 0u32;
         loop {
@@ -1053,6 +1270,9 @@ impl Engine {
                             asks_rx,
                             user_asks_rx,
                             recall_rx,
+                            task_rx,
+                            memory_rx,
+                            skill_rx,
                         )
                         .await
                         .is_canceled()
@@ -1259,6 +1479,7 @@ impl Engine {
     /// Execute tool calls sequentially, appending each result to the
     /// conversation. Stops early on cancellation, backfilling canceled results
     /// so the conversation stays well-formed (every tool_use has a result).
+    #[allow(clippy::too_many_arguments)]
     async fn run_tool_calls(
         &mut self,
         tool_calls: Vec<PendingToolCall>,
@@ -1266,13 +1487,16 @@ impl Engine {
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
         recall_rx: &mut mpsc::Receiver<RecallAsk>,
+        task_rx: &mut mpsc::Receiver<TaskListAsk>,
+        memory_rx: &mut mpsc::Receiver<MemoryAsk>,
+        skill_rx: &mut mpsc::Receiver<SkillAsk>,
     ) -> ToolCallResult {
         // Start a fresh loop-signature observation for this turn (S-5).
         self.turn_obs = TurnObservation::default();
         let mut iter = tool_calls.into_iter();
         while let Some(call) = iter.next() {
             match self
-                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx, recall_rx)
+                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx)
                 .await
             {
                 ToolCallResult::Completed(outcome) => self.ingest_tool_result(&call, outcome).await,
@@ -1389,6 +1613,7 @@ impl Engine {
 
     /// Run one tool call, driving its execution concurrently with permission
     /// asks and cancellation.
+    #[allow(clippy::too_many_arguments)]
     async fn run_one_tool_call(
         &mut self,
         call: &PendingToolCall,
@@ -1396,6 +1621,9 @@ impl Engine {
         asks_rx: &mut mpsc::Receiver<PermissionAsk>,
         user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
         recall_rx: &mut mpsc::Receiver<RecallAsk>,
+        task_rx: &mut mpsc::Receiver<TaskListAsk>,
+        memory_rx: &mut mpsc::Receiver<MemoryAsk>,
+        skill_rx: &mut mpsc::Receiver<SkillAsk>,
     ) -> ToolCallResult {
         let args = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
 
@@ -1441,6 +1669,9 @@ impl Engine {
                 Some(ask) = asks_rx.recv() => self.on_permission_ask(ask, &mut pending).await,
                 Some(ask) = user_asks_rx.recv() => self.on_user_ask(ask, &mut pending_user).await,
                 Some(recall) = recall_rx.recv() => self.on_recall(recall).await,
+                Some(task) = task_rx.recv() => self.on_task_list_set(task).await,
+                Some(mem) = memory_rx.recv() => self.on_memory_op(mem).await,
+                Some(skill) = skill_rx.recv() => self.on_skill_invoke(skill).await,
                 command = commands_rx.recv(), if commands_open => match command {
                     Some(Command::PermissionAnswer { id, decision }) => {
                         self.answer_permission(id, decision, &mut pending).await;
@@ -1595,6 +1826,20 @@ impl Engine {
             RecallOutcome::Turns { content, count }
         };
         let _ = reply.send(outcome);
+    }
+
+    /// Handle a task-list replace from the `todo` tool (T-11): store the full
+    /// list, emit the UI event for the sidebar/inline render, write the
+    /// additive transcript event (HC-7), and ack the oneshot so the tool
+    /// returns success only after the state is stored.
+    async fn on_task_list_set(&mut self, ask: TaskListAsk) {
+        let TaskListAsk { items, reply } = ask;
+        self.task_list = items.clone();
+        self.emit(UiEvent::TaskListUpdated { items }).await;
+        self.write_transcript(TranscriptEvent::TaskList {
+            items: self.task_list.clone(),
+        });
+        let _ = reply.send(Ok(()));
     }
 
     /// Change the auto-accept mode (Requirements §6.4, §6.7). Auto tiers are
@@ -1911,11 +2156,29 @@ impl Engine {
             !outcome.ok,
         ));
 
+        // An image from `read_image` (P-11): append a `ContentBlock::Image` as
+        // a synthetic user message so both adapters can carry it — Anthropic in
+        // a user-role image block, OpenAI as an `image_url` part (whose tool
+        // role cannot hold images, Tech Spec §4.2). The bytes are NOT in the
+        // transcript (HC-7); the `tool_call` recorded the path, and the block
+        // lives only in the live conversation (re-derived from disk on resume —
+        // honestly absent if the file is gone).
+        if let Some(image) = outcome.image {
+            self.push_conversation_message(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Image {
+                    media_type: image.media_type,
+                    data: image.data,
+                }],
+            });
+        }
+
         self.emit(UiEvent::ToolFinished {
             call_id: call.id.clone(),
             ok: outcome.ok,
             summary: outcome.summary,
             preview: result_preview(&outcome.content),
+            untrusted: outcome.untrusted,
         })
         .await;
 
@@ -1959,6 +2222,7 @@ impl Engine {
             ok: false,
             summary: "canceled".into(),
             preview: String::new(),
+            untrusted: false,
         })
         .await;
     }
@@ -2147,15 +2411,60 @@ impl Engine {
 
     /// The outgoing system prompt: the stored base (base prompt + project
     /// instructions) with the tool-call explanation instruction appended when
-    /// enabled (T-9).
+    /// enabled (T-9), and the task-list block appended when the list is non-empty
+    /// and pinning is on (T-11, Tech Spec §7).
     fn effective_system(&self) -> Option<String> {
-        if !self.tool_explanations {
-            return self.system.clone();
-        }
-        let instruction = crate::prompts::tool_explanation();
-        match &self.system {
-            Some(base) => Some(format!("{base}\n\n{instruction}")),
-            None => Some(instruction.to_string()),
+        let base = if self.tool_explanations {
+            let instruction = crate::prompts::tool_explanation();
+            match &self.system {
+                Some(b) => Some(format!("{b}\n\n{instruction}")),
+                None => Some(instruction.to_string()),
+            }
+        } else {
+            self.system.clone()
+        };
+
+        let base = if self.context.pin_task_list && !self.task_list.is_empty() {
+            let block = render_task_list_block(&self.task_list);
+            match &base {
+                Some(b) => Some(format!("{b}\n\n{block}")),
+                None => Some(block),
+            }
+        } else {
+            base
+        };
+
+        // Pin the memory index (FR-6, Tech Spec §7/§8.1). Only the one-line
+        // index is standing context; entry bodies load via the `recall` op
+        // (progressive disclosure). Project memory is absent on an untrusted
+        // root (Design §4.9).
+        let base = if self.memory_config.enabled {
+            let block = render_memory_block(
+                &self.memory_user_index,
+                &self.memory_project_index,
+            );
+            if !block.is_empty() {
+                match &base {
+                    Some(b) => Some(format!("{b}\n\n{block}")),
+                    None => Some(block),
+                }
+            } else {
+                base
+            }
+        } else {
+            base
+        };
+
+        // Pin the skill catalog (FR-7, Tech Spec §7/§8.2). Only metadata is
+        // standing context; bodies load via the `skill` tool (progressive
+        // disclosure). Project skills are absent on an untrusted root.
+        if self.skills_config.enabled && !self.skill_catalog_text.is_empty() {
+            match &base {
+                Some(b) => Some(format!("{b}\n\n{}", self.skill_catalog_text)),
+                None => Some(self.skill_catalog_text.clone()),
+            }
+        } else {
+            base
         }
     }
 
@@ -2168,6 +2477,191 @@ impl Engine {
         )
         .with_ask_gate(self.ask_gate.clone())
         .with_recall_gate(self.recall_gate.clone())
+        .with_task_list_gate(self.task_list_gate.clone())
+        .with_memory_gate(self.memory_gate.clone())
+        .with_skill_gate(self.skill_gate.clone())
+        .with_vision(self.provider.model_info().vision)
+        .with_image_max_bytes(self.image_max_bytes)
+    }
+
+    /// Reload the memory index strings from the store into the cached fields.
+    fn refresh_memory_indexes(&mut self) {
+        if let Some(store) = &self.memory_store {
+            self.memory_user_index = store.user_index();
+            self.memory_project_index = store.project_index();
+        } else {
+            self.memory_user_index.clear();
+            self.memory_project_index.clear();
+        }
+    }
+
+    /// Rebuild the skill catalog from disk and refresh the cached fields
+    /// (Tech Spec §8.2). Called at session start and on session switch so a new
+    /// root re-scans project skills. When skills are disabled or no user dir
+    /// exists, the catalog is cleared.
+    fn refresh_skill_catalog(&mut self) {
+        if let Some(catalog) = &self.skill_catalog {
+            let (metas, shadows) = catalog.discover();
+            self.skill_catalog_text = render_catalog(&metas);
+            self.skill_metas = metas;
+            self.skill_shadows = shadows;
+        } else {
+            self.skill_catalog_text.clear();
+            self.skill_metas.clear();
+            self.skill_shadows.clear();
+        }
+    }
+
+    /// The single validated memory write path, shared by the `memory` tool
+    /// (`on_memory_op`) and the inspector's `MemoryMutate` command (FR-6, C-5).
+    /// Routes to the store (whose `slug` guard re-validates the name), refreshes
+    /// the pinned indexes, emits `MemoryStatus`, and warns once past the soft
+    /// cap. Extracting it means the tool and the inspector **cannot diverge** —
+    /// the harness performs the write in exactly one place, never the TUI.
+    async fn execute_memory_op(
+        &mut self,
+        req: &emberly_tools::MemoryRequest,
+    ) -> emberly_tools::MemoryOutcome {
+        // Compute the result first so the immutable borrow of the store ends
+        // before the mutable refresh + emit.
+        let computed = if self.memory_config.enabled {
+            self.memory_store.as_ref().map(|store| store.execute(req))
+        } else {
+            None
+        };
+        match computed {
+            Some(result) => {
+                self.refresh_memory_indexes();
+                let (user_count, project_count) = self
+                    .memory_store
+                    .as_ref()
+                    .map_or((0, 0), |s| s.status_counts());
+                self.emit(UiEvent::MemoryStatus {
+                    user: user_count,
+                    project: project_count,
+                })
+                .await;
+                // Soft-cap warn (Tech Spec §16): warn once when the combined
+                // index exceeds `max_index_entries`. Do not truncate.
+                let total = user_count + project_count;
+                if !self.memory_warn_emitted
+                    && total > self.memory_config.max_index_entries
+                {
+                    self.memory_warn_emitted = true;
+                    self.emit(UiEvent::Notice {
+                        message: format!(
+                            "memory index has {total} entries (soft cap {}) — consider trimming or consolidating",
+                            self.memory_config.max_index_entries
+                        ),
+                    })
+                    .await;
+                }
+                result
+            }
+            None => emberly_tools::MemoryOutcome::Rejected {
+                reason: "memory is disabled".into(),
+            },
+        }
+    }
+
+    /// Handle a memory op from the `memory` tool (T-13, FR-6): run the shared
+    /// write path and reply over the oneshot.
+    async fn on_memory_op(&mut self, ask: MemoryAsk) {
+        let outcome = self.execute_memory_op(&ask.req).await;
+        let _ = ask.reply.send(Ok(outcome));
+    }
+
+    /// List the memory entries grouped by scope for the inspector (FR-6, Design
+    /// §4.9), and emit them as `MemoryEntries`. Summaries only — no bodies read
+    /// (progressive disclosure). Both groups are empty when memory is disabled;
+    /// `project` is empty on an untrusted root (`list_entries` returns empty for
+    /// an unavailable scope), which makes the project section silently absent
+    /// (FR-1).
+    async fn emit_memory_entries(&self) {
+        let (user, project) = match &self.memory_store {
+            Some(store) if self.memory_config.enabled => (
+                store.list_entries(emberly_tools::MemoryScope::User),
+                store.list_entries(emberly_tools::MemoryScope::Project),
+            ),
+            _ => (Vec::new(), Vec::new()),
+        };
+        self.emit(UiEvent::MemoryEntries { user, project }).await;
+    }
+
+    /// Fetch a single memory entry's body for the inspector (FR-6, §4.6) and
+    /// emit it as `MemoryBody`. Read-only — a `Recall` through the store, which
+    /// applies the same trust gating (an untrusted project scope has no store
+    /// dir, so its body reads back empty). The body is fetched on demand and
+    /// never pinned (progressive disclosure).
+    async fn emit_memory_body(&self, scope: emberly_tools::MemoryScope, name: String) {
+        let body = if self.memory_config.enabled {
+            self.memory_store.as_ref().and_then(|store| {
+                match store.execute(&emberly_tools::MemoryRequest {
+                    op: emberly_tools::MemoryOp::Recall,
+                    scope,
+                    name: name.clone(),
+                    description: None,
+                    type_: None,
+                    body: None,
+                }) {
+                    emberly_tools::MemoryOutcome::Recalled { body, .. } => body,
+                    _ => None,
+                }
+            })
+        } else {
+            None
+        };
+        self.emit(UiEvent::MemoryBody {
+            scope,
+            name,
+            body: body.unwrap_or_default(),
+        })
+        .await;
+    }
+
+    /// Fetch a skill's instruction body for the inspector (FR-7, Design §4.9)
+    /// and emit it as `SkillBody`. Resolved through the catalog so project
+    /// precedence + untrusted-root gating still apply; loading the body for
+    /// display runs **no** bundled script (FR-7). An unknown/disabled/untrusted-
+    /// absent skill emits a `Notice` rather than a `SkillBody`, so the inspector
+    /// never opens an empty overlay.
+    async fn inspect_skill(&self, name: String) {
+        let invocation = if self.skills_config.enabled {
+            self.skill_catalog.as_ref().and_then(|cat| cat.invoke(&name))
+        } else {
+            None
+        };
+        match invocation {
+            Some(inv) => {
+                self.emit(UiEvent::SkillBody {
+                    name,
+                    origin: inv.origin,
+                    body: inv.body,
+                    resources: inv.resources,
+                })
+                .await;
+            }
+            None => {
+                self.emit(UiEvent::Notice {
+                    message: format!("skill '{name}' is not available"),
+                })
+                .await;
+            }
+        }
+    }
+
+    /// Handle a skill invoke from the `skill` tool (T-15, FR-7). Resolves the
+    /// body via the catalog and replies over the oneshot. An unknown/untrusted-
+    /// absent skill returns `Ok(None)` which the tool maps to an HC-6 failure
+    /// (never a panic). **Read-only — emits nothing** (the catalog does not
+    /// change on invoke; contrast `on_memory_op` which refreshes `MemoryStatus`).
+    async fn on_skill_invoke(&mut self, ask: SkillAsk) {
+        let result = if self.skills_config.enabled {
+            self.skill_catalog.as_ref().and_then(|cat| cat.invoke(&ask.name))
+        } else {
+            None
+        };
+        let _ = ask.reply.send(Ok(result));
     }
 
     /// Resolve a turn-number range to the messages it contains (T-10, FR-3).
@@ -2317,8 +2811,7 @@ impl Engine {
 
     fn context_tokens(&self) -> u64 {
         let count = |s: &str| self.provider.count_tokens(s).tokens;
-        let mut total = self.system.as_deref().map(count).unwrap_or(0);
-        // Count the windowed sent view (FR-3, Design §8.6), not the full
+        let mut total = self.system.as_deref().map(count).unwrap_or(0);        // Count the windowed sent view (FR-3, Design §8.6), not the full
         // in-memory conversation — so usage reflects what the provider
         // actually receives. The elision marker is included because it rides
         // in the sent messages.
@@ -2334,6 +2827,12 @@ impl Engine {
                     // Replayed reasoning is sent back on the wire, so it counts
                     // toward the context budget (P-10).
                     ContentBlock::Reasoning { text, .. } => count(text),
+                    // An image's token cost is not chars/4 of its base64. Until
+                    // an authoritative provider-reported usage arrives (P-6),
+                    // estimate a fixed per-image cost rather than inflating the
+                    // budget with raw base64 length (initial; tune with use,
+                    // Requirements §13).
+                    ContentBlock::Image { .. } => IMAGE_TOKEN_ESTIMATE,
                 });
             }
         }
@@ -2377,6 +2876,10 @@ fn render_for_summary(messages: &[Message]) -> String {
                 // Reasoning is the model's private scratch, not conversation
                 // content; the summary is built from the answer, so skip it.
                 ContentBlock::Reasoning { .. } => String::new(),
+                // An image is summarized by its media type, not its bytes.
+                ContentBlock::Image { media_type, .. } => {
+                    format!("[image: {media_type}]")
+                }
             };
             if !piece.is_empty() {
                 out.push_str(role);
@@ -2420,6 +2923,9 @@ fn render_recall(messages: &[Message], reduce: bool) -> String {
                     }
                 }
                 ContentBlock::Reasoning { .. } => String::new(),
+                ContentBlock::Image { media_type, .. } => {
+                    format!("[image: {media_type}]")
+                }
             };
             if !piece.is_empty() {
                 out.push_str(role);
@@ -2438,6 +2944,12 @@ const PREVIEW_LINES: usize = 8;
 /// flood the conversation.
 const PREVIEW_CHARS: usize = 600;
 
+/// Rough per-image token cost for the context-budget estimate (P-6). An image's
+/// cost is not chars/4 of its base64; until authoritative provider-reported usage
+/// arrives, this fixed estimate avoids inflating the budget. Initial; tune with
+/// use (Requirements §13, Tech Spec §16).
+const IMAGE_TOKEN_ESTIMATE: u64 = 765;
+
 /// A short excerpt of a tool's output for the conversation (Design §6.1): the
 /// first few lines, char-capped. The full output goes to the model; this is
 /// just what the user glances at.
@@ -2451,6 +2963,64 @@ fn result_preview(content: &str) -> String {
         preview = preview.chars().take(PREVIEW_CHARS).collect();
     }
     preview
+}
+
+/// Render the current task list as a compact block for the pinned system prompt
+/// (T-11, Tech Spec §7). One line per item with a text status token, so the
+/// standing context cost is trivial.
+fn render_task_list_block(items: &[emberly_tools::TaskItem]) -> String {
+    let mut lines = String::from("## Current task list\n");
+    for item in items {
+        let token = match item.status {
+            emberly_tools::TaskStatus::Pending => "[pending]",
+            emberly_tools::TaskStatus::InProgress => "[in_progress]",
+            emberly_tools::TaskStatus::Done => "[done]",
+        };
+        lines.push_str(&format!("- {token} {}\n", item.text));
+    }
+    lines
+}
+
+/// Render the memory index as a pinned block for the system prompt (FR-6, Tech
+/// Spec §7/§8.1). Only the one-line index is standing context; bodies load via
+/// the `recall` op. Returns an empty string when both indexes are empty.
+fn render_memory_block(user_index: &str, project_index: &str) -> String {
+    let mut block = String::new();
+    if !user_index.is_empty() {
+        block.push_str("## Memory (user)\n");
+        block.push_str(user_index);
+    }
+    if !project_index.is_empty() {
+        block.push_str("## Memory (project)\n");
+        block.push_str(project_index);
+    }
+    block
+}
+
+/// Build the memory store from the engine config (FR-6, Tech Spec §8.1). Returns
+/// `None` when memory is disabled or no home directory exists.
+fn build_memory_store(config: &EngineConfig) -> Option<MemoryStore> {
+    if !config.memory.enabled {
+        return None;
+    }
+    let user_dir = config.user_memory_dir.as_ref()?;
+    Some(MemoryStore::new(
+        user_dir.clone(),
+        config.project_memory_dir.clone(),
+    ))
+}
+
+/// Build the skill catalog from the engine config (FR-7, Tech Spec §8.2).
+/// Returns `None` when skills are disabled or no home directory exists.
+fn build_skill_catalog(config: &EngineConfig) -> Option<SkillCatalog> {
+    if !config.skills.enabled {
+        return None;
+    }
+    let user_dir = config.user_skills_dir.as_ref()?;
+    Some(SkillCatalog::new(
+        user_dir.clone(),
+        config.project_skills_dir.clone(),
+    ))
 }
 
 /// Enrich a tool's [`PermissionRequest`] into a UI [`PermissionRendering`] with

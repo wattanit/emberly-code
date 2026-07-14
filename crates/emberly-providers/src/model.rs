@@ -93,6 +93,11 @@ pub struct ModelInfo {
     /// no effort (the provider's own default). `default`s to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_effort: Option<Effort>,
+    /// Whether the model accepts image input (P-11, Tech Spec §4.1). **Default
+    /// `false`** so an image is never sent to a model not declared
+    /// vision-capable. `default`s to `false` for older `ModelInfo` values.
+    #[serde(default)]
+    pub vision: bool,
 }
 
 /// Per-model pricing in USD per million tokens (Tech Spec §4.4). Sourced from
@@ -185,6 +190,7 @@ mod tests {
         let info: ModelInfo = from_json(json);
         assert!(info.effort_levels.is_empty());
         assert_eq!(info.default_effort, None);
+        assert!(!info.vision);
     }
 
     #[test]
@@ -196,6 +202,7 @@ mod tests {
             pricing: None,
             effort_levels: vec![Effort::Low, Effort::High],
             default_effort: Some(Effort::Low),
+            vision: false,
         };
         let json = to_json(&info);
         assert_eq!(from_json::<ModelInfo>(&json), info);

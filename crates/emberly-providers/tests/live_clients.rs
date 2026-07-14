@@ -34,6 +34,7 @@ fn model_info() -> ModelInfo {
         pricing: None,
         effort_levels: Vec::new(),
         default_effort: None,
+        vision: false,
     }
 }
 

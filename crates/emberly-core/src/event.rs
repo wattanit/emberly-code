@@ -56,6 +56,11 @@ pub enum UiEvent {
         ok: bool,
         summary: String,
         preview: String,
+        /// Whether the result is untrusted web content (T-14, Design §4.10).
+        /// When `true`, the frontend renders it with the untrusted-content
+        /// styling — fetched web data, never harness or assistant voice.
+        #[serde(default)]
+        untrusted: bool,
     },
 
     /// The engine needs a permission decision before proceeding. The frontend
@@ -173,4 +178,63 @@ pub enum UiEvent {
     /// Progress/outcome of a `/compact` operation (Requirements §8.3). Emitted
     /// from Phase 5 onward.
     CompactionStatus { message: String },
+
+    /// The model updated its task list (T-11, Tech Spec §3.1, Design §4.7). The
+    /// full list is sent on every update (replace, not merge). The sidebar's
+    /// Tasks section and the inline checklist both render from this. Additive —
+    /// older frontends warn-skip it.
+    TaskListUpdated {
+        items: Vec<emberly_tools::TaskItem>,
+    },
+
+    /// Memory entry counts for the sidebar inspector (T-13, FR-6, Design §4.9).
+    /// `user` is the global count; `project` is the project-scoped count (0
+    /// when the root is untrusted — Design §4.9 "silently absent, not
+    /// half-loaded"). Additive — older frontends warn-skip it.
+    MemoryStatus { user: usize, project: usize },
+
+    /// The skill catalog for the sidebar Skills section (T-15, FR-7, Design
+    /// §4.9). Emitted at session start and when the set changes. Each entry
+    /// carries name, description, and origin (user vs project — origin is how
+    /// the user reads trust). Additive — older frontends warn-skip it.
+    SkillsAvailable { skills: Vec<emberly_tools::SkillMeta> },
+
+    /// The memory inspector's grouped entry list (FR-6, Design §4.9), sent in
+    /// reply to [`Command::MemoryList`](crate::command::Command::MemoryList).
+    /// Entries are **summaries only** — no bodies, so listing preserves
+    /// progressive disclosure (Tech Spec §7/§8.6); a body loads on demand via a
+    /// `recall`/edit fetch. `project` is empty on an untrusted root (the
+    /// project section is then silently absent — FR-1). Additive — older
+    /// frontends warn-skip it.
+    MemoryEntries {
+        user: Vec<crate::memory::EntrySummary>,
+        project: Vec<crate::memory::EntrySummary>,
+    },
+
+    /// A single memory entry's body for the inspector's view/edit step (FR-6,
+    /// §4.6), sent in reply to [`Command::MemoryView`](crate::command::Command::MemoryView).
+    /// The body is fetched on demand and never pinned (progressive disclosure).
+    /// `scope`/`name` echo the request so the frontend correlates it with the
+    /// summary it selected. An empty `body` means the entry has none (or was
+    /// removed between listing and viewing). Additive — older frontends
+    /// warn-skip it.
+    MemoryBody {
+        scope: emberly_tools::MemoryScope,
+        name: String,
+        body: String,
+    },
+
+    /// A skill's instruction body for the inspector (FR-7, Design §4.9), sent in
+    /// reply to [`Command::InspectSkill`](crate::command::Command::InspectSkill).
+    /// This is the §4.9 promise — "what could this skill tell the model to do"
+    /// is inspectable *before it ever runs*. Loading the body for display runs
+    /// no bundled script (FR-7). `origin` is how the user reads trust;
+    /// `resources` lists bundled file paths. Additive — older frontends
+    /// warn-skip it.
+    SkillBody {
+        name: String,
+        origin: emberly_tools::SkillOrigin,
+        body: String,
+        resources: Vec<String>,
+    },
 }

@@ -9,10 +9,12 @@
 //! permission prompt (group 7), and palette (group 8) fill it in.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 use emberly_core::{
-    resume, AskAnswer, AskId, Command, Effort, LoopResolution, Mode, PermissionDecision,
-    PermissionId, PermissionRendering, SandboxStatus, SessionId, TokenUsage, ToolCallId,
-    TranscriptEvent, TranscriptRecord, UiEvent,
+    resume, AskAnswer, AskId, Command, Effort, EntrySummary, LoopResolution, MemoryOp, MemoryScope,
+    Mode, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus, SessionId,
+    SkillMeta, SkillOrigin, TaskItem, TokenUsage, ToolCallId, TranscriptEvent, TranscriptRecord,
+    UiEvent,
 };
 
 use std::collections::HashMap;
@@ -20,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use crate::commands::{self, AppCommand};
 use crate::editor::LineEditor;
+use crate::hit::{ClickTarget, PermissionChoice};
 use crate::theme::Theme;
 
 /// Rows the conversation scrolls per PageUp/PageDown.
@@ -67,6 +70,10 @@ pub enum ConvItem {
         result: Option<String>,
         /// A short excerpt of the tool's output (Design §6.1).
         preview: Option<String>,
+        /// Whether the result is untrusted web content (T-14, Design §4.10).
+        /// When `true`, the render styles it as fetched web data with visible
+        /// source URLs — never harness or assistant voice.
+        untrusted: bool,
     },
     /// A harness-world line (error, retry) — rendered out-of-band from the
     /// conversation voice (Design §6.1).
@@ -74,6 +81,10 @@ pub enum ConvItem {
     /// A unified diff shown inline when an edit executes (Design §4.2). Capped
     /// on render; the full diff is available in the overlay (Ctrl+O).
     Diff { unified: String },
+    /// The model's task list (T-11, Design §4.7). Shown as an inline checklist
+    /// block; a completed list settles to an all-done block rather than
+    /// vanishing.
+    TaskList { items: Vec<TaskItem> },
 }
 
 /// A dismissable, scrollable pane overlay (Design §4.2). Modal for navigation:
@@ -107,6 +118,51 @@ pub enum OverlayContent {
         rows: Vec<ChoiceRow>,
         selected: usize,
     },
+    /// The memory inspector (`/memory`, FR-6, Design §4.9): entries grouped by
+    /// scope, each viewable/editable/deletable via the in-app edit path (§4.6).
+    /// Unlike the pickers, Enter/`e`/`d` have distinct actions, so it is its own
+    /// variant rather than a `Choices` reuse. `selected` indexes the flattened
+    /// entry list (user entries, then project entries); `confirm_delete` gates
+    /// the destructive delete behind an explicit y/N step (never a lone key).
+    MemoryEntries {
+        user: Vec<EntrySummary>,
+        project: Vec<EntrySummary>,
+        selected: usize,
+        confirm_delete: bool,
+    },
+    /// The skills inspector (`/skills`, FR-7, Design §4.9): the available skills
+    /// as a selectable list; Enter fetches the selected skill's instruction body
+    /// to view **read-only**. There is no edit/delete — a skill is an
+    /// externally-authored on-disk folder; the inspector shows what it could
+    /// tell the model to do before it ever runs. The catalog is already cached
+    /// in `App::skills`, so this needs no engine round-trip to open.
+    SkillList {
+        skills: Vec<SkillMeta>,
+        selected: usize,
+    },
+}
+
+/// Whether an inspector body-fetch is for read-only viewing or for editing
+/// (FR-6, §4.6). Recorded when a [`Command::MemoryView`] is issued; consumed
+/// when the [`UiEvent::MemoryBody`] reply arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryFetchIntent {
+    View,
+    Edit,
+}
+
+/// A memory edit staged for the frontend loop's `$EDITOR` handoff (FR-6, §4.6).
+/// The loop opens `$EDITOR` on the body, then commits via
+/// [`Command::MemoryMutate`] — the harness performs the write, never the TUI.
+/// `description`/`type_` are carried through unchanged so a body edit never
+/// silently erases the entry's metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMemoryEdit {
+    pub scope: MemoryScope,
+    pub name: String,
+    pub description: Option<String>,
+    pub type_: Option<String>,
+    pub body: String,
 }
 
 /// What a [`OverlayContent::Choices`] picker selects, so Enter knows which
@@ -307,6 +363,24 @@ pub struct App {
     pub sandbox: Option<SandboxStatus>,
     pub mode: emberly_core::Mode,
     pub modified_files: Vec<ModifiedFile>,
+    /// The model-maintained task list (T-11, Design §4.7). Updated from
+    /// `UiEvent::TaskListUpdated`; cleared on a new session.
+    pub tasks: Vec<TaskItem>,
+    /// Memory entry counts for the sidebar (T-13, FR-6, Design §4.9). Updated
+    /// from `UiEvent::MemoryStatus`; cleared on a new session.
+    pub memory_user: usize,
+    pub memory_project: usize,
+    /// The skill catalog for the sidebar (T-15, FR-7, Design §4.9). Updated
+    /// from `UiEvent::SkillsAvailable`; cleared on a new session.
+    pub skills: Vec<SkillMeta>,
+    /// The inspector's in-flight body fetch (FR-6, §4.6): the selected entry
+    /// and whether the user wants to view or edit it. Set when a `MemoryView`
+    /// is issued; consumed when the `MemoryBody` reply arrives.
+    memory_fetch: Option<(MemoryFetchIntent, EntrySummary)>,
+    /// A memory edit whose body has arrived and is ready for the `$EDITOR`
+    /// handoff (FR-6, §4.6). The frontend loop drains this, runs the editor, and
+    /// commits via `MemoryMutate` (the harness writes, not the TUI).
+    pending_memory_edit: Option<PendingMemoryEdit>,
     /// The permission prompt currently awaiting an answer, if any. While set,
     /// the prompt owns the screen and normal input is suspended (Design §5).
     pub pending_permission: Option<(PermissionId, PermissionRendering)>,
@@ -335,6 +409,10 @@ pub struct App {
     pub overlays: Vec<Overlay>,
     /// The command palette, when open (Ctrl+P). Modal while present.
     pub palette: Option<PaletteState>,
+    /// The click hit-map from the last rendered frame (Design §3.4). Rebuilt by
+    /// `render::frame` and stored here by the `tui` loop after each draw, so a
+    /// click resolves against the geometry actually on screen.
+    pub hit_map: crate::hit::HitMap,
     /// True while a turn is in flight (submit → `TurnEnded`): drives the
     /// "working" spinner (Design §6.3).
     pub busy: bool,
@@ -380,6 +458,12 @@ impl App {
             sandbox: None,
             mode: emberly_core::Mode::default(),
             modified_files: Vec::new(),
+            tasks: Vec::new(),
+            memory_user: 0,
+            memory_project: 0,
+            skills: Vec::new(),
+            memory_fetch: None,
+            pending_memory_edit: None,
             pending_permission: None,
             pending_ask: None,
             pending_loop_halt: None,
@@ -390,6 +474,7 @@ impl App {
             last_modified: None,
             overlays: Vec::new(),
             palette: None,
+            hit_map: crate::hit::HitMap::new(),
             busy: false,
             motion: true,
             anim_frame: 0,
@@ -456,6 +541,7 @@ impl App {
                         done: None,
                         result: None,
                         preview: None,
+                        untrusted: false,
                     });
                 }
                 TranscriptEvent::ToolResult {
@@ -541,6 +627,7 @@ impl App {
                     done: None,
                     result: None,
                     preview: None,
+                    untrusted: false,
                 });
             }
             UiEvent::ToolFinished {
@@ -548,11 +635,13 @@ impl App {
                 ok,
                 summary,
                 preview,
+                untrusted,
             } => {
                 if let Some(ConvItem::Tool {
                     done,
                     result,
                     preview: p,
+                    untrusted: u,
                     ..
                 }) = self.find_tool_mut(&call_id)
                 {
@@ -561,6 +650,7 @@ impl App {
                     // a preview of the output separately.
                     *result = (!summary.is_empty()).then_some(summary);
                     *p = (!preview.is_empty()).then_some(preview);
+                    *u = untrusted;
                 }
             }
             UiEvent::PermissionRequest { id, rendering } => {
@@ -653,6 +743,31 @@ impl App {
             }
             UiEvent::CompactionStatus { message } => {
                 self.conversation.push(ConvItem::Notice(message));
+            }
+            UiEvent::TaskListUpdated { items } => {
+                self.tasks = items.clone();
+                self.conversation.push(ConvItem::TaskList { items });
+            }
+            UiEvent::MemoryStatus { user, project } => {
+                self.memory_user = user;
+                self.memory_project = project;
+            }
+            UiEvent::SkillsAvailable { skills } => {
+                self.skills = skills;
+            }
+            UiEvent::MemoryEntries { user, project } => {
+                self.apply_memory_entries(user, project);
+            }
+            UiEvent::MemoryBody { scope, name, body } => {
+                self.apply_memory_body(scope, &name, body);
+            }
+            UiEvent::SkillBody {
+                name,
+                origin,
+                body,
+                resources,
+            } => {
+                self.apply_skill_body(&name, origin, body, &resources);
             }
             // `#[non_exhaustive]`: unknown future events are ignored, not fatal.
             _ => {}
@@ -923,6 +1038,26 @@ impl App {
     /// scrolling toward older content.
     pub fn on_scroll(&mut self, up: bool) {
         let step = 3;
+        // Modal priority mirrors `on_key` (palette > overlay > permission >
+        // conversation, Design §3.3/§3.4): the wheel scrolls the focused
+        // surface, so an open palette takes the wheel before any lower pane.
+        if self.palette.is_some() {
+            // The palette viewport follows `selected` (the render windows the
+            // list around it), so moving the selection is exactly how the list
+            // scrolls — the same action as the Up/Down keys (keyboard parity,
+            // §3.4). One item per wheel notch, matching a single arrow press.
+            let last = commands::matches(self.palette_query())
+                .len()
+                .saturating_sub(1);
+            if let Some(p) = self.palette.as_mut() {
+                p.selected = if up {
+                    p.selected.saturating_sub(1)
+                } else {
+                    (p.selected + 1).min(last)
+                };
+            }
+            return;
+        }
         if let Some(o) = self.overlays.last_mut() {
             o.scroll = if up {
                 o.scroll.saturating_sub(step)
@@ -943,6 +1078,85 @@ impl App {
             } else {
                 self.scroll.saturating_sub(step)
             };
+        }
+    }
+
+    /// Handle an unmodified left click at `(col, row)` (Design §3.4). A click is
+    /// a shortcut for "focus + Enter": it resolves against the last frame's
+    /// hit-map and then reuses the **exact same keyboard handler** the Enter key
+    /// would — the mouse adds no capability the keyboard lacks (the §3.4
+    /// invariant). A click on nothing interactive is inert. Returns the `Action`
+    /// the keypress would, so the frontend loop routes it identically.
+    pub fn on_click(&mut self, col: u16, row: u16) -> Action {
+        let Some(target) = self.hit_map.hit(col, row) else {
+            return Action::None;
+        };
+        match target {
+            ClickTarget::PaletteRow(row) => {
+                // Focus the clicked row, then activate it exactly as palette
+                // Enter does (on_palette_key) — no separate dispatch path.
+                if let Some(p) = self.palette.as_mut() {
+                    p.selected = row;
+                }
+                self.on_palette_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::ChoiceRow(row) => {
+                // Focus the clicked choice, then confirm it exactly as picker
+                // Enter does (on_choice_picker_key).
+                self.set_choice_selection(row);
+                self.on_choice_picker_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::SessionRow(row) => {
+                // Focus + Enter on the session picker (resume).
+                self.set_picker_selection(row);
+                self.on_session_picker_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::MemoryRow(row) => {
+                // Focus + Enter on the memory inspector (view the entry).
+                self.set_memory_selection(row);
+                self.on_memory_inspector_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::SkillRow(row) => {
+                // Focus + Enter on the skills inspector (read-only body view).
+                self.set_skill_selection(row);
+                self.on_skills_inspector_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::ReasoningToggle => {
+                // Exactly the Ctrl+R action — toggle the most recent trail.
+                self.toggle_reasoning();
+                Action::None
+            }
+            ClickTarget::OpenDiff => {
+                // Exactly the Ctrl+O action — open the most-recent diff overlay.
+                self.open_last_diff();
+                Action::None
+            }
+            ClickTarget::OpenMemoryInspector => {
+                // Exactly the `/memory` action (palette-reachable, §3.3).
+                self.run_command(AppCommand::Memory)
+            }
+            ClickTarget::OpenSkillsInspector => {
+                // Exactly the `/skills` action.
+                self.run_command(AppCommand::Skills)
+            }
+            ClickTarget::PermissionChoice(choice) => {
+                // Reuse `on_permission_key` EXACTLY (Design §3.4/§5): a click on
+                // an affordance is the same deliberate act as its key, and can
+                // do nothing the key cannot. Only lands here when the click hit
+                // an affordance rect (the render only pushes those); a click
+                // elsewhere on the prompt resolves to nothing → inert. It never
+                // approves "whatever is focused," and it never bypasses the
+                // unscrolled-content indicator the key path shows.
+                let Some(id) = self.pending_permission.as_ref().map(|(i, _)| *i) else {
+                    return Action::None;
+                };
+                let code = match choice {
+                    PermissionChoice::Allow => KeyCode::Char('y'),
+                    PermissionChoice::Session => KeyCode::Char('s'),
+                    PermissionChoice::Deny => KeyCode::Enter,
+                };
+                self.on_permission_key(id, KeyEvent::from(code))
+            }
         }
     }
 
@@ -1148,6 +1362,291 @@ impl App {
             content: OverlayContent::Text(body.into()),
             scroll: 0,
         });
+    }
+
+    // ---- memory inspector (`/memory`, FR-6, Design §4.9) ------------------
+
+    /// `/memory` — open the memory inspector. Requests the grouped entry list;
+    /// the overlay opens (or refreshes) when the `MemoryEntries` reply arrives.
+    /// The engine owns the store, so the TUI never reads memory files directly.
+    fn open_memory_inspector(&mut self) -> Action {
+        Action::Command(Command::MemoryList)
+    }
+
+    /// Apply a `MemoryEntries` reply: refresh an already-open inspector in place
+    /// (so a post-mutation re-list updates the list without a flash), or open a
+    /// fresh one. The project group is simply empty on an untrusted root (FR-1).
+    fn apply_memory_entries(&mut self, user: Vec<EntrySummary>, project: Vec<EntrySummary>) {
+        let total = user.len() + project.len();
+        let existing = self
+            .overlays
+            .iter()
+            .rposition(|o| matches!(o.content, OverlayContent::MemoryEntries { .. }));
+        match existing {
+            Some(i) => {
+                if let OverlayContent::MemoryEntries {
+                    user: u,
+                    project: p,
+                    selected,
+                    confirm_delete,
+                } = &mut self.overlays[i].content
+                {
+                    *u = user;
+                    *p = project;
+                    *selected = (*selected).min(total.saturating_sub(1));
+                    // A refresh cancels any half-finished confirm — the list it
+                    // referred to just changed under it.
+                    *confirm_delete = false;
+                }
+            }
+            None => self.push_overlay(Overlay {
+                title: crate::strings::memory::TITLE.into(),
+                content: OverlayContent::MemoryEntries {
+                    user,
+                    project,
+                    selected: 0,
+                    confirm_delete: false,
+                },
+                scroll: 0,
+            }),
+        }
+    }
+
+    /// Apply a `MemoryBody` reply, dispatched by the intent recorded when the
+    /// fetch was issued: view opens the body read-only; edit stages it for the
+    /// `$EDITOR` handoff the frontend loop performs. A reply that no longer
+    /// matches the recorded target (a stale/late arrival) is ignored.
+    fn apply_memory_body(&mut self, scope: MemoryScope, name: &str, body: String) {
+        let Some((intent, target)) = self.memory_fetch.take() else {
+            return;
+        };
+        if target.scope != scope || target.name != name {
+            return;
+        }
+        match intent {
+            MemoryFetchIntent::View => {
+                let title = format!("{} · {}", target.name, memory_scope_label(scope));
+                let shown = if body.trim().is_empty() {
+                    crate::strings::memory::EMPTY_BODY.to_string()
+                } else {
+                    body
+                };
+                self.open_text_overlay(title, shown);
+            }
+            MemoryFetchIntent::Edit => {
+                self.pending_memory_edit = Some(PendingMemoryEdit {
+                    scope,
+                    name: target.name.clone(),
+                    description: Some(target.description.clone()).filter(|d| !d.is_empty()),
+                    type_: target.type_.clone(),
+                    body,
+                });
+            }
+        }
+    }
+
+    /// The entry currently highlighted in the memory inspector (flattened over
+    /// the user then project groups), if any.
+    fn selected_memory_entry(&self) -> Option<EntrySummary> {
+        match self.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::MemoryEntries {
+                user,
+                project,
+                selected,
+                ..
+            }) => user.iter().chain(project.iter()).nth(*selected).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Issue a `MemoryView` for the highlighted entry, recording the intent so
+    /// the `MemoryBody` reply is routed to view or edit.
+    fn begin_memory_fetch(&mut self, intent: MemoryFetchIntent) -> Action {
+        match self.selected_memory_entry() {
+            Some(target) => {
+                let cmd = Command::MemoryView {
+                    scope: target.scope,
+                    name: target.name.clone(),
+                };
+                self.memory_fetch = Some((intent, target));
+                Action::Command(cmd)
+            }
+            None => Action::None,
+        }
+    }
+
+    fn set_memory_selection(&mut self, next: usize) {
+        if let Some(Overlay {
+            content: OverlayContent::MemoryEntries { selected, .. },
+            ..
+        }) = self.overlays.last_mut()
+        {
+            *selected = next;
+        }
+    }
+
+    fn set_memory_confirm(&mut self, on: bool) {
+        if let Some(Overlay {
+            content: OverlayContent::MemoryEntries { confirm_delete, .. },
+            ..
+        }) = self.overlays.last_mut()
+        {
+            *confirm_delete = on;
+        }
+    }
+
+    /// Drain a staged memory edit for the frontend loop's `$EDITOR` handoff
+    /// (FR-6, §4.6).
+    pub fn take_pending_memory_edit(&mut self) -> Option<PendingMemoryEdit> {
+        self.pending_memory_edit.take()
+    }
+
+    /// Keys for the memory inspector (FR-6, Design §4.9): ↑/↓ move, Enter views
+    /// the body, `e` edits it via `$EDITOR`, `d` starts a confirmed delete,
+    /// Esc/q dismiss. Delete is destructive, so it takes an explicit y/N step —
+    /// never a lone key (§3.4 spirit).
+    fn on_memory_inspector_key(&mut self, key: KeyEvent) -> Action {
+        let (user_len, project_len, selected, confirm) =
+            match self.overlays.last().map(|o| &o.content) {
+                Some(OverlayContent::MemoryEntries {
+                    user,
+                    project,
+                    selected,
+                    confirm_delete,
+                }) => (user.len(), project.len(), *selected, *confirm_delete),
+                _ => return Action::None,
+            };
+        let total = user_len + project_len;
+
+        // The confirm-delete step owns the keyboard until resolved: only `y`
+        // deletes; every other key cancels (deny-by-default for a destructive
+        // action).
+        if confirm {
+            self.set_memory_confirm(false);
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                if let Some(target) = self.selected_memory_entry() {
+                    return Action::Command(Command::MemoryMutate {
+                        op: MemoryOp::Remove,
+                        scope: target.scope,
+                        name: target.name,
+                        description: None,
+                        type_: None,
+                        body: None,
+                    });
+                }
+            }
+            return Action::None;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+                Action::None
+            }
+            KeyCode::Up => {
+                self.set_memory_selection(selected.saturating_sub(1));
+                Action::None
+            }
+            KeyCode::Down => {
+                self.set_memory_selection((selected + 1).min(total.saturating_sub(1)));
+                Action::None
+            }
+            KeyCode::Enter => self.begin_memory_fetch(MemoryFetchIntent::View),
+            KeyCode::Char('e') => self.begin_memory_fetch(MemoryFetchIntent::Edit),
+            KeyCode::Char('d') => {
+                if total > 0 {
+                    self.set_memory_confirm(true);
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    // ---- skills inspector (`/skills`, FR-7, Design §4.9) ------------------
+
+    /// `/skills` — open the skills inspector. The catalog is already cached
+    /// (`SkillsAvailable`), so the list overlay opens immediately with no engine
+    /// round-trip; only a selected skill's *body* is fetched on demand (§8.6).
+    fn open_skills_inspector(&mut self) -> Action {
+        self.push_overlay(Overlay {
+            title: crate::strings::skills::TITLE.into(),
+            content: OverlayContent::SkillList {
+                skills: self.skills.clone(),
+                selected: 0,
+            },
+            scroll: 0,
+        });
+        Action::None
+    }
+
+    /// Apply a `SkillBody` reply: open the instruction body **read-only** on top
+    /// of the list (§4.9 — inspectable before it ever runs). Bundled resource
+    /// paths are appended so "what the skill bundles" is visible too. Fetching
+    /// the body for display runs no bundled script (FR-7).
+    fn apply_skill_body(
+        &mut self,
+        name: &str,
+        origin: SkillOrigin,
+        body: String,
+        resources: &[String],
+    ) {
+        let title = format!("{name} · {}", skill_origin_label(origin));
+        let mut text = if body.trim().is_empty() {
+            crate::strings::skills::EMPTY_BODY.to_string()
+        } else {
+            body
+        };
+        if !resources.is_empty() {
+            text.push_str("\n\n");
+            text.push_str(crate::strings::skills::RESOURCES_HEADER);
+            text.push('\n');
+            for r in resources {
+                text.push_str(&format!("- {r}\n"));
+            }
+        }
+        self.open_text_overlay(title, text);
+    }
+
+    fn set_skill_selection(&mut self, next: usize) {
+        if let Some(Overlay {
+            content: OverlayContent::SkillList { selected, .. },
+            ..
+        }) = self.overlays.last_mut()
+        {
+            *selected = next;
+        }
+    }
+
+    /// Keys for the skills inspector (FR-7, Design §4.9): ↑/↓ move, Enter fetches
+    /// and shows the selected skill's body read-only, Esc/q dismiss. There is no
+    /// edit or delete — skills are externally-authored folders (read-only here).
+    fn on_skills_inspector_key(&mut self, key: KeyEvent) -> Action {
+        let (len, selected, chosen) = match self.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::SkillList { skills, selected }) => {
+                (skills.len(), *selected, skills.get(*selected).cloned())
+            }
+            _ => return Action::None,
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+                Action::None
+            }
+            KeyCode::Up => {
+                self.set_skill_selection(selected.saturating_sub(1));
+                Action::None
+            }
+            KeyCode::Down => {
+                self.set_skill_selection((selected + 1).min(len.saturating_sub(1)));
+                Action::None
+            }
+            KeyCode::Enter => match chosen {
+                Some(skill) => Action::Command(Command::InspectSkill { name: skill.name }),
+                None => Action::None,
+            },
+            _ => Action::None,
+        }
     }
 
     /// Open the model/provider picker (`/model` with no args, the palette, or a
@@ -1557,6 +2056,8 @@ impl App {
                 self.open_effort_picker();
                 Action::None
             }
+            AppCommand::Memory => self.open_memory_inspector(),
+            AppCommand::Skills => self.open_skills_inspector(),
             AppCommand::Config => self.edit_config(),
             AppCommand::Prompt => self.edit_prompt("system"),
             AppCommand::Reload => Action::Command(Command::ReloadConfig),
@@ -1637,6 +2138,12 @@ impl App {
         self.session.title = title;
         self.conversation.clear();
         self.modified_files.clear();
+        self.tasks.clear();
+        self.memory_user = 0;
+        self.memory_project = 0;
+        self.skills.clear();
+        self.memory_fetch = None;
+        self.pending_memory_edit = None;
         self.latest_diffs.clear();
         self.last_modified = None;
         self.scroll = 0;
@@ -1727,6 +2234,18 @@ impl App {
             Some(OverlayContent::Choices { .. })
         ) {
             return self.on_choice_picker_key(key);
+        }
+        if matches!(
+            self.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::MemoryEntries { .. })
+        ) {
+            return self.on_memory_inspector_key(key);
+        }
+        if matches!(
+            self.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::SkillList { .. })
+        ) {
+            return self.on_skills_inspector_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
@@ -1950,6 +2469,25 @@ fn parse_mode(s: &str) -> Option<Mode> {
     }
 }
 
+/// The user-facing label for a memory scope (origin is how the user reads
+/// trust, Design §4.9). Centralized so the inspector and any future surface
+/// agree.
+fn memory_scope_label(scope: MemoryScope) -> &'static str {
+    match scope {
+        MemoryScope::User => crate::strings::memory::SCOPE_USER,
+        MemoryScope::Project => crate::strings::memory::SCOPE_PROJECT,
+    }
+}
+
+/// The user-facing label for a skill's origin (user vs project — origin is how
+/// the user reads trust, FR-7/§4.9).
+fn skill_origin_label(origin: SkillOrigin) -> &'static str {
+    match origin {
+        SkillOrigin::User => crate::strings::skills::ORIGIN_USER,
+        SkillOrigin::Project => crate::strings::skills::ORIGIN_PROJECT,
+    }
+}
+
 fn help_text() -> String {
     let mut out = String::from("Commands — run via Ctrl-P, /name, or a keybinding.\n\n");
     for spec in commands::COMMANDS {
@@ -1960,6 +2498,14 @@ fn help_text() -> String {
     out.push_str("  (also: /model <profile> [model] to switch directly)\n");
     // `/mode` and `/effort` also take a direct argument.
     out.push_str("  (also: /mode <normal|auto-accept-edits|auto>, /effort <level>)\n");
+    // Mouse (Design §3.4): additive to the keyboard — everything here the
+    // keyboard already does. Documents the Shift-passthrough and the off switch.
+    out.push_str("\nMouse (on by default; set [ui] mouse = false to turn off):\n");
+    out.push_str("    wheel / trackpad scrolls the focused pane or open overlay\n");
+    out.push_str("    click selects a row (palette, picker, sidebar entry, reasoning trail) —\n");
+    out.push_str("      the same as focusing it and pressing Enter; it never approves a prompt\n");
+    out.push_str("    hold Shift (in most terminals) to drag-select and copy text as usual;\n");
+    out.push_str("      or set mouse = false to let the terminal own the pointer entirely\n");
     out
 }
 
@@ -2289,6 +2835,7 @@ mod tests {
             ok: true,
             summary: "exit 0".into(),
             preview: "hello\nworld".into(),
+            untrusted: false,
         });
         match &a.conversation[0] {
             ConvItem::Tool {
@@ -2528,6 +3075,283 @@ mod tests {
         a.on_scroll(false);
         assert_eq!(a.scroll, 0, "conversation untouched while overlay is up");
         assert!(a.active_overlay().is_some_and(|o| o.scroll > 0));
+    }
+
+    #[test]
+    fn wheel_routes_to_the_open_palette() {
+        let mut a = app();
+        // Open the palette (Ctrl+P) — it is modal and takes the wheel first.
+        a.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(a.palette.is_some());
+        // Wheel down moves the selection down, exactly like the Down key…
+        a.on_scroll(false);
+        assert_eq!(a.palette.as_ref().map(|p| p.selected), Some(1));
+        // …and wheel up moves it back, clamped at the top.
+        a.on_scroll(true);
+        assert_eq!(a.palette.as_ref().map(|p| p.selected), Some(0));
+        a.on_scroll(true);
+        assert_eq!(a.palette.as_ref().map(|p| p.selected), Some(0));
+        // The wheel never leaks to the conversation while the palette is up.
+        assert_eq!(a.scroll, 0);
+    }
+
+    #[test]
+    fn click_on_a_palette_row_is_focus_plus_enter() {
+        // A click resolves via the hit-map to a row, then does exactly what
+        // "arrow to that row + Enter" does — no separate authority (§3.4).
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+
+        let mut by_click = app();
+        by_click.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        by_click.hit_map.push(region, ClickTarget::PaletteRow(1));
+        let click_action = by_click.on_click(0, 0);
+
+        let mut by_key = app();
+        by_key.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        by_key.on_key(KeyEvent::from(KeyCode::Down)); // focus row 1
+        let key_action = by_key.on_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(click_action, key_action, "a click is focus + Enter");
+        assert!(
+            by_click.palette.is_none(),
+            "activating a row closes the palette, like Enter"
+        );
+        assert!(by_key.palette.is_none());
+    }
+
+    #[test]
+    fn click_on_a_choice_row_is_focus_plus_enter() {
+        // Same parity for the model/effort/mode picker rows.
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+
+        let mut by_click = app();
+        by_click.open_mode_picker(); // rows: Normal(current) / AutoAcceptEdits / Auto
+        by_click.hit_map.push(region, ClickTarget::ChoiceRow(2));
+        let click_action = by_click.on_click(0, 0);
+
+        let mut by_key = app();
+        by_key.open_mode_picker();
+        by_key.on_key(KeyEvent::from(KeyCode::Down));
+        by_key.on_key(KeyEvent::from(KeyCode::Down)); // focus row 2
+        let key_action = by_key.on_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(click_action, key_action, "clicking a choice == arrow + Enter");
+        assert!(
+            by_click.overlays.is_empty(),
+            "confirming a choice closes the picker, like Enter"
+        );
+        assert!(by_key.overlays.is_empty());
+    }
+
+    #[test]
+    fn a_click_on_nothing_interactive_is_inert() {
+        // An empty hit-map (nothing rendered clickable) → no action, no panic.
+        let mut a = app();
+        assert_eq!(a.on_click(5, 5), Action::None);
+    }
+
+    #[test]
+    fn click_reasoning_toggle_matches_ctrl_r() {
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+        let mut a = app();
+        a.apply_event(UiEvent::ReasoningDelta { text: "hmm".into() });
+        a.apply_event(UiEvent::AssistantDelta { text: "a".into() }); // settle → collapsed
+        a.hit_map.push(region, ClickTarget::ReasoningToggle);
+        // A click expands the trail — exactly Ctrl+R.
+        assert_eq!(a.on_click(0, 0), Action::None);
+        assert!(matches!(
+            a.conversation.first(),
+            Some(ConvItem::Reasoning { expanded: true, .. })
+        ));
+        // A second click collapses it (parity with a second Ctrl+R).
+        a.on_click(0, 0);
+        assert!(matches!(
+            a.conversation.first(),
+            Some(ConvItem::Reasoning { expanded: false, .. })
+        ));
+    }
+
+    #[test]
+    fn click_memory_row_is_focus_plus_enter() {
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+        let entries = || {
+            (
+                vec![mem_summary("Alpha", "a", MemoryScope::User)],
+                vec![mem_summary("Proj", "p", MemoryScope::Project)],
+            )
+        };
+
+        let mut by_click = app();
+        let (user, project) = entries();
+        by_click.apply_event(UiEvent::MemoryEntries { user, project });
+        by_click.hit_map.push(region, ClickTarget::MemoryRow(1)); // project entry
+        let click_action = by_click.on_click(0, 0);
+
+        let mut by_key = app();
+        let (user, project) = entries();
+        by_key.apply_event(UiEvent::MemoryEntries { user, project });
+        by_key.on_key(key(KeyCode::Down)); // focus flattened row 1
+        let key_action = by_key.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            click_action, key_action,
+            "clicking a memory entry == arrow + Enter"
+        );
+    }
+
+    #[test]
+    fn click_sidebar_sections_match_their_keyboard_actions() {
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+
+        // Memory section → the `/memory` command (palette twin, §3.3).
+        let mut a = app();
+        a.hit_map.push(region, ClickTarget::OpenMemoryInspector);
+        let click = a.on_click(0, 0);
+        assert_eq!(click, app().run_command(AppCommand::Memory));
+
+        // Skills section → the `/skills` command.
+        let mut a = app();
+        a.hit_map.push(region, ClickTarget::OpenSkillsInspector);
+        let click = a.on_click(0, 0);
+        assert_eq!(click, app().run_command(AppCommand::Skills));
+
+        // Modified-files section → Ctrl+O (open the diff overlay). With no diff
+        // recorded both are inert, and both open the same overlay when one is.
+        let mut by_click = app();
+        by_click.hit_map.push(region, ClickTarget::OpenDiff);
+        let click = by_click.on_click(0, 0);
+        let mut by_key = app();
+        let key = by_key.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert_eq!(click, key, "clicking modified files == Ctrl+O");
+        assert_eq!(by_click.overlays.len(), by_key.overlays.len());
+    }
+
+    fn pending_permission_app() -> App {
+        let mut a = app();
+        a.apply_event(UiEvent::PermissionRequest {
+            id: PermissionId(7),
+            rendering: PermissionRendering {
+                tool: "bash".into(),
+                summary: "run: x".into(),
+                detail: "x".into(),
+                affected_paths: vec![],
+                outside_root: false,
+                reason: "bash asks".into(),
+            },
+        });
+        a
+    }
+
+    #[test]
+    fn click_permission_affordances_match_their_keys() {
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+        for (choice, code, decision) in [
+            (
+                PermissionChoice::Allow,
+                KeyCode::Char('y'),
+                PermissionDecision::AllowOnce,
+            ),
+            (
+                PermissionChoice::Session,
+                KeyCode::Char('s'),
+                PermissionDecision::AllowForSession,
+            ),
+            (
+                PermissionChoice::Deny,
+                KeyCode::Enter,
+                PermissionDecision::Deny,
+            ),
+        ] {
+            let mut by_click = pending_permission_app();
+            by_click
+                .hit_map
+                .push(region, ClickTarget::PermissionChoice(choice));
+            let click = by_click.on_click(0, 0);
+
+            let mut by_key = pending_permission_app();
+            let keyed = by_key.on_key(key(code));
+
+            assert_eq!(click, keyed, "click on {choice:?} == its key");
+            assert!(matches!(
+                click,
+                Action::Command(Command::PermissionAnswer { decision: d, .. }) if d == decision
+            ));
+        }
+    }
+
+    #[test]
+    fn help_documents_the_mouse_and_shift_passthrough() {
+        let help = help_text();
+        assert!(help.contains("Mouse"), "help has a mouse section");
+        assert!(
+            help.contains("Shift"),
+            "help documents Shift for native selection (Design §3.4)"
+        );
+        assert!(
+            help.contains("mouse = false"),
+            "help documents the off switch"
+        );
+    }
+
+    #[test]
+    fn a_click_off_the_permission_affordances_never_decides() {
+        // The safety invariant (Design §3.4/§5): a click that does not land on
+        // an affordance leaves the prompt pending — never a default-approve, no
+        // "approve whatever is focused." (Here the hit-map has no affordance
+        // region, standing in for a click on the body/header/margin.)
+        let mut a = pending_permission_app();
+        assert_eq!(a.on_click(5, 5), Action::None);
+        assert!(
+            a.pending_permission.is_some(),
+            "a click off the affordances must not decide"
+        );
+        // A Deny click is safe; still no *approval* ever appears without the
+        // Allow/Session affordance.
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+        a.hit_map
+            .push(region, ClickTarget::PermissionChoice(PermissionChoice::Deny));
+        assert!(matches!(
+            a.on_click(0, 0),
+            Action::Command(Command::PermissionAnswer {
+                decision: PermissionDecision::Deny,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2795,6 +3619,31 @@ mod tests {
         // Home returns to the top.
         a.on_key(KeyEvent::from(KeyCode::Home));
         assert_eq!(a.permission_scroll, 0);
+    }
+
+    #[test]
+    fn wheel_scrolls_a_permission_prompt_without_deciding() {
+        let mut a = app();
+        a.apply_event(UiEvent::PermissionRequest {
+            id: PermissionId(11),
+            rendering: PermissionRendering {
+                tool: "bash".into(),
+                summary: "run: x".into(),
+                detail: "long\ncommand\nbelow\nthe\nfold".into(),
+                affected_paths: vec![],
+                outside_root: false,
+                reason: "bash asks".into(),
+            },
+        });
+        // The wheel reviews the prompt body (permission_scroll), never the
+        // conversation, and never decides (Design §5, §3.4).
+        a.on_scroll(false);
+        assert!(a.permission_scroll > 0);
+        assert_eq!(a.scroll, 0, "conversation untouched while a prompt is up");
+        assert!(a.pending_permission.is_some(), "the wheel never decides");
+        a.on_scroll(true);
+        assert_eq!(a.permission_scroll, 0);
+        assert!(a.pending_permission.is_some());
     }
 
     #[test]
@@ -3100,5 +3949,322 @@ mod tests {
         assert!(crate::commands::COMMANDS
             .iter()
             .any(|c| c.name == "compact"));
+    }
+
+    // ---- memory inspector (`/memory`, FR-6, Design §4.9) ------------------
+
+    fn mem_summary(name: &str, desc: &str, scope: MemoryScope) -> EntrySummary {
+        EntrySummary {
+            name: name.into(),
+            description: desc.into(),
+            type_: None,
+            scope,
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn memory_command_requests_the_list() {
+        let mut a = app();
+        // Reachable three ways (§3.3): slash, palette dispatch, and registry.
+        assert_eq!(a.run_slash("memory"), Action::Command(Command::MemoryList));
+        assert_eq!(
+            a.run_command(AppCommand::Memory),
+            Action::Command(Command::MemoryList)
+        );
+        assert!(commands::COMMANDS.iter().any(|c| c.name == "memory"));
+    }
+
+    #[test]
+    fn memory_entries_open_grouped_overlay_with_origin() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "first", MemoryScope::User)],
+            project: vec![mem_summary("Proj", "p", MemoryScope::Project)],
+        });
+        match a.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::MemoryEntries {
+                user,
+                project,
+                selected,
+                confirm_delete,
+            }) => {
+                assert_eq!(user.len(), 1);
+                assert_eq!(project.len(), 1);
+                assert_eq!(user[0].scope, MemoryScope::User);
+                assert_eq!(project[0].scope, MemoryScope::Project);
+                assert_eq!(*selected, 0);
+                assert!(!confirm_delete);
+            }
+            other => panic!("expected MemoryEntries overlay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_enter_issues_view_for_the_selected_entry() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![
+                mem_summary("Alpha", "first", MemoryScope::User),
+                mem_summary("Beta", "second", MemoryScope::User),
+            ],
+            project: vec![],
+        });
+        a.on_key(key(KeyCode::Down)); // move to Beta
+        assert_eq!(
+            a.on_key(key(KeyCode::Enter)),
+            Action::Command(Command::MemoryView {
+                scope: MemoryScope::User,
+                name: "Beta".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn memory_delete_requires_explicit_confirmation() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "first", MemoryScope::User)],
+            project: vec![],
+        });
+        // A single `d` arms the confirm — it does NOT delete.
+        assert_eq!(a.on_key(key(KeyCode::Char('d'))), Action::None);
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::MemoryEntries {
+                confirm_delete: true,
+                ..
+            })
+        ));
+        // `y` confirms → the delete is issued (harness performs the write).
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('y'))),
+            Action::Command(Command::MemoryMutate {
+                op: MemoryOp::Remove,
+                scope: MemoryScope::User,
+                name: "Alpha".into(),
+                description: None,
+                type_: None,
+                body: None,
+            })
+        );
+    }
+
+    #[test]
+    fn memory_delete_is_cancelled_by_any_other_key() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "first", MemoryScope::User)],
+            project: vec![],
+        });
+        a.on_key(key(KeyCode::Char('d')));
+        // Anything but `y` cancels: no command, confirm cleared, entry intact.
+        assert_eq!(a.on_key(key(KeyCode::Char('n'))), Action::None);
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::MemoryEntries {
+                confirm_delete: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn memory_edit_stages_a_pending_edit_when_body_arrives() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "first", MemoryScope::User)],
+            project: vec![],
+        });
+        // `e` issues a body fetch with the edit intent.
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('e'))),
+            Action::Command(Command::MemoryView {
+                scope: MemoryScope::User,
+                name: "Alpha".into(),
+            })
+        );
+        // The body reply stages a pending edit for the loop's $EDITOR handoff,
+        // carrying the metadata through unchanged (so a body edit never erases
+        // the description).
+        a.apply_event(UiEvent::MemoryBody {
+            scope: MemoryScope::User,
+            name: "Alpha".into(),
+            body: "the body".into(),
+        });
+        let edit = a.take_pending_memory_edit().expect("edit staged");
+        assert_eq!(edit.name, "Alpha");
+        assert_eq!(edit.scope, MemoryScope::User);
+        assert_eq!(edit.description, Some("first".into()));
+        assert_eq!(edit.body, "the body");
+        // An edit does not open a read-only overlay (that's the view path).
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::MemoryEntries { .. })
+        ));
+    }
+
+    #[test]
+    fn memory_view_opens_a_read_only_body_overlay() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "first", MemoryScope::User)],
+            project: vec![],
+        });
+        a.on_key(key(KeyCode::Enter)); // view intent
+        a.apply_event(UiEvent::MemoryBody {
+            scope: MemoryScope::User,
+            name: "Alpha".into(),
+            body: "hello body".into(),
+        });
+        match a.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::Text(body)) => assert!(body.contains("hello body")),
+            other => panic!("expected a Text overlay, got {other:?}"),
+        }
+        // A view never stages an edit.
+        assert!(a.take_pending_memory_edit().is_none());
+    }
+
+    #[test]
+    fn memory_entries_refresh_in_place_and_clamp_selection() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![
+                mem_summary("Alpha", "a", MemoryScope::User),
+                mem_summary("Beta", "b", MemoryScope::User),
+            ],
+            project: vec![],
+        });
+        a.on_key(key(KeyCode::Down)); // select Beta (index 1)
+        // A re-list with fewer entries reuses the overlay and clamps selection.
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "a", MemoryScope::User)],
+            project: vec![],
+        });
+        assert_eq!(a.overlays.len(), 1);
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::MemoryEntries { selected: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn memory_inspector_esc_dismisses() {
+        let mut a = app();
+        a.apply_event(UiEvent::MemoryEntries {
+            user: vec![mem_summary("Alpha", "a", MemoryScope::User)],
+            project: vec![],
+        });
+        assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
+        assert!(a.overlays.is_empty());
+    }
+
+    // ---- skills inspector (`/skills`, FR-7, Design §4.9) ------------------
+
+    fn skill_meta(name: &str, desc: &str, origin: SkillOrigin) -> SkillMeta {
+        SkillMeta {
+            name: name.into(),
+            description: desc.into(),
+            origin,
+        }
+    }
+
+    #[test]
+    fn skills_command_opens_inspector_from_cached_catalog() {
+        let mut a = app();
+        a.skills = vec![
+            skill_meta("pdf-fill", "Fill PDF forms", SkillOrigin::User),
+            skill_meta("linter", "Run linters", SkillOrigin::Project),
+        ];
+        // No engine round-trip — the catalog is already cached, so the overlay
+        // opens immediately.
+        assert_eq!(a.run_slash("skills"), Action::None);
+        match a.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::SkillList { skills, selected }) => {
+                assert_eq!(skills.len(), 2);
+                assert_eq!(skills[0].origin, SkillOrigin::User);
+                assert_eq!(skills[1].origin, SkillOrigin::Project);
+                assert_eq!(*selected, 0);
+            }
+            other => panic!("expected SkillList overlay, got {other:?}"),
+        }
+        // Reachable three ways (§3.3): palette dispatch and the registry too.
+        assert_eq!(a.run_command(AppCommand::Skills), Action::None);
+        assert!(commands::COMMANDS.iter().any(|c| c.name == "skills"));
+    }
+
+    #[test]
+    fn skills_enter_issues_inspect_for_the_selected_skill() {
+        let mut a = app();
+        a.skills = vec![
+            skill_meta("pdf-fill", "Fill PDF forms", SkillOrigin::User),
+            skill_meta("linter", "Run linters", SkillOrigin::Project),
+        ];
+        a.run_command(AppCommand::Skills);
+        a.on_key(key(KeyCode::Down)); // select linter
+        assert_eq!(
+            a.on_key(key(KeyCode::Enter)),
+            Action::Command(Command::InspectSkill {
+                name: "linter".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn skill_body_opens_a_read_only_overlay_with_resources() {
+        let mut a = app();
+        a.skills = vec![skill_meta("pdf-fill", "Fill PDF forms", SkillOrigin::User)];
+        a.run_command(AppCommand::Skills);
+        a.on_key(key(KeyCode::Enter));
+        a.apply_event(UiEvent::SkillBody {
+            name: "pdf-fill".into(),
+            origin: SkillOrigin::User,
+            body: "Step 1: open the template.".into(),
+            resources: vec!["/abs/template.txt".into()],
+        });
+        match a.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::Text(body)) => {
+                assert!(body.contains("Step 1: open the template."));
+                assert!(body.contains("template.txt"), "bundled resource listed");
+            }
+            other => panic!("expected a Text overlay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skills_inspector_has_no_edit_or_delete() {
+        let mut a = app();
+        a.skills = vec![skill_meta("pdf-fill", "Fill PDF forms", SkillOrigin::User)];
+        a.run_command(AppCommand::Skills);
+        // `e`/`d` are inert for skills (read-only) — no command, overlay stays.
+        assert_eq!(a.on_key(key(KeyCode::Char('e'))), Action::None);
+        assert_eq!(a.on_key(key(KeyCode::Char('d'))), Action::None);
+        assert!(matches!(
+            a.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::SkillList { .. })
+        ));
+    }
+
+    #[test]
+    fn skills_empty_catalog_opens_an_empty_overlay() {
+        let mut a = app();
+        a.skills.clear();
+        a.run_command(AppCommand::Skills);
+        match a.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::SkillList { skills, .. }) => assert!(skills.is_empty()),
+            other => panic!("expected an empty SkillList overlay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skills_inspector_esc_dismisses() {
+        let mut a = app();
+        a.skills = vec![skill_meta("pdf-fill", "Fill PDF forms", SkillOrigin::User)];
+        a.run_command(AppCommand::Skills);
+        assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
+        assert!(a.overlays.is_empty());
     }
 }
