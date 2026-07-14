@@ -72,6 +72,14 @@ pub struct UiConfig {
     /// prompt instruction are both omitted so no tokens are spent. Default
     /// `true`.
     pub tool_explanations: Option<bool>,
+    /// Pointer (mouse) interaction in the rich TUI (Design §3.4, Tech Spec §9).
+    /// When on (the default), wheel scroll and click-to-select are enabled and
+    /// the terminal's mouse is captured; when off, the terminal keeps its native
+    /// pointer behavior (selection everywhere) and no capture happens. Additive
+    /// convenience only — the keyboard can always do everything the mouse can.
+    /// Ignored in degraded mode, which never captures the mouse (§7). Default
+    /// `true`.
+    pub mouse: Option<bool>,
 }
 
 /// `[trust]` — workspace trust (FR-1). `trusted_dirs` pre-declares folders
@@ -343,6 +351,9 @@ impl ConfigFile {
         if higher.ui.tool_explanations.is_some() {
             self.ui.tool_explanations = higher.ui.tool_explanations;
         }
+        if higher.ui.mouse.is_some() {
+            self.ui.mouse = higher.ui.mouse;
+        }
         // `[loop]` (S-5) merges normally — a project may tune the guardrail.
         if higher.loop_.enabled.is_some() {
             self.loop_.enabled = higher.loop_.enabled;
@@ -454,6 +465,11 @@ pub struct Resolved {
     /// `true`; when `false` the schema property and prompt instruction are both
     /// omitted (no tokens spent).
     pub tool_explanations: bool,
+    /// Whether pointer (mouse) interaction is enabled in the rich TUI (Design
+    /// §3.4, Tech Spec §9). Default `true`; when `false` the TUI never captures
+    /// the mouse, leaving native terminal selection everywhere. Degraded mode
+    /// ignores this and never captures regardless (§7).
+    pub mouse: bool,
     /// Resolved loop-breaking guardrail tunables (S-5), ready for the engine.
     pub loop_config: emberly_core::LoopConfig,
     /// Resolved truncation/reduction config (FR-2, §8.1), ready for the engine.
@@ -621,6 +637,20 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             field(&global, |c| c.ui.tool_explanations.is_some()),
         ),
         merged.ui.tool_explanations.is_some(),
+    );
+
+    // Mouse interaction (Design §3.4): on unless a user tier turned it off;
+    // record provenance only on a deviation from the default `true`.
+    record(
+        &mut provenance,
+        "ui.mouse",
+        source_of(
+            false,
+            false,
+            field(&project, |c| c.ui.mouse.is_some()),
+            field(&global, |c| c.ui.mouse.is_some()),
+        ),
+        merged.ui.mouse.is_some(),
     );
 
     // Truncation/reduction (FR-2): record provenance when a user tier sets any
@@ -890,6 +920,7 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         sandbox_require: merged.sandbox.require.unwrap_or(false),
         reasoning: merged.reasoning,
         tool_explanations: merged.ui.tool_explanations.unwrap_or(true),
+        mouse: merged.ui.mouse.unwrap_or(true),
         loop_config: {
             // Override only the fields the user set; the engine owns the
             // defaults (S-5, Tech Spec §7 — "initial; tune with use").
@@ -1481,6 +1512,21 @@ mod tests {
         let mut base = ConfigFile::parse("[ui]\ntool_explanations = true").expect("base");
         base.merge(off);
         assert_eq!(base.ui.tool_explanations, Some(false));
+    }
+
+    #[test]
+    fn ui_mouse_parses_and_merges() {
+        // Absent unless set (resolves to the `true` default in `load`, Design §3.4).
+        assert_eq!(ConfigFile::parse("").expect("empty").ui.mouse, None);
+        // Parsed from the `[ui]` table.
+        let off = ConfigFile::parse("[ui]\nmouse = false").expect("ui");
+        assert_eq!(off.ui.mouse, Some(false));
+        // A higher tier overrides a lower one, independently of tool_explanations.
+        let mut base =
+            ConfigFile::parse("[ui]\nmouse = true\ntool_explanations = true").expect("base");
+        base.merge(off);
+        assert_eq!(base.ui.mouse, Some(false));
+        assert_eq!(base.ui.tool_explanations, Some(true)); // untouched
     }
 
     #[test]

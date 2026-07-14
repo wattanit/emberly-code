@@ -67,6 +67,7 @@ pub async fn run(
     profiles: Vec<String>,
     config_template: String,
     reasoning: Option<String>,
+    mouse: bool,
 ) -> io::Result<()> {
     let reasoning_view = crate::app::ReasoningView::parse(reasoning.as_deref().unwrap_or(""));
     match kind {
@@ -79,6 +80,7 @@ pub async fn run(
                 profiles,
                 config_template,
                 reasoning_view,
+                mouse,
             )
             .await
         }
@@ -107,5 +109,15 @@ mod tests {
         assert_eq!(decide(false, true, false, true), FrontendKind::Plain);
         assert_eq!(decide(false, false, true, true), FrontendKind::Plain);
         assert_eq!(decide(false, false, false, false), FrontendKind::Plain);
+    }
+
+    #[test]
+    fn degraded_mode_never_captures_the_mouse() {
+        // Exit criterion (Design §3.4, Tech Spec §15): a degraded signal picks
+        // the line frontend — which sets no terminal modes at all (structurally
+        // capture-free) — and the single capture predicate is false for any
+        // non-rich frontend regardless of `ui.mouse`.
+        assert_eq!(decide(true, false, false, true), FrontendKind::Plain);
+        assert!(!crate::terminal::mouse_capture_enabled(false, true));
     }
 }

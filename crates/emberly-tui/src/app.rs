@@ -9,6 +9,7 @@
 //! permission prompt (group 7), and palette (group 8) fill it in.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 use emberly_core::{
     resume, AskAnswer, AskId, Command, Effort, EntrySummary, LoopResolution, MemoryOp, MemoryScope,
     Mode, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus, SessionId,
@@ -21,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use crate::commands::{self, AppCommand};
 use crate::editor::LineEditor;
+use crate::hit::{ClickTarget, PermissionChoice};
 use crate::theme::Theme;
 
 /// Rows the conversation scrolls per PageUp/PageDown.
@@ -407,6 +409,10 @@ pub struct App {
     pub overlays: Vec<Overlay>,
     /// The command palette, when open (Ctrl+P). Modal while present.
     pub palette: Option<PaletteState>,
+    /// The click hit-map from the last rendered frame (Design §3.4). Rebuilt by
+    /// `render::frame` and stored here by the `tui` loop after each draw, so a
+    /// click resolves against the geometry actually on screen.
+    pub hit_map: crate::hit::HitMap,
     /// True while a turn is in flight (submit → `TurnEnded`): drives the
     /// "working" spinner (Design §6.3).
     pub busy: bool,
@@ -468,6 +474,7 @@ impl App {
             last_modified: None,
             overlays: Vec::new(),
             palette: None,
+            hit_map: crate::hit::HitMap::new(),
             busy: false,
             motion: true,
             anim_frame: 0,
@@ -1031,6 +1038,26 @@ impl App {
     /// scrolling toward older content.
     pub fn on_scroll(&mut self, up: bool) {
         let step = 3;
+        // Modal priority mirrors `on_key` (palette > overlay > permission >
+        // conversation, Design §3.3/§3.4): the wheel scrolls the focused
+        // surface, so an open palette takes the wheel before any lower pane.
+        if self.palette.is_some() {
+            // The palette viewport follows `selected` (the render windows the
+            // list around it), so moving the selection is exactly how the list
+            // scrolls — the same action as the Up/Down keys (keyboard parity,
+            // §3.4). One item per wheel notch, matching a single arrow press.
+            let last = commands::matches(self.palette_query())
+                .len()
+                .saturating_sub(1);
+            if let Some(p) = self.palette.as_mut() {
+                p.selected = if up {
+                    p.selected.saturating_sub(1)
+                } else {
+                    (p.selected + 1).min(last)
+                };
+            }
+            return;
+        }
         if let Some(o) = self.overlays.last_mut() {
             o.scroll = if up {
                 o.scroll.saturating_sub(step)
@@ -1051,6 +1078,85 @@ impl App {
             } else {
                 self.scroll.saturating_sub(step)
             };
+        }
+    }
+
+    /// Handle an unmodified left click at `(col, row)` (Design §3.4). A click is
+    /// a shortcut for "focus + Enter": it resolves against the last frame's
+    /// hit-map and then reuses the **exact same keyboard handler** the Enter key
+    /// would — the mouse adds no capability the keyboard lacks (the §3.4
+    /// invariant). A click on nothing interactive is inert. Returns the `Action`
+    /// the keypress would, so the frontend loop routes it identically.
+    pub fn on_click(&mut self, col: u16, row: u16) -> Action {
+        let Some(target) = self.hit_map.hit(col, row) else {
+            return Action::None;
+        };
+        match target {
+            ClickTarget::PaletteRow(row) => {
+                // Focus the clicked row, then activate it exactly as palette
+                // Enter does (on_palette_key) — no separate dispatch path.
+                if let Some(p) = self.palette.as_mut() {
+                    p.selected = row;
+                }
+                self.on_palette_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::ChoiceRow(row) => {
+                // Focus the clicked choice, then confirm it exactly as picker
+                // Enter does (on_choice_picker_key).
+                self.set_choice_selection(row);
+                self.on_choice_picker_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::SessionRow(row) => {
+                // Focus + Enter on the session picker (resume).
+                self.set_picker_selection(row);
+                self.on_session_picker_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::MemoryRow(row) => {
+                // Focus + Enter on the memory inspector (view the entry).
+                self.set_memory_selection(row);
+                self.on_memory_inspector_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::SkillRow(row) => {
+                // Focus + Enter on the skills inspector (read-only body view).
+                self.set_skill_selection(row);
+                self.on_skills_inspector_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::ReasoningToggle => {
+                // Exactly the Ctrl+R action — toggle the most recent trail.
+                self.toggle_reasoning();
+                Action::None
+            }
+            ClickTarget::OpenDiff => {
+                // Exactly the Ctrl+O action — open the most-recent diff overlay.
+                self.open_last_diff();
+                Action::None
+            }
+            ClickTarget::OpenMemoryInspector => {
+                // Exactly the `/memory` action (palette-reachable, §3.3).
+                self.run_command(AppCommand::Memory)
+            }
+            ClickTarget::OpenSkillsInspector => {
+                // Exactly the `/skills` action.
+                self.run_command(AppCommand::Skills)
+            }
+            ClickTarget::PermissionChoice(choice) => {
+                // Reuse `on_permission_key` EXACTLY (Design §3.4/§5): a click on
+                // an affordance is the same deliberate act as its key, and can
+                // do nothing the key cannot. Only lands here when the click hit
+                // an affordance rect (the render only pushes those); a click
+                // elsewhere on the prompt resolves to nothing → inert. It never
+                // approves "whatever is focused," and it never bypasses the
+                // unscrolled-content indicator the key path shows.
+                let Some(id) = self.pending_permission.as_ref().map(|(i, _)| *i) else {
+                    return Action::None;
+                };
+                let code = match choice {
+                    PermissionChoice::Allow => KeyCode::Char('y'),
+                    PermissionChoice::Session => KeyCode::Char('s'),
+                    PermissionChoice::Deny => KeyCode::Enter,
+                };
+                self.on_permission_key(id, KeyEvent::from(code))
+            }
         }
     }
 
@@ -2392,6 +2498,14 @@ fn help_text() -> String {
     out.push_str("  (also: /model <profile> [model] to switch directly)\n");
     // `/mode` and `/effort` also take a direct argument.
     out.push_str("  (also: /mode <normal|auto-accept-edits|auto>, /effort <level>)\n");
+    // Mouse (Design §3.4): additive to the keyboard — everything here the
+    // keyboard already does. Documents the Shift-passthrough and the off switch.
+    out.push_str("\nMouse (on by default; set [ui] mouse = false to turn off):\n");
+    out.push_str("    wheel / trackpad scrolls the focused pane or open overlay\n");
+    out.push_str("    click selects a row (palette, picker, sidebar entry, reasoning trail) —\n");
+    out.push_str("      the same as focusing it and pressing Enter; it never approves a prompt\n");
+    out.push_str("    hold Shift (in most terminals) to drag-select and copy text as usual;\n");
+    out.push_str("      or set mouse = false to let the terminal own the pointer entirely\n");
     out
 }
 
@@ -2964,6 +3078,283 @@ mod tests {
     }
 
     #[test]
+    fn wheel_routes_to_the_open_palette() {
+        let mut a = app();
+        // Open the palette (Ctrl+P) — it is modal and takes the wheel first.
+        a.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(a.palette.is_some());
+        // Wheel down moves the selection down, exactly like the Down key…
+        a.on_scroll(false);
+        assert_eq!(a.palette.as_ref().map(|p| p.selected), Some(1));
+        // …and wheel up moves it back, clamped at the top.
+        a.on_scroll(true);
+        assert_eq!(a.palette.as_ref().map(|p| p.selected), Some(0));
+        a.on_scroll(true);
+        assert_eq!(a.palette.as_ref().map(|p| p.selected), Some(0));
+        // The wheel never leaks to the conversation while the palette is up.
+        assert_eq!(a.scroll, 0);
+    }
+
+    #[test]
+    fn click_on_a_palette_row_is_focus_plus_enter() {
+        // A click resolves via the hit-map to a row, then does exactly what
+        // "arrow to that row + Enter" does — no separate authority (§3.4).
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+
+        let mut by_click = app();
+        by_click.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        by_click.hit_map.push(region, ClickTarget::PaletteRow(1));
+        let click_action = by_click.on_click(0, 0);
+
+        let mut by_key = app();
+        by_key.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        by_key.on_key(KeyEvent::from(KeyCode::Down)); // focus row 1
+        let key_action = by_key.on_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(click_action, key_action, "a click is focus + Enter");
+        assert!(
+            by_click.palette.is_none(),
+            "activating a row closes the palette, like Enter"
+        );
+        assert!(by_key.palette.is_none());
+    }
+
+    #[test]
+    fn click_on_a_choice_row_is_focus_plus_enter() {
+        // Same parity for the model/effort/mode picker rows.
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+
+        let mut by_click = app();
+        by_click.open_mode_picker(); // rows: Normal(current) / AutoAcceptEdits / Auto
+        by_click.hit_map.push(region, ClickTarget::ChoiceRow(2));
+        let click_action = by_click.on_click(0, 0);
+
+        let mut by_key = app();
+        by_key.open_mode_picker();
+        by_key.on_key(KeyEvent::from(KeyCode::Down));
+        by_key.on_key(KeyEvent::from(KeyCode::Down)); // focus row 2
+        let key_action = by_key.on_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(click_action, key_action, "clicking a choice == arrow + Enter");
+        assert!(
+            by_click.overlays.is_empty(),
+            "confirming a choice closes the picker, like Enter"
+        );
+        assert!(by_key.overlays.is_empty());
+    }
+
+    #[test]
+    fn a_click_on_nothing_interactive_is_inert() {
+        // An empty hit-map (nothing rendered clickable) → no action, no panic.
+        let mut a = app();
+        assert_eq!(a.on_click(5, 5), Action::None);
+    }
+
+    #[test]
+    fn click_reasoning_toggle_matches_ctrl_r() {
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+        let mut a = app();
+        a.apply_event(UiEvent::ReasoningDelta { text: "hmm".into() });
+        a.apply_event(UiEvent::AssistantDelta { text: "a".into() }); // settle → collapsed
+        a.hit_map.push(region, ClickTarget::ReasoningToggle);
+        // A click expands the trail — exactly Ctrl+R.
+        assert_eq!(a.on_click(0, 0), Action::None);
+        assert!(matches!(
+            a.conversation.first(),
+            Some(ConvItem::Reasoning { expanded: true, .. })
+        ));
+        // A second click collapses it (parity with a second Ctrl+R).
+        a.on_click(0, 0);
+        assert!(matches!(
+            a.conversation.first(),
+            Some(ConvItem::Reasoning { expanded: false, .. })
+        ));
+    }
+
+    #[test]
+    fn click_memory_row_is_focus_plus_enter() {
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+        let entries = || {
+            (
+                vec![mem_summary("Alpha", "a", MemoryScope::User)],
+                vec![mem_summary("Proj", "p", MemoryScope::Project)],
+            )
+        };
+
+        let mut by_click = app();
+        let (user, project) = entries();
+        by_click.apply_event(UiEvent::MemoryEntries { user, project });
+        by_click.hit_map.push(region, ClickTarget::MemoryRow(1)); // project entry
+        let click_action = by_click.on_click(0, 0);
+
+        let mut by_key = app();
+        let (user, project) = entries();
+        by_key.apply_event(UiEvent::MemoryEntries { user, project });
+        by_key.on_key(key(KeyCode::Down)); // focus flattened row 1
+        let key_action = by_key.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            click_action, key_action,
+            "clicking a memory entry == arrow + Enter"
+        );
+    }
+
+    #[test]
+    fn click_sidebar_sections_match_their_keyboard_actions() {
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+
+        // Memory section → the `/memory` command (palette twin, §3.3).
+        let mut a = app();
+        a.hit_map.push(region, ClickTarget::OpenMemoryInspector);
+        let click = a.on_click(0, 0);
+        assert_eq!(click, app().run_command(AppCommand::Memory));
+
+        // Skills section → the `/skills` command.
+        let mut a = app();
+        a.hit_map.push(region, ClickTarget::OpenSkillsInspector);
+        let click = a.on_click(0, 0);
+        assert_eq!(click, app().run_command(AppCommand::Skills));
+
+        // Modified-files section → Ctrl+O (open the diff overlay). With no diff
+        // recorded both are inert, and both open the same overlay when one is.
+        let mut by_click = app();
+        by_click.hit_map.push(region, ClickTarget::OpenDiff);
+        let click = by_click.on_click(0, 0);
+        let mut by_key = app();
+        let key = by_key.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert_eq!(click, key, "clicking modified files == Ctrl+O");
+        assert_eq!(by_click.overlays.len(), by_key.overlays.len());
+    }
+
+    fn pending_permission_app() -> App {
+        let mut a = app();
+        a.apply_event(UiEvent::PermissionRequest {
+            id: PermissionId(7),
+            rendering: PermissionRendering {
+                tool: "bash".into(),
+                summary: "run: x".into(),
+                detail: "x".into(),
+                affected_paths: vec![],
+                outside_root: false,
+                reason: "bash asks".into(),
+            },
+        });
+        a
+    }
+
+    #[test]
+    fn click_permission_affordances_match_their_keys() {
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+        for (choice, code, decision) in [
+            (
+                PermissionChoice::Allow,
+                KeyCode::Char('y'),
+                PermissionDecision::AllowOnce,
+            ),
+            (
+                PermissionChoice::Session,
+                KeyCode::Char('s'),
+                PermissionDecision::AllowForSession,
+            ),
+            (
+                PermissionChoice::Deny,
+                KeyCode::Enter,
+                PermissionDecision::Deny,
+            ),
+        ] {
+            let mut by_click = pending_permission_app();
+            by_click
+                .hit_map
+                .push(region, ClickTarget::PermissionChoice(choice));
+            let click = by_click.on_click(0, 0);
+
+            let mut by_key = pending_permission_app();
+            let keyed = by_key.on_key(key(code));
+
+            assert_eq!(click, keyed, "click on {choice:?} == its key");
+            assert!(matches!(
+                click,
+                Action::Command(Command::PermissionAnswer { decision: d, .. }) if d == decision
+            ));
+        }
+    }
+
+    #[test]
+    fn help_documents_the_mouse_and_shift_passthrough() {
+        let help = help_text();
+        assert!(help.contains("Mouse"), "help has a mouse section");
+        assert!(
+            help.contains("Shift"),
+            "help documents Shift for native selection (Design §3.4)"
+        );
+        assert!(
+            help.contains("mouse = false"),
+            "help documents the off switch"
+        );
+    }
+
+    #[test]
+    fn a_click_off_the_permission_affordances_never_decides() {
+        // The safety invariant (Design §3.4/§5): a click that does not land on
+        // an affordance leaves the prompt pending — never a default-approve, no
+        // "approve whatever is focused." (Here the hit-map has no affordance
+        // region, standing in for a click on the body/header/margin.)
+        let mut a = pending_permission_app();
+        assert_eq!(a.on_click(5, 5), Action::None);
+        assert!(
+            a.pending_permission.is_some(),
+            "a click off the affordances must not decide"
+        );
+        // A Deny click is safe; still no *approval* ever appears without the
+        // Allow/Session affordance.
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+        a.hit_map
+            .push(region, ClickTarget::PermissionChoice(PermissionChoice::Deny));
+        assert!(matches!(
+            a.on_click(0, 0),
+            Action::Command(Command::PermissionAnswer {
+                decision: PermissionDecision::Deny,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn overlay_scrolls_and_dismisses() {
         let mut a = app();
         a.open_text_overlay("t", "line1\nline2\nline3");
@@ -3228,6 +3619,31 @@ mod tests {
         // Home returns to the top.
         a.on_key(KeyEvent::from(KeyCode::Home));
         assert_eq!(a.permission_scroll, 0);
+    }
+
+    #[test]
+    fn wheel_scrolls_a_permission_prompt_without_deciding() {
+        let mut a = app();
+        a.apply_event(UiEvent::PermissionRequest {
+            id: PermissionId(11),
+            rendering: PermissionRendering {
+                tool: "bash".into(),
+                summary: "run: x".into(),
+                detail: "long\ncommand\nbelow\nthe\nfold".into(),
+                affected_paths: vec![],
+                outside_root: false,
+                reason: "bash asks".into(),
+            },
+        });
+        // The wheel reviews the prompt body (permission_scroll), never the
+        // conversation, and never decides (Design §5, §3.4).
+        a.on_scroll(false);
+        assert!(a.permission_scroll > 0);
+        assert_eq!(a.scroll, 0, "conversation untouched while a prompt is up");
+        assert!(a.pending_permission.is_some(), "the wheel never decides");
+        a.on_scroll(true);
+        assert_eq!(a.permission_scroll, 0);
+        assert!(a.pending_permission.is_some());
     }
 
     #[test]

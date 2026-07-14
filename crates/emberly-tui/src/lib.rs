@@ -16,6 +16,7 @@ pub mod diffview;
 pub mod edit;
 pub mod editor;
 pub mod frontend;
+pub mod hit;
 pub mod line;
 pub mod markdown;
 pub mod render;

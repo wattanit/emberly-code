@@ -20,6 +20,7 @@ use emberly_core::{resume, Command, FrontendPorts, MemoryOp, SessionId, Transcri
 use tokio::sync::mpsc;
 
 use crate::app::{Action, App, PendingMemoryEdit, SessionInfo};
+use crate::hit::HitMap;
 use crate::render;
 use crate::terminal::TerminalGuard;
 
@@ -37,8 +38,14 @@ pub async fn run(
     profiles: Vec<String>,
     config_template: String,
     reasoning_view: crate::app::ReasoningView,
+    mouse: bool,
 ) -> io::Result<()> {
-    let mut guard = TerminalGuard::enter()?;
+    // The single §3.4 capture gate (Tech Spec §9): reaching `tui::run` already
+    // means rich mode (degraded runs `line::run`), so the one predicate is
+    // `mouse_capture_enabled(true, ui.mouse)`. Off ⇒ no `EnableMouseCapture`,
+    // the terminal owns the mouse.
+    let capture_mouse = crate::terminal::mouse_capture_enabled(true, mouse);
+    let mut guard = TerminalGuard::enter(capture_mouse)?;
     let mut app = App::new(session, sessions_dir, profiles, config_template);
     // Set the trail view before seeding history so resumed reasoning items
     // render with the configured default (Design §4.4).
@@ -59,7 +66,7 @@ pub async fn run(
     // events. No hard cancel: an in-flight reply is still allowed to complete.
     let commands_tx = ports.commands_tx;
 
-    guard.terminal().draw(|f| render::frame(f, &app))?;
+    redraw(&mut guard, &mut app)?;
 
     loop {
         tokio::select! {
@@ -69,7 +76,7 @@ pub async fn run(
                 // prompt) stays perfectly still (Design §6.4).
                 if app.is_animating() {
                     app.tick();
-                    guard.terminal().draw(|f| render::frame(f, &app))?;
+                    redraw(&mut guard, &mut app)?;
                 }
             },
             event = events_rx.recv() => match event {
@@ -87,71 +94,57 @@ pub async fn run(
                         )
                         .await?;
                     }
-                    guard.terminal().draw(|f| render::frame(f, &app))?;
+                    redraw(&mut guard, &mut app)?;
                 }
                 None => break, // engine finished and closed its events
             },
             input = input_rx.recv() => match input {
                 Some(Event::Key(key)) if is_press(&key) => {
-                    match app.on_key(key) {
-                        Action::Quit => break,
-                        Action::Command(cmd) => {
-                            // A memory mutation (inspector delete/edit-commit)
-                            // re-emits only MemoryStatus; re-list so the open
-                            // inspector refreshes its rows (FR-6, group 2 note).
-                            let refresh_memory = matches!(cmd, Command::MemoryMutate { .. });
-                            let _ = commands_tx.send(cmd).await;
-                            if refresh_memory {
-                                let _ = commands_tx.send(Command::MemoryList).await;
-                            }
-                        }
-                        Action::NewSession => {
-                            // Mint the id here so the view can update without a
-                            // round trip; the engine adopts the same id.
-                            let id = SessionId::new();
-                            let _ = commands_tx
-                                .send(Command::NewSession { session_id: id })
-                                .await;
-                            app.begin_new_session(id);
-                        }
-                        Action::ResumeSession(id) => {
-                            switch_session(&mut app, &commands_tx, id).await;
-                        }
-                        Action::EditFile(path) => {
-                            // Hand the terminal to $EDITOR (C-5): pause the input
-                            // reader so the editor gets the keystrokes, leave the
-                            // TUI, run the editor, then restore and redraw.
-                            input_paused.store(true, Ordering::Relaxed);
-                            guard.suspend()?;
-                            let status = crate::edit::run_editor(&path);
-                            guard.resume()?;
-                            input_paused.store(false, Ordering::Relaxed);
-                            let edited = matches!(status, crate::edit::EditStatus::Edited);
-                            app.note_edit(&path, status);
-                            // Apply the saved edit to the running session (C-5).
-                            if edited {
-                                let _ = commands_tx.send(Command::ReloadConfig).await;
-                            }
-                        }
-                        Action::None => {}
+                    let action = app.on_key(key);
+                    if handle_action(action, &mut app, &commands_tx, &input_paused, &mut guard)
+                        .await?
+                    {
+                        break;
                     }
-                    guard.terminal().draw(|f| render::frame(f, &app))?;
+                    redraw(&mut guard, &mut app)?;
                 }
                 Some(Event::Paste(text)) => {
                     app.on_paste(&text);
-                    guard.terminal().draw(|f| render::frame(f, &app))?;
+                    redraw(&mut guard, &mut app)?;
                 }
                 Some(Event::Mouse(mouse)) => {
-                    use crossterm::event::MouseEventKind;
+                    use crossterm::event::{MouseButton, MouseEventKind};
                     match mouse.kind {
                         MouseEventKind::ScrollUp => app.on_scroll(true),
                         MouseEventKind::ScrollDown => app.on_scroll(false),
+                        // A click is "focus + Enter" on an interactive row
+                        // (Design §3.4): it goes through the *same* Action path a
+                        // keypress does, so the mouse adds no new authority. Only
+                        // an **unmodified** left button is consumed — Shift/Ctrl/
+                        // Alt clicks are left to the terminal so its native
+                        // selection still works (Design §3.4; group 5 verifies).
+                        MouseEventKind::Down(MouseButton::Left) if mouse.modifiers.is_empty() => {
+                            let action = app.on_click(mouse.column, mouse.row);
+                            if handle_action(
+                                action,
+                                &mut app,
+                                &commands_tx,
+                                &input_paused,
+                                &mut guard,
+                            )
+                            .await?
+                            {
+                                break;
+                            }
+                        }
+                        // Drag/move/right/up and modified clicks: not consumed
+                        // (no redraw, so a native Shift-drag selection is smooth).
                         _ => continue,
                     }
-                    guard.terminal().draw(|f| render::frame(f, &app))?;
+                    redraw(&mut guard, &mut app)?;
                 }
                 Some(Event::Resize(_, _)) => {
-                    guard.terminal().draw(|f| render::frame(f, &app))?;
+                    redraw(&mut guard, &mut app)?;
                 }
                 Some(_) => {} // focus events — ignored
                 None => break, // input thread ended (stdin closed)
@@ -160,6 +153,72 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Draw one frame and store the click hit-map it built on `app` (Design §3.4).
+/// A fresh [`HitMap`] is built per frame from the live render geometry, so a
+/// subsequent click resolves against exactly what is on screen.
+fn redraw(guard: &mut TerminalGuard, app: &mut App) -> io::Result<()> {
+    let mut hit_map = HitMap::new();
+    let view: &App = app;
+    guard.terminal().draw(|f| render::frame(f, view, &mut hit_map))?;
+    app.hit_map = hit_map;
+    Ok(())
+}
+
+/// Apply an [`Action`] produced by a key **or** a click — both go through this
+/// one path, so the mouse can never do anything the keyboard cannot (the §3.4
+/// invariant). Returns `true` when the app should quit.
+async fn handle_action(
+    action: Action,
+    app: &mut App,
+    commands_tx: &mpsc::Sender<Command>,
+    input_paused: &Arc<AtomicBool>,
+    guard: &mut TerminalGuard,
+) -> io::Result<bool> {
+    match action {
+        Action::Quit => return Ok(true),
+        Action::Command(cmd) => {
+            // A memory mutation (inspector delete/edit-commit) re-emits only
+            // MemoryStatus; re-list so the open inspector refreshes its rows
+            // (FR-6, group 2 note).
+            let refresh_memory = matches!(cmd, Command::MemoryMutate { .. });
+            let _ = commands_tx.send(cmd).await;
+            if refresh_memory {
+                let _ = commands_tx.send(Command::MemoryList).await;
+            }
+        }
+        Action::NewSession => {
+            // Mint the id here so the view can update without a round trip; the
+            // engine adopts the same id.
+            let id = SessionId::new();
+            let _ = commands_tx
+                .send(Command::NewSession { session_id: id })
+                .await;
+            app.begin_new_session(id);
+        }
+        Action::ResumeSession(id) => {
+            switch_session(app, commands_tx, id).await;
+        }
+        Action::EditFile(path) => {
+            // Hand the terminal to $EDITOR (C-5): pause the input reader so the
+            // editor gets the keystrokes, leave the TUI, run the editor, then
+            // restore and redraw.
+            input_paused.store(true, Ordering::Relaxed);
+            guard.suspend()?;
+            let status = crate::edit::run_editor(&path);
+            guard.resume()?;
+            input_paused.store(false, Ordering::Relaxed);
+            let edited = matches!(status, crate::edit::EditStatus::Edited);
+            app.note_edit(&path, status);
+            // Apply the saved edit to the running session (C-5).
+            if edited {
+                let _ = commands_tx.send(Command::ReloadConfig).await;
+            }
+        }
+        Action::None => {}
+    }
+    Ok(false)
 }
 
 /// Perform the memory-edit `$EDITOR` handoff (FR-6, §4.6): stage the current

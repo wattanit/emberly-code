@@ -12,10 +12,11 @@ use emberly_core::{EntrySummary, Mode, SandboxStatus, SkillMeta, SkillOrigin, Ta
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, ChoiceRow, ConvItem, Overlay, OverlayContent, SessionRow};
+use crate::hit::{ClickTarget, HitMap, PermissionChoice};
 use crate::text;
 use crate::theme::Theme;
 use crate::{strings, strings::markers};
@@ -31,8 +32,12 @@ const GUTTER: u16 = 2;
 /// Inline diffs show at most this many rows before pointing at the overlay.
 const INLINE_DIFF_CAP: usize = 20;
 
-/// Draw one full frame.
-pub fn frame(f: &mut Frame, app: &App) {
+/// Draw one full frame, populating `hit` with the click regions of the topmost
+/// interactive layer (Design §3.4). `hit` is a fresh map each frame; the modal
+/// renderers ([`render_overlay`], [`render_palette`]) clear it before pushing
+/// their own regions, so it always reflects the layer that actually owns input
+/// — a click can never fall through a modal to the pane behind it.
+pub fn frame(f: &mut Frame, app: &App, hit: &mut HitMap) {
     let area = f.area();
     let sidebar_shown = app.sidebar_visible && area.width >= COLLAPSE_BELOW;
 
@@ -57,7 +62,7 @@ pub fn frame(f: &mut Frame, app: &App) {
     // area — no input box is shown, so nothing can be typed into a decision
     // (Design §5, §5.1). The permission prompt wins if somehow both are set.
     if app.pending_permission.is_some() {
-        render_permission(f, app, main);
+        render_permission(f, app, main, hit);
     } else if app.pending_ask.is_some() {
         render_ask(f, app, main);
     } else if app.pending_loop_halt.is_some() {
@@ -70,29 +75,38 @@ pub fn frame(f: &mut Frame, app: &App) {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(input_height)])
             .split(main);
-        render_conversation(f, app, main_rows[0]);
+        render_conversation(f, app, main_rows[0], hit);
         render_input(f, app, main_rows[1]);
     }
     if let Some(area) = sidebar {
-        render_sidebar(f, app, area);
+        // The sidebar's click regions are live only on the base layer — not
+        // while a permission/ask/loop prompt owns input (Design §3.4/§5). An
+        // overlay or palette clears the map afterward, covering those.
+        let base_active = app.pending_permission.is_none()
+            && app.pending_ask.is_none()
+            && app.pending_loop_halt.is_none();
+        render_sidebar(f, app, area, hit, base_active);
     }
     render_status(f, app, status, sidebar_shown);
 
     // Overlays draw last, on top of everything (Design §4.2).
     if let Some(overlay) = app.active_overlay() {
-        render_overlay(f, app, overlay, area);
+        render_overlay(f, app, overlay, area, hit);
     }
     // The command palette sits above overlays when open (Design §3.3).
     if app.palette.is_some() {
-        render_palette(f, app, area);
+        render_palette(f, app, area, hit);
     }
 }
 
 // ---- command palette -----------------------------------------------------
 
 /// Draw the command palette: a query line over a filtered, selectable list.
-fn render_palette(f: &mut Frame, app: &App, screen: Rect) {
+fn render_palette(f: &mut Frame, app: &App, screen: Rect, hit: &mut HitMap) {
     let theme = &app.theme;
+    // The palette is the topmost modal (Design §3.3): it owns the hit-map, so
+    // clear any regions the layers behind it pushed — no click-through.
+    hit.clear();
     let Some(palette) = &app.palette else {
         return;
     };
@@ -138,6 +152,19 @@ fn render_palette(f: &mut Frame, app: &App, screen: Rect) {
             Span::styled(spec.desc.to_string(), theme.chrome()),
             Span::styled(key, theme.chrome()),
         ]));
+        // Clickable region for this row (Design §3.4): `row` is the index into
+        // the filtered match list — exactly what `PaletteState::selected` holds
+        // — so a click maps to "select this row + palette Enter".
+        let y = inner.y + 1 + u16::try_from(row - top).unwrap_or(0);
+        hit.push(
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
+            ClickTarget::PaletteRow(row),
+        );
     }
     if matched.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -155,9 +182,36 @@ fn render_palette(f: &mut Frame, app: &App, screen: Rect) {
 
 // ---- overlay -------------------------------------------------------------
 
+/// Which selectable list an overlay row belongs to — selects the `ClickTarget`
+/// variant for a clicked overlay row (Design §3.4).
+#[derive(Clone, Copy)]
+enum RowKind {
+    Choice,
+    Session,
+    Memory,
+    Skill,
+}
+
+impl RowKind {
+    fn target(self, row: usize) -> ClickTarget {
+        match self {
+            RowKind::Choice => ClickTarget::ChoiceRow(row),
+            RowKind::Session => ClickTarget::SessionRow(row),
+            RowKind::Memory => ClickTarget::MemoryRow(row),
+            RowKind::Skill => ClickTarget::SkillRow(row),
+        }
+    }
+}
+
 /// Draw the active overlay as a centered, scrollable pane over the screen.
-fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
+fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect, hit: &mut HitMap) {
     let theme = &app.theme;
+    // An overlay is modal over the conversation/sidebar (Design §4.2): it owns
+    // the hit-map. Clear regions from the layers behind so a click cannot fall
+    // through to them; interactive overlays push their own rows below. (If the
+    // palette is also open it renders after this and clears again — palette on
+    // top.)
+    hit.clear();
     // Brief ease-in: the overlay expands from ~70% to its full 82% over a frame
     // or two (Design §6.4). Settled overlays render at full size.
     let p = app.overlay_ease_progress();
@@ -180,14 +234,22 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
     let body_w = usize::from(inner.width);
 
     // The picker keeps its selection in view (forced_scroll); read-only panes
-    // scroll freely, so their forced_scroll is None.
-    let (lines, forced_scroll, hint_base): (Vec<Line>, Option<usize>, String) = match &overlay
-        .content
-    {
+    // scroll freely, so their forced_scroll is None. `row_of_line`/`row_kind`
+    // drive click hit-testing (Design §3.4) — empty/None for read-only panes.
+    #[allow(clippy::type_complexity)]
+    let (lines, forced_scroll, hint_base, row_of_line, row_kind): (
+        Vec<Line>,
+        Option<usize>,
+        String,
+        Vec<Option<usize>>,
+        Option<RowKind>,
+    ) = match &overlay.content {
         OverlayContent::Diff(unified) => (
             crate::diffview::render_unified(unified, theme),
             None,
             " Esc close · ↑↓ PgUp/PgDn scroll".to_string(),
+            Vec::new(),
+            None,
         ),
         OverlayContent::Text(body) => (
             body.split('\n')
@@ -196,21 +258,27 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
                 .collect(),
             None,
             " Esc close · ↑↓ PgUp/PgDn scroll".to_string(),
+            Vec::new(),
+            None,
         ),
         OverlayContent::Sessions { rows, selected } => {
-            let (lines, sel_line) = session_picker_lines(rows, *selected, theme);
+            let (lines, sel_line, map) = session_picker_lines(rows, *selected, theme);
             (
                 lines,
                 Some(sel_line),
                 " Enter resume · ↑↓ move · Esc close".to_string(),
+                map,
+                Some(RowKind::Session),
             )
         }
         OverlayContent::Choices { rows, selected, .. } => {
-            let (lines, sel_line) = choice_picker_lines(rows, *selected, theme);
+            let (lines, sel_line, map) = choice_picker_lines(rows, *selected, theme);
             (
                 lines,
                 Some(sel_line),
                 " Enter select · ↑↓ move · Esc close".to_string(),
+                map,
+                Some(RowKind::Choice),
             )
         }
         OverlayContent::MemoryEntries {
@@ -219,7 +287,7 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
             selected,
             confirm_delete,
         } => {
-            let (lines, sel_line) = memory_inspector_lines(user, project, *selected, theme);
+            let (lines, sel_line, map) = memory_inspector_lines(user, project, *selected, theme);
             let hint = if *confirm_delete {
                 let name = user
                     .iter()
@@ -235,11 +303,17 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
             } else {
                 strings::memory::HINT.to_string()
             };
-            (lines, Some(sel_line), hint)
+            (lines, Some(sel_line), hint, map, Some(RowKind::Memory))
         }
         OverlayContent::SkillList { skills, selected } => {
-            let (lines, sel_line) = skill_list_lines(skills, *selected, theme);
-            (lines, Some(sel_line), strings::skills::HINT.to_string())
+            let (lines, sel_line, map) = skill_list_lines(skills, *selected, theme);
+            (
+                lines,
+                Some(sel_line),
+                strings::skills::HINT.to_string(),
+                map,
+                Some(RowKind::Skill),
+            )
         }
     };
 
@@ -257,7 +331,31 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
         height: inner.height - 1,
         ..inner
     };
+    let visible_len = visible.len();
     f.render_widget(Paragraph::new(visible), body_area);
+
+    // Clickable rows for a selectable-list overlay (Design §3.4). Each visible
+    // line maps to a logical row via `row_of_line` (`None` for headers/spacers);
+    // a click on a row-line maps to "select this row + picker Enter". Read-only
+    // panes (Diff/Text) have `row_kind == None` and push nothing (the clear
+    // above still blocks click-through).
+    if let Some(kind) = row_kind {
+        for offset in 0..visible_len {
+            let Some(Some(row)) = row_of_line.get(scroll + offset).copied() else {
+                continue; // a header/spacer line — not selectable
+            };
+            let y = body_area.y + u16::try_from(offset).unwrap_or(0);
+            hit.push(
+                Rect {
+                    x: body_area.x,
+                    y,
+                    width: body_area.width,
+                    height: 1,
+                },
+                kind.target(row),
+            );
+        }
+    }
 
     let more = if scroll < max_scroll {
         "  ↓ more"
@@ -273,21 +371,31 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
     f.render_widget(Paragraph::new(hint).style(theme.chrome()), hint_area);
 }
 
+/// The return of a selectable-list builder: the rendered `lines`, the selected
+/// row's line index (to scroll it into view), and `row_of_line` — the logical
+/// row each line maps to for click hit-testing (`None` for headers/spacers/empty
+/// messages), Design §3.4. `row_of_line.len() == lines.len()`.
+type PickerLines = (Vec<Line<'static>>, usize, Vec<Option<usize>>);
+
 /// Render the session picker as selectable rows (title + metadata), returning
-/// the lines and the line index of the selected row (so the pane can scroll it
-/// into view). The selected row is marked and accented.
+/// the lines, the line index of the selected row (so the pane can scroll it into
+/// view), and a per-line `row_of_line` map (which logical row each line belongs
+/// to, `None` for spacers) for click hit-testing (Design §3.4). The selected row
+/// is marked and accented.
 fn session_picker_lines(
     rows: &[SessionRow],
     selected: usize,
     theme: &crate::theme::Theme,
-) -> (Vec<Line<'static>>, usize) {
+) -> PickerLines {
     let mut lines: Vec<Line> = Vec::new();
+    let mut row_of_line: Vec<Option<usize>> = Vec::new();
     if rows.is_empty() {
         lines.push(Line::from(Span::styled(
             "No saved sessions yet.".to_string(),
             theme.chrome(),
         )));
-        return (lines, 0);
+        row_of_line.push(None);
+        return (lines, 0, row_of_line);
     }
     let mut sel_line = 0;
     for (i, row) in rows.iter().enumerate() {
@@ -308,6 +416,7 @@ fn session_picker_lines(
             title_spans.push(Span::styled("  (current)".to_string(), theme.success()));
         }
         lines.push(Line::from(title_spans));
+        row_of_line.push(Some(i));
         // A short id prefix — enough to recognise, matching `emberly resume`.
         let short = row.id.to_string();
         let short = short.get(..8).unwrap_or(&short);
@@ -315,20 +424,24 @@ fn session_picker_lines(
             format!("    {short} · {}", row.subtitle),
             theme.chrome(),
         )));
+        row_of_line.push(Some(i)); // clicking the metadata line selects the row too
         lines.push(Line::from(String::new()));
+        row_of_line.push(None); // spacer
     }
-    (lines, sel_line)
+    (lines, sel_line, row_of_line)
 }
 
 /// Render a generic choice picker (`/model`, C-6) as selectable rows, returning
-/// the lines and the selected line index (to scroll it into view). The active
+/// the lines, the selected line index (to scroll it into view), and the
+/// `row_of_line` map (one row per line here) for click hit-testing. The active
 /// choice is marked; the selected one is accented.
 fn choice_picker_lines(
     rows: &[ChoiceRow],
     selected: usize,
     theme: &crate::theme::Theme,
-) -> (Vec<Line<'static>>, usize) {
+) -> PickerLines {
     let mut lines: Vec<Line> = Vec::new();
+    let mut row_of_line: Vec<Option<usize>> = Vec::new();
     let mut sel_line = 0;
     for (i, row) in rows.iter().enumerate() {
         if i == selected {
@@ -348,8 +461,9 @@ fn choice_picker_lines(
             spans.push(Span::styled("  (current)".to_string(), theme.success()));
         }
         lines.push(Line::from(spans));
+        row_of_line.push(Some(i));
     }
-    (lines, sel_line)
+    (lines, sel_line, row_of_line)
 }
 
 /// Render the memory inspector (`/memory`, FR-6, Design §4.9): entries grouped
@@ -363,14 +477,16 @@ fn memory_inspector_lines(
     project: &[EntrySummary],
     selected: usize,
     theme: &crate::theme::Theme,
-) -> (Vec<Line<'static>>, usize) {
+) -> PickerLines {
     let mut lines: Vec<Line> = Vec::new();
+    let mut row_of_line: Vec<Option<usize>> = Vec::new();
     if user.is_empty() && project.is_empty() {
         lines.push(Line::from(Span::styled(
             strings::memory::EMPTY.to_string(),
             theme.chrome(),
         )));
-        return (lines, 0);
+        row_of_line.push(None);
+        return (lines, 0, row_of_line);
     }
     let mut sel_line = 0;
     // A running index over the flattened entry list, matched against `selected`.
@@ -383,6 +499,7 @@ fn memory_inspector_lines(
             continue;
         }
         lines.push(Line::from(Span::styled(header.to_string(), theme.chrome())));
+        row_of_line.push(None); // scope header
         for entry in entries {
             if gi == selected {
                 sel_line = lines.len();
@@ -404,11 +521,13 @@ fn memory_inspector_lines(
                 ));
             }
             lines.push(Line::from(spans));
+            row_of_line.push(Some(gi));
             gi += 1;
         }
         lines.push(Line::from(String::new()));
+        row_of_line.push(None); // spacer
     }
-    (lines, sel_line)
+    (lines, sel_line, row_of_line)
 }
 
 /// Render the skills inspector (`/skills`, FR-7, Design §4.9): the available
@@ -420,14 +539,16 @@ fn skill_list_lines(
     skills: &[SkillMeta],
     selected: usize,
     theme: &crate::theme::Theme,
-) -> (Vec<Line<'static>>, usize) {
+) -> PickerLines {
     let mut lines: Vec<Line> = Vec::new();
+    let mut row_of_line: Vec<Option<usize>> = Vec::new();
     if skills.is_empty() {
         lines.push(Line::from(Span::styled(
             strings::skills::EMPTY.to_string(),
             theme.chrome(),
         )));
-        return (lines, 0);
+        row_of_line.push(None);
+        return (lines, 0, row_of_line);
     }
     let mut sel_line = 0;
     for (i, skill) in skills.iter().enumerate() {
@@ -456,8 +577,9 @@ fn skill_list_lines(
         }
         spans.push(Span::styled(format!("  ({origin})"), theme.chrome()));
         lines.push(Line::from(spans));
+        row_of_line.push(Some(i));
     }
-    (lines, sel_line)
+    (lines, sel_line, row_of_line)
 }
 
 /// A rectangle centered in `area` at the given width/height percentages.
@@ -473,7 +595,7 @@ fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
 
 // ---- conversation --------------------------------------------------------
 
-fn render_conversation(f: &mut Frame, app: &App, area: Rect) {
+fn render_conversation(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
     let theme = &app.theme;
 
     // No pane title — the wordmark lives in the sidebar. The conversation is a
@@ -486,14 +608,36 @@ fn render_conversation(f: &mut Frame, app: &App, area: Rect) {
     let height = usize::from(inner.height);
 
     // Pre-wrap the whole conversation to the pane width (Thai-safe, via the
-    // text engine) so scroll math counts real display rows.
-    let lines = conversation_lines(app, width);
+    // text engine) so scroll math counts real display rows. `reasoning_line`
+    // comes back as the line index of the *most recent* reasoning header — the
+    // one Ctrl+R toggles — so a click on it can mirror that key (Design §3.4).
+    let mut reasoning_line: Option<usize> = None;
+    let lines = conversation_lines(app, width, &mut reasoning_line);
     let total = lines.len();
     let max_scroll = total.saturating_sub(height);
     let scroll = app.scroll.min(max_scroll);
     let end = total - scroll;
     let start = end.saturating_sub(height);
     let visible: Vec<Line> = lines[start..end].to_vec();
+
+    // The collapsed/expanded reasoning trail is clickable when it is on screen
+    // (Design §3.4): a click toggles it exactly as Ctrl+R does. The conversation
+    // is pre-wrapped (one line == one screen row), so the screen row is simply
+    // the line's offset from the top of the visible window.
+    if let Some(idx) = reasoning_line {
+        if idx >= start && idx < end {
+            let y = inner.y + u16::try_from(idx - start).unwrap_or(0);
+            hit.push(
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 1,
+                },
+                ClickTarget::ReasoningToggle,
+            );
+        }
+    }
 
     // A dim hint when scrolled up, so it is obvious there is newer content.
     let block = if scroll > 0 {
@@ -505,8 +649,15 @@ fn render_conversation(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(visible), inner);
 }
 
-/// Flatten the conversation into styled, pre-wrapped display rows.
-fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+/// Flatten the conversation into styled, pre-wrapped display rows. `reasoning_line`
+/// is set to the line index of the **most recent** reasoning header (for click
+/// hit-testing, Design §3.4) — it is overwritten on each reasoning item so it
+/// ends pointing at the last one, matching `toggle_reasoning`/Ctrl+R.
+fn conversation_lines(
+    app: &App,
+    width: usize,
+    reasoning_line: &mut Option<usize>,
+) -> Vec<Line<'static>> {
     let theme = &app.theme;
     let mut out: Vec<Line<'static>> = Vec::new();
     let w = width.max(1);
@@ -541,6 +692,9 @@ fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                         format!("reasoning ({lines} lines)"),
                     )
                 };
+                // Record this header's line index; the last one wins, matching
+                // Ctrl+R's "toggle the most recent reasoning" (Design §3.4).
+                *reasoning_line = Some(out.len());
                 out.push(Line::from(vec![Span::styled(
                     format!("{mark} {label}"),
                     theme.chrome(),
@@ -719,7 +873,7 @@ fn push_wrapped(
 
 // ---- sidebar -------------------------------------------------------------
 
-fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
+fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, interactive: bool) {
     let theme = &app.theme;
     let block = Block::default()
         .borders(Borders::LEFT)
@@ -729,6 +883,12 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
 
     let w = usize::from(inner.width).saturating_sub(1);
     let mut lines: Vec<Line> = Vec::new();
+    // Line-index ranges of the clickable sections, filled as they are built.
+    // The sidebar renders **without wrap** (each logical line is one screen row),
+    // so a range `[start, end)` maps directly to screen rows for hit-testing.
+    let mut modified_range: Option<(usize, usize)> = None;
+    let mut memory_range: Option<(usize, usize)> = None;
+    let mut skills_range: Option<(usize, usize)> = None;
 
     // Wordmark + version (Design §1.1): ember `emberly`, dimmed `code` + version.
     // While the model is working, the wordmark breathes — the ember glowing
@@ -822,6 +982,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(""));
 
     // Modified files (Design §3.1): path + add/remove counts.
+    let modified_start = lines.len();
     lines.push(Line::from(Span::styled(
         strings::status::MODIFIED_FILES_TITLE,
         theme.chrome(),
@@ -829,6 +990,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
     if app.modified_files.is_empty() {
         lines.push(Line::from(Span::styled("  —", theme.chrome())));
     } else {
+        // Clickable → open the diff (Ctrl+O twin); range set after the rows.
         let last = app.modified_files.len() - 1;
         for (i, file) in app.modified_files.iter().enumerate() {
             let counts = format!(" +{} -{}", file.adds, file.dels);
@@ -845,6 +1007,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(format!(" -{}", file.dels), theme.diff_del()),
             ]));
         }
+        modified_range = Some((modified_start, lines.len()));
     }
 
     // Task list (T-11, Design §3.1/§4.7): one line per item with a status
@@ -870,11 +1033,13 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
     // bodies. An empty store shows no section (Design §3.1).
     if app.memory_user > 0 || app.memory_project > 0 {
         lines.push(Line::from(""));
+        let start = lines.len();
         lines.push(Line::from(Span::styled("Memory", theme.chrome())));
         lines.push(Line::from(Span::styled(
             format!("user {} · project {}", app.memory_user, app.memory_project),
             theme.primary(),
         )));
+        memory_range = Some((start, lines.len())); // clickable → open /memory
     }
 
     // Skills catalog (T-15, FR-7, Design §4.9): name, description, and origin
@@ -882,6 +1047,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
     // catalog shows no section (Design §3.1). No color-only signal (Design §7).
     if !app.skills.is_empty() {
         lines.push(Line::from(""));
+        let start = lines.len();
         lines.push(Line::from(Span::styled("Skills", theme.chrome())));
         for skill in &app.skills {
             let origin = match skill.origin {
@@ -893,11 +1059,46 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 format!("{} — {} ({})", skill.name, skill.description, origin)
             };
-            lines.push(Line::from(Span::styled(desc, theme.primary())));
+            // `fit` so the row stays one screen line (the sidebar no longer
+            // wraps — see below); the full text is in the `/skills` inspector.
+            lines.push(Line::from(Span::styled(fit(&desc, w), theme.primary())));
         }
+        skills_range = Some((start, lines.len())); // clickable → open /skills
     }
 
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // Render **without wrap** so each logical line is exactly one screen row
+    // (ratatui truncates overflow) — this is what makes the sidebar's click
+    // regions reliable (Design §3.4): line index `i` sits at screen row
+    // `inner.y + i`. Long values are already `fit`-truncated above.
+    f.render_widget(Paragraph::new(lines), inner);
+
+    // Register the clickable sidebar sections (Design §3.4), each a parity-safe
+    // shortcut for an existing action. Only on the base layer (`interactive`);
+    // a modal on top clears/owns the map. A section is clickable only for the
+    // rows actually drawn (line index < inner.height).
+    if interactive {
+        let mut push_section = |range: Option<(usize, usize)>, target: ClickTarget| {
+            let Some((start, end)) = range else { return };
+            let vis_end = end.min(usize::from(inner.height));
+            if start >= vis_end {
+                return; // scrolled/clipped off the drawn area
+            }
+            let y = inner.y + u16::try_from(start).unwrap_or(0);
+            let height = u16::try_from(vis_end - start).unwrap_or(0);
+            hit.push(
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height,
+                },
+                target,
+            );
+        };
+        push_section(modified_range, ClickTarget::OpenDiff);
+        push_section(memory_range, ClickTarget::OpenMemoryInspector);
+        push_section(skills_range, ClickTarget::OpenSkillsInspector);
+    }
 }
 
 /// A `label value` sidebar line, value truncated to fit.
@@ -1059,8 +1260,12 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
 /// over a pinned footer of choices. Deny is the default and the meaning of
 /// Enter/Esc; allow (`y`/`s`) is deliberate. Nothing auto-scrolls, nothing is
 /// truncated to fit, and no timer approves — see `App::on_permission_key`.
-fn render_permission(f: &mut Frame, app: &App, area: Rect) {
+fn render_permission(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
     let theme = &app.theme;
+    // The prompt is modal and safety-critical (Design §5): it owns the hit-map.
+    // Clear anything behind it (no click-through to the conversation/sidebar),
+    // then register **only** the footer affordances below.
+    hit.clear();
     let Some((_, r)) = &app.pending_permission else {
         return;
     };
@@ -1162,6 +1367,36 @@ fn render_permission(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(footer_lines(theme, hidden_below)),
         footer_area,
     );
+
+    // Register the footer affordances as click targets (Design §3.4/§5). The
+    // choices are the *second* footer row. Only the affordance **text** is
+    // clickable — the padding between them is left inert, so a stray click near
+    // Allow does nothing (a click approves only when it lands squarely on the
+    // affordance). Each dispatches through `on_permission_key`, identical to its
+    // key; a click anywhere else on the prompt resolves to nothing (inert).
+    let choices_y = footer_area.y + 1;
+    if choices_y < footer_area.y + footer_area.height {
+        let right = footer_area.x.saturating_add(footer_area.width);
+        let mut x = footer_area.x;
+        for (label, choice) in permission_affordance_labels() {
+            let full_w = u16::try_from(text::width(&label)).unwrap_or(0);
+            let core_w = u16::try_from(text::width(label.trim_end())).unwrap_or(0);
+            // Clamp the clickable width to what is actually on screen.
+            let width = core_w.min(right.saturating_sub(x));
+            if x < right && width > 0 {
+                hit.push(
+                    Rect {
+                        x,
+                        y: choices_y,
+                        width,
+                        height: 1,
+                    },
+                    ClickTarget::PermissionChoice(choice),
+                );
+            }
+            x = x.saturating_add(full_w);
+        }
+    }
 }
 
 // ---- question prompt — the model asking your opinion (Design §5.1) --------
@@ -1346,21 +1581,34 @@ fn footer_lines(theme: &Theme, hidden_below: usize) -> Vec<Line<'static>> {
     } else {
         Line::from(Span::styled("— end of content —", theme.chrome()))
     };
+    let [allow, session, deny] = permission_affordance_labels();
     let choices = Line::from(vec![
-        Span::styled(
-            format!("[y] {}   ", strings::permission::ALLOW_ONCE),
-            theme.success(),
-        ),
-        Span::styled(
-            format!("[s] {}   ", strings::permission::ALLOW_SESSION),
-            theme.success(),
-        ),
-        Span::styled(
-            format!("[Enter] {}", strings::permission::DENY),
-            theme.error(),
-        ),
+        Span::styled(allow.0, theme.success()),
+        Span::styled(session.0, theme.success()),
+        Span::styled(deny.0, theme.error()),
     ]);
     vec![notice, choices]
+}
+
+/// The permission footer affordance labels, in render order (Allow, Session,
+/// Deny). One source of truth so the click hit-regions (Design §3.4) line up
+/// exactly with the rendered text (`render_permission`), and so the affordances
+/// can never drift from what `on_permission_key` accepts.
+fn permission_affordance_labels() -> [(String, PermissionChoice); 3] {
+    [
+        (
+            format!("[y] {}   ", strings::permission::ALLOW_ONCE),
+            PermissionChoice::Allow,
+        ),
+        (
+            format!("[s] {}   ", strings::permission::ALLOW_SESSION),
+            PermissionChoice::Session,
+        ),
+        (
+            format!("[Enter] {}", strings::permission::DENY),
+            PermissionChoice::Deny,
+        ),
+    ]
 }
 
 /// Heuristic: a unified diff begins with a `--- ` file header.
@@ -1474,7 +1722,8 @@ mod tests {
     /// screen row per line), for asserting what actually appears on screen.
     fn draw(app: &App, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).expect("backend");
-        term.draw(|f| frame(f, app)).expect("draw");
+        let mut hit = HitMap::new();
+        term.draw(|f| frame(f, app, &mut hit)).expect("draw");
         let buf = term.backend().buffer();
         let width = usize::from(buf.area.width);
         buf.content
@@ -1489,6 +1738,191 @@ mod tests {
             .join("\n")
     }
 
+    /// Render a full frame and return the click hit-map it built, so tests can
+    /// assert which screen positions resolve to which targets (Design §3.4).
+    fn hit_map_of(app: &App, w: u16, h: u16) -> HitMap {
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("backend");
+        let mut hit = HitMap::new();
+        term.draw(|f| frame(f, app, &mut hit)).expect("draw");
+        hit
+    }
+
+    #[test]
+    fn palette_rows_populate_the_hit_map() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.palette = Some(crate::app::PaletteState::default());
+        let hit = hit_map_of(&app, 100, 24);
+        // The first two filtered rows are clickable at consecutive screen rows.
+        let y0 = (0..24).find(|&y| hit.hit(50, y) == Some(ClickTarget::PaletteRow(0)));
+        let y1 = (0..24).find(|&y| hit.hit(50, y) == Some(ClickTarget::PaletteRow(1)));
+        assert!(y0.is_some(), "palette row 0 is clickable");
+        assert_eq!(
+            y1,
+            y0.map(|y| y + 1),
+            "consecutive rows occupy adjacent screen rows"
+        );
+    }
+
+    #[test]
+    fn choice_picker_rows_populate_the_hit_map() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.overlays.push(Overlay {
+            title: "permission mode".into(),
+            content: OverlayContent::Choices {
+                kind: crate::app::ChoiceKind::Mode,
+                rows: vec![
+                    ChoiceRow {
+                        label: "normal".into(),
+                        current: true,
+                    },
+                    ChoiceRow {
+                        label: "auto-accept edits".into(),
+                        current: false,
+                    },
+                ],
+                selected: 0,
+            },
+            scroll: 0,
+        });
+        let hit = hit_map_of(&app, 100, 24);
+        let y0 = (0..24).find(|&y| hit.hit(50, y) == Some(ClickTarget::ChoiceRow(0)));
+        let y1 = (0..24).find(|&y| hit.hit(50, y) == Some(ClickTarget::ChoiceRow(1)));
+        assert!(y0.is_some(), "choice row 0 is clickable");
+        assert_eq!(y1, y0.map(|y| y + 1), "choice rows are adjacent");
+    }
+
+    #[test]
+    fn memory_inspector_rows_populate_the_hit_map() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.apply_event(emberly_core::UiEvent::MemoryEntries {
+            user: vec![EntrySummary {
+                name: "Alpha".into(),
+                description: "a".into(),
+                type_: None,
+                scope: emberly_core::MemoryScope::User,
+            }],
+            project: vec![EntrySummary {
+                name: "Proj".into(),
+                description: "p".into(),
+                type_: None,
+                scope: emberly_core::MemoryScope::Project,
+            }],
+        });
+        let hit = hit_map_of(&app, 100, 24);
+        // The two entries (flattened user-then-project) are clickable; the scope
+        // header lines resolve to nothing.
+        let r0 = (0..24).find_map(|y| match hit.hit(50, y) {
+            Some(ClickTarget::MemoryRow(r)) => Some(r),
+            _ => None,
+        });
+        let rows: Vec<usize> = (0..24)
+            .filter_map(|y| match hit.hit(50, y) {
+                Some(ClickTarget::MemoryRow(r)) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(r0, Some(0), "the first entry is clickable");
+        assert!(rows.contains(&1), "the project entry (row 1) is clickable");
+    }
+
+    #[test]
+    fn reasoning_trail_is_clickable() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.apply_event(emberly_core::UiEvent::ReasoningDelta {
+            text: "why".into(),
+        });
+        app.apply_event(emberly_core::UiEvent::AssistantDelta { text: "a".into() });
+        let hit = hit_map_of(&app, 100, 24);
+        let found = (0..24).any(|y| {
+            (0..100).any(|x| hit.hit(x, y) == Some(ClickTarget::ReasoningToggle))
+        });
+        assert!(found, "the collapsed reasoning line is clickable");
+    }
+
+    #[test]
+    fn sidebar_sections_populate_the_hit_map() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.modified_files.push(crate::app::ModifiedFile {
+            path: "src/x.rs".into(),
+            adds: 3,
+            dels: 1,
+        });
+        app.memory_user = 2;
+        app.memory_project = 1;
+        app.skills.push(SkillMeta {
+            name: "review".into(),
+            description: "d".into(),
+            origin: SkillOrigin::User,
+        });
+        // Wide enough for the sidebar to show (>= COLLAPSE_BELOW).
+        let hit = hit_map_of(&app, 120, 40);
+        let has = |t: ClickTarget| (0..40).any(|y| (0..120).any(|x| hit.hit(x, y) == Some(t)));
+        assert!(has(ClickTarget::OpenDiff), "modified files → open diff");
+        assert!(has(ClickTarget::OpenMemoryInspector), "Memory → inspector");
+        assert!(has(ClickTarget::OpenSkillsInspector), "Skills → inspector");
+    }
+
+    #[test]
+    fn sidebar_is_not_clickable_behind_a_permission_prompt() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.memory_user = 1;
+        pending(&mut app, false, "rm -rf build"); // a permission prompt owns input
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40).all(|y| (0..120)
+                .all(|x| hit.hit(x, y) != Some(ClickTarget::OpenMemoryInspector))),
+            "the sidebar is inert while a permission decision is pending (§5)"
+        );
+    }
+
+    #[test]
+    fn a_read_only_overlay_blocks_click_through() {
+        // A Text overlay is read-only: it clears the hit-map (no click-through
+        // to the conversation behind) and pushes no rows.
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.open_text_overlay("t", "some body text");
+        let hit = hit_map_of(&app, 100, 24);
+        assert!(
+            (0..24).all(|y| (0..100).all(|x| hit.hit(x, y).is_none())),
+            "nothing under a read-only overlay is clickable"
+        );
+    }
+
     fn pending(app: &mut App, outside_root: bool, detail: &str) {
         app.apply_event(UiEvent::PermissionRequest {
             id: PermissionId(1),
@@ -1501,6 +1935,28 @@ mod tests {
                 reason: "bash requires approval".into(),
             },
         });
+    }
+
+    #[test]
+    fn permission_affordances_are_the_only_click_targets() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        // A body with content below the fold, so the "more below" notice shows.
+        pending(&mut app, false, "line1\nline2\nline3\nline4\nline5\nline6");
+        let hit = hit_map_of(&app, 100, 24);
+        let has = |c: PermissionChoice| {
+            (0..24).any(|y| (0..100).any(|x| hit.hit(x, y) == Some(ClickTarget::PermissionChoice(c))))
+        };
+        assert!(has(PermissionChoice::Allow), "Allow affordance clickable");
+        assert!(has(PermissionChoice::Session), "Session affordance clickable");
+        assert!(has(PermissionChoice::Deny), "Deny affordance clickable");
+        // The header/body is inert — no click-through, no click-to-approve, and
+        // no click-to-scroll (Design §5). Row 3 is well inside the header/body.
+        assert_eq!(hit.hit(40, 3), None, "the prompt body/header is not clickable");
     }
 
     #[test]
@@ -1820,7 +2276,8 @@ mod tests {
             text: "aaaa bbbb cccc".into(),
         });
         // Width 6 forces three rows.
-        let lines = conversation_lines(&app, 6);
+        let mut reasoning_line = None;
+        let lines = conversation_lines(&app, 6, &mut reasoning_line);
         assert_eq!(lines.len(), 3);
     }
 
