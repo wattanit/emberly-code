@@ -12,7 +12,7 @@ use emberly_core::{EntrySummary, Mode, SandboxStatus, SkillMeta, SkillOrigin, Ta
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, ChoiceRow, ConvItem, Overlay, OverlayContent, SessionRow};
@@ -79,7 +79,13 @@ pub fn frame(f: &mut Frame, app: &App, hit: &mut HitMap) {
         render_input(f, app, main_rows[1]);
     }
     if let Some(area) = sidebar {
-        render_sidebar(f, app, area);
+        // The sidebar's click regions are live only on the base layer — not
+        // while a permission/ask/loop prompt owns input (Design §3.4/§5). An
+        // overlay or palette clears the map afterward, covering those.
+        let base_active = app.pending_permission.is_none()
+            && app.pending_ask.is_none()
+            && app.pending_loop_halt.is_none();
+        render_sidebar(f, app, area, hit, base_active);
     }
     render_status(f, app, status, sidebar_shown);
 
@@ -867,7 +873,7 @@ fn push_wrapped(
 
 // ---- sidebar -------------------------------------------------------------
 
-fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
+fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, interactive: bool) {
     let theme = &app.theme;
     let block = Block::default()
         .borders(Borders::LEFT)
@@ -877,6 +883,12 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
 
     let w = usize::from(inner.width).saturating_sub(1);
     let mut lines: Vec<Line> = Vec::new();
+    // Line-index ranges of the clickable sections, filled as they are built.
+    // The sidebar renders **without wrap** (each logical line is one screen row),
+    // so a range `[start, end)` maps directly to screen rows for hit-testing.
+    let mut modified_range: Option<(usize, usize)> = None;
+    let mut memory_range: Option<(usize, usize)> = None;
+    let mut skills_range: Option<(usize, usize)> = None;
 
     // Wordmark + version (Design §1.1): ember `emberly`, dimmed `code` + version.
     // While the model is working, the wordmark breathes — the ember glowing
@@ -970,6 +982,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(""));
 
     // Modified files (Design §3.1): path + add/remove counts.
+    let modified_start = lines.len();
     lines.push(Line::from(Span::styled(
         strings::status::MODIFIED_FILES_TITLE,
         theme.chrome(),
@@ -977,6 +990,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
     if app.modified_files.is_empty() {
         lines.push(Line::from(Span::styled("  —", theme.chrome())));
     } else {
+        // Clickable → open the diff (Ctrl+O twin); range set after the rows.
         let last = app.modified_files.len() - 1;
         for (i, file) in app.modified_files.iter().enumerate() {
             let counts = format!(" +{} -{}", file.adds, file.dels);
@@ -993,6 +1007,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(format!(" -{}", file.dels), theme.diff_del()),
             ]));
         }
+        modified_range = Some((modified_start, lines.len()));
     }
 
     // Task list (T-11, Design §3.1/§4.7): one line per item with a status
@@ -1018,11 +1033,13 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
     // bodies. An empty store shows no section (Design §3.1).
     if app.memory_user > 0 || app.memory_project > 0 {
         lines.push(Line::from(""));
+        let start = lines.len();
         lines.push(Line::from(Span::styled("Memory", theme.chrome())));
         lines.push(Line::from(Span::styled(
             format!("user {} · project {}", app.memory_user, app.memory_project),
             theme.primary(),
         )));
+        memory_range = Some((start, lines.len())); // clickable → open /memory
     }
 
     // Skills catalog (T-15, FR-7, Design §4.9): name, description, and origin
@@ -1030,6 +1047,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
     // catalog shows no section (Design §3.1). No color-only signal (Design §7).
     if !app.skills.is_empty() {
         lines.push(Line::from(""));
+        let start = lines.len();
         lines.push(Line::from(Span::styled("Skills", theme.chrome())));
         for skill in &app.skills {
             let origin = match skill.origin {
@@ -1041,11 +1059,46 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 format!("{} — {} ({})", skill.name, skill.description, origin)
             };
-            lines.push(Line::from(Span::styled(desc, theme.primary())));
+            // `fit` so the row stays one screen line (the sidebar no longer
+            // wraps — see below); the full text is in the `/skills` inspector.
+            lines.push(Line::from(Span::styled(fit(&desc, w), theme.primary())));
         }
+        skills_range = Some((start, lines.len())); // clickable → open /skills
     }
 
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // Render **without wrap** so each logical line is exactly one screen row
+    // (ratatui truncates overflow) — this is what makes the sidebar's click
+    // regions reliable (Design §3.4): line index `i` sits at screen row
+    // `inner.y + i`. Long values are already `fit`-truncated above.
+    f.render_widget(Paragraph::new(lines), inner);
+
+    // Register the clickable sidebar sections (Design §3.4), each a parity-safe
+    // shortcut for an existing action. Only on the base layer (`interactive`);
+    // a modal on top clears/owns the map. A section is clickable only for the
+    // rows actually drawn (line index < inner.height).
+    if interactive {
+        let mut push_section = |range: Option<(usize, usize)>, target: ClickTarget| {
+            let Some((start, end)) = range else { return };
+            let vis_end = end.min(usize::from(inner.height));
+            if start >= vis_end {
+                return; // scrolled/clipped off the drawn area
+            }
+            let y = inner.y + u16::try_from(start).unwrap_or(0);
+            let height = u16::try_from(vis_end - start).unwrap_or(0);
+            hit.push(
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height,
+                },
+                target,
+            );
+        };
+        push_section(modified_range, ClickTarget::OpenDiff);
+        push_section(memory_range, ClickTarget::OpenMemoryInspector);
+        push_section(skills_range, ClickTarget::OpenSkillsInspector);
+    }
 }
 
 /// A `label value` sidebar line, value truncated to fit.
@@ -1757,6 +1810,52 @@ mod tests {
             (0..100).any(|x| hit.hit(x, y) == Some(ClickTarget::ReasoningToggle))
         });
         assert!(found, "the collapsed reasoning line is clickable");
+    }
+
+    #[test]
+    fn sidebar_sections_populate_the_hit_map() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.modified_files.push(crate::app::ModifiedFile {
+            path: "src/x.rs".into(),
+            adds: 3,
+            dels: 1,
+        });
+        app.memory_user = 2;
+        app.memory_project = 1;
+        app.skills.push(SkillMeta {
+            name: "review".into(),
+            description: "d".into(),
+            origin: SkillOrigin::User,
+        });
+        // Wide enough for the sidebar to show (>= COLLAPSE_BELOW).
+        let hit = hit_map_of(&app, 120, 40);
+        let has = |t: ClickTarget| (0..40).any(|y| (0..120).any(|x| hit.hit(x, y) == Some(t)));
+        assert!(has(ClickTarget::OpenDiff), "modified files → open diff");
+        assert!(has(ClickTarget::OpenMemoryInspector), "Memory → inspector");
+        assert!(has(ClickTarget::OpenSkillsInspector), "Skills → inspector");
+    }
+
+    #[test]
+    fn sidebar_is_not_clickable_behind_a_permission_prompt() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.memory_user = 1;
+        pending(&mut app, false, "rm -rf build"); // a permission prompt owns input
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40).all(|y| (0..120)
+                .all(|x| hit.hit(x, y) != Some(ClickTarget::OpenMemoryInspector))),
+            "the sidebar is inert while a permission decision is pending (§5)"
+        );
     }
 
     #[test]

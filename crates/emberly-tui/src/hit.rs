@@ -37,6 +37,16 @@ pub enum ClickTarget {
     /// The collapsed/expanded reasoning-trail line in the conversation. Click =
     /// toggle it, exactly as Ctrl+R does (`toggle_reasoning`).
     ReasoningToggle,
+    /// The sidebar's modified-files list. Click = open the diff overlay, exactly
+    /// as Ctrl+O does (`open_last_diff`) — parity-safe (per-file open has no
+    /// keyboard twin, so any click opens the same view the key does).
+    OpenDiff,
+    /// The sidebar's Memory section. Click = open the memory inspector, exactly
+    /// as `/memory` does (palette-reachable, §3.3).
+    OpenMemoryInspector,
+    /// The sidebar's Skills section. Click = open the skills inspector, exactly
+    /// as `/skills` does.
+    OpenSkillsInspector,
 }
 
 /// A per-frame map from screen rectangles to click targets, rebuilt every draw

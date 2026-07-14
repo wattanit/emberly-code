@@ -1126,6 +1126,19 @@ impl App {
                 self.toggle_reasoning();
                 Action::None
             }
+            ClickTarget::OpenDiff => {
+                // Exactly the Ctrl+O action — open the most-recent diff overlay.
+                self.open_last_diff();
+                Action::None
+            }
+            ClickTarget::OpenMemoryInspector => {
+                // Exactly the `/memory` action (palette-reachable, §3.3).
+                self.run_command(AppCommand::Memory)
+            }
+            ClickTarget::OpenSkillsInspector => {
+                // Exactly the `/skills` action.
+                self.run_command(AppCommand::Skills)
+            }
         }
     }
 
@@ -3178,6 +3191,38 @@ mod tests {
             click_action, key_action,
             "clicking a memory entry == arrow + Enter"
         );
+    }
+
+    #[test]
+    fn click_sidebar_sections_match_their_keyboard_actions() {
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+
+        // Memory section → the `/memory` command (palette twin, §3.3).
+        let mut a = app();
+        a.hit_map.push(region, ClickTarget::OpenMemoryInspector);
+        let click = a.on_click(0, 0);
+        assert_eq!(click, app().run_command(AppCommand::Memory));
+
+        // Skills section → the `/skills` command.
+        let mut a = app();
+        a.hit_map.push(region, ClickTarget::OpenSkillsInspector);
+        let click = a.on_click(0, 0);
+        assert_eq!(click, app().run_command(AppCommand::Skills));
+
+        // Modified-files section → Ctrl+O (open the diff overlay). With no diff
+        // recorded both are inert, and both open the same overlay when one is.
+        let mut by_click = app();
+        by_click.hit_map.push(region, ClickTarget::OpenDiff);
+        let click = by_click.on_click(0, 0);
+        let mut by_key = app();
+        let key = by_key.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert_eq!(click, key, "clicking modified files == Ctrl+O");
+        assert_eq!(by_click.overlays.len(), by_key.overlays.len());
     }
 
     #[test]
