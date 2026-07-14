@@ -4634,3 +4634,37 @@ async fn adopt_session_reemits_memory_status() {
 
     let _ = std::fs::remove_dir_all(&sessions_dir);
 }
+
+#[tokio::test]
+async fn inspect_skill_untrusted_project_emits_notice_not_body() {
+    // FR-1: a project skill under an untrusted root is neither cataloged nor
+    // invocable — the inspector's InspectSkill returns a Notice, never a body,
+    // even though the SKILL.md exists on disk.
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    let project_dir = skill_temp_dir("p");
+    write_skill(&project_dir, "proj-only", "Project skill", "secret instructions");
+
+    let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
+    // project_dir = None simulates an untrusted root: the skill is on disk but
+    // the engine's catalog never sees it.
+    let config = skills_config(fake, root, user_dir, None);
+    let mut h = spawn(config);
+    let _ = h.collect(None).await; // drain session-start events
+
+    h.send(Command::InspectSkill {
+        name: "proj-only".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        !events.iter().any(|e| matches!(e, UiEvent::SkillBody { .. })),
+        "no SkillBody for a project skill on an untrusted root (FR-1)"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::Notice { message } if message.contains("proj-only"))),
+        "a Notice explains the skill is unavailable"
+    );
+}

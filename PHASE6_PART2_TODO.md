@@ -96,10 +96,10 @@ And the FR-6 mandate:
 | 2. TUI→engine command + event plumbing: new `Command`/`UiEvent` variants; adopt_session fix (`emberly-core`) | [x] | idle-loop handlers; shared `execute_memory_op`; adopt_session `MemoryStatus` fix; 7 round-trip tests |
 | 3. Memory inspector overlay: `/memory`, grouped list, view/edit/delete (`emberly-tui`) | [x] | `OverlayContent::MemoryEntries`; view/edit(`$EDITOR`→`Update`)/confirmed-delete; +`MemoryView`/`MemoryBody`; 9 app tests |
 | 4. Skills inspector overlay: `/skills`, list, read-only body (`emberly-tui`) | [x] | `OverlayContent::SkillList` from cached catalog; Enter→`InspectSkill`→read-only body+resources; origin per row; 6 app tests |
-| 5. Degraded parity + rendering + strings (`emberly-tui`) | [ ] | overlays are rich-only; define plain-mode `/memory` `/skills` behavior |
-| 6. Tests (offline — §14.7) + exit criterion (`emberly-core`, `emberly-tui`) | [ ] | round-trips, trust-absence, delete-confirm, body-not-pinned preserved |
+| 5. Degraded parity + rendering + strings (`emberly-tui`) | [x] | plain `/memory`+`/skills`: list/view inline + confirmed delete; edit rich-only (see log); ASCII, 7 line tests |
+| 6. Tests (offline — §14.7) + exit criterion (`emberly-core`, `emberly-tui`) | [x] | round-trips, trust-absence (memory+skills), delete-confirm, body-not-pinned, degraded parity — all green; no new deps |
 
-**Overall Phase 6 Part 2: Groups 1–4 done; Groups 5–6 remain (degraded parity + strings, and the offline test suite / exit criterion — engine round-trips and rich-TUI tests already landed alongside their groups).**
+**Overall Phase 6 Part 2: COMPLETE (Groups 1–6). Rich `/memory` (list/view/edit/delete) and `/skills` (list/view read-only) inspectors, degraded-mode inspection + confirmed delete inline, `adopt_session` MemoryStatus fix; offline suite green (22 suites, 0 failures), workspace lib clippy clean, no new dependency (HC-2). Design §4.9 is realized; Phase 6's sidebar-click target is now wireable.**
 
 ---
 
@@ -198,21 +198,21 @@ And the FR-6 mandate:
 
 ## 5. Degraded parity + rendering + strings  *(Design §7, §4.9)*
 
-- [ ] **Overlay rendering.** Grouped memory list + skill list reuse the selectable-list
-      render (`render.rs:184`, session/choice pattern); the skill body + memory-view reuse
-      the `Text` wrap+scroll render. Scope/origin headers are dimmed chrome, not accent
-      (§2); status/keys ("[Enter] view · [e] edit · [d] delete · [Esc] close") go through the
-      strings module, not inline literals.
-- [ ] **Degraded / plain mode (§7).** Overlays are a **rich-TUI** affordance; the plain
-      frontend (`line.rs`) is append-only with no overlays. **Decide (notes log):** in plain
-      mode, `/memory` and `/skills` print the list inline (append-only, read-only text), and
-      skill-body / memory-view print inline too; **edit still works via `$EDITOR`** (it
-      suspends the TUI regardless of mode) but **delete is confirmed inline**. Lean to:
-      degraded gives full *inspection* inline (parity with §4.9's "inspectable") and keeps
-      edit/delete available via the same commands, since FR-6's inspect/edit/delete is a
-      requirement, not a rich-only nicety. Do not make inspection rich-only.
-- [ ] All new strings centralized (Tech Spec §9 strings rule); ASCII-safe in degraded mode
-      (no color-only meaning, §7).
+- [x] **Overlay rendering.** Grouped memory list + skill list use the selectable-list render
+      pattern (`memory_inspector_lines`/`skill_list_lines` in `render.rs`); the skill body +
+      memory-view reuse the `Text` wrap+scroll render. Scope/origin headers are dimmed chrome,
+      not accent (§2); the action/confirm hints go through `strings::memory`/`strings::skills`,
+      not inline literals.
+- [x] **Degraded / plain mode (§7).** Plain frontend (`line.rs`) prints `/memory` (list),
+      `/memory <name>` (view), and `/skills` (list) / `/skills <name>` (view) **inline,
+      read-only, ASCII** — inspection is not rich-only. Memory **delete is confirmed inline**
+      (`/memory delete <name>` → y/N via `Pending::MemoryDelete` → engine `MemoryMutate`).
+      **Edit is rich-only** (deviation from the original lean — see log): the plain frontend
+      deliberately never launches `$EDITOR` (its stdin is the line reader / often a pipe, the
+      same reason `/config`/`/prompt` only point at files), so a body-edit handoff is not
+      offered in degraded mode.
+- [x] All new strings centralized in `strings::memory`/`strings::skills` (Tech Spec §9);
+      degraded output is ASCII/no-ANSI (asserted in the no-ANSI sweep + per-event tests).
 
 ## 6. Tests + exit criterion  *(Tech Spec §14.7 offline, deterministic)*
 
@@ -230,8 +230,8 @@ And the FR-6 mandate:
       - `inspect_skill_unknown_emits_notice_not_body` — unknown skill → `Notice`, no
         `SkillBody`.
       - `adopt_session_reemits_memory_status` — regression for the `/resume` `/new` gap.
-- [ ] **Store units** (`memory.rs:299`): `list_entries` returns summaries (no bodies) for
-      each scope; empty project when `project_dir` is `None`.
+- [x] **Store units** (`memory.rs`): `list_entries_returns_sorted_summaries_without_bodies`
+      and `list_entries_empty_when_scope_unavailable` (done in group 1).
 - [x] **TUI** (`app.rs` `#[cfg(test)]`): memory side (9 tests) — `/memory` reachable three
       ways; grouped-by-scope overlay with origin; Enter issues `MemoryView`; view opens a
       read-only body overlay; edit stages a pending `$EDITOR` handoff carrying metadata;
@@ -239,18 +239,24 @@ And the FR-6 mandate:
       place. Skills side (6 tests) — `/skills` reachable three ways; overlay from the cached
       catalog with per-row origin; Enter issues `InspectSkill`; `SkillBody` opens read-only
       with resources; `e`/`d` inert (no edit/delete); empty catalog handled.
-- [ ] **Trust (FR-1)** (`engine_loop.rs` or `app.rs`): with an untrusted project root, the
-      inspector shows **no** project memory and **no** project skills.
-- [ ] **Degraded parity** (`line.rs:672` neighborhood): plain-mode `/memory` `/skills`
-      produce inspectable, ASCII-only output with no ANSI; inspection is not rich-only.
-- [ ] **Exit criterion (Part 2 done when):** memory can be listed, viewed, edited (via
-      `$EDITOR`, committed through the engine), and deleted (confirmed) from a running
-      session; skills can be listed and their instruction bodies viewed read-only; both are
-      reachable via `/memory` and `/skills` (§3.3) with project content hidden on an
-      untrusted root (FR-1); progressive disclosure is preserved (bodies never pinned);
-      offline suite green; workspace clippy-clean under §1; no new external dependency
-      (HC-2). **On merge, Design §4.9 is fully realized and Phase 6's sidebar-click target
-      (`PHASE6_TODO.md` group 4) becomes wireable.**
+- [x] **Trust (FR-1):** memory — `memory_list_project_empty_when_untrusted` (engine);
+      skills — `inspect_skill_untrusted_project_emits_notice_not_body` (engine, a project
+      SKILL.md on disk but untrusted → Notice, no body) + the existing catalog-exclusion
+      units. Degraded — `memory_list_untrusted_root_shows_only_user_group` (`line.rs`).
+- [x] **Degraded parity** (`line.rs`): plain-mode `/memory`/`/skills` list + view render
+      inline, ASCII, no ANSI (7 tests incl. the extended no-ANSI sweep); inspection is not
+      rich-only.
+- [x] **Exit criterion — MET (with one scoped deviation):** memory can be listed, viewed,
+      edited (via `$EDITOR`, committed through the engine — rich TUI), and deleted (confirmed)
+      from a running session; skills listed + bodies viewed read-only; both reachable via
+      `/memory`/`/skills` (§3.3); project content hidden on an untrusted root (FR-1);
+      progressive disclosure preserved (bodies never pinned — asserted); offline suite green
+      (22 suites, 0 failures); workspace lib clippy clean under §1 (only 2 pre-existing
+      `engine.rs` warnings, unrelated); **no new external dependency (HC-2 — `Cargo.toml`/
+      `Cargo.lock` unchanged).** _Deviation:_ **edit is rich-only** — degraded mode does not
+      launch `$EDITOR` (plain-frontend stdin constraint); degraded still lists/views/deletes.
+      Design §4.9 is realized; Phase 6's sidebar-click target (`PHASE6_TODO.md` group 4) is
+      now wireable.
 
 ---
 
@@ -325,9 +331,30 @@ And the FR-6 mandate:
   key/click), consistent with the "mouse never weakens a decision" spirit (§3.4) and the
   general care around irreversible actions.
 - **Degraded mode still inspects (FR-6 is a requirement, not a nicety).** Plain mode prints
-  the lists/bodies inline (append-only) and keeps edit (`$EDITOR`) and confirmed delete;
-  only the *overlay presentation* is rich-only. _Confirm the plain-frontend surface in
-  group 5._
+  the lists/bodies inline (append-only) and keeps confirmed delete; only the *overlay
+  presentation* is rich-only. _RESOLVED (group 5) with a deviation:_ **edit is rich-only.**
+  The original lean assumed `$EDITOR` "suspends the TUI regardless of mode", but structural
+  fact #4 / the existing `/config`+`/prompt` handlers show the **plain frontend deliberately
+  never launches `$EDITOR`** — its stdin is the line reader (often a pipe), so spawning an
+  editor would fight for the tty / hang under a pipe. Rather than reconstruct store paths in
+  the frontend (fragile; the engine owns path resolution + trust-gating, FR-6), plain-mode
+  edit is left to the rich TUI. Degraded still delivers the *core* of the requirement —
+  list + view (inspection) and confirmed delete, all engine-mediated. **Owner check:** if
+  edit-in-degraded is required, it is a small follow-up (either a safe `$EDITOR` handoff that
+  pauses the stdin reader on an interactive tty, or an engine-provided entry-file path) and
+  would flow back as a Spec §8 open-item resolution (G-11), not a shadow spec.
+- **Group 5/6 decisions:**
+  - **Plain-mode listing is engine-mediated, name-resolved from the last `/memory`.**
+    `/memory <name>` and `/memory delete <name>` resolve the name → scope from the last
+    `MemoryEntries` the frontend received (user before project), so a name-based command
+    needs a prior `/memory`; unknown names print a hint. Skills list is rendered from the
+    cached `SkillsAvailable` (no round-trip); a named skill's body is fetched via
+    `InspectSkill`.
+  - **Plain delete mirrors the rich y/N.** `Pending::MemoryDelete` holds the confirm; only
+    `y`/`yes` deletes, anything else cancels — a lone command never deletes.
+  - **Rendering lives in the renderer where the event drives it** (`MemoryEntries`/
+    `MemoryBody`/`SkillBody` in `LineRenderer::render`); the skills *list* is a free
+    `render_skill_list` because the catalog is standing run-loop state, not an event.
 - **Bonus fix carried here:** `adopt_session` re-emitting `MemoryStatus` (`engine.rs:1022`)
   — a pre-existing staleness gap, cheap to fix alongside the inspector. _DONE (group 2)._
 - **Group 2 decisions (confirmed):** (a) `execute_memory_op` extracted from `on_memory_op`
