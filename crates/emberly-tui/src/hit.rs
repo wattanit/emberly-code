@@ -47,6 +47,25 @@ pub enum ClickTarget {
     /// The sidebar's Skills section. Click = open the skills inspector, exactly
     /// as `/skills` does.
     OpenSkillsInspector,
+    /// A permission-prompt affordance (Design §5). A click here dispatches the
+    /// **same** decision the matching key does, via `on_permission_key` — never
+    /// a new path. Only the affordance text is registered (the gaps between them
+    /// are inert), and a click elsewhere on the prompt is inert: no click
+    /// "approves whatever is focused," no hover-to-approve, no click-through.
+    PermissionChoice(PermissionChoice),
+}
+
+/// The three permission-prompt affordances (Design §5), in footer order. Each
+/// maps to the exact key `on_permission_key` handles: Allow→`y`, Session→`s`,
+/// Deny→Enter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionChoice {
+    /// Allow once (the `y` key).
+    Allow,
+    /// Allow for this session (the `s` key).
+    Session,
+    /// Deny — the safe default (Enter/Esc/`d`/`n`).
+    Deny,
 }
 
 /// A per-frame map from screen rectangles to click targets, rebuilt every draw

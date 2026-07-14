@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, ChoiceRow, ConvItem, Overlay, OverlayContent, SessionRow};
-use crate::hit::{ClickTarget, HitMap};
+use crate::hit::{ClickTarget, HitMap, PermissionChoice};
 use crate::text;
 use crate::theme::Theme;
 use crate::{strings, strings::markers};
@@ -62,7 +62,7 @@ pub fn frame(f: &mut Frame, app: &App, hit: &mut HitMap) {
     // area — no input box is shown, so nothing can be typed into a decision
     // (Design §5, §5.1). The permission prompt wins if somehow both are set.
     if app.pending_permission.is_some() {
-        render_permission(f, app, main);
+        render_permission(f, app, main, hit);
     } else if app.pending_ask.is_some() {
         render_ask(f, app, main);
     } else if app.pending_loop_halt.is_some() {
@@ -1260,8 +1260,12 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
 /// over a pinned footer of choices. Deny is the default and the meaning of
 /// Enter/Esc; allow (`y`/`s`) is deliberate. Nothing auto-scrolls, nothing is
 /// truncated to fit, and no timer approves — see `App::on_permission_key`.
-fn render_permission(f: &mut Frame, app: &App, area: Rect) {
+fn render_permission(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
     let theme = &app.theme;
+    // The prompt is modal and safety-critical (Design §5): it owns the hit-map.
+    // Clear anything behind it (no click-through to the conversation/sidebar),
+    // then register **only** the footer affordances below.
+    hit.clear();
     let Some((_, r)) = &app.pending_permission else {
         return;
     };
@@ -1363,6 +1367,36 @@ fn render_permission(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(footer_lines(theme, hidden_below)),
         footer_area,
     );
+
+    // Register the footer affordances as click targets (Design §3.4/§5). The
+    // choices are the *second* footer row. Only the affordance **text** is
+    // clickable — the padding between them is left inert, so a stray click near
+    // Allow does nothing (a click approves only when it lands squarely on the
+    // affordance). Each dispatches through `on_permission_key`, identical to its
+    // key; a click anywhere else on the prompt resolves to nothing (inert).
+    let choices_y = footer_area.y + 1;
+    if choices_y < footer_area.y + footer_area.height {
+        let right = footer_area.x.saturating_add(footer_area.width);
+        let mut x = footer_area.x;
+        for (label, choice) in permission_affordance_labels() {
+            let full_w = u16::try_from(text::width(&label)).unwrap_or(0);
+            let core_w = u16::try_from(text::width(label.trim_end())).unwrap_or(0);
+            // Clamp the clickable width to what is actually on screen.
+            let width = core_w.min(right.saturating_sub(x));
+            if x < right && width > 0 {
+                hit.push(
+                    Rect {
+                        x,
+                        y: choices_y,
+                        width,
+                        height: 1,
+                    },
+                    ClickTarget::PermissionChoice(choice),
+                );
+            }
+            x = x.saturating_add(full_w);
+        }
+    }
 }
 
 // ---- question prompt — the model asking your opinion (Design §5.1) --------
@@ -1547,21 +1581,34 @@ fn footer_lines(theme: &Theme, hidden_below: usize) -> Vec<Line<'static>> {
     } else {
         Line::from(Span::styled("— end of content —", theme.chrome()))
     };
+    let [allow, session, deny] = permission_affordance_labels();
     let choices = Line::from(vec![
-        Span::styled(
-            format!("[y] {}   ", strings::permission::ALLOW_ONCE),
-            theme.success(),
-        ),
-        Span::styled(
-            format!("[s] {}   ", strings::permission::ALLOW_SESSION),
-            theme.success(),
-        ),
-        Span::styled(
-            format!("[Enter] {}", strings::permission::DENY),
-            theme.error(),
-        ),
+        Span::styled(allow.0, theme.success()),
+        Span::styled(session.0, theme.success()),
+        Span::styled(deny.0, theme.error()),
     ]);
     vec![notice, choices]
+}
+
+/// The permission footer affordance labels, in render order (Allow, Session,
+/// Deny). One source of truth so the click hit-regions (Design §3.4) line up
+/// exactly with the rendered text (`render_permission`), and so the affordances
+/// can never drift from what `on_permission_key` accepts.
+fn permission_affordance_labels() -> [(String, PermissionChoice); 3] {
+    [
+        (
+            format!("[y] {}   ", strings::permission::ALLOW_ONCE),
+            PermissionChoice::Allow,
+        ),
+        (
+            format!("[s] {}   ", strings::permission::ALLOW_SESSION),
+            PermissionChoice::Session,
+        ),
+        (
+            format!("[Enter] {}", strings::permission::DENY),
+            PermissionChoice::Deny,
+        ),
+    ]
 }
 
 /// Heuristic: a unified diff begins with a `--- ` file header.
@@ -1888,6 +1935,28 @@ mod tests {
                 reason: "bash requires approval".into(),
             },
         });
+    }
+
+    #[test]
+    fn permission_affordances_are_the_only_click_targets() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        // A body with content below the fold, so the "more below" notice shows.
+        pending(&mut app, false, "line1\nline2\nline3\nline4\nline5\nline6");
+        let hit = hit_map_of(&app, 100, 24);
+        let has = |c: PermissionChoice| {
+            (0..24).any(|y| (0..100).any(|x| hit.hit(x, y) == Some(ClickTarget::PermissionChoice(c))))
+        };
+        assert!(has(PermissionChoice::Allow), "Allow affordance clickable");
+        assert!(has(PermissionChoice::Session), "Session affordance clickable");
+        assert!(has(PermissionChoice::Deny), "Deny affordance clickable");
+        // The header/body is inert — no click-through, no click-to-approve, and
+        // no click-to-scroll (Design §5). Row 3 is well inside the header/body.
+        assert_eq!(hit.hit(40, 3), None, "the prompt body/header is not clickable");
     }
 
     #[test]

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use crate::commands::{self, AppCommand};
 use crate::editor::LineEditor;
-use crate::hit::ClickTarget;
+use crate::hit::{ClickTarget, PermissionChoice};
 use crate::theme::Theme;
 
 /// Rows the conversation scrolls per PageUp/PageDown.
@@ -1138,6 +1138,24 @@ impl App {
             ClickTarget::OpenSkillsInspector => {
                 // Exactly the `/skills` action.
                 self.run_command(AppCommand::Skills)
+            }
+            ClickTarget::PermissionChoice(choice) => {
+                // Reuse `on_permission_key` EXACTLY (Design §3.4/§5): a click on
+                // an affordance is the same deliberate act as its key, and can
+                // do nothing the key cannot. Only lands here when the click hit
+                // an affordance rect (the render only pushes those); a click
+                // elsewhere on the prompt resolves to nothing → inert. It never
+                // approves "whatever is focused," and it never bypasses the
+                // unscrolled-content indicator the key path shows.
+                let Some(id) = self.pending_permission.as_ref().map(|(i, _)| *i) else {
+                    return Action::None;
+                };
+                let code = match choice {
+                    PermissionChoice::Allow => KeyCode::Char('y'),
+                    PermissionChoice::Session => KeyCode::Char('s'),
+                    PermissionChoice::Deny => KeyCode::Enter,
+                };
+                self.on_permission_key(id, KeyEvent::from(code))
             }
         }
     }
@@ -2480,6 +2498,14 @@ fn help_text() -> String {
     out.push_str("  (also: /model <profile> [model] to switch directly)\n");
     // `/mode` and `/effort` also take a direct argument.
     out.push_str("  (also: /mode <normal|auto-accept-edits|auto>, /effort <level>)\n");
+    // Mouse (Design §3.4): additive to the keyboard — everything here the
+    // keyboard already does. Documents the Shift-passthrough and the off switch.
+    out.push_str("\nMouse (on by default; set [ui] mouse = false to turn off):\n");
+    out.push_str("    wheel / trackpad scrolls the focused pane or open overlay\n");
+    out.push_str("    click selects a row (palette, picker, sidebar entry, reasoning trail) —\n");
+    out.push_str("      the same as focusing it and pressing Enter; it never approves a prompt\n");
+    out.push_str("    hold Shift (in most terminals) to drag-select and copy text as usual;\n");
+    out.push_str("      or set mouse = false to let the terminal own the pointer entirely\n");
     out
 }
 
@@ -3223,6 +3249,109 @@ mod tests {
         let key = by_key.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert_eq!(click, key, "clicking modified files == Ctrl+O");
         assert_eq!(by_click.overlays.len(), by_key.overlays.len());
+    }
+
+    fn pending_permission_app() -> App {
+        let mut a = app();
+        a.apply_event(UiEvent::PermissionRequest {
+            id: PermissionId(7),
+            rendering: PermissionRendering {
+                tool: "bash".into(),
+                summary: "run: x".into(),
+                detail: "x".into(),
+                affected_paths: vec![],
+                outside_root: false,
+                reason: "bash asks".into(),
+            },
+        });
+        a
+    }
+
+    #[test]
+    fn click_permission_affordances_match_their_keys() {
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+        for (choice, code, decision) in [
+            (
+                PermissionChoice::Allow,
+                KeyCode::Char('y'),
+                PermissionDecision::AllowOnce,
+            ),
+            (
+                PermissionChoice::Session,
+                KeyCode::Char('s'),
+                PermissionDecision::AllowForSession,
+            ),
+            (
+                PermissionChoice::Deny,
+                KeyCode::Enter,
+                PermissionDecision::Deny,
+            ),
+        ] {
+            let mut by_click = pending_permission_app();
+            by_click
+                .hit_map
+                .push(region, ClickTarget::PermissionChoice(choice));
+            let click = by_click.on_click(0, 0);
+
+            let mut by_key = pending_permission_app();
+            let keyed = by_key.on_key(key(code));
+
+            assert_eq!(click, keyed, "click on {choice:?} == its key");
+            assert!(matches!(
+                click,
+                Action::Command(Command::PermissionAnswer { decision: d, .. }) if d == decision
+            ));
+        }
+    }
+
+    #[test]
+    fn help_documents_the_mouse_and_shift_passthrough() {
+        let help = help_text();
+        assert!(help.contains("Mouse"), "help has a mouse section");
+        assert!(
+            help.contains("Shift"),
+            "help documents Shift for native selection (Design §3.4)"
+        );
+        assert!(
+            help.contains("mouse = false"),
+            "help documents the off switch"
+        );
+    }
+
+    #[test]
+    fn a_click_off_the_permission_affordances_never_decides() {
+        // The safety invariant (Design §3.4/§5): a click that does not land on
+        // an affordance leaves the prompt pending — never a default-approve, no
+        // "approve whatever is focused." (Here the hit-map has no affordance
+        // region, standing in for a click on the body/header/margin.)
+        let mut a = pending_permission_app();
+        assert_eq!(a.on_click(5, 5), Action::None);
+        assert!(
+            a.pending_permission.is_some(),
+            "a click off the affordances must not decide"
+        );
+        // A Deny click is safe; still no *approval* ever appears without the
+        // Allow/Session affordance.
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+        a.hit_map
+            .push(region, ClickTarget::PermissionChoice(PermissionChoice::Deny));
+        assert!(matches!(
+            a.on_click(0, 0),
+            Action::Command(Command::PermissionAnswer {
+                decision: PermissionDecision::Deny,
+                ..
+            })
+        ));
     }
 
     #[test]

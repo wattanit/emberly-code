@@ -40,10 +40,12 @@ pub async fn run(
     reasoning_view: crate::app::ReasoningView,
     mouse: bool,
 ) -> io::Result<()> {
-    // The single §3.4 capture gate: reaching `tui::run` already means rich mode
-    // (degraded runs `line::run`), so the `rich && ui.mouse` predicate reduces
-    // to `ui.mouse` here. Off ⇒ no `EnableMouseCapture`, terminal owns the mouse.
-    let mut guard = TerminalGuard::enter(mouse)?;
+    // The single §3.4 capture gate (Tech Spec §9): reaching `tui::run` already
+    // means rich mode (degraded runs `line::run`), so the one predicate is
+    // `mouse_capture_enabled(true, ui.mouse)`. Off ⇒ no `EnableMouseCapture`,
+    // the terminal owns the mouse.
+    let capture_mouse = crate::terminal::mouse_capture_enabled(true, mouse);
+    let mut guard = TerminalGuard::enter(capture_mouse)?;
     let mut app = App::new(session, sessions_dir, profiles, config_template);
     // Set the trail view before seeding history so resumed reasoning items
     // render with the configured default (Design §4.4).

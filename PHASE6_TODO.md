@@ -96,10 +96,10 @@ surfaces the prior phases built and is otherwise self-contained in `emberly-tui`
 | 2. Wheel-scroll parity: route wheel to the palette list; confirm overlay/permission/conversation (`emberly-tui`) | [x] | added palette branch to `on_scroll` (moves `selected`, == Up/Down); confirmed overlay/permission/conversation routing with tests |
 | 3. Click hit-testing infrastructure: retained `HitMap` of `Rect → Target` (`emberly-tui`) | [x] | `hit.rs` (`HitMap`/`ClickTarget`); `frame` builds it (out-param); `on_click` = focus+Enter; tui click arm; palette+choice rows wired (rest → group 4) |
 | 4. Click = focus+Enter on keyboard-parity surfaces: palette rows, picker rows, reasoning expand, overlay rows, sidebar (`emberly-tui`) | [x] | palette/choice (grp 3) + session/memory/skill overlay rows + reasoning toggle + sidebar diff/memory/skills open (sidebar-geometry refactor); all via key/command twins |
-| 5. Permission-prompt click safety + native Shift-selection passthrough + `ui.mouse=false` off switch (`emberly-tui`) | [ ] | click reuses `on_permission_key`; never auto-approve; preserve terminal copy |
+| 5. Permission-prompt click safety + native Shift-selection passthrough + `ui.mouse=false` off switch (`emberly-tui`) | [x] | affordances reuse `on_permission_key`; body/header inert (no click-through/approve); Shift-gate + `/help` doc; single `mouse_capture_enabled` predicate |
 | 6. Tests (offline — §14.7) + exit criterion (`emberly-tui`) | [ ] | capture-off predicate, wheel routing, click→action, click-never-approves, degraded |
 
-**Overall Phase 6: IN PROGRESS — Groups 1–4 done (capture gate + wheel parity + click hit-testing + full click dispatch incl. sidebar). Remaining: group 5 (permission click safety + Shift passthrough) + group 6 (tests/exit).**
+**Overall Phase 6: IN PROGRESS — Groups 1–5 done (capture gate + wheel parity + click hit-testing + full click dispatch incl. sidebar + permission click safety). Remaining: group 6 (consolidated tests + exit criterion).**
 
 ---
 
@@ -242,26 +242,34 @@ each target — the mouse adds no capability the keyboard lacks (the invariant).
 
 ## 5. Permission-prompt click safety + native selection + off switch  *(Design §3.4, §5, §7)*
 
-- [ ] **Permission clicks reuse `on_permission_key` (`app.rs:1000`), never a new path.** A
-      click on the Allow/Session/Deny affordance dispatches the *same* decision the key
-      produces. **Guarantees that must hold (Design §3.4/§5):** no click "approves whatever
-      is focused"; no hover-to-approve (only an explicit click on the affordance, like an
-      explicit keypress); **no click-through past unscrolled content** — if the body has
-      content below the fold, the approve affordance still indicates it and a click cannot
-      bypass it, exactly as the key path enforces; clicking Allow is as deliberate as the
-      approve key. A click *outside* the affordances is inert (never a default-approve).
-- [ ] **Native Shift-drag selection passes through (Design §3.4).** With capture on, the
-      terminal's own Shift-modified click-drag-to-copy must still work. crossterm delivers
-      Shift-modified drags as events carrying the Shift modifier — **do not consume** those
-      (let the terminal handle selection); only act on unmodified left-clicks and wheel.
-      Document this in `/help` (Design §3.4). **Open item (Tech Spec §16, this phase's
-      resolver):** Shift-passthrough is terminal-dependent — verify across the target
-      terminals and document those where `ui.mouse = false` is the only way to get native
-      selection.
-- [ ] **`ui.mouse = false` releases the mouse entirely** (Design §3.4): capture never
-      enabled (group 1), so the terminal owns the pointer unconditionally — for users who
-      prefer native selection everywhere. Verify no click/scroll handling runs when capture
-      is off (it can't — no events arrive).
+- [x] **Permission clicks reuse `on_permission_key`, never a new path.** `render_permission`
+      registers **only** the three footer affordances (Allow/Session/Deny) as click targets —
+      and only their **text** (the padding between them is inert, so a stray near-miss never
+      approves). `on_click` maps each to the exact key (`y`/`s`/Enter) and calls
+      `on_permission_key(id, …)`, so a click is byte-for-byte the key's decision. **Guarantees
+      held:** (a) no click "approves whatever is focused" — a non-affordance click resolves to
+      nothing (`render_permission` clears the hit-map first → no click-through to the
+      conversation/sidebar behind; body/header push nothing → inert); (b) no hover-to-approve
+      (only `Down(Left)` acts); (c) **no click-through past unscrolled content** — the footer's
+      "↓ N more" notice is unchanged and approval reuses the key path (which never blocked on
+      scroll, only *indicated*), so the click has exactly the key's power, no more; (d) Allow is
+      as deliberate as the approve key. Tests: `click_permission_affordances_match_their_keys`,
+      `a_click_off_the_permission_affordances_never_decides` (app),
+      `permission_affordances_are_the_only_click_targets` (render — body row inert).
+- [x] **Native Shift-drag selection passes through (Design §3.4).** The tui click arm consumes
+      **only** `Down(Left)` with `mouse.modifiers.is_empty()` (added in group 3); Shift/Ctrl/
+      Alt-modified clicks and all drags fall to `_ => continue` — not consumed, not redrawn — so
+      the terminal's own Shift-drag-to-copy works and stays smooth. Documented in `/help` (new
+      Mouse section: wheel/click/Shift/off-switch). Test: `help_documents_the_mouse_and_shift_passthrough`.
+      _Open item (Tech Spec §16) carried to release verification: Shift-passthrough is
+      terminal-dependent — verify across target terminals; where a terminal doesn't honor it,
+      `ui.mouse = false` is the escape hatch. Not blocking (offline suite green)._
+- [x] **`ui.mouse = false` releases the mouse entirely** (Design §3.4). Made the gate an
+      explicit single control point: `terminal::mouse_capture_enabled(rich, ui_mouse) = rich &&
+      ui_mouse`, called by `tui::run` with `rich = true`, so `false` ⇒ no `EnableMouseCapture`
+      ⇒ no mouse events arrive ⇒ neither `on_click` nor `on_scroll` ever runs (verified by
+      construction; the predicate is unit-tested). Degraded runs `line::run`, which never
+      touches capture. Test: `mouse_capture_gated_on_rich_and_ui_mouse` (terminal).
 
 ## 6. Tests + exit criterion  *(Tech Spec §14.7 offline, deterministic)*
 
@@ -346,6 +354,18 @@ each target — the mouse adds no capability the keyboard lacks (the invariant).
   reports the last reasoning header's line index; `render_conversation` pushes a
   `ReasoningToggle` region). All dispatch via the synthetic-Enter pattern → parity by
   construction. +4 tests (183 green), `emberly-tui` clippy-clean, no new dep.
+- **Group 5 DONE (permission click safety + Shift passthrough + off switch).** Permission
+  clicks are the sharpest safety surface, so they get the strictest treatment: `render_permission`
+  clears the hit-map (no click-through to anything behind the modal) and registers **only** the
+  three footer affordances, and only their **text** (inter-affordance padding is inert). `on_click`
+  maps Allow/Session/Deny → `y`/`s`/Enter and calls `on_permission_key` verbatim, so a click is
+  identical to the key — a non-affordance click resolves to nothing (never a default-approve),
+  there's no hover-to-approve, and no click-through past the "↓ N more" indicator (the click has
+  exactly the key's power). Shift/modified clicks are already left to the terminal (group-3 gate)
+  for native selection, now documented in `/help`. The off switch is an explicit, unit-tested
+  control point `terminal::mouse_capture_enabled(rich, ui_mouse)`; `false` ⇒ no capture ⇒ no
+  events ⇒ no click/scroll handling. +5 tests (191 green), clippy-clean, no new dep. _Terminal-
+  dependent Shift-passthrough stays a release-verification open item (Tech Spec §16), non-blocking._
 - **Sidebar clicks DONE (owner: do it now).** The initial group-4 deferral was resolved the
   same phase: the sidebar-geometry refactor landed. Root cause was the sidebar's
   `Paragraph.wrap(Wrap{trim:false})` — wrapping made screen-row → logical-line unreliable.

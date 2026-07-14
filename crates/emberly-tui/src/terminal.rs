@@ -124,6 +124,17 @@ pub fn restore_terminal() -> io::Result<()> {
     Ok(())
 }
 
+/// The single mouse-capture control point (Tech Spec §9, Design §3.4), mirroring
+/// the §6.4 animation ticker's one predicate: capture is on only in **rich** mode
+/// **and** when `ui.mouse` is set. It is off whenever `ui.mouse = false` (the off
+/// switch) or the frontend is degraded (`--plain`/`NO_COLOR`/`TERM=dumb`, which
+/// never reaches the rich TUI at all). `tui::run` is the only rich path, so it
+/// calls this with `rich = true`.
+#[must_use]
+pub fn mouse_capture_enabled(rich: bool, ui_mouse: bool) -> bool {
+    rich && ui_mouse
+}
+
 /// Wrap the current panic hook so the terminal is restored before the existing
 /// hook (which prints the calm bug notice + backtrace, see the binary's
 /// `install_panic_hook`) runs. Without this the message would be written into
@@ -134,4 +145,20 @@ fn install_panic_hook() {
         let _ = restore_terminal();
         previous(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mouse_capture_gated_on_rich_and_ui_mouse() {
+        // On only when rich AND ui.mouse (Design §3.4, Tech Spec §9).
+        assert!(mouse_capture_enabled(true, true));
+        // Off switch: ui.mouse = false releases the mouse even in rich mode.
+        assert!(!mouse_capture_enabled(true, false));
+        // Degraded (never rich): capture stays off regardless of ui.mouse.
+        assert!(!mouse_capture_enabled(false, true));
+        assert!(!mouse_capture_enabled(false, false));
+    }
 }
