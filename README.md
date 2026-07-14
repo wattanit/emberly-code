@@ -1,28 +1,22 @@
 # Emberly Code
 
-**An interactive AI coding agent for your terminal — provider-agnostic, fully
-auditable, and built in pure Rust.**
+> **Currently on v0.4** — feature-complete for the milestone, install from source.
 
-You describe a task in plain language; Emberly reads your code, proposes and
-makes edits, runs commands, searches the web, remembers what matters, and
-iterates — asking permission before it touches anything — until the task is done
-or you step in. It works with Anthropic and any OpenAI-compatible endpoint
-(including local models), keeps a complete, resumable transcript of every
-session, and runs anywhere a single static binary can.
+**An AI coding agent for your terminal — provider-agnostic, fully auditable, and
+built in pure Rust.**
 
-> **Status: v0.4 feature set (M8) — feature-complete, install from source.**
-> The interactive TUI, live providers, session persistence, the permission rule
-> engine, auto-accept modes, and OS confinement (Linux Landlock, macOS Seatbelt)
-> ship alongside the full 0.2–0.4 stack: configurable provider profiles,
-> in-app config/prompt editing, reasoning effort + thinking trail, workspace
-> trust, the loop-breaking guardrail, the context-economy layer (salient
-> reduction, adaptive windowing, auto-compaction, `recall`), and the 0.4
-> capabilities — a task list, image input, persistent memory, a skill system,
-> web search, and mouse support. Prebuilt binaries and Windows support are not
-> yet shipped.
+Tell Emberly what you want in plain words, and it goes to work in your codebase —
+reading, editing, running commands, and correcting course as it goes. It asks
+before it acts and writes down everything it does, so you stay in the loop and
+never have to guess what happened.
 
-<!-- Note: a dedicated landing page + docs site are planned; this README will
-     slim down once they exist. Until then it is the single source of truth. -->
+Bring your own model: Anthropic, any OpenAI-compatible endpoint, or something
+running on your own machine. Every session is a complete, resumable transcript,
+and the whole thing ships as a single self-contained binary — no C, no runtime,
+nothing else to install.
+
+<!-- A dedicated landing page + docs site are planned; this README will slim
+     down once they exist. Until then it is the single source of truth. -->
 
 ---
 
@@ -356,6 +350,32 @@ minimal terminals.
 ---
 
 ## Developer guide
+
+### Project status
+
+Feature-complete for the **v0.4** milestone (M8), installable from source. The
+interactive TUI, live providers, session persistence, the permission rule
+engine, auto-accept modes, and OS confinement (Linux Landlock, macOS Seatbelt)
+all work today, alongside the full 0.2–0.4 stack described below. **Not yet
+shipped:** prebuilt binaries and Windows support (no Landlock/Seatbelt
+equivalent).
+
+### Release history
+
+Each release stacks a new layer onto the last — so the nicknames follow a fire
+as it grows. _(Affectionate, not official.)_
+
+| Version | Milestones | Nickname | What it added |
+|---|---|---|---|
+| **v0.1** | M1–M5 | 🪵 _Kindling_ | The harness itself — the six crates, the agent loop, both live providers, the full TUI, sessions / resume / compaction, the permission rule engine, and OS confinement on Linux + macOS. |
+| **v0.2** | M6 | 🏡 _Hearth_ | Configurable and safe to live with — endpoint-configurable provider profiles (incl. Z.ai), in-app config/prompt editing, reasoning effort + thinking trail, the ask-you-a-question tool, tool-call explanations, workspace trust, and the loop-breaking guardrail. |
+| **v0.3** | M7 | 🔥 _Slow Burn_ | The economy layer — salient tool-result reduction, the adaptive context window + `recall`, automatic + manual compaction, and the derived resume cache. Longer, cheaper sessions from the same fuel. |
+| **v0.4** | M8 | 🌲🔥 _Wildfire_ | New capability surface — planning (task list), sight (image input), durable memory, extensible skills, live web search, and pointer interaction. |
+
+Prior as-built plans live under `docs/version-0-1/`, `docs/version-0-2/`, and
+`docs/version-0-3/`.
+
+### Architecture
 
 Cargo workspace, six crates, strictly one-way dependency flow
 (`emberly` → {`tui`, `core`}; `tui` → `core`; `core` → {`providers`, `tools`,
