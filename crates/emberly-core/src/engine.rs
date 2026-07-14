@@ -878,6 +878,42 @@ impl Engine {
                 }
                 Command::SetEffort { effort } => self.set_effort(effort).await,
                 Command::ReloadConfig => self.reload_config().await,
+                // Inspector reads/mutations — user/TUI actions, issued at idle
+                // (a clean boundary), mirroring the config/effort commands above.
+                Command::MemoryList => self.emit_memory_entries().await,
+                Command::MemoryMutate {
+                    op,
+                    scope,
+                    name,
+                    description,
+                    type_,
+                    body,
+                } => {
+                    // The harness performs the write via the shared validated
+                    // path (FR-6) — never the TUI. `MemoryStatus` re-emits
+                    // inside on success; the inspector re-issues `MemoryList` to
+                    // refresh its open list.
+                    let req = emberly_tools::MemoryRequest {
+                        op,
+                        scope,
+                        name,
+                        description,
+                        type_,
+                        body,
+                    };
+                    if let emberly_tools::MemoryOutcome::Rejected { reason } =
+                        self.execute_memory_op(&req).await
+                    {
+                        // Surface a rejection (disabled memory, untrusted scope,
+                        // invalid name) so the user sees why (Design §6.1).
+                        self.emit(UiEvent::Notice {
+                            message: format!("memory change rejected: {reason}"),
+                        })
+                        .await;
+                    }
+                    self.write_view_cache();
+                }
+                Command::InspectSkill { name } => self.inspect_skill(name).await,
             }
         }
 
@@ -1021,8 +1057,20 @@ impl Engine {
         self.task_list.clear();
         // Reload memory indexes for the new session (user-global unchanged,
         // project re-pointed to the new root). The store reads from disk, so a
-        // resumed session re-reads the current store (Tech Spec §8.1).
+        // resumed session re-reads the current store (Tech Spec §8.1). Re-emit
+        // `MemoryStatus` so the sidebar/inspector are never stale after a
+        // session switch — matching the `SkillsAvailable` re-emit below (this
+        // closes a pre-existing gap where `/resume` left the memory count
+        // stale, Design §4.9).
         self.refresh_memory_indexes();
+        let (user_count, project_count) = self
+            .memory_store
+            .as_ref()
+            .map_or((0, 0), |s| s.status_counts());
+        let _ = self.events_tx.try_send(UiEvent::MemoryStatus {
+            user: user_count,
+            project: project_count,
+        });
         // Re-derive the skill catalog for the new session (user-global
         // unchanged, project re-pointed to the new root). Emit
         // `SkillsAvailable` so the TUI Skills section is never stale after a
@@ -2456,17 +2504,24 @@ impl Engine {
         }
     }
 
-    /// Handle a memory op from the `memory` tool (T-13, FR-6). Re-validates the
-    /// name, routes to the store, refreshes indexes, and emits `MemoryStatus`.
-    async fn on_memory_op(&mut self, ask: MemoryAsk) {
+    /// The single validated memory write path, shared by the `memory` tool
+    /// (`on_memory_op`) and the inspector's `MemoryMutate` command (FR-6, C-5).
+    /// Routes to the store (whose `slug` guard re-validates the name), refreshes
+    /// the pinned indexes, emits `MemoryStatus`, and warns once past the soft
+    /// cap. Extracting it means the tool and the inspector **cannot diverge** —
+    /// the harness performs the write in exactly one place, never the TUI.
+    async fn execute_memory_op(
+        &mut self,
+        req: &emberly_tools::MemoryRequest,
+    ) -> emberly_tools::MemoryOutcome {
         // Compute the result first so the immutable borrow of the store ends
         // before the mutable refresh + emit.
         let computed = if self.memory_config.enabled {
-            self.memory_store.as_ref().map(|store| store.execute(&ask.req))
+            self.memory_store.as_ref().map(|store| store.execute(req))
         } else {
             None
         };
-        let outcome = match computed {
+        match computed {
             Some(result) => {
                 self.refresh_memory_indexes();
                 let (user_count, project_count) = self
@@ -2493,13 +2548,67 @@ impl Engine {
                     })
                     .await;
                 }
-                Ok(result)
+                result
             }
-            None => Ok(emberly_tools::MemoryOutcome::Rejected {
+            None => emberly_tools::MemoryOutcome::Rejected {
                 reason: "memory is disabled".into(),
-            }),
+            },
+        }
+    }
+
+    /// Handle a memory op from the `memory` tool (T-13, FR-6): run the shared
+    /// write path and reply over the oneshot.
+    async fn on_memory_op(&mut self, ask: MemoryAsk) {
+        let outcome = self.execute_memory_op(&ask.req).await;
+        let _ = ask.reply.send(Ok(outcome));
+    }
+
+    /// List the memory entries grouped by scope for the inspector (FR-6, Design
+    /// §4.9), and emit them as `MemoryEntries`. Summaries only — no bodies read
+    /// (progressive disclosure). Both groups are empty when memory is disabled;
+    /// `project` is empty on an untrusted root (`list_entries` returns empty for
+    /// an unavailable scope), which makes the project section silently absent
+    /// (FR-1).
+    async fn emit_memory_entries(&self) {
+        let (user, project) = match &self.memory_store {
+            Some(store) if self.memory_config.enabled => (
+                store.list_entries(emberly_tools::MemoryScope::User),
+                store.list_entries(emberly_tools::MemoryScope::Project),
+            ),
+            _ => (Vec::new(), Vec::new()),
         };
-        let _ = ask.reply.send(outcome);
+        self.emit(UiEvent::MemoryEntries { user, project }).await;
+    }
+
+    /// Fetch a skill's instruction body for the inspector (FR-7, Design §4.9)
+    /// and emit it as `SkillBody`. Resolved through the catalog so project
+    /// precedence + untrusted-root gating still apply; loading the body for
+    /// display runs **no** bundled script (FR-7). An unknown/disabled/untrusted-
+    /// absent skill emits a `Notice` rather than a `SkillBody`, so the inspector
+    /// never opens an empty overlay.
+    async fn inspect_skill(&self, name: String) {
+        let invocation = if self.skills_config.enabled {
+            self.skill_catalog.as_ref().and_then(|cat| cat.invoke(&name))
+        } else {
+            None
+        };
+        match invocation {
+            Some(inv) => {
+                self.emit(UiEvent::SkillBody {
+                    name,
+                    origin: inv.origin,
+                    body: inv.body,
+                    resources: inv.resources,
+                })
+                .await;
+            }
+            None => {
+                self.emit(UiEvent::Notice {
+                    message: format!("skill '{name}' is not available"),
+                })
+                .await;
+            }
+        }
     }
 
     /// Handle a skill invoke from the `skill` tool (T-15, FR-7). Resolves the

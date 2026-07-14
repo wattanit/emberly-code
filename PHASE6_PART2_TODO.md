@@ -93,7 +93,7 @@ And the FR-6 mandate:
 | Group | Status | Notes |
 |---|---|---|
 | 1. Engine/store data model: memory listing + skill-body fetch (`emberly-core`, `emberly-tools`) | [x] | `EntrySummary` + `MemoryStore::list_entries`; Recall/invoke reused as-is |
-| 2. TUI→engine command + event plumbing: new `Command`/`UiEvent` variants; adopt_session fix (`emberly-core`) | [ ] | idle-loop handlers mirroring `ReloadConfig`; no direct TUI writes |
+| 2. TUI→engine command + event plumbing: new `Command`/`UiEvent` variants; adopt_session fix (`emberly-core`) | [x] | idle-loop handlers; shared `execute_memory_op`; adopt_session `MemoryStatus` fix; 7 round-trip tests |
 | 3. Memory inspector overlay: `/memory`, grouped list, view/edit/delete (`emberly-tui`) | [ ] | edit via `$EDITOR`→`Update`; delete confirmed; scope/origin shown (FR-6, §4.6) |
 | 4. Skills inspector overlay: `/skills`, list, read-only body (`emberly-tui`) | [ ] | body fetched via engine (progressive disclosure); origin visible (FR-7) |
 | 5. Degraded parity + rendering + strings (`emberly-tui`) | [ ] | overlays are rich-only; define plain-mode `/memory` `/skills` behavior |
@@ -127,24 +127,32 @@ And the FR-6 mandate:
 
 ## 2. TUI→engine command + event plumbing  *(C-5; the harness-owned-store rule, FR-6)*
 
-- [ ] **New `Command` variants** (`core/src/command.rs:17`), handled at the **idle loop**
-      (`engine.rs:842`, mirroring `ReloadConfig`/`SetEffort`):
-      - `Command::MemoryList` — request the grouped entry summaries.
-      - `Command::MemoryMutate { op: Update | Remove, scope, name, description?, type_?,
-        body? }` — commit an edit or a delete. Route through the **same** validated path as
-        `on_memory_op` (`engine.rs:2459`) — extract a shared `execute_memory_op` so tool and
-        inspector share one code path, re-emitting `MemoryStatus` after (FR-6: harness
-        performs the write; name re-validated via `slug`).
-      - `Command::InspectSkill { name }` — fetch a skill body for display.
-- [ ] **New response `UiEvent`s** (`core/src/event.rs`): `MemoryEntries { user:
-      Vec<EntrySummary>, project: Vec<EntrySummary> }` and `SkillBody { name, origin, body }`
-      (+ optional resource paths). The frontend sees oneshot gate replies only as events, so
-      these carry the async results back to the overlay.
-- [ ] **Fix `adopt_session`** (`engine.rs:1022`) to re-emit `MemoryStatus` after
-      `refresh_memory_indexes()` — matching the `SkillsAvailable` re-emit at :1030 — so the
-      inspector/sidebar are correct after `/resume`.
-- [ ] Wire `commands_tx`/`events_rx` as today (`tui.rs:86`, app `apply_event`
-      `app.rs:688`); no channel-shape change (still `FrontendPorts`).
+- [x] **New `Command` variants** (`core/src/command.rs`), handled at the **idle loop**
+      (`engine.rs:842`, alongside `ReloadConfig`/`SetEffort`):
+      - `Command::MemoryList` → `emit_memory_entries()`.
+      - `Command::MemoryMutate { op, scope, name, description?, type_?, body? }` → builds a
+        `MemoryRequest` and calls the shared `execute_memory_op` (below); a `Rejected`
+        outcome surfaces as a `Notice` so the user sees why. `op` is the full `MemoryOp`
+        enum (docs restrict inspector use to `Update`/`Remove`); reused the tool's enum
+        rather than a new one.
+      - `Command::InspectSkill { name }` → `inspect_skill()` (catalog `invoke`).
+      - The three mid-turn command matches (`engine.rs:1389/1585/1667`) already have
+        catch-all arms, so these idle-only commands are safely ignored mid-turn (gated by
+        the frontend like `SetEffort`).
+- [x] **Extracted `execute_memory_op(req) -> MemoryOutcome`** from `on_memory_op` — the
+      single validated write path (store `execute` → `refresh_memory_indexes` → emit
+      `MemoryStatus` → soft-cap warn). Both the `memory` tool (`on_memory_op` now just calls
+      it + replies over the oneshot) and the inspector's `MemoryMutate` share it, so they
+      **cannot diverge** (FR-6). The store's `slug` guard re-validates the name.
+- [x] **New response `UiEvent`s** (`core/src/event.rs`): `MemoryEntries { user:
+      Vec<EntrySummary>, project: Vec<EntrySummary> }` and `SkillBody { name, origin, body,
+      resources }`. An unknown/disabled/untrusted-absent skill emits a `Notice` instead of a
+      `SkillBody`, so the inspector never opens an empty overlay.
+- [x] **Fixed `adopt_session`** (`engine.rs`) to re-emit `MemoryStatus` after
+      `refresh_memory_indexes()` — matching the `SkillsAvailable` re-emit just below — so the
+      inspector/sidebar are correct after `/resume` and `/new`.
+- [x] Channels unchanged (still `FrontendPorts` = `commands_tx` + `events_rx`); no
+      channel-shape change. TUI wiring is group 3.
 
 ## 3. Memory inspector overlay  *(Design §4.9, §4.6; FR-6, C-5, C-3, FR-1)*
 
@@ -210,14 +218,20 @@ And the FR-6 mandate:
 
 ## 6. Tests + exit criterion  *(Tech Spec §14.7 offline, deterministic)*
 
-- [ ] **Engine round-trips** (`tests/engine_loop.rs`, beside :3834/:4034):
-      - `Command::MemoryList` → `UiEvent::MemoryEntries` with correct scope grouping.
-      - `Command::MemoryMutate{Update}` edits the body and re-emits `MemoryStatus`; the
-        pinned one-line index reflects the change; body stays off standing context.
-      - `Command::MemoryMutate{Remove}` deletes and re-emits updated counts.
-      - `Command::InspectSkill` → `UiEvent::SkillBody` returns the body; assert the body is
-        **still not** in the system prompt (progressive disclosure preserved, cf. :4121).
-      - `adopt_session` re-emits `MemoryStatus` (regression for the current gap).
+- [x] **Engine round-trips** (`tests/engine_loop.rs`, "inspector round-trips" section) —
+      done early alongside group 2 (7 tests, all green):
+      - `memory_list_command_groups_entries_by_scope` — `MemoryList` → `MemoryEntries` with
+        correct scope grouping + case-insensitive sort + origin tag.
+      - `memory_list_project_empty_when_untrusted` — project empty when `project_dir` None.
+      - `memory_mutate_update_edits_body_and_reemits_status` — edits body on disk, re-emits
+        `MemoryStatus`, pinned index shows new description, **body stays off** the system
+        prompt.
+      - `memory_mutate_remove_deletes_and_reemits_counts` — deletes + re-emits count 0.
+      - `inspect_skill_returns_body_and_stays_off_context` — `InspectSkill` → `SkillBody`
+        with origin + resources; body **not** pinned in the system prompt.
+      - `inspect_skill_unknown_emits_notice_not_body` — unknown skill → `Notice`, no
+        `SkillBody`.
+      - `adopt_session_reemits_memory_status` — regression for the `/resume` `/new` gap.
 - [ ] **Store units** (`memory.rs:299`): `list_entries` returns summaries (no bodies) for
       each scope; empty project when `project_dir` is `None`.
 - [ ] **TUI** (`app.rs` `#[cfg(test)]`): `/memory` and `/skills` open their overlays; memory
@@ -282,6 +296,15 @@ And the FR-6 mandate:
   only the *overlay presentation* is rich-only. _Confirm the plain-frontend surface in
   group 5._
 - **Bonus fix carried here:** `adopt_session` re-emitting `MemoryStatus` (`engine.rs:1022`)
-  — a pre-existing staleness gap, cheap to fix alongside the inspector.
+  — a pre-existing staleness gap, cheap to fix alongside the inspector. _DONE (group 2)._
+- **Group 2 decisions (confirmed):** (a) `execute_memory_op` extracted from `on_memory_op`
+  as the single write path — tool + inspector share it (FR-6). (b) `MemoryMutate` reuses the
+  tool's `MemoryOp` enum rather than a new inspector-only enum; docs restrict inspector use
+  to `Update`/`Remove`. (c) A rejected mutate surfaces as a `Notice`; a missing/untrusted
+  skill on `InspectSkill` also surfaces as a `Notice` (never an empty overlay). (d) After a
+  mutate the engine only re-emits `MemoryStatus`; the TUI re-issues `MemoryList` to refresh
+  the open list (group 3) — keeps the engine from guessing the overlay is open. (e) `clippy`
+  note: `deny(unwrap_used)` fires only under `cargo clippy`, not `cargo test`/`build`, and
+  CI's stable clippy exempts test modules — new tests follow existing `.unwrap()` style.
 - **Trust is inherited (FR-1).** Untrusted root ⇒ no `project_dir` / no project skills ⇒
   empty project section, no extra TUI logic. _Add a test so it cannot regress silently._

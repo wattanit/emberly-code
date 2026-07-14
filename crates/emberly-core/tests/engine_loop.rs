@@ -22,7 +22,7 @@ use emberly_providers::{
     ContentBlock, Effort, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
     ScriptOutcome, ScriptedResponse, StopReason, StreamEvent, TokenUsage, ToolCallId,
 };
-use emberly_tools::{default_registry, TruncateConfig};
+use emberly_tools::{default_registry, MemoryOp, MemoryScope, SkillOrigin, TruncateConfig};
 use tokio::sync::mpsc;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -4364,4 +4364,273 @@ async fn skill_precedence_project_over_user() {
     let system = req.system.as_deref().unwrap_or("");
     assert!(system.contains("Project version"), "project description pinned");
     assert!(!system.contains("User version"), "user description not pinned");
+}
+
+// ---- inspector round-trips (Phase 6b: /memory & /skills, FR-6/FR-7) --------
+
+/// Write a memory entry file with `+++` frontmatter + body directly (sets up a
+/// store state without going through the tool).
+fn write_mem_entry(dir: &Path, slug: &str, name: &str, description: &str, body: &str) {
+    let content = format!("+++\nname = \"{name}\"\ndescription = \"{description}\"\n+++\n{body}");
+    std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
+}
+
+/// Pull the `MemoryEntries` payload out of a collected event stream.
+fn memory_entries(
+    events: &[UiEvent],
+) -> Option<(
+    Vec<emberly_core::memory::EntrySummary>,
+    Vec<emberly_core::memory::EntrySummary>,
+)> {
+    events.iter().find_map(|e| match e {
+        UiEvent::MemoryEntries { user, project } => Some((user.clone(), project.clone())),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn memory_list_command_groups_entries_by_scope() {
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    let project_dir = mem_temp_dir("p");
+    write_mem_entry(&user_dir, "zebra", "Zebra", "the last", "z body");
+    write_mem_entry(&user_dir, "alpha", "Alpha", "the first", "a body");
+    write_mem_entry(&project_dir, "proj", "Proj", "a project note", "p body");
+
+    let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
+    let config = memory_config(fake, root, user_dir, Some(project_dir));
+    let mut h = spawn(config);
+
+    h.send(Command::MemoryList).await;
+    let events = h.collect(None).await;
+
+    let (user, project) = memory_entries(&events).expect("MemoryEntries emitted");
+    // User scope: two entries, sorted case-insensitively by name.
+    assert_eq!(user.len(), 2);
+    assert_eq!(user[0].name, "Alpha");
+    assert_eq!(user[1].name, "Zebra");
+    assert_eq!(user[0].description, "the first");
+    assert_eq!(user[0].scope, MemoryScope::User);
+    // Project scope: one entry, tagged Project (origin on every line, §4.9).
+    assert_eq!(project.len(), 1);
+    assert_eq!(project[0].name, "Proj");
+    assert_eq!(project[0].scope, MemoryScope::Project);
+}
+
+#[tokio::test]
+async fn memory_list_project_empty_when_untrusted() {
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    write_mem_entry(&user_dir, "note", "Note", "a user note", "body");
+
+    let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
+    // project_dir = None → untrusted root.
+    let config = memory_config(fake, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::MemoryList).await;
+    let events = h.collect(None).await;
+
+    let (user, project) = memory_entries(&events).expect("MemoryEntries emitted");
+    assert_eq!(user.len(), 1);
+    assert!(
+        project.is_empty(),
+        "no project memory on an untrusted root (FR-1) — the section is silently absent"
+    );
+}
+
+#[tokio::test]
+async fn memory_mutate_update_edits_body_and_reemits_status() {
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    write_mem_entry(&user_dir, "build", "Build", "old desc", "old body");
+
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = memory_config(provider, root, user_dir.clone(), None);
+    let mut h = spawn(config);
+
+    h.send(Command::MemoryMutate {
+        op: MemoryOp::Update,
+        scope: MemoryScope::User,
+        name: "Build".into(),
+        description: Some("new desc".into()),
+        type_: None,
+        body: Some("new body".into()),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // The harness performed the write (FR-6) and re-emitted MemoryStatus.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::MemoryStatus { user: 1, .. })),
+        "MemoryStatus re-emitted after the inspector edit"
+    );
+    // The body was rewritten on disk in its existing scope (C-1).
+    let on_disk = std::fs::read_to_string(user_dir.join("build.md")).unwrap_or_default();
+    assert!(on_disk.contains("new body"), "body updated on disk");
+    assert!(on_disk.contains("new desc"), "description updated on disk");
+
+    // The pinned one-line index reflects the new description, but the body
+    // stays OFF standing context (progressive disclosure preserved).
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(system.contains("new desc"), "updated description pinned in index");
+    assert!(
+        !system.contains("new body"),
+        "body not pinned (progressive disclosure, §8.6)"
+    );
+}
+
+#[tokio::test]
+async fn memory_mutate_remove_deletes_and_reemits_counts() {
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    write_mem_entry(&user_dir, "temp", "Temp", "temp desc", "temp body");
+
+    let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
+    let config = memory_config(fake, root, user_dir.clone(), None);
+    let mut h = spawn(config);
+
+    h.send(Command::MemoryMutate {
+        op: MemoryOp::Remove,
+        scope: MemoryScope::User,
+        name: "Temp".into(),
+        description: None,
+        type_: None,
+        body: None,
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::MemoryStatus { user: 0, .. })),
+        "MemoryStatus re-emitted with count 0 after remove"
+    );
+    assert!(!user_dir.join("temp.md").exists(), "entry file deleted");
+}
+
+#[tokio::test]
+async fn inspect_skill_returns_body_and_stays_off_context() {
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    write_skill(&user_dir, "pdf-fill", "Fill PDF forms", "Step 1: open the template.");
+    write_skill_resource(&user_dir, "pdf-fill", "template.txt", "content");
+
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = skills_config(provider, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::InspectSkill {
+        name: "pdf-fill".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    let (name, origin, body, resources) = events
+        .iter()
+        .find_map(|e| match e {
+            UiEvent::SkillBody {
+                name,
+                origin,
+                body,
+                resources,
+            } => Some((name.clone(), *origin, body.clone(), resources.clone())),
+            _ => None,
+        })
+        .expect("SkillBody emitted");
+    assert_eq!(name, "pdf-fill");
+    assert_eq!(origin, SkillOrigin::User);
+    assert_eq!(body, "Step 1: open the template.");
+    assert!(
+        resources.iter().any(|r| r.ends_with("template.txt")),
+        "bundled resource listed"
+    );
+
+    // The body stays OFF standing context — only the catalog metadata is
+    // pinned (progressive disclosure preserved, §8.6).
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+    let req = fake.last_request().expect("request sent");
+    let system = req.system.as_deref().unwrap_or("");
+    assert!(system.contains("pdf-fill"), "skill name pinned in catalog");
+    assert!(
+        !system.contains("Step 1: open the template."),
+        "skill body not pinned (fetched only on inspect)"
+    );
+}
+
+#[tokio::test]
+async fn inspect_skill_unknown_emits_notice_not_body() {
+    let root = temp_project();
+    let user_dir = skill_temp_dir("u");
+    let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
+    let config = skills_config(fake, root, user_dir, None);
+    let mut h = spawn(config);
+
+    h.send(Command::InspectSkill {
+        name: "nonexistent".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        !events.iter().any(|e| matches!(e, UiEvent::SkillBody { .. })),
+        "no SkillBody for an unknown skill"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::Notice { message } if message.contains("nonexistent"))),
+        "a Notice explains the skill is unavailable"
+    );
+}
+
+#[tokio::test]
+async fn adopt_session_reemits_memory_status() {
+    // Regression: adopt_session previously re-emitted only SkillsAvailable, so
+    // the memory count/inspector went stale after /resume or /new (Design §4.9).
+    let root = temp_project();
+    let user_dir = mem_temp_dir("u");
+    write_mem_entry(&user_dir, "note", "Note", "a note", "body");
+    let sessions_dir = mem_temp_dir("sessions");
+    let first_id = SessionId::new();
+    let path = sessions_dir.join(format!("{first_id}.jsonl"));
+    let sink = match FileTranscript::open(&path) {
+        Ok(s) => s,
+        Err(e) => panic!("open transcript {}: {e}", path.display()),
+    };
+    let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
+    let mut config = memory_config(fake, root, user_dir, None);
+    config.transcript = Box::new(sink);
+    config.session_id = first_id;
+    config.sessions_dir = sessions_dir.clone();
+    config.active_session_path = std::sync::Arc::new(std::sync::RwLock::new(path));
+    let mut h = spawn(config);
+
+    // Drain the session-start events (which include the first MemoryStatus).
+    let _ = h.collect(None).await;
+
+    // Switch sessions — adopt_session must re-emit MemoryStatus.
+    let second_id = SessionId::new();
+    h.send(Command::NewSession {
+        session_id: second_id,
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::MemoryStatus { user: 1, .. })),
+        "adopt_session re-emits MemoryStatus after a session switch"
+    );
+
+    let _ = std::fs::remove_dir_all(&sessions_dir);
 }

@@ -198,4 +198,30 @@ pub enum UiEvent {
     /// carries name, description, and origin (user vs project — origin is how
     /// the user reads trust). Additive — older frontends warn-skip it.
     SkillsAvailable { skills: Vec<emberly_tools::SkillMeta> },
+
+    /// The memory inspector's grouped entry list (FR-6, Design §4.9), sent in
+    /// reply to [`Command::MemoryList`](crate::command::Command::MemoryList).
+    /// Entries are **summaries only** — no bodies, so listing preserves
+    /// progressive disclosure (Tech Spec §7/§8.6); a body loads on demand via a
+    /// `recall`/edit fetch. `project` is empty on an untrusted root (the
+    /// project section is then silently absent — FR-1). Additive — older
+    /// frontends warn-skip it.
+    MemoryEntries {
+        user: Vec<crate::memory::EntrySummary>,
+        project: Vec<crate::memory::EntrySummary>,
+    },
+
+    /// A skill's instruction body for the inspector (FR-7, Design §4.9), sent in
+    /// reply to [`Command::InspectSkill`](crate::command::Command::InspectSkill).
+    /// This is the §4.9 promise — "what could this skill tell the model to do"
+    /// is inspectable *before it ever runs*. Loading the body for display runs
+    /// no bundled script (FR-7). `origin` is how the user reads trust;
+    /// `resources` lists bundled file paths. Additive — older frontends
+    /// warn-skip it.
+    SkillBody {
+        name: String,
+        origin: emberly_tools::SkillOrigin,
+        body: String,
+        resources: Vec<String>,
+    },
 }
