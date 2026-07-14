@@ -440,7 +440,9 @@ mod tests {
             ],
         };
         let content = user_content(&msg);
-        let parts = content.as_array().expect("array when image present");
+        let Some(parts) = content.as_array() else {
+            panic!("array when image present");
+        };
         assert_eq!(parts.len(), 2);
         assert_eq!(
             parts[0].get("type").and_then(Value::as_str),

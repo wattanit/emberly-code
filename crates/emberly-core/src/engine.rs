@@ -779,6 +779,10 @@ impl Engine {
     /// Run the engine until the command channel closes. Idle between turns,
     /// waiting for a `UserInput`; a turn owns `commands_rx`/`asks_rx` for its
     /// duration (permission answers and cancellation arrive through them).
+    // Each receiver is an independent per-turn channel (permission, ask-user,
+    // recall, task-list, memory, skill); bundling them into a struct would only
+    // relocate the list. Same rationale as the frontend `run` (Design §7).
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         mut self,
         mut commands_rx: mpsc::Receiver<Command>,
@@ -1227,6 +1231,9 @@ impl Engine {
 
     /// Drive completions until the model stops without requesting tools, an
     /// error/drop occurs, or the user cancels.
+    // Threads the same per-turn channel receivers as `run`; bundling them would
+    // only move the argument list. See `run` above.
+    #[allow(clippy::too_many_arguments)]
     async fn run_turn(
         &mut self,
         commands_rx: &mut mpsc::Receiver<Command>,

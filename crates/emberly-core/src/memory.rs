@@ -533,9 +533,14 @@ mod tests {
         };
         let serialized = serialize_entry(&meta, "body text");
         let (front, body) = split_frontmatter(&serialized);
-        assert!(front.is_some());
+        let Some(front) = front else {
+            panic!("expected frontmatter to be present");
+        };
         assert_eq!(body.trim(), "body text");
-        let parsed: EntryMeta = toml::from_str(front.unwrap()).unwrap();
+        let parsed: EntryMeta = match toml::from_str(front) {
+            Ok(meta) => meta,
+            Err(e) => panic!("deserialize frontmatter: {e}"),
+        };
         assert_eq!(parsed.name, "Test");
         assert_eq!(parsed.description, "A test");
         assert_eq!(parsed.type_, Some("fact".into()));

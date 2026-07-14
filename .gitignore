@@ -5,6 +5,10 @@
 # Emberly session data / project config materialized by `emberly init`
 .agents/sessions/
 .agents/sessions-*/
+# Local dogfooding config (personal provider/model choice). `emberly init`
+# treats config.toml as shareable, but this repo's own .agents/config.toml is a
+# developer-local artifact and must never be committed.
+.agents/config.toml
 
 # Local secrets — never committed (Tech Spec §8)
 keys.toml

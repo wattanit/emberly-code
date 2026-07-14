@@ -233,15 +233,23 @@ mod tests {
 
     fn write_skill(dir: &Path, name: &str, description: &str, body: &str) {
         let skill_dir = dir.join(name);
-        fs::create_dir_all(&skill_dir).unwrap();
+        if let Err(e) = fs::create_dir_all(&skill_dir) {
+            panic!("create skill dir: {e}");
+        }
         let content = format!("+++\nname = \"{name}\"\ndescription = \"{description}\"\n+++\n{body}");
-        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+        if let Err(e) = fs::write(skill_dir.join("SKILL.md"), content) {
+            panic!("write SKILL.md: {e}");
+        }
     }
 
     fn write_resource(dir: &Path, skill_name: &str, resource_name: &str, content: &str) {
         let skill_dir = dir.join(skill_name);
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join(resource_name), content).unwrap();
+        if let Err(e) = fs::create_dir_all(&skill_dir) {
+            panic!("create skill dir: {e}");
+        }
+        if let Err(e) = fs::write(skill_dir.join(resource_name), content) {
+            panic!("write resource: {e}");
+        }
     }
 
     #[test]
@@ -262,7 +270,9 @@ mod tests {
     #[test]
     fn discover_skips_folder_without_skill_md() {
         let dir = temp_dir();
-        fs::create_dir_all(dir.join("not-a-skill")).unwrap();
+        if let Err(e) = fs::create_dir_all(dir.join("not-a-skill")) {
+            panic!("create dir: {e}");
+        }
         write_skill(&dir, "real-skill", "A real skill", "Body.");
 
         let catalog = SkillCatalog::new(dir.clone(), None);
@@ -276,8 +286,12 @@ mod tests {
     fn discover_skips_skill_without_frontmatter() {
         let dir = temp_dir();
         let skill_dir = dir.join("no-frontmatter");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), "Just a body, no frontmatter.").unwrap();
+        if let Err(e) = fs::create_dir_all(&skill_dir) {
+            panic!("create dir: {e}");
+        }
+        if let Err(e) = fs::write(skill_dir.join("SKILL.md"), "Just a body, no frontmatter.") {
+            panic!("write SKILL.md: {e}");
+        }
 
         let catalog = SkillCatalog::new(dir.clone(), None);
         let (skills, _) = catalog.discover();
@@ -289,8 +303,12 @@ mod tests {
     fn discover_skips_skill_with_invalid_frontmatter() {
         let dir = temp_dir();
         let skill_dir = dir.join("bad-frontmatter");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), "+++\nnot valid toml = = =\n+++\nBody.").unwrap();
+        if let Err(e) = fs::create_dir_all(&skill_dir) {
+            panic!("create dir: {e}");
+        }
+        if let Err(e) = fs::write(skill_dir.join("SKILL.md"), "+++\nnot valid toml = = =\n+++\nBody.") {
+            panic!("write SKILL.md: {e}");
+        }
 
         let catalog = SkillCatalog::new(dir.clone(), None);
         let (skills, _) = catalog.discover();
@@ -356,8 +374,9 @@ mod tests {
         let catalog = SkillCatalog::new(dir.clone(), None);
         let invocation = catalog.invoke("pdf-fill");
 
-        assert!(invocation.is_some());
-        let inv = invocation.unwrap();
+        let Some(inv) = invocation else {
+            panic!("expected an invocation");
+        };
         assert_eq!(inv.body, "Step 1: do the thing.");
         assert_eq!(inv.origin, SkillOrigin::User);
         assert_eq!(inv.resources.len(), 1);
@@ -381,7 +400,9 @@ mod tests {
         write_skill(&project_dir, "shared", "Project version", "Project body.");
 
         let catalog = SkillCatalog::new(user_dir, Some(project_dir.clone()));
-        let inv = catalog.invoke("shared").unwrap();
+        let Some(inv) = catalog.invoke("shared") else {
+            panic!("expected the shared skill to resolve");
+        };
 
         assert_eq!(inv.body, "Project body.");
         assert_eq!(inv.origin, SkillOrigin::Project);
