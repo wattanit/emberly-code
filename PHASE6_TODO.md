@@ -93,13 +93,13 @@ surfaces the prior phases built and is otherwise self-contained in `emberly-tui`
 | Group | Status | Notes |
 |---|---|---|
 | 1. `ui.mouse` config + threading + single capture gate (rich && ui.mouse) + crossterm feature (`emberly`/`emberly-tui`) | [x] | mirrored `tool_explanations` + the §6.4 ticker control point; gated the *existing* capture; no new dep (`Cargo.lock` unchanged) |
-| 2. Wheel-scroll parity: route wheel to the palette list; confirm overlay/permission/conversation (`emberly-tui`) | [ ] | small gap — `on_scroll` doesn't route to the open palette today |
+| 2. Wheel-scroll parity: route wheel to the palette list; confirm overlay/permission/conversation (`emberly-tui`) | [x] | added palette branch to `on_scroll` (moves `selected`, == Up/Down); confirmed overlay/permission/conversation routing with tests |
 | 3. Click hit-testing infrastructure: retained `HitMap` of `Rect → Target` (`emberly-tui`) | [ ] | layout is transient in draw; build a hit-map from render geometry |
 | 4. Click = focus+Enter on keyboard-parity surfaces: palette rows, picker rows, reasoning expand, modified-files diff (`emberly-tui`) | [ ] | each maps to an existing handler; Memory/Skills row-open deferred (no keyboard parity yet) |
 | 5. Permission-prompt click safety + native Shift-selection passthrough + `ui.mouse=false` off switch (`emberly-tui`) | [ ] | click reuses `on_permission_key`; never auto-approve; preserve terminal copy |
 | 6. Tests (offline — §14.7) + exit criterion (`emberly-tui`) | [ ] | capture-off predicate, wheel routing, click→action, click-never-approves, degraded |
 
-**Overall Phase 6: IN PROGRESS — Group 1 done (config + threading + capture gate).**
+**Overall Phase 6: IN PROGRESS — Groups 1–2 done (capture gate + wheel-scroll parity).**
 
 ---
 
@@ -137,16 +137,19 @@ surfaces the prior phases built and is otherwise self-contained in `emberly-tui`
 Wheel scroll mostly works (`on_scroll` routes overlay → permission → conversation,
 `app.rs:959`). Close the one gap and confirm the rest.
 
-- [ ] Route the wheel to the **command palette** list when it is open: `on_scroll`
-      (`app.rs:959`) currently ignores the palette (modal at `on_key` :727 but absent from
-      the scroll router), so a long palette cannot be wheeled. Add a palette branch (scroll
-      `palette.selected`/a view offset) ahead of the overlay branch, matching the modal
-      priority in `on_key`.
-- [ ] Confirm (with a test, group 6) the existing routing: open overlay → wheel scrolls
-      the overlay (`Overlay.scroll`); permission prompt up → wheel scrolls
-      `permission_scroll`; otherwise the conversation `scroll`. This is the "scrolls the
-      focused pane or open overlay" requirement (Design §3.4) — mostly present, just
-      unverified and missing the palette case.
+- [x] Routed the wheel to the **command palette** when open: added a palette branch to
+      `on_scroll` **ahead of the overlay branch**, matching the modal priority in `on_key`
+      (palette > overlay > permission > conversation). The palette has no separate view
+      offset — its render windows the list around `selected` — so the branch moves `selected`
+      (wheel-up → up, wheel-down → down, clamped to `commands::matches(query).len()-1`), which
+      is **exactly the Up/Down key action** (keyboard parity, §3.4). One item per notch.
+- [x] Confirmed the existing routing with tests. `wheel_routes_to_the_open_palette` (new):
+      wheel moves the palette selection like Down/Up, clamps at the top, and never leaks to
+      the conversation. `wheel_scrolls_a_permission_prompt_without_deciding` (new): the wheel
+      scrolls `permission_scroll`, never `scroll`, and **never decides** (Design §5/§3.4).
+      `wheel_scrolls_conversation_and_routes_to_overlay` (existing) already covers overlay +
+      conversation. All green (169 `emberly-tui` tests). _Group 6 can reference these rather
+      than re-adding._
 
 ## 3. Click hit-testing infrastructure  *(Design §3.4)*
 
@@ -278,6 +281,12 @@ each target — the mouse adds no capability the keyboard lacks (the invariant).
   `ui_mouse_parses_and_merges`) and the full `emberly-tui` suite (167) green; `emberly-tui --lib`
   clippy clean (the only workspace clippy warnings are the 2 pre-existing `emberly-core/engine.rs`
   `too_many_arguments`, unrelated).
+- **Group 2 DONE (wheel-scroll parity).** `on_scroll` gained a palette branch at the top of
+  the modal chain (mirroring `on_key`'s palette > overlay > permission > conversation order).
+  Because the palette render windows the list around `selected` (no separate scroll offset),
+  the wheel moves `selected` — the same action as the Up/Down keys, so wheeling the palette is
+  keyboard-parity by construction. Overlay/permission/conversation routing was already present
+  and is now covered by tests. No new state, no config. 2 tests added (169 `emberly-tui` green).
 - **Part 2 (memory/skills inspectors) already merged into this branch — group 4 sidebar-click
   target is now UNBLOCKED.** `PHASE6_TODO.md` groups 2/4 and the notes below were written before
   `phase6b/memory-skills-inspector` landed; the inspectors now exist and are palette-openable

@@ -1031,6 +1031,26 @@ impl App {
     /// scrolling toward older content.
     pub fn on_scroll(&mut self, up: bool) {
         let step = 3;
+        // Modal priority mirrors `on_key` (palette > overlay > permission >
+        // conversation, Design §3.3/§3.4): the wheel scrolls the focused
+        // surface, so an open palette takes the wheel before any lower pane.
+        if self.palette.is_some() {
+            // The palette viewport follows `selected` (the render windows the
+            // list around it), so moving the selection is exactly how the list
+            // scrolls — the same action as the Up/Down keys (keyboard parity,
+            // §3.4). One item per wheel notch, matching a single arrow press.
+            let last = commands::matches(self.palette_query())
+                .len()
+                .saturating_sub(1);
+            if let Some(p) = self.palette.as_mut() {
+                p.selected = if up {
+                    p.selected.saturating_sub(1)
+                } else {
+                    (p.selected + 1).min(last)
+                };
+            }
+            return;
+        }
         if let Some(o) = self.overlays.last_mut() {
             o.scroll = if up {
                 o.scroll.saturating_sub(step)
@@ -2964,6 +2984,24 @@ mod tests {
     }
 
     #[test]
+    fn wheel_routes_to_the_open_palette() {
+        let mut a = app();
+        // Open the palette (Ctrl+P) — it is modal and takes the wheel first.
+        a.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(a.palette.is_some());
+        // Wheel down moves the selection down, exactly like the Down key…
+        a.on_scroll(false);
+        assert_eq!(a.palette.as_ref().map(|p| p.selected), Some(1));
+        // …and wheel up moves it back, clamped at the top.
+        a.on_scroll(true);
+        assert_eq!(a.palette.as_ref().map(|p| p.selected), Some(0));
+        a.on_scroll(true);
+        assert_eq!(a.palette.as_ref().map(|p| p.selected), Some(0));
+        // The wheel never leaks to the conversation while the palette is up.
+        assert_eq!(a.scroll, 0);
+    }
+
+    #[test]
     fn overlay_scrolls_and_dismisses() {
         let mut a = app();
         a.open_text_overlay("t", "line1\nline2\nline3");
@@ -3228,6 +3266,31 @@ mod tests {
         // Home returns to the top.
         a.on_key(KeyEvent::from(KeyCode::Home));
         assert_eq!(a.permission_scroll, 0);
+    }
+
+    #[test]
+    fn wheel_scrolls_a_permission_prompt_without_deciding() {
+        let mut a = app();
+        a.apply_event(UiEvent::PermissionRequest {
+            id: PermissionId(11),
+            rendering: PermissionRendering {
+                tool: "bash".into(),
+                summary: "run: x".into(),
+                detail: "long\ncommand\nbelow\nthe\nfold".into(),
+                affected_paths: vec![],
+                outside_root: false,
+                reason: "bash asks".into(),
+            },
+        });
+        // The wheel reviews the prompt body (permission_scroll), never the
+        // conversation, and never decides (Design §5, §3.4).
+        a.on_scroll(false);
+        assert!(a.permission_scroll > 0);
+        assert_eq!(a.scroll, 0, "conversation untouched while a prompt is up");
+        assert!(a.pending_permission.is_some(), "the wheel never decides");
+        a.on_scroll(true);
+        assert_eq!(a.permission_scroll, 0);
+        assert!(a.pending_permission.is_some());
     }
 
     #[test]
