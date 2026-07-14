@@ -9,6 +9,7 @@
 //! permission prompt (group 7), and palette (group 8) fill it in.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 use emberly_core::{
     resume, AskAnswer, AskId, Command, Effort, EntrySummary, LoopResolution, MemoryOp, MemoryScope,
     Mode, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus, SessionId,
@@ -21,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use crate::commands::{self, AppCommand};
 use crate::editor::LineEditor;
+use crate::hit::ClickTarget;
 use crate::theme::Theme;
 
 /// Rows the conversation scrolls per PageUp/PageDown.
@@ -407,6 +409,10 @@ pub struct App {
     pub overlays: Vec<Overlay>,
     /// The command palette, when open (Ctrl+P). Modal while present.
     pub palette: Option<PaletteState>,
+    /// The click hit-map from the last rendered frame (Design §3.4). Rebuilt by
+    /// `render::frame` and stored here by the `tui` loop after each draw, so a
+    /// click resolves against the geometry actually on screen.
+    pub hit_map: crate::hit::HitMap,
     /// True while a turn is in flight (submit → `TurnEnded`): drives the
     /// "working" spinner (Design §6.3).
     pub busy: bool,
@@ -468,6 +474,7 @@ impl App {
             last_modified: None,
             overlays: Vec::new(),
             palette: None,
+            hit_map: crate::hit::HitMap::new(),
             busy: false,
             motion: true,
             anim_frame: 0,
@@ -1071,6 +1078,34 @@ impl App {
             } else {
                 self.scroll.saturating_sub(step)
             };
+        }
+    }
+
+    /// Handle an unmodified left click at `(col, row)` (Design §3.4). A click is
+    /// a shortcut for "focus + Enter": it resolves against the last frame's
+    /// hit-map and then reuses the **exact same keyboard handler** the Enter key
+    /// would — the mouse adds no capability the keyboard lacks (the §3.4
+    /// invariant). A click on nothing interactive is inert. Returns the `Action`
+    /// the keypress would, so the frontend loop routes it identically.
+    pub fn on_click(&mut self, col: u16, row: u16) -> Action {
+        let Some(target) = self.hit_map.hit(col, row) else {
+            return Action::None;
+        };
+        match target {
+            ClickTarget::PaletteRow(row) => {
+                // Focus the clicked row, then activate it exactly as palette
+                // Enter does (on_palette_key) — no separate dispatch path.
+                if let Some(p) = self.palette.as_mut() {
+                    p.selected = row;
+                }
+                self.on_palette_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::ChoiceRow(row) => {
+                // Focus the clicked choice, then confirm it exactly as picker
+                // Enter does (on_choice_picker_key).
+                self.set_choice_selection(row);
+                self.on_choice_picker_key(KeyEvent::from(KeyCode::Enter))
+            }
         }
     }
 
@@ -2999,6 +3034,71 @@ mod tests {
         assert_eq!(a.palette.as_ref().map(|p| p.selected), Some(0));
         // The wheel never leaks to the conversation while the palette is up.
         assert_eq!(a.scroll, 0);
+    }
+
+    #[test]
+    fn click_on_a_palette_row_is_focus_plus_enter() {
+        // A click resolves via the hit-map to a row, then does exactly what
+        // "arrow to that row + Enter" does — no separate authority (§3.4).
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+
+        let mut by_click = app();
+        by_click.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        by_click.hit_map.push(region, ClickTarget::PaletteRow(1));
+        let click_action = by_click.on_click(0, 0);
+
+        let mut by_key = app();
+        by_key.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        by_key.on_key(KeyEvent::from(KeyCode::Down)); // focus row 1
+        let key_action = by_key.on_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(click_action, key_action, "a click is focus + Enter");
+        assert!(
+            by_click.palette.is_none(),
+            "activating a row closes the palette, like Enter"
+        );
+        assert!(by_key.palette.is_none());
+    }
+
+    #[test]
+    fn click_on_a_choice_row_is_focus_plus_enter() {
+        // Same parity for the model/effort/mode picker rows.
+        let region = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 1,
+        };
+
+        let mut by_click = app();
+        by_click.open_mode_picker(); // rows: Normal(current) / AutoAcceptEdits / Auto
+        by_click.hit_map.push(region, ClickTarget::ChoiceRow(2));
+        let click_action = by_click.on_click(0, 0);
+
+        let mut by_key = app();
+        by_key.open_mode_picker();
+        by_key.on_key(KeyEvent::from(KeyCode::Down));
+        by_key.on_key(KeyEvent::from(KeyCode::Down)); // focus row 2
+        let key_action = by_key.on_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(click_action, key_action, "clicking a choice == arrow + Enter");
+        assert!(
+            by_click.overlays.is_empty(),
+            "confirming a choice closes the picker, like Enter"
+        );
+        assert!(by_key.overlays.is_empty());
+    }
+
+    #[test]
+    fn a_click_on_nothing_interactive_is_inert() {
+        // An empty hit-map (nothing rendered clickable) → no action, no panic.
+        let mut a = app();
+        assert_eq!(a.on_click(5, 5), Action::None);
     }
 
     #[test]

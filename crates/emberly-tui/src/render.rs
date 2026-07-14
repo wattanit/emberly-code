@@ -16,6 +16,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, ChoiceRow, ConvItem, Overlay, OverlayContent, SessionRow};
+use crate::hit::{ClickTarget, HitMap};
 use crate::text;
 use crate::theme::Theme;
 use crate::{strings, strings::markers};
@@ -31,8 +32,12 @@ const GUTTER: u16 = 2;
 /// Inline diffs show at most this many rows before pointing at the overlay.
 const INLINE_DIFF_CAP: usize = 20;
 
-/// Draw one full frame.
-pub fn frame(f: &mut Frame, app: &App) {
+/// Draw one full frame, populating `hit` with the click regions of the topmost
+/// interactive layer (Design §3.4). `hit` is a fresh map each frame; the modal
+/// renderers ([`render_overlay`], [`render_palette`]) clear it before pushing
+/// their own regions, so it always reflects the layer that actually owns input
+/// — a click can never fall through a modal to the pane behind it.
+pub fn frame(f: &mut Frame, app: &App, hit: &mut HitMap) {
     let area = f.area();
     let sidebar_shown = app.sidebar_visible && area.width >= COLLAPSE_BELOW;
 
@@ -80,19 +85,22 @@ pub fn frame(f: &mut Frame, app: &App) {
 
     // Overlays draw last, on top of everything (Design §4.2).
     if let Some(overlay) = app.active_overlay() {
-        render_overlay(f, app, overlay, area);
+        render_overlay(f, app, overlay, area, hit);
     }
     // The command palette sits above overlays when open (Design §3.3).
     if app.palette.is_some() {
-        render_palette(f, app, area);
+        render_palette(f, app, area, hit);
     }
 }
 
 // ---- command palette -----------------------------------------------------
 
 /// Draw the command palette: a query line over a filtered, selectable list.
-fn render_palette(f: &mut Frame, app: &App, screen: Rect) {
+fn render_palette(f: &mut Frame, app: &App, screen: Rect, hit: &mut HitMap) {
     let theme = &app.theme;
+    // The palette is the topmost modal (Design §3.3): it owns the hit-map, so
+    // clear any regions the layers behind it pushed — no click-through.
+    hit.clear();
     let Some(palette) = &app.palette else {
         return;
     };
@@ -138,6 +146,19 @@ fn render_palette(f: &mut Frame, app: &App, screen: Rect) {
             Span::styled(spec.desc.to_string(), theme.chrome()),
             Span::styled(key, theme.chrome()),
         ]));
+        // Clickable region for this row (Design §3.4): `row` is the index into
+        // the filtered match list — exactly what `PaletteState::selected` holds
+        // — so a click maps to "select this row + palette Enter".
+        let y = inner.y + 1 + u16::try_from(row - top).unwrap_or(0);
+        hit.push(
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
+            ClickTarget::PaletteRow(row),
+        );
     }
     if matched.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -156,8 +177,14 @@ fn render_palette(f: &mut Frame, app: &App, screen: Rect) {
 // ---- overlay -------------------------------------------------------------
 
 /// Draw the active overlay as a centered, scrollable pane over the screen.
-fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
+fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect, hit: &mut HitMap) {
     let theme = &app.theme;
+    // An overlay is modal over the conversation/sidebar (Design §4.2): it owns
+    // the hit-map. Clear regions from the layers behind so a click cannot fall
+    // through to them; interactive overlays push their own rows below. (If the
+    // palette is also open it renders after this and clears again — palette on
+    // top.)
+    hit.clear();
     // Brief ease-in: the overlay expands from ~70% to its full 82% over a frame
     // or two (Design §6.4). Settled overlays render at full size.
     let p = app.overlay_ease_progress();
@@ -257,7 +284,29 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
         height: inner.height - 1,
         ..inner
     };
+    let visible_len = visible.len();
     f.render_widget(Paragraph::new(visible), body_area);
+
+    // Clickable rows for the choice picker (Design §3.4). Each choice is exactly
+    // one line (`choice_picker_lines`), so the row index is `scroll + offset`;
+    // a click maps to "select this row + picker Enter". Other overlay kinds are
+    // read-only or wired in a later group — they push no rows (the clear above
+    // still blocks click-through).
+    if matches!(overlay.content, OverlayContent::Choices { .. }) {
+        for offset in 0..visible_len {
+            let row = scroll + offset;
+            let y = body_area.y + u16::try_from(offset).unwrap_or(0);
+            hit.push(
+                Rect {
+                    x: body_area.x,
+                    y,
+                    width: body_area.width,
+                    height: 1,
+                },
+                ClickTarget::ChoiceRow(row),
+            );
+        }
+    }
 
     let more = if scroll < max_scroll {
         "  ↓ more"
@@ -1474,7 +1523,8 @@ mod tests {
     /// screen row per line), for asserting what actually appears on screen.
     fn draw(app: &App, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).expect("backend");
-        term.draw(|f| frame(f, app)).expect("draw");
+        let mut hit = HitMap::new();
+        term.draw(|f| frame(f, app, &mut hit)).expect("draw");
         let buf = term.backend().buffer();
         let width = usize::from(buf.area.width);
         buf.content
@@ -1487,6 +1537,87 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Render a full frame and return the click hit-map it built, so tests can
+    /// assert which screen positions resolve to which targets (Design §3.4).
+    fn hit_map_of(app: &App, w: u16, h: u16) -> HitMap {
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("backend");
+        let mut hit = HitMap::new();
+        term.draw(|f| frame(f, app, &mut hit)).expect("draw");
+        hit
+    }
+
+    #[test]
+    fn palette_rows_populate_the_hit_map() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.palette = Some(crate::app::PaletteState::default());
+        let hit = hit_map_of(&app, 100, 24);
+        // The first two filtered rows are clickable at consecutive screen rows.
+        let y0 = (0..24).find(|&y| hit.hit(50, y) == Some(ClickTarget::PaletteRow(0)));
+        let y1 = (0..24).find(|&y| hit.hit(50, y) == Some(ClickTarget::PaletteRow(1)));
+        assert!(y0.is_some(), "palette row 0 is clickable");
+        assert_eq!(
+            y1,
+            y0.map(|y| y + 1),
+            "consecutive rows occupy adjacent screen rows"
+        );
+    }
+
+    #[test]
+    fn choice_picker_rows_populate_the_hit_map() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.overlays.push(Overlay {
+            title: "permission mode".into(),
+            content: OverlayContent::Choices {
+                kind: crate::app::ChoiceKind::Mode,
+                rows: vec![
+                    ChoiceRow {
+                        label: "normal".into(),
+                        current: true,
+                    },
+                    ChoiceRow {
+                        label: "auto-accept edits".into(),
+                        current: false,
+                    },
+                ],
+                selected: 0,
+            },
+            scroll: 0,
+        });
+        let hit = hit_map_of(&app, 100, 24);
+        let y0 = (0..24).find(|&y| hit.hit(50, y) == Some(ClickTarget::ChoiceRow(0)));
+        let y1 = (0..24).find(|&y| hit.hit(50, y) == Some(ClickTarget::ChoiceRow(1)));
+        assert!(y0.is_some(), "choice row 0 is clickable");
+        assert_eq!(y1, y0.map(|y| y + 1), "choice rows are adjacent");
+    }
+
+    #[test]
+    fn a_read_only_overlay_blocks_click_through() {
+        // A Text overlay is read-only: it clears the hit-map (no click-through
+        // to the conversation behind) and pushes no rows.
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+        );
+        app.open_text_overlay("t", "some body text");
+        let hit = hit_map_of(&app, 100, 24);
+        assert!(
+            (0..24).all(|y| (0..100).all(|x| hit.hit(x, y).is_none())),
+            "nothing under a read-only overlay is clickable"
+        );
     }
 
     fn pending(app: &mut App, outside_root: bool, detail: &str) {

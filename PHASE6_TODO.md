@@ -94,12 +94,12 @@ surfaces the prior phases built and is otherwise self-contained in `emberly-tui`
 |---|---|---|
 | 1. `ui.mouse` config + threading + single capture gate (rich && ui.mouse) + crossterm feature (`emberly`/`emberly-tui`) | [x] | mirrored `tool_explanations` + the §6.4 ticker control point; gated the *existing* capture; no new dep (`Cargo.lock` unchanged) |
 | 2. Wheel-scroll parity: route wheel to the palette list; confirm overlay/permission/conversation (`emberly-tui`) | [x] | added palette branch to `on_scroll` (moves `selected`, == Up/Down); confirmed overlay/permission/conversation routing with tests |
-| 3. Click hit-testing infrastructure: retained `HitMap` of `Rect → Target` (`emberly-tui`) | [ ] | layout is transient in draw; build a hit-map from render geometry |
+| 3. Click hit-testing infrastructure: retained `HitMap` of `Rect → Target` (`emberly-tui`) | [x] | `hit.rs` (`HitMap`/`ClickTarget`); `frame` builds it (out-param); `on_click` = focus+Enter; tui click arm; palette+choice rows wired (rest → group 4) |
 | 4. Click = focus+Enter on keyboard-parity surfaces: palette rows, picker rows, reasoning expand, modified-files diff (`emberly-tui`) | [ ] | each maps to an existing handler; Memory/Skills row-open deferred (no keyboard parity yet) |
 | 5. Permission-prompt click safety + native Shift-selection passthrough + `ui.mouse=false` off switch (`emberly-tui`) | [ ] | click reuses `on_permission_key`; never auto-approve; preserve terminal copy |
 | 6. Tests (offline — §14.7) + exit criterion (`emberly-tui`) | [ ] | capture-off predicate, wheel routing, click→action, click-never-approves, degraded |
 
-**Overall Phase 6: IN PROGRESS — Groups 1–2 done (capture gate + wheel-scroll parity).**
+**Overall Phase 6: IN PROGRESS — Groups 1–3 done (capture gate + wheel parity + click hit-testing).**
 
 ---
 
@@ -156,37 +156,49 @@ Wheel scroll mostly works (`on_scroll` routes overlay → permission → convers
 The crux: turn a click `(column, row)` into a target. Layout is transient (`render.rs:40`),
 so introduce a retained hit-map.
 
-- [ ] Define `enum ClickTarget { PaletteRow(usize), ChoiceRow(usize), ReasoningToggle,
-      ModifiedFile(usize)/OpenDiff, ConversationBody, OverlayBody, PermissionChoice(Allow|
-      Session|Deny), … }` and a `HitMap(Vec<(Rect, ClickTarget)>)` with `hit(col,row) ->
-      Option<ClickTarget>` (topmost match wins, honoring the same modal priority as
-      `on_key`: palette > overlay > permission > sidebar/conversation).
-- [ ] **Populate the hit-map from render geometry.** `render::frame(f, &app)` takes `&App`
-      today, so choose the plumbing (**decide in notes log**):
-      (a) have `frame` build and return a `HitMap` (the `tui` loop stores it on `App` after
-      each `draw`), or (b) a separate `layout(app, area) -> HitMap` that recomputes the
-      same `Layout::split` deterministically and is called alongside draw.
-      Leaning to (a) — one geometry source of truth, no drift — accepting that `frame`
-      then returns the map (or writes it via a `&mut HitMap` out-param). Record the choice.
-- [ ] For the sidebar (one `Paragraph`, `render.rs:755`) and the wrapped conversation
-      (`conversation_lines()` `render.rs:344`), map row ranges to targets as the lines are
-      built, so a click resolves to the right row without per-row widgets.
-- [ ] Add the click arm in the event loop (`tui.rs:130`, replacing `_ => continue`):
-      `MouseEventKind::Down(Left)` → `app.on_click(mouse.column, mouse.row)` → redraw. Keep
-      wheel arms unchanged. Ignore other kinds (drag/move/right — but see group 5 for
-      Shift-drag passthrough).
+- [x] Defined `ClickTarget` + `HitMap` in a new `crate::hit` module. `ClickTarget` starts
+      minimal — `PaletteRow(usize)`, `ChoiceRow(usize)` — and each later group **extends** the
+      enum as it wires a surface (avoids `dead_code` on unconstructed variants; §1 lint
+      policy). `HitMap` is `Vec<(Rect, ClickTarget)>` with `push`/`clear`/`hit(col,row) ->
+      Option<ClickTarget>`; `hit` scans **back-to-front so the topmost region wins**. Modal
+      priority is enforced structurally (below), not by relying on push order alone. 4 unit
+      tests (contains/half-open edges, miss, topmost-wins, clear).
+- [x] **Populated from render geometry — plumbing (a) via a `&mut HitMap` out-param.**
+      `render::frame(f, &app, &mut HitMap)` builds the map as it draws (one geometry source of
+      truth, no drift). Chosen the out-param over a return value because ratatui's
+      `Terminal::draw` closure must return `()` — so `frame` can't return the map through it;
+      the `tui` loop's `redraw` helper makes a fresh `HitMap`, draws, and stores it on
+      `App.hit_map`. **Modal priority** is enforced by each modal renderer calling
+      `hit.clear()` before pushing its own regions (`render_overlay`, `render_palette`), so the
+      **topmost interactive layer owns the map** and a click can never fall through a modal to
+      the pane behind it (asserted: a read-only Text overlay leaves nothing clickable).
+- [~] Sidebar (modified files) and conversation (reasoning toggle) row→target mapping —
+      **moved to group 4** alongside their dispatch (they need parallel target-maps in
+      `conversation_lines()`/`render_sidebar` and are meaningless without dispatch). Group 3
+      populates the two clean 1-line-per-row surfaces: **palette rows** (`render_palette`) and
+      **choice-picker rows** (`render_overlay` Choices). Sessions/memory/skills overlay rows
+      also → group 4 (multi-line rows). Permission affordances → group 5.
+- [x] Added the click arm in the event loop (replacing `_ => continue`):
+      `MouseEventKind::Down(Left)` with **no modifiers** → `app.on_click(col,row)` → routed
+      through the shared `handle_action` (same path as keys) → `redraw`. Wheel arms unchanged;
+      modified/other kinds fall to `_ => continue` (no redraw, so a native Shift-drag stays
+      smooth — the Shift gate is here already; group 5 verifies/documents it). Extracted
+      `handle_action` so a key and a click share one Action-dispatch path (the §3.4 invariant
+      in code).
 
 ## 4. Click = focus + Enter on keyboard-parity surfaces  *(Design §3.4; §3.3, §4.4, §4.2)*
 
 `on_click(col,row)` dispatches via the hit-map to the **existing** keyboard handler for
 each target — the mouse adds no capability the keyboard lacks (the invariant).
 
-- [ ] **Command-palette row** → select that row and run it, reusing the `on_palette_key`
-      Enter path (`app.rs:1708` → `run_slash`). A click on row *i* sets `palette.selected =
-      i` then activates — "focus + Enter".
-- [ ] **Picker rows (model/effort/mode)** → select + apply, reusing `on_choice_picker_key`
-      Enter (`app.rs:1857` → `Command::SwitchModel`/`SetEffort`/`SetMode`). Click a choice
-      row = highlight + confirm.
+- [x] **Command-palette row** → select that row and run it, reusing the `on_palette_key`
+      Enter path. **Done in group 3** — `on_click` sets `palette.selected = row` then
+      dispatches a synthetic `Enter` to `on_palette_key` (literal "focus + Enter"; zero
+      duplicated dispatch). Parity test: click row 1 == Down + Enter.
+- [x] **Picker rows (model/effort/mode)** → select + apply, reusing `on_choice_picker_key`
+      Enter. **Done in group 3** — `on_click` calls `set_choice_selection(row)` then a
+      synthetic `Enter` to `on_choice_picker_key`. Parity test: click row 2 == Down·Down +
+      Enter.
 - [ ] **Collapsed reasoning trail** → expand/collapse, reusing `toggle_reasoning`
       (`app.rs:1357`, the Ctrl+R action). (The inline task list is always-expanded today —
       no collapse affordance exists, so there is nothing to toggle; a click is a no-op
@@ -287,6 +299,32 @@ each target — the mouse adds no capability the keyboard lacks (the invariant).
   the wheel moves `selected` — the same action as the Up/Down keys, so wheeling the palette is
   keyboard-parity by construction. Overlay/permission/conversation routing was already present
   and is now covered by tests. No new state, no config. 2 tests added (169 `emberly-tui` green).
+- **Group 3 DONE (click hit-testing infrastructure).** New `crate::hit` module: `ClickTarget`
+  (starts minimal — `PaletteRow`/`ChoiceRow` — extended per group to avoid `dead_code`) +
+  `HitMap` (topmost-wins `hit()`). `render::frame(f, &app, &mut HitMap)` builds the map from
+  live geometry (out-param, because ratatui's `draw` closure returns `()`); the `tui` loop's
+  `redraw` stores it on `App.hit_map`. **Modal priority via `hit.clear()`** in each modal
+  renderer → the topmost layer owns the map, no click-through (tested with a read-only overlay).
+  `on_click` is **literal "focus + Enter"**: it resolves the target, sets the selection, then
+  dispatches a synthetic `Enter` to the *existing* key handler — so the mouse cannot diverge
+  from the keyboard by construction (the §3.4 invariant, in code). Extracted `handle_action` so
+  keys and clicks share one Action path. Wired palette + choice rows (clean 1-line rows);
+  sessions/memory/skills/reasoning/modified-files → group 4, permission → group 5. Shift-gate on
+  the click already present (`modifiers.is_empty()`); group 5 verifies. +10 tests (179 green),
+  `emberly-tui` clippy-clean, no new dep.
+- **Group 3/4 boundary rebalanced (recorded per G-11).** The TODO put "populate all surfaces"
+  in group 3 and "dispatch" in group 4. Rebalanced so each commit is coherent and tested:
+  **group 3** = framework + the two clean 1-line-per-row surfaces (palette, choices) *with*
+  dispatch (the synthetic-Enter pattern made dispatch trivial, so splitting it off added no
+  value); **group 4** = the multi-line / conversation-embedded / sidebar surfaces (sessions,
+  memory/skills rows, reasoning toggle, modified files, sidebar-open) with their population +
+  dispatch; **group 5** = permission affordances. Net scope unchanged; only the commit seam
+  moved.
+- **Hit-map plumbing decision (resolves the group-3 open item).** Chose the `&mut HitMap`
+  out-param over a `frame` return value: ratatui's `Terminal::draw` takes an `FnOnce(&mut Frame)`
+  whose return is discarded, so a returned map can't escape the closure — the out-param is the
+  clean way to get geometry out of the draw. Single source of truth preserved (built *in* the
+  draw, never a second recompute).
 - **Part 2 (memory/skills inspectors) already merged into this branch — group 4 sidebar-click
   target is now UNBLOCKED.** `PHASE6_TODO.md` groups 2/4 and the notes below were written before
   `phase6b/memory-skills-inspector` landed; the inspectors now exist and are palette-openable
