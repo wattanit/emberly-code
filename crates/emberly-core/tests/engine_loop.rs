@@ -143,7 +143,8 @@ fn start_with_file_transcript(
 
 fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx) = Engine::new(config, engine_ports.events_tx);
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx) =
+        Engine::new(config, engine_ports.events_tx);
     tokio::spawn(engine.run(
         engine_ports.commands_rx,
         asks_rx,
@@ -1875,11 +1876,7 @@ fn start_with_truncate(
         Ok(sink) => sink,
         Err(error) => panic!("open transcript {}: {error}", path.display()),
     };
-    let mut config = make_config(
-        Arc::new(FakeProvider::new(scripts)),
-        root,
-        Box::new(sink),
-    );
+    let mut config = make_config(Arc::new(FakeProvider::new(scripts)), root, Box::new(sink));
     config.truncate = truncate;
     spawn(config)
 }
@@ -1907,7 +1904,10 @@ async fn glob_reduction_writes_sidecar_with_full_output() {
         ScriptedResponse::text("done"),
     ];
     let mut h = start_with_truncate(scripts, root.clone(), &path, TruncateConfig::default());
-    h.send(Command::UserInput { text: "list".into() }).await;
+    h.send(Command::UserInput {
+        text: "list".into(),
+    })
+    .await;
     let _ = h.collect(None).await;
     drop(h);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1933,7 +1933,10 @@ async fn glob_reduction_writes_sidecar_with_full_output() {
             let sidecar = std::fs::read_to_string(ref_path).unwrap_or_default();
             assert!(sidecar.contains("file_00.txt"), "head preserved in sidecar");
             assert!(sidecar.contains("file_59.txt"), "tail preserved in sidecar");
-            assert!(sidecar.contains("file_30.txt"), "middle preserved in sidecar");
+            assert!(
+                sidecar.contains("file_30.txt"),
+                "middle preserved in sidecar"
+            );
         }
         _ => panic!("expected ToolResult"),
     }
@@ -1957,7 +1960,10 @@ async fn reduce_false_passes_output_through_unchanged() {
         ..TruncateConfig::default()
     };
     let mut h = start_with_truncate(scripts, root, &path, no_reduce);
-    h.send(Command::UserInput { text: "list".into() }).await;
+    h.send(Command::UserInput {
+        text: "list".into(),
+    })
+    .await;
     let _ = h.collect(None).await;
     drop(h);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2022,7 +2028,10 @@ async fn bash_reduction_collapses_progress_in_context() {
             // The sidecar has the complete output including all 100 lines.
             let ref_path = full_output_ref.as_ref().expect("full_output_ref set");
             let sidecar = std::fs::read_to_string(ref_path).unwrap_or_default();
-            assert!(sidecar.contains("Downloading 50%"), "middle preserved in sidecar");
+            assert!(
+                sidecar.contains("Downloading 50%"),
+                "middle preserved in sidecar"
+            );
             assert!(sidecar.matches("Downloading").count() >= 100);
         }
         _ => panic!("expected ToolResult"),
@@ -2045,7 +2054,10 @@ async fn hc7_transcript_and_sidecar_preserve_full_result() {
         ScriptedResponse::text("done"),
     ];
     let mut h = start_with_truncate(scripts, root.clone(), &path, TruncateConfig::default());
-    h.send(Command::UserInput { text: "list".into() }).await;
+    h.send(Command::UserInput {
+        text: "list".into(),
+    })
+    .await;
     let _ = h.collect(None).await;
     drop(h);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2075,14 +2087,12 @@ async fn hc7_transcript_and_sidecar_preserve_full_result() {
 
     // The sidecar holds the complete, unreduced output.
     match tr[0] {
-        TranscriptEvent::ToolResult { full_output_ref, .. } => {
+        TranscriptEvent::ToolResult {
+            full_output_ref, ..
+        } => {
             let ref_path = full_output_ref.as_ref().expect("sidecar ref set");
             let sidecar = std::fs::read_to_string(ref_path).unwrap_or_default();
-            assert_eq!(
-                sidecar.matches("f").count(),
-                60,
-                "all 60 paths in sidecar"
-            );
+            assert_eq!(sidecar.matches("f").count(), 60, "all 60 paths in sidecar");
         }
         _ => panic!("expected ToolResult"),
     }
@@ -2165,18 +2175,11 @@ async fn window_drops_old_turns_from_sent_context() {
         marker.contains("turns 1\u{2013}8"),
         "marker names the stable turn range: {marker}"
     );
-    assert!(
-        marker.contains("recall"),
-        "marker offers recall: {marker}"
-    );
+    assert!(marker.contains("recall"), "marker offers recall: {marker}");
 
     // The last 3 turns are kept: turn 8 (2 msgs), turn 9 (2 msgs), and the new
     // "next" turn (1 msg — no assistant reply yet). Plus pinned(1) + marker(1).
-    assert_eq!(
-        msgs.len(),
-        7,
-        "pinned(1) + marker(1) + 3 kept turns(2+2+1)"
-    );
+    assert_eq!(msgs.len(), 7, "pinned(1) + marker(1) + 3 kept turns(2+2+1)");
 
     // The kept turns include the last few user messages.
     let texts: Vec<&str> = msgs.iter().map(first_text).collect();
@@ -2223,7 +2226,7 @@ async fn window_never_splits_tool_use_from_result() {
     // A windowed message list must stay provider-valid: every ToolUse has its
     // matching ToolResult (FR-3 clean boundary invariant).
     let mut conv = vec![Message::user_text("original task")]; // pinned
-    // 6 turns, each with a tool call: [User, Assistant+ToolUse, ToolResult]
+                                                              // 6 turns, each with a tool call: [User, Assistant+ToolUse, ToolResult]
     for i in 0..6 {
         let call_id = ToolCallId::new(format!("c{i}"));
         conv.push(Message::user_text(format!("turn {i}")));
@@ -2428,12 +2431,12 @@ async fn turn_numbers_stable_across_compaction() {
     // Build: [task(0), summary(11), turn8(8), reply8(8), turn9(9), reply9(9)]
     // (simulating a compaction that kept turns 8–9 and inserted a summary).
     let conv = vec![
-        Message::user_text("original task"),         // turn 0 (pinned)
-        Message::user_text("compaction summary"),    // turn 11 (summary)
-        Message::user_text("turn 8"),                // turn 8
-        Message::assistant_text("reply 8"),          // turn 8
-        Message::user_text("turn 9"),                // turn 9
-        Message::assistant_text("reply 9"),          // turn 9
+        Message::user_text("original task"),      // turn 0 (pinned)
+        Message::user_text("compaction summary"), // turn 11 (summary)
+        Message::user_text("turn 8"),             // turn 8
+        Message::assistant_text("reply 8"),       // turn 8
+        Message::user_text("turn 9"),             // turn 9
+        Message::assistant_text("reply 9"),       // turn 9
     ];
     let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
     let ctx = ContextConfig {
@@ -2475,11 +2478,7 @@ async fn recall_round_trip_returns_dropped_turns() {
     let conv = multi_turn_conversation(10);
     let scripts = vec![
         // Turn 1: the model calls recall for turns 1–2.
-        ScriptedResponse::tool_call(
-            "r1",
-            "recall",
-            r#"{"from_turn":1,"to_turn":2}"#,
-        ),
+        ScriptedResponse::tool_call("r1", "recall", r#"{"from_turn":1,"to_turn":2}"#),
         // Turn 2: the model finishes.
         ScriptedResponse::text("done"),
     ];
@@ -2491,10 +2490,7 @@ async fn recall_round_trip_returns_dropped_turns() {
     let root = temp_project();
     let mut h = spawn_windowed(fake.clone(), root, ctx, conv, false);
 
-    h.send(Command::UserInput {
-        text: "go".into(),
-    })
-    .await;
+    h.send(Command::UserInput { text: "go".into() }).await;
     // recall is not permission-gated — no permission prompt, just tool activity.
     let _ = h.collect(None).await;
 
@@ -2549,11 +2545,7 @@ async fn recall_out_of_range_returns_empty() {
     // empty outcome — not an error (HC-6).
     let conv = multi_turn_conversation(3);
     let scripts = vec![
-        ScriptedResponse::tool_call(
-            "r1",
-            "recall",
-            r#"{"from_turn":100,"to_turn":200}"#,
-        ),
+        ScriptedResponse::tool_call("r1", "recall", r#"{"from_turn":100,"to_turn":200}"#),
         ScriptedResponse::text("done"),
     ];
     let fake = Arc::new(FakeProvider::new(scripts));
@@ -2564,10 +2556,7 @@ async fn recall_out_of_range_returns_empty() {
         conv,
         false,
     );
-    h.send(Command::UserInput {
-        text: "go".into(),
-    })
-    .await;
+    h.send(Command::UserInput { text: "go".into() }).await;
     let _ = h.collect(None).await;
 
     let req = fake.last_request().expect("request captured");
@@ -2578,7 +2567,10 @@ async fn recall_out_of_range_returns_empty() {
             _ => false,
         })
     });
-    assert!(found_empty, "out-of-range recall returns a structured empty");
+    assert!(
+        found_empty,
+        "out-of-range recall returns a structured empty"
+    );
 }
 
 #[tokio::test]
@@ -2595,17 +2587,12 @@ async fn context_usage_reflects_windowed_view() {
         window_turns: 2,
         ..ContextConfig::default()
     };
-    let mut h_small = spawn_windowed(
-        fake.clone(),
-        temp_project(),
-        ctx_small,
-        conv.clone(),
-        false,
-    );
-    h_small.send(Command::UserInput {
-        text: "next".into(),
-    })
-    .await;
+    let mut h_small = spawn_windowed(fake.clone(), temp_project(), ctx_small, conv.clone(), false);
+    h_small
+        .send(Command::UserInput {
+            text: "next".into(),
+        })
+        .await;
     let events_small = h_small.collect(None).await;
 
     // Large window: everything kept.
@@ -2614,17 +2601,12 @@ async fn context_usage_reflects_windowed_view() {
         window_turns: 40,
         ..ContextConfig::default()
     };
-    let mut h_full = spawn_windowed(
-        fake_full,
-        temp_project(),
-        ctx_full,
-        conv,
-        false,
-    );
-    h_full.send(Command::UserInput {
-        text: "next".into(),
-    })
-    .await;
+    let mut h_full = spawn_windowed(fake_full, temp_project(), ctx_full, conv, false);
+    h_full
+        .send(Command::UserInput {
+            text: "next".into(),
+        })
+        .await;
     let events_full = h_full.collect(None).await;
 
     // Extract the ContextUsage token counts from the events.
@@ -2658,11 +2640,7 @@ async fn recall_renders_as_ordinary_tool_activity() {
     // tool-agnostic, so recall renders as one dim line like any tool.
     let conv = multi_turn_conversation(10);
     let scripts = vec![
-        ScriptedResponse::tool_call(
-            "r1",
-            "recall",
-            r#"{"from_turn":1,"to_turn":2}"#,
-        ),
+        ScriptedResponse::tool_call("r1", "recall", r#"{"from_turn":1,"to_turn":2}"#),
         ScriptedResponse::text("done"),
     ];
     let fake = Arc::new(FakeProvider::new(scripts));
@@ -2671,10 +2649,7 @@ async fn recall_renders_as_ordinary_tool_activity() {
         ..ContextConfig::default()
     };
     let mut h = spawn_windowed(fake, temp_project(), ctx, conv, false);
-    h.send(Command::UserInput {
-        text: "go".into(),
-    })
-    .await;
+    h.send(Command::UserInput { text: "go".into() }).await;
     let events = h.collect(None).await;
 
     // Must find a ToolStarted for recall — no special event variant.
@@ -2738,9 +2713,9 @@ async fn windowing_does_not_affect_user_scrollback() {
     // No UiEvent variant carries the elision marker — it lives only in the
     // sent messages, which the frontend never sees. The user's scrollback
     // (built from UiEvents) is whole.
-    let has_elision_event = events.iter().any(|e| {
-        matches!(e, UiEvent::Notice { message } if message.contains("elided"))
-    });
+    let has_elision_event = events
+        .iter()
+        .any(|e| matches!(e, UiEvent::Notice { message } if message.contains("elided")));
     assert!(
         !has_elision_event,
         "windowing produces no user-visible elision event"
@@ -2833,11 +2808,7 @@ async fn windowing_with_compaction_and_recall_compose() {
     }
 
     let scripts = vec![
-        ScriptedResponse::tool_call(
-            "r1",
-            "recall",
-            r#"{"from_turn":2,"to_turn":3}"#,
-        ),
+        ScriptedResponse::tool_call("r1", "recall", r#"{"from_turn":2,"to_turn":3}"#),
         ScriptedResponse::text("done"),
     ];
     let fake = Arc::new(FakeProvider::new(scripts));
@@ -2846,10 +2817,7 @@ async fn windowing_with_compaction_and_recall_compose() {
         ..ContextConfig::default()
     };
     let mut h = spawn_windowed(fake.clone(), temp_project(), ctx, conv, true);
-    h.send(Command::UserInput {
-        text: "go".into(),
-    })
-    .await;
+    h.send(Command::UserInput { text: "go".into() }).await;
     let _ = h.collect(None).await;
 
     let req = fake.last_request().expect("request captured");
@@ -2877,10 +2845,7 @@ async fn windowing_with_compaction_and_recall_compose() {
         .next()
         .unwrap_or_default();
 
-    assert!(
-        !recall_content.is_empty(),
-        "recall returned turn 2 content"
-    );
+    assert!(!recall_content.is_empty(), "recall returned turn 2 content");
     assert!(
         recall_content.contains("turn 3"),
         "recall returned turn 3 content"
@@ -2972,21 +2937,19 @@ async fn auto_compaction_fires_at_clean_boundary_and_does_not_thrash() {
 
     // FR-4: auto-compaction fired at the clean boundary.
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, UiEvent::CompactionStatus { message } if message.contains("near full"))),
+        events.iter().any(
+            |e| matches!(e, UiEvent::CompactionStatus { message } if message.contains("near full"))
+        ),
         "auto-compaction should surface its reason"
     );
     assert!(
-        sink.records()
-            .iter()
-            .any(|r| matches!(
-                &r.event,
-                TranscriptEvent::Compaction {
-                    trigger: CompactTrigger::Auto,
-                    ..
-                }
-            )),
+        sink.records().iter().any(|r| matches!(
+            &r.event,
+            TranscriptEvent::Compaction {
+                trigger: CompactTrigger::Auto,
+                ..
+            }
+        )),
         "transcript should record trigger = auto"
     );
 
@@ -3050,21 +3013,19 @@ async fn auto_compact_disabled_never_auto_fires() {
     h.send(Command::Compact).await;
     let events = h.collect(None).await;
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, UiEvent::CompactionStatus { message } if message.contains("Compacted"))),
+        events.iter().any(
+            |e| matches!(e, UiEvent::CompactionStatus { message } if message.contains("Compacted"))
+        ),
         "manual compaction still works when auto is disabled"
     );
     assert!(
-        sink.records()
-            .iter()
-            .any(|r| matches!(
-                &r.event,
-                TranscriptEvent::Compaction {
-                    trigger: CompactTrigger::Manual,
-                    ..
-                }
-            )),
+        sink.records().iter().any(|r| matches!(
+            &r.event,
+            TranscriptEvent::Compaction {
+                trigger: CompactTrigger::Manual,
+                ..
+            }
+        )),
         "manual compaction records trigger = manual"
     );
 }
@@ -3273,10 +3234,7 @@ async fn in_session_resume_fast_path_is_silent() {
         sessions_dir.clone(),
         sid,
     );
-    h.send(Command::UserInput {
-        text: "hi".into(),
-    })
-    .await;
+    h.send(Command::UserInput { text: "hi".into() }).await;
     let _ = h.collect(None).await;
     drop(h);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3321,10 +3279,7 @@ async fn in_session_resume_fallback_emits_one_notice() {
         sessions_dir.clone(),
         sid,
     );
-    h.send(Command::UserInput {
-        text: "hi".into(),
-    })
-    .await;
+    h.send(Command::UserInput { text: "hi".into() }).await;
     let _ = h.collect(None).await;
     drop(h);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3382,9 +3337,9 @@ async fn in_session_resume_restores_conversation() {
 
     // Resume and send a follow-up. The FakeProvider's second call should
     // receive the restored conversation (including "remember this").
-    let fake = Arc::new(FakeProvider::new(vec![
-        ScriptedResponse::text("second response"),
-    ]));
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text(
+        "second response",
+    )]));
     let fake_clone = fake.clone();
     let sid2 = SessionId::new();
     let path2 = sessions_dir.join(format!("{sid2}.jsonl"));
@@ -3443,10 +3398,7 @@ async fn todo_round_trip_emits_event_and_transcript() {
         ScriptedResponse::text("ok"),
     ];
     let (mut h, sink) = start_capturing(scripts, temp_project());
-    h.send(Command::UserInput {
-        text: "go".into(),
-    })
-    .await;
+    h.send(Command::UserInput { text: "go".into() }).await;
     let events = h.collect(None).await;
 
     // Must emit TaskListUpdated with the full list.
@@ -3484,10 +3436,7 @@ async fn todo_second_call_replaces_not_merges() {
         ScriptedResponse::text("ok"),
     ];
     let (mut h, sink) = start_capturing(scripts, temp_project());
-    h.send(Command::UserInput {
-        text: "go".into(),
-    })
-    .await;
+    h.send(Command::UserInput { text: "go".into() }).await;
     let _ = h.collect(None).await;
 
     // The last task_list transcript event must have exactly 1 item — replace,
@@ -3517,19 +3466,13 @@ async fn todo_is_not_permission_gated() {
         ScriptedResponse::text("done"),
     ];
     let mut h = start(scripts, temp_project());
-    h.send(Command::UserInput {
-        text: "go".into(),
-    })
-    .await;
+    h.send(Command::UserInput { text: "go".into() }).await;
     let events = h.collect(None).await;
 
     let has_permission = events
         .iter()
         .any(|e| matches!(e, UiEvent::PermissionRequest { .. }));
-    assert!(
-        !has_permission,
-        "todo never raises a permission prompt"
-    );
+    assert!(!has_permission, "todo never raises a permission prompt");
 }
 
 /// With `pin_task_list = true`, the task list survives compaction in the
@@ -3619,10 +3562,7 @@ async fn todo_unpinned_absent_from_context() {
     };
     let mut h = spawn(config);
 
-    h.send(Command::UserInput {
-        text: "go".into(),
-    })
-    .await;
+    h.send(Command::UserInput { text: "go".into() }).await;
     let _ = h.collect(None).await;
 
     let req = fake.last_request().expect("request captured");
@@ -3651,10 +3591,7 @@ async fn todo_transcript_event_is_additive_for_resume() {
     let sid = SessionId::new();
     let path = session_dir.join(format!("{sid}.jsonl"));
     let mut h = start_with_file_transcript(scripts, root.clone(), &path);
-    h.send(Command::UserInput {
-        text: "go".into(),
-    })
-    .await;
+    h.send(Command::UserInput { text: "go".into() }).await;
     let _ = h.collect(None).await;
 
     // The transcript file contains the task_list event. Reading it back for
@@ -3666,10 +3603,10 @@ async fn todo_transcript_event_is_additive_for_resume() {
     );
     let loaded = records.expect("checked ok");
     assert!(
-        loaded.records.iter().any(|r| matches!(
-            &r.event,
-            TranscriptEvent::TaskList { .. }
-        )),
+        loaded
+            .records
+            .iter()
+            .any(|r| matches!(&r.event, TranscriptEvent::TaskList { .. })),
         "transcript contains the task_list event"
     );
 }
@@ -3725,9 +3662,7 @@ async fn read_image_round_trip_appends_image_block() {
     assert_eq!(deltas(&events), "I see a red pixel.");
 
     // The last request sent to the provider contains an Image block.
-    let req = fake
-        .last_request()
-        .expect("at least one request was sent");
+    let req = fake.last_request().expect("at least one request was sent");
     let has_image = req.messages.iter().any(|m| {
         m.content
             .iter()
@@ -3767,9 +3702,7 @@ async fn read_image_on_non_vision_model_returns_unsupported_result() {
     );
 
     // No Image block in the sent context.
-    let req = fake
-        .last_request()
-        .expect("at least one request was sent");
+    let req = fake.last_request().expect("at least one request was sent");
     let has_image = req.messages.iter().any(|m| {
         m.content
             .iter()
@@ -3804,27 +3737,27 @@ async fn read_image_transcript_records_path_not_bytes() {
 
     // The transcript has a ToolCall for read_image with the path.
     let records = sink.records();
-    let tool_call = records.iter().find(|r| {
-        matches!(&r.event, TranscriptEvent::ToolCall { tool, .. } if tool == "read_image")
-    });
+    let tool_call = records.iter().find(
+        |r| matches!(&r.event, TranscriptEvent::ToolCall { tool, .. } if tool == "read_image"),
+    );
     assert!(tool_call.is_some(), "tool_call recorded");
     if let Some(r) = tool_call {
         if let TranscriptEvent::ToolCall { args, .. } = &r.event {
-            assert!(args.to_string().contains("pic.png"), "path in tool_call args");
+            assert!(
+                args.to_string().contains("pic.png"),
+                "path in tool_call args"
+            );
         }
     }
 
     // The tool_result is recorded with ok=true (the reference line text).
-    let tool_result = records.iter().find(|r| {
-        matches!(&r.event, TranscriptEvent::ToolResult { call_id, .. } if call_id.0 == "c1")
-    });
+    let tool_result = records.iter().find(
+        |r| matches!(&r.event, TranscriptEvent::ToolResult { call_id, .. } if call_id.0 == "c1"),
+    );
     assert!(tool_result.is_some(), "tool_result recorded");
 
     // No transcript record contains base64 image data (the bytes are not in the JSONL).
-    let all_text: String = records
-        .iter()
-        .map(|r| format!("{:?}", r.event))
-        .collect();
+    let all_text: String = records.iter().map(|r| format!("{:?}", r.event)).collect();
     assert!(
         !all_text.contains("iVBOR"),
         "image bytes must not appear in the transcript (HC-7)"
@@ -3834,7 +3767,12 @@ async fn read_image_transcript_records_path_not_bytes() {
 // ---- memory round-trip (FR-6, T-13) ---------------------------------------
 
 /// A config with memory enabled and temp dirs for both scopes.
-fn memory_config(provider: Arc<dyn Provider>, root: PathBuf, user_dir: PathBuf, project_dir: Option<PathBuf>) -> EngineConfig {
+fn memory_config(
+    provider: Arc<dyn Provider>,
+    root: PathBuf,
+    user_dir: PathBuf,
+    project_dir: Option<PathBuf>,
+) -> EngineConfig {
     let mut config = make_config(provider, root, EngineConfig::no_transcript());
     config.memory = emberly_core::MemoryConfig::default();
     config.user_memory_dir = Some(user_dir);
@@ -3871,7 +3809,10 @@ async fn memory_write_recall_round_trip() {
     let config = memory_config(provider, root, user_dir.clone(), None);
     let mut h = spawn(config);
 
-    h.send(Command::UserInput { text: "remember and recall".into() }).await;
+    h.send(Command::UserInput {
+        text: "remember and recall".into(),
+    })
+    .await;
     let events = h.collect(None).await;
 
     // The model produced its closing message.
@@ -3879,21 +3820,31 @@ async fn memory_write_recall_round_trip() {
 
     // A MemoryStatus event was emitted with the updated count.
     assert!(
-        events.iter().any(|e| matches!(e, UiEvent::MemoryStatus { user: 1, .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::MemoryStatus { user: 1, .. })),
         "MemoryStatus with user count 1 was emitted"
     );
 
     // The recall returned the body — the tool_result content contains it.
     // The second tool's result ("cargo build") should appear in a ToolFinished.
-    let recall_finish = events.iter().find(|e| matches!(e,
-        UiEvent::ToolFinished { summary, .. } if summary.contains("recalled")));
+    let recall_finish = events.iter().find(|e| {
+        matches!(e,
+        UiEvent::ToolFinished { summary, .. } if summary.contains("recalled"))
+    });
     assert!(recall_finish.is_some(), "recall tool finished with origin");
 
     // The index is pinned in the system prompt of the next request.
     let req = fake.last_request().expect("request sent");
     let system = req.system.as_deref().unwrap_or("");
-    assert!(system.contains("Build"), "memory index pinned in system prompt");
-    assert!(system.contains("how to build"), "description in pinned index");
+    assert!(
+        system.contains("Build"),
+        "memory index pinned in system prompt"
+    );
+    assert!(
+        system.contains("how to build"),
+        "description in pinned index"
+    );
 }
 
 #[tokio::test]
@@ -3915,13 +3866,17 @@ async fn memory_project_scope_absent_when_untrusted() {
     let config = memory_config(provider, root, user_dir, None);
     let mut h = spawn(config);
 
-    h.send(Command::UserInput { text: "write project memory".into() }).await;
+    h.send(Command::UserInput {
+        text: "write project memory".into(),
+    })
+    .await;
     let events = h.collect(None).await;
 
     // The tool finished with ok=false (Rejected — project unavailable).
     assert!(
-        events.iter().any(|e| matches!(e,
-            UiEvent::ToolFinished { ok: false, .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ToolFinished { ok: false, .. })),
         "project memory rejected on untrusted root"
     );
 }
@@ -3944,13 +3899,17 @@ async fn memory_name_escape_is_rejected() {
     let config = memory_config(provider, root, user_dir, None);
     let mut h = spawn(config);
 
-    h.send(Command::UserInput { text: "write bad memory".into() }).await;
+    h.send(Command::UserInput {
+        text: "write bad memory".into(),
+    })
+    .await;
     let events = h.collect(None).await;
 
     // The tool finished with ok=false (path escape rejected).
     assert!(
-        events.iter().any(|e| matches!(e,
-            UiEvent::ToolFinished { ok: false, .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ToolFinished { ok: false, .. })),
         "path-escape in name was rejected"
     );
 }
@@ -3967,10 +3926,7 @@ async fn memory_disabled_does_not_pin_index() {
         user_dir.join("seed.md"),
         "+++\nname = \"Seed\"\ndescription = \"seed entry\"\n+++\nbody\n",
     );
-    let _ = std::fs::write(
-        user_dir.join("MEMORY.md"),
-        "- Seed — seed entry\n",
-    );
+    let _ = std::fs::write(user_dir.join("MEMORY.md"), "- Seed — seed entry\n");
 
     let fake = Arc::new(FakeProvider::new(vec![
         ScriptedResponse::tool_call(
@@ -3985,13 +3941,17 @@ async fn memory_disabled_does_not_pin_index() {
     config.memory.enabled = false;
     let mut h = spawn(config);
 
-    h.send(Command::UserInput { text: "recall".into() }).await;
+    h.send(Command::UserInput {
+        text: "recall".into(),
+    })
+    .await;
     let events = h.collect(None).await;
 
     // The tool finished with ok=false (memory disabled).
     assert!(
-        events.iter().any(|e| matches!(e,
-            UiEvent::ToolFinished { ok: false, .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ToolFinished { ok: false, .. })),
         "memory op rejected when disabled"
     );
 
@@ -4022,11 +3982,16 @@ async fn memory_op_never_raises_permission_request() {
     let config = memory_config(provider, root, user_dir, None);
     let mut h = spawn(config);
 
-    h.send(Command::UserInput { text: "write memory".into() }).await;
+    h.send(Command::UserInput {
+        text: "write memory".into(),
+    })
+    .await;
     let events = h.collect(None).await;
 
     assert!(
-        !events.iter().any(|e| matches!(e, UiEvent::PermissionRequest { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::PermissionRequest { .. })),
         "memory op never raises a PermissionRequest"
     );
 }
@@ -4049,7 +4014,8 @@ fn skills_config(
 
 fn skill_temp_dir(label: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("emberly-skill-{label}-{}-{n}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("emberly-skill-{label}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
     dir
@@ -4074,7 +4040,12 @@ fn write_skill_resource(dir: &Path, skill_name: &str, resource_name: &str, conte
 async fn skill_invoke_loads_body_and_resources() {
     let root = temp_project();
     let user_dir = skill_temp_dir("u");
-    write_skill(&user_dir, "pdf-fill", "Fill PDF forms", "Step 1: open the template.");
+    write_skill(
+        &user_dir,
+        "pdf-fill",
+        "Fill PDF forms",
+        "Step 1: open the template.",
+    );
     write_skill_resource(&user_dir, "pdf-fill", "template.txt", "Template content");
 
     let fake = Arc::new(FakeProvider::new(vec![
@@ -4085,7 +4056,10 @@ async fn skill_invoke_loads_body_and_resources() {
     let config = skills_config(provider, root, user_dir, None);
     let mut h = spawn(config);
 
-    h.send(Command::UserInput { text: "use the pdf skill".into() }).await;
+    h.send(Command::UserInput {
+        text: "use the pdf skill".into(),
+    })
+    .await;
     let events = h.collect(None).await;
 
     assert_eq!(deltas(&events), "done");
@@ -4102,24 +4076,44 @@ async fn skill_invoke_loads_body_and_resources() {
     // The skill tool finished successfully with origin on the summary line.
     let skill_finish = events.iter().find(|e| matches!(e,
         UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("skill") && summary.contains("pdf-fill")));
-    assert!(skill_finish.is_some(), "skill tool finished with origin on summary");
+    assert!(
+        skill_finish.is_some(),
+        "skill tool finished with origin on summary"
+    );
 
     // The tool result contains the body (assert via ToolFinished preview).
-    let finish = events.iter().find(|e| matches!(e,
-        UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("pdf-fill")));
+    let finish = events.iter().find(|e| {
+        matches!(e,
+        UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("pdf-fill"))
+    });
     if let Some(UiEvent::ToolFinished { preview, .. }) = finish {
-        assert!(preview.contains("Step 1: open the template."), "body in tool result preview");
-        assert!(preview.contains("template.txt"), "resource listed in tool result");
+        assert!(
+            preview.contains("Step 1: open the template."),
+            "body in tool result preview"
+        );
+        assert!(
+            preview.contains("template.txt"),
+            "resource listed in tool result"
+        );
     }
 
     // The catalog (metadata) is pinned in the system prompt.
     let req = fake.last_request().expect("request sent");
     let system = req.system.as_deref().unwrap_or("");
-    assert!(system.contains("pdf-fill"), "skill name pinned in system prompt");
-    assert!(system.contains("Fill PDF forms"), "skill description pinned in system prompt");
+    assert!(
+        system.contains("pdf-fill"),
+        "skill name pinned in system prompt"
+    );
+    assert!(
+        system.contains("Fill PDF forms"),
+        "skill description pinned in system prompt"
+    );
 
     // The body is NOT pinned (progressive disclosure).
-    assert!(!system.contains("Step 1: open the template."), "body not pinned in system prompt");
+    assert!(
+        !system.contains("Step 1: open the template."),
+        "body not pinned in system prompt"
+    );
 }
 
 #[tokio::test]
@@ -4129,9 +4123,7 @@ async fn skill_catalog_pinned_when_enabled_absent_when_disabled() {
     write_skill(&user_dir, "linter", "Run linters", "Use eslint.");
 
     // --- enabled: catalog is pinned ---
-    let fake = Arc::new(FakeProvider::new(vec![
-        ScriptedResponse::text("ok"),
-    ]));
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
     let provider: Arc<dyn Provider> = fake.clone();
     let config = skills_config(provider, root.clone(), user_dir.clone(), None);
     let mut h = spawn(config);
@@ -4147,7 +4139,10 @@ async fn skill_catalog_pinned_when_enabled_absent_when_disabled() {
 
     let req = fake.last_request().expect("request sent");
     let system = req.system.as_deref().unwrap_or("");
-    assert!(system.contains("linter"), "catalog pinned when skills enabled");
+    assert!(
+        system.contains("linter"),
+        "catalog pinned when skills enabled"
+    );
 
     // --- disabled: no catalog pinned, skill tool fails ---
     let fake2 = Arc::new(FakeProvider::new(vec![
@@ -4159,25 +4154,34 @@ async fn skill_catalog_pinned_when_enabled_absent_when_disabled() {
     config2.skills = emberly_core::SkillsConfig { enabled: false };
     let mut h2 = spawn(config2);
 
-    h2.send(Command::UserInput { text: "use skill".into() }).await;
+    h2.send(Command::UserInput {
+        text: "use skill".into(),
+    })
+    .await;
     let events2 = h2.collect(None).await;
 
     // No SkillsAvailable with skills (empty or absent).
-    let skills_event = events2.iter().find(|e| matches!(e, UiEvent::SkillsAvailable { .. }));
+    let skills_event = events2
+        .iter()
+        .find(|e| matches!(e, UiEvent::SkillsAvailable { .. }));
     if let Some(UiEvent::SkillsAvailable { skills }) = skills_event {
         assert!(skills.is_empty(), "no skills cataloged when disabled");
     }
 
     // The skill tool call fails (unknown skill — no catalog).
     assert!(
-        events2.iter().any(|e| matches!(e,
-            UiEvent::ToolFinished { ok: false, .. })),
+        events2
+            .iter()
+            .any(|e| matches!(e, UiEvent::ToolFinished { ok: false, .. })),
         "skill tool fails when skills disabled"
     );
 
     let req2 = fake2.last_request().expect("request sent");
     let system2 = req2.system.as_deref().unwrap_or("");
-    assert!(!system2.contains("linter"), "catalog not pinned when skills disabled");
+    assert!(
+        !system2.contains("linter"),
+        "catalog not pinned when skills disabled"
+    );
 }
 
 #[tokio::test]
@@ -4188,7 +4192,12 @@ async fn skill_untrusted_project_absent() {
     let user_dir = skill_temp_dir("u");
     let project_dir = skill_temp_dir("p");
     write_skill(&user_dir, "user-skill", "User skill", "User body.");
-    write_skill(&project_dir, "project-skill", "Project skill", "Project body.");
+    write_skill(
+        &project_dir,
+        "project-skill",
+        "Project skill",
+        "Project body.",
+    );
 
     let fake = Arc::new(FakeProvider::new(vec![
         // Try to invoke the project skill — should fail.
@@ -4202,7 +4211,10 @@ async fn skill_untrusted_project_absent() {
     let config = skills_config(provider, root, user_dir, None);
     let mut h = spawn(config);
 
-    h.send(Command::UserInput { text: "use skills".into() }).await;
+    h.send(Command::UserInput {
+        text: "use skills".into(),
+    })
+    .await;
     let events = h.collect(None).await;
 
     assert_eq!(deltas(&events), "done");
@@ -4218,10 +4230,13 @@ async fn skill_untrusted_project_absent() {
     }
 
     // The project skill invoke fails (not cataloged).
-    let finishes: Vec<_> = events.iter().filter_map(|e| match e {
-        UiEvent::ToolFinished { ok, summary, .. } => Some((*ok, summary.clone())),
-        _ => None,
-    }).collect();
+    let finishes: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            UiEvent::ToolFinished { ok, summary, .. } => Some((*ok, summary.clone())),
+            _ => None,
+        })
+        .collect();
     assert_eq!(finishes.len(), 2, "two tool finishes");
     assert!(!finishes[0].0, "project skill invoke fails (not cataloged)");
     assert!(finishes[1].0, "user skill invoke succeeds");
@@ -4229,7 +4244,10 @@ async fn skill_untrusted_project_absent() {
     // The project skill is not in the pinned system prompt.
     let req = fake.last_request().expect("request sent");
     let system = req.system.as_deref().unwrap_or("");
-    assert!(!system.contains("project-skill"), "project skill not pinned");
+    assert!(
+        !system.contains("project-skill"),
+        "project skill not pinned"
+    );
     assert!(system.contains("user-skill"), "user skill pinned");
 }
 
@@ -4250,12 +4268,17 @@ async fn skill_not_permission_gated() {
     let config = skills_config(provider, root, user_dir, None);
     let mut h = spawn(config);
 
-    h.send(Command::UserInput { text: "use skill".into() }).await;
+    h.send(Command::UserInput {
+        text: "use skill".into(),
+    })
+    .await;
     let events = h.collect(None).await;
 
     // No PermissionRequest was emitted.
     assert!(
-        !events.iter().any(|e| matches!(e, UiEvent::PermissionRequest { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::PermissionRequest { .. })),
         "skill invoke never raises a PermissionRequest"
     );
 
@@ -4291,7 +4314,10 @@ async fn memory_hc7_no_bytes_in_transcript() {
     };
     let mut h = spawn(config);
 
-    h.send(Command::UserInput { text: "remember".into() }).await;
+    h.send(Command::UserInput {
+        text: "remember".into(),
+    })
+    .await;
     let _ = h.collect(None).await;
 
     // The memory file exists on disk with the body.
@@ -4301,9 +4327,9 @@ async fn memory_hc7_no_bytes_in_transcript() {
     // The transcript records the tool_call and tool_result but the tool_result
     // does NOT duplicate the body — only the summary.
     let records = sink.records();
-    let tool_result = records.iter().find(|r| {
-        matches!(&r.event, TranscriptEvent::ToolResult { call_id, .. } if call_id.0 == "c1")
-    });
+    let tool_result = records.iter().find(
+        |r| matches!(&r.event, TranscriptEvent::ToolResult { call_id, .. } if call_id.0 == "c1"),
+    );
     assert!(tool_result.is_some(), "tool_result recorded");
     if let Some(r) = tool_result {
         if let TranscriptEvent::ToolResult { output, .. } = &r.event {
@@ -4335,7 +4361,10 @@ async fn skill_precedence_project_over_user() {
     let config = skills_config(provider, root, user_dir, Some(project_dir));
     let mut h = spawn(config);
 
-    h.send(Command::UserInput { text: "use shared skill".into() }).await;
+    h.send(Command::UserInput {
+        text: "use shared skill".into(),
+    })
+    .await;
     let events = h.collect(None).await;
 
     // SkillsAvailable shows the project variant.
@@ -4351,19 +4380,30 @@ async fn skill_precedence_project_over_user() {
     }
 
     // The invoke returns the project body.
-    let finish = events.iter().find(|e| matches!(e,
-        UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("shared")));
+    let finish = events.iter().find(|e| {
+        matches!(e,
+        UiEvent::ToolFinished { ok: true, summary, .. } if summary.contains("shared"))
+    });
     assert!(finish.is_some(), "skill invoke succeeded");
     if let Some(UiEvent::ToolFinished { preview, .. }) = finish {
-        assert!(preview.contains("Project body."), "project body returned on invoke");
+        assert!(
+            preview.contains("Project body."),
+            "project body returned on invoke"
+        );
         assert!(!preview.contains("User body."), "user body not returned");
     }
 
     // The pinned catalog shows the project variant.
     let req = fake.last_request().expect("request sent");
     let system = req.system.as_deref().unwrap_or("");
-    assert!(system.contains("Project version"), "project description pinned");
-    assert!(!system.contains("User version"), "user description not pinned");
+    assert!(
+        system.contains("Project version"),
+        "project description pinned"
+    );
+    assert!(
+        !system.contains("User version"),
+        "user description not pinned"
+    );
 }
 
 // ---- inspector round-trips (Phase 6b: /memory & /skills, FR-6/FR-7) --------
@@ -4479,7 +4519,10 @@ async fn memory_mutate_update_edits_body_and_reemits_status() {
     let _ = h.collect(None).await;
     let req = fake.last_request().expect("request sent");
     let system = req.system.as_deref().unwrap_or("");
-    assert!(system.contains("new desc"), "updated description pinned in index");
+    assert!(
+        system.contains("new desc"),
+        "updated description pinned in index"
+    );
     assert!(
         !system.contains("new body"),
         "body not pinned (progressive disclosure, §8.6)"
@@ -4520,7 +4563,12 @@ async fn memory_mutate_remove_deletes_and_reemits_counts() {
 async fn inspect_skill_returns_body_and_stays_off_context() {
     let root = temp_project();
     let user_dir = skill_temp_dir("u");
-    write_skill(&user_dir, "pdf-fill", "Fill PDF forms", "Step 1: open the template.");
+    write_skill(
+        &user_dir,
+        "pdf-fill",
+        "Fill PDF forms",
+        "Step 1: open the template.",
+    );
     write_skill_resource(&user_dir, "pdf-fill", "template.txt", "content");
 
     let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("ok")]));
@@ -4582,7 +4630,9 @@ async fn inspect_skill_unknown_emits_notice_not_body() {
     let events = h.collect(None).await;
 
     assert!(
-        !events.iter().any(|e| matches!(e, UiEvent::SkillBody { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::SkillBody { .. })),
         "no SkillBody for an unknown skill"
     );
     assert!(
@@ -4643,7 +4693,12 @@ async fn inspect_skill_untrusted_project_emits_notice_not_body() {
     let root = temp_project();
     let user_dir = skill_temp_dir("u");
     let project_dir = skill_temp_dir("p");
-    write_skill(&project_dir, "proj-only", "Project skill", "secret instructions");
+    write_skill(
+        &project_dir,
+        "proj-only",
+        "Project skill",
+        "secret instructions",
+    );
 
     let fake: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![]));
     // project_dir = None simulates an untrusted root: the skill is on disk but
@@ -4659,7 +4714,9 @@ async fn inspect_skill_untrusted_project_emits_notice_not_body() {
     let events = h.collect(None).await;
 
     assert!(
-        !events.iter().any(|e| matches!(e, UiEvent::SkillBody { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::SkillBody { .. })),
         "no SkillBody for a project skill on an untrusted root (FR-1)"
     );
     assert!(

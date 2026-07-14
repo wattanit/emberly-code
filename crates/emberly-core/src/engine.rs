@@ -19,8 +19,8 @@ use emberly_providers::{
 };
 use emberly_sandbox::{Decision, Mode, Query, RuleEngine};
 use emberly_tools::{
-    reduce_output, truncate_output, AskUserOutcome, PermissionOutcome, PermissionRequest, RecallOutcome,
-    Reduction, Sandbox, ToolCtx, ToolRegistry, TruncateConfig,
+    reduce_output, truncate_output, AskUserOutcome, PermissionOutcome, PermissionRequest,
+    RecallOutcome, Reduction, Sandbox, ToolCtx, ToolRegistry, TruncateConfig,
 };
 use futures::StreamExt;
 use time::OffsetDateTime;
@@ -29,13 +29,16 @@ use tokio::sync::mpsc;
 use crate::command::Command;
 use crate::event::UiEvent;
 use crate::factory::{ConfigReloader, ProviderFactory};
-use crate::gate::{AskGate, AskUserAsk, ChannelGate, MemoryAsk, MemoryGateImpl, PermissionAsk, RecallAsk, RecallGateImpl, SkillAsk, SkillGateImpl, TaskListAsk, TaskListGateImpl};
+use crate::gate::{
+    AskGate, AskUserAsk, ChannelGate, MemoryAsk, MemoryGateImpl, PermissionAsk, RecallAsk,
+    RecallGateImpl, SkillAsk, SkillGateImpl, TaskListAsk, TaskListGateImpl,
+};
 use crate::id::{AskId, PermissionId, SessionId};
 use crate::memory::MemoryStore;
 use crate::skills::{render_catalog, ShadowNotice, SkillCatalog};
 use crate::transcript::{
-    CompactTrigger, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent,
-    TranscriptRecord, TranscriptSink,
+    CompactTrigger, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord,
+    TranscriptSink,
 };
 use crate::types::{LoopResolution, PermissionRendering, SandboxStatus, TokenUsage};
 use crate::view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
@@ -761,19 +764,25 @@ impl Engine {
             .memory_store
             .as_ref()
             .map_or((0, 0), |s| s.status_counts());
-        let _ = engine
-            .events_tx
-            .try_send(UiEvent::MemoryStatus {
-                user: user_count,
-                project: project_count,
-            });
+        let _ = engine.events_tx.try_send(UiEvent::MemoryStatus {
+            user: user_count,
+            project: project_count,
+        });
         // Build the skill catalog and emit SkillsAvailable at session start
         // (Tech Spec §8.2, §3.1).
         engine.refresh_skill_catalog();
         let _ = engine.events_tx.try_send(UiEvent::SkillsAvailable {
             skills: engine.skill_metas.clone(),
         });
-        (engine, asks_rx, user_asks_rx, recall_rx, task_list_rx, memory_rx, skill_rx)
+        (
+            engine,
+            asks_rx,
+            user_asks_rx,
+            recall_rx,
+            task_list_rx,
+            memory_rx,
+            skill_rx,
+        )
     }
 
     /// Run the engine until the command channel closes. Idle between turns,
@@ -849,8 +858,16 @@ impl Engine {
                     self.record_user_message(&text);
                     self.push_conversation_message(Message::user_text(text));
                     self.emit_context_usage().await;
-                    self.run_turn(&mut commands_rx, &mut asks_rx, &mut user_asks_rx, &mut recall_rx, &mut task_rx, &mut memory_rx, &mut skill_rx)
-                        .await;
+                    self.run_turn(
+                        &mut commands_rx,
+                        &mut asks_rx,
+                        &mut user_asks_rx,
+                        &mut recall_rx,
+                        &mut task_rx,
+                        &mut memory_rx,
+                        &mut skill_rx,
+                    )
+                    .await;
                     // The engine is idle again; let the frontend stop its
                     // "working" affordance (Design §6.3).
                     self.emit(UiEvent::TurnEnded).await;
@@ -951,13 +968,7 @@ impl Engine {
         };
         self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
         self.transcript = Box::new(sink);
-        self.adopt_session(
-            session_id,
-            path,
-            Vec::new(),
-            AdoptedState::fresh(),
-            false,
-        );
+        self.adopt_session(session_id, path, Vec::new(), AdoptedState::fresh(), false);
         self.write_transcript(TranscriptEvent::SessionStart {
             session_id,
             provider: self.provider_label.clone(),
@@ -1127,7 +1138,10 @@ impl Engine {
         // conversation). Keep the tail verbatim; summarize the middle.
         let pinned = usize::from(!self.conversation.is_empty());
         let len = self.conversation.len();
-        let keep = self.context.keep_recent_turns.min(len.saturating_sub(pinned));
+        let keep = self
+            .context
+            .keep_recent_turns
+            .min(len.saturating_sub(pinned));
         let from = pinned;
         let to = len.saturating_sub(keep);
         if to <= from {
@@ -1496,7 +1510,16 @@ impl Engine {
         let mut iter = tool_calls.into_iter();
         while let Some(call) = iter.next() {
             match self
-                .run_one_tool_call(&call, commands_rx, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx)
+                .run_one_tool_call(
+                    &call,
+                    commands_rx,
+                    asks_rx,
+                    user_asks_rx,
+                    recall_rx,
+                    task_rx,
+                    memory_rx,
+                    skill_rx,
+                )
                 .await
             {
                 ToolCallResult::Completed(outcome) => self.ingest_tool_result(&call, outcome).await,
@@ -2214,9 +2237,7 @@ impl Engine {
             truncated: false,
             full_output_ref: None,
         });
-        self.push_conversation_message(
-            Message::tool_result(call.id.clone(), canceled, true),
-        );
+        self.push_conversation_message(Message::tool_result(call.id.clone(), canceled, true));
         self.emit(UiEvent::ToolFinished {
             call_id: call.id.clone(),
             ok: false,
@@ -2361,8 +2382,7 @@ impl Engine {
         let first_turn = self.turn_map[first_turn_msg];
         let last_turn = self.turn_map[last_turn_msg];
 
-        let mut result =
-            Vec::with_capacity(pinned + 1 + total.saturating_sub(keep_from));
+        let mut result = Vec::with_capacity(pinned + 1 + total.saturating_sub(keep_from));
         result.extend(self.conversation[..pinned].iter().cloned());
         result.push(Message::user_text(format!(
             "[turns {first_turn}–{last_turn} elided from context \
@@ -2439,10 +2459,7 @@ impl Engine {
         // (progressive disclosure). Project memory is absent on an untrusted
         // root (Design §4.9).
         let base = if self.memory_config.enabled {
-            let block = render_memory_block(
-                &self.memory_user_index,
-                &self.memory_project_index,
-            );
+            let block = render_memory_block(&self.memory_user_index, &self.memory_project_index);
             if !block.is_empty() {
                 match &base {
                     Some(b) => Some(format!("{b}\n\n{block}")),
@@ -2544,9 +2561,7 @@ impl Engine {
                 // Soft-cap warn (Tech Spec §16): warn once when the combined
                 // index exceeds `max_index_entries`. Do not truncate.
                 let total = user_count + project_count;
-                if !self.memory_warn_emitted
-                    && total > self.memory_config.max_index_entries
-                {
+                if !self.memory_warn_emitted && total > self.memory_config.max_index_entries {
                     self.memory_warn_emitted = true;
                     self.emit(UiEvent::Notice {
                         message: format!(
@@ -2627,7 +2642,9 @@ impl Engine {
     /// never opens an empty overlay.
     async fn inspect_skill(&self, name: String) {
         let invocation = if self.skills_config.enabled {
-            self.skill_catalog.as_ref().and_then(|cat| cat.invoke(&name))
+            self.skill_catalog
+                .as_ref()
+                .and_then(|cat| cat.invoke(&name))
         } else {
             None
         };
@@ -2657,7 +2674,9 @@ impl Engine {
     /// change on invoke; contrast `on_memory_op` which refreshes `MemoryStatus`).
     async fn on_skill_invoke(&mut self, ask: SkillAsk) {
         let result = if self.skills_config.enabled {
-            self.skill_catalog.as_ref().and_then(|cat| cat.invoke(&ask.name))
+            self.skill_catalog
+                .as_ref()
+                .and_then(|cat| cat.invoke(&ask.name))
         } else {
             None
         };
@@ -2811,10 +2830,10 @@ impl Engine {
 
     fn context_tokens(&self) -> u64 {
         let count = |s: &str| self.provider.count_tokens(s).tokens;
-        let mut total = self.system.as_deref().map(count).unwrap_or(0);        // Count the windowed sent view (FR-3, Design §8.6), not the full
-        // in-memory conversation — so usage reflects what the provider
-        // actually receives. The elision marker is included because it rides
-        // in the sent messages.
+        let mut total = self.system.as_deref().map(count).unwrap_or(0); // Count the windowed sent view (FR-3, Design §8.6), not the full
+                                                                        // in-memory conversation — so usage reflects what the provider
+                                                                        // actually receives. The elision marker is included because it rides
+                                                                        // in the sent messages.
         let messages = self.windowed_messages();
         for message in &messages {
             for block in &message.content {

@@ -495,12 +495,18 @@ pub fn parse_loop_resolution(line: &str) -> LoopResolution {
 /// it impossible for a permission answer and a question answer to cross wires.
 enum Pending {
     Permission(PermissionId),
-    Ask { id: AskId, options: Vec<String> },
+    Ask {
+        id: AskId,
+        options: Vec<String>,
+    },
     Loop,
     /// An inline delete-confirm for the memory inspector (FR-6, §4.9): the next
     /// line confirms (`y`) or cancels. Delete is destructive, so it never
     /// happens on a single command — parity with the rich overlay's y/N step.
-    MemoryDelete { scope: MemoryScope, name: String },
+    MemoryDelete {
+        scope: MemoryScope,
+        name: String,
+    },
 }
 
 /// Run the line-mode frontend: render events to stdout, forward stdin lines to
@@ -1120,12 +1126,16 @@ mod tests {
             call_id: ToolCallId::new("ws"),
             ok: true,
             summary: "searched: \"rust async\" (2 results)".into(),
-            preview: "Search results for: rust async\n1. Tokio\n   https://tokio.rs\n   Async runtime"
-                .into(),
+            preview:
+                "Search results for: rust async\n1. Tokio\n   https://tokio.rs\n   Async runtime"
+                    .into(),
             untrusted: true,
         });
         assert!(out.contains("[ok]"), "status shown");
-        assert!(out.contains("[web]"), "untrusted label visible in degraded mode");
+        assert!(
+            out.contains("[web]"),
+            "untrusted label visible in degraded mode"
+        );
         assert!(out.contains("https://tokio.rs"), "source URL visible");
         assert!(!out.contains('\u{1b}'), "no ANSI in degraded mode");
     }
@@ -1139,7 +1149,10 @@ mod tests {
             preview: "hello world".into(),
             untrusted: false,
         });
-        assert!(!out.contains("[web]"), "ordinary results have no [web] label");
+        assert!(
+            !out.contains("[web]"),
+            "ordinary results have no [web] label"
+        );
     }
 
     // ---- inspectors, degraded parity (FR-6/FR-7, Design §4.9, §7) ---------
@@ -1197,7 +1210,10 @@ mod tests {
             name: "Build".into(),
             body: "cargo build".into(),
         });
-        assert!(out.contains("memory: Build (user)"), "header with origin: {out:?}");
+        assert!(
+            out.contains("memory: Build (user)"),
+            "header with origin: {out:?}"
+        );
         assert!(out.contains("cargo build"));
         assert!(!out.contains('\u{1b}'));
     }
@@ -1210,7 +1226,10 @@ mod tests {
             body: "Step 1: open the template.".into(),
             resources: vec!["/abs/template.txt".into()],
         });
-        assert!(out.contains("skill: pdf-fill (user)"), "header with origin: {out:?}");
+        assert!(
+            out.contains("skill: pdf-fill (user)"),
+            "header with origin: {out:?}"
+        );
         assert!(out.contains("Step 1: open the template."));
         assert!(out.contains("bundled files:"));
         assert!(out.contains("template.txt"), "resource path listed");

@@ -136,7 +136,11 @@ fn parse_json(body: &Value, max: usize) -> Vec<SearchResult> {
         .or_else(|| body.get("results").and_then(Value::as_array))
         .or_else(|| body.get("data").and_then(Value::as_array))
         .or_else(|| body.get("items").and_then(Value::as_array))
-        .or_else(|| body.get("web").and_then(|w| w.get("results")).and_then(Value::as_array));
+        .or_else(|| {
+            body.get("web")
+                .and_then(|w| w.get("results"))
+                .and_then(Value::as_array)
+        });
     results_from(array, max)
 }
 
@@ -144,11 +148,7 @@ fn parse_json(body: &Value, max: usize) -> Vec<SearchResult> {
 /// without a URL (the essential field — a hit without a link is not useful).
 fn results_from(array: Option<&Vec<Value>>, max: usize) -> Vec<SearchResult> {
     match array {
-        Some(arr) => arr
-            .iter()
-            .filter_map(extract_result)
-            .take(max)
-            .collect(),
+        Some(arr) => arr.iter().filter_map(extract_result).take(max).collect(),
         None => Vec::new(),
     }
 }
@@ -159,9 +159,16 @@ fn results_from(array: Option<&Vec<Value>>, max: usize) -> Vec<SearchResult> {
 fn extract_result(obj: &Value) -> Option<SearchResult> {
     let url = first_str(obj, &["url", "link", "href", "dest"])?;
     let title = first_str(obj, &["title", "name", "heading"]).unwrap_or_else(|| url.clone());
-    let snippet =
-        first_str(obj, &["snippet", "description", "content", "text", "excerpt"]).unwrap_or_default();
-    Some(SearchResult { title, url, snippet })
+    let snippet = first_str(
+        obj,
+        &["snippet", "description", "content", "text", "excerpt"],
+    )
+    .unwrap_or_default();
+    Some(SearchResult {
+        title,
+        url,
+        snippet,
+    })
 }
 
 /// The first non-empty string among the given keys in a JSON object.
@@ -257,9 +264,7 @@ impl SearchClient {
 
     /// Map a non-2xx response into a typed error (mirror
     /// `wire::check_response`, `emberly-providers/src/wire.rs:19`).
-    async fn check_response(
-        response: reqwest::Response,
-    ) -> Result<reqwest::Response, SearchError> {
+    async fn check_response(response: reqwest::Response) -> Result<reqwest::Response, SearchError> {
         let status = response.status();
         if status.is_success() {
             return Ok(response);
@@ -484,7 +489,8 @@ mod tests {
 
     #[test]
     fn parse_results_dispatches_correctly() {
-        let brave = json!({"web": {"results": [{"title": "B", "url": "https://b", "description": "d"}]}});
+        let brave =
+            json!({"web": {"results": [{"title": "B", "url": "https://b", "description": "d"}]}});
         let tavily = json!({"results": [{"title": "T", "url": "https://t", "content": "c"}]});
 
         let r = parse_results("brave", &brave, 10).unwrap_or_else(|e| panic!("{e}"));

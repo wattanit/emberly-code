@@ -85,7 +85,11 @@ impl Tool for TaskListTool {
         if args.items.is_empty() {
             Some("task list cleared".into())
         } else {
-            Some(format!("task list: {} items, {} done", args.items.len(), done))
+            Some(format!(
+                "task list: {} items, {} done",
+                args.items.len(),
+                done
+            ))
         }
     }
 

@@ -57,10 +57,7 @@ pub enum ContentBlock {
     /// base64 encoding of the file bytes; `media_type` is the MIME string
     /// (`image/png`, `image/jpeg`, `image/gif`, `image/webp`). Each adapter maps
     /// this to its provider's native image content shape (Tech Spec §4.2).
-    Image {
-        media_type: String,
-        data: String,
-    },
+    Image { media_type: String, data: String },
 }
 
 /// `skip_serializing_if` helper: omit `redacted` from the wire when false.

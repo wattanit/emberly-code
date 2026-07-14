@@ -120,7 +120,10 @@ async fn read_line_range_returns_numbered_slice() {
         .await;
     assert!(outcome.ok);
     // 1-based inclusive, line-numbered — the prompt-free `sed -n` equivalent.
-    assert_eq!(outcome.content, "     2\ttwo\n     3\tthree\n     4\tfour\n");
+    assert_eq!(
+        outcome.content,
+        "     2\ttwo\n     3\tthree\n     4\tfour\n"
+    );
     assert!(outcome.summary.contains("lines 2-4 of 5"));
 }
 
@@ -129,7 +132,10 @@ async fn read_line_range_start_only_reads_to_eof() {
     let root = temp_project();
     write_file(&root, "many.txt", "one\ntwo\nthree\n");
     let outcome = ReadFileTool
-        .execute(json!({ "path": "many.txt", "start_line": 2 }), &ctx(&root, true))
+        .execute(
+            json!({ "path": "many.txt", "start_line": 2 }),
+            &ctx(&root, true),
+        )
         .await;
     assert!(outcome.ok);
     assert_eq!(outcome.content, "     2\ttwo\n     3\tthree\n");
@@ -140,7 +146,10 @@ async fn read_line_range_past_end_is_a_failure() {
     let root = temp_project();
     write_file(&root, "short.txt", "only\n");
     let outcome = ReadFileTool
-        .execute(json!({ "path": "short.txt", "start_line": 50 }), &ctx(&root, true))
+        .execute(
+            json!({ "path": "short.txt", "start_line": 50 }),
+            &ctx(&root, true),
+        )
         .await;
     assert!(!outcome.ok);
     assert!(outcome.content.contains("past the end"));

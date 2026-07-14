@@ -210,7 +210,10 @@ pub fn render_catalog(skills: &[SkillMeta]) -> String {
         if skill.description.is_empty() {
             out.push_str(&format!("- {} ({})\n", skill.name, origin));
         } else {
-            out.push_str(&format!("- {} — {} ({})\n", skill.name, skill.description, origin));
+            out.push_str(&format!(
+                "- {} — {} ({})\n",
+                skill.name, skill.description, origin
+            ));
         }
     }
     out
@@ -225,7 +228,8 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("emberly-skill-test-{}-{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("emberly-skill-test-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::create_dir_all(&dir);
         dir
@@ -236,7 +240,8 @@ mod tests {
         if let Err(e) = fs::create_dir_all(&skill_dir) {
             panic!("create skill dir: {e}");
         }
-        let content = format!("+++\nname = \"{name}\"\ndescription = \"{description}\"\n+++\n{body}");
+        let content =
+            format!("+++\nname = \"{name}\"\ndescription = \"{description}\"\n+++\n{body}");
         if let Err(e) = fs::write(skill_dir.join("SKILL.md"), content) {
             panic!("write SKILL.md: {e}");
         }
@@ -306,7 +311,10 @@ mod tests {
         if let Err(e) = fs::create_dir_all(&skill_dir) {
             panic!("create dir: {e}");
         }
-        if let Err(e) = fs::write(skill_dir.join("SKILL.md"), "+++\nnot valid toml = = =\n+++\nBody.") {
+        if let Err(e) = fs::write(
+            skill_dir.join("SKILL.md"),
+            "+++\nnot valid toml = = =\n+++\nBody.",
+        ) {
             panic!("write SKILL.md: {e}");
         }
 

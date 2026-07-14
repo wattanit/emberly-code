@@ -515,7 +515,11 @@ mod tests {
     // --- Staleness guard tests (FR-5, group 3) ---
 
     /// Write a transcript and a matching `-view.json` cache, return both paths.
-    fn write_cache_fixture(sid: SessionId, transcript_len_delta: i64, cache_overrides: Option<ViewCache>) -> (PathBuf, PathBuf) {
+    fn write_cache_fixture(
+        sid: SessionId,
+        transcript_len_delta: i64,
+        cache_overrides: Option<ViewCache>,
+    ) -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!("emberly-cache-{}-{sid}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
@@ -524,7 +528,9 @@ mod tests {
         let body = r#"{"v":2,"ts":"1970-01-01T00:00:00Z","type":"session_start","session_id":"00000000-0000-0000-0000-000000000000","provider":"test","model":"test","project_root":"/p","sandbox":{"state":"unavailable","reason":"x"},"config_provenance":[],"prompts_version":1}
 "#;
         let _ = std::fs::write(&transcript_path, body);
-        let real_len = std::fs::metadata(&transcript_path).map(|m| m.len()).unwrap_or(0);
+        let real_len = std::fs::metadata(&transcript_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
         // Adjust the transcript to create the desired delta (grown / shorter / exact).
         if transcript_len_delta > 0 {
             // Append bytes to grow the file past the recorded length.
@@ -561,7 +567,8 @@ mod tests {
         let (transcript_path, _cache_path) = write_cache_fixture(sid, 0, None);
         let cache = try_load_view_cache(&transcript_path);
         assert!(cache.is_some(), "exact byte-length match → trusted");
-        let _ = std::fs::remove_dir_all(transcript_path.parent().unwrap_or(std::path::Path::new("")));
+        let _ =
+            std::fs::remove_dir_all(transcript_path.parent().unwrap_or(std::path::Path::new("")));
     }
 
     #[test]
@@ -577,7 +584,8 @@ mod tests {
     #[test]
     fn view_cache_corrupt_returns_none() {
         let sid = SessionId::new();
-        let dir = std::env::temp_dir().join(format!("emberly-cache-corrupt-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("emberly-cache-corrupt-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let transcript_path = dir.join(format!("{sid}.jsonl"));
         let _ = std::fs::write(&transcript_path, "some content\n");
@@ -604,8 +612,12 @@ mod tests {
             transcript_byte_len: 0,
         };
         let (transcript_path, _cache_path) = write_cache_fixture(sid, 0, Some(stale));
-        assert!(try_load_view_cache(&transcript_path).is_none(), "unknown version → stale");
-        let _ = std::fs::remove_dir_all(transcript_path.parent().unwrap_or(std::path::Path::new("")));
+        assert!(
+            try_load_view_cache(&transcript_path).is_none(),
+            "unknown version → stale"
+        );
+        let _ =
+            std::fs::remove_dir_all(transcript_path.parent().unwrap_or(std::path::Path::new("")));
     }
 
     #[test]
@@ -614,8 +626,12 @@ mod tests {
         // Delta > 0: append 3 bytes to the transcript after the cache was written.
         let (transcript_path, _cache_path) = write_cache_fixture(sid, 3, None);
         let cache = try_load_view_cache(&transcript_path);
-        assert!(cache.is_none(), "transcript grew past the recorded offset → stale");
-        let _ = std::fs::remove_dir_all(transcript_path.parent().unwrap_or(std::path::Path::new("")));
+        assert!(
+            cache.is_none(),
+            "transcript grew past the recorded offset → stale"
+        );
+        let _ =
+            std::fs::remove_dir_all(transcript_path.parent().unwrap_or(std::path::Path::new("")));
     }
 
     #[test]
@@ -628,7 +644,8 @@ mod tests {
             try_load_view_cache(&transcript_path).is_none(),
             "transcript is shorter than recorded → stale"
         );
-        let _ = std::fs::remove_dir_all(transcript_path.parent().unwrap_or(std::path::Path::new("")));
+        let _ =
+            std::fs::remove_dir_all(transcript_path.parent().unwrap_or(std::path::Path::new("")));
     }
 
     #[test]
@@ -654,6 +671,7 @@ mod tests {
             try_load_view_cache(&transcript_path).is_none(),
             "session-id mismatch → stale"
         );
-        let _ = std::fs::remove_dir_all(transcript_path.parent().unwrap_or(std::path::Path::new("")));
+        let _ =
+            std::fs::remove_dir_all(transcript_path.parent().unwrap_or(std::path::Path::new("")));
     }
 }

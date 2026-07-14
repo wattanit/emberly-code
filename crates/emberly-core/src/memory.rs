@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use emberly_tools::memory::{MemoryOp, MemoryOutcome, MemoryRequest, MemoryScope, slug};
+use emberly_tools::memory::{slug, MemoryOp, MemoryOutcome, MemoryRequest, MemoryScope};
 
 /// The metadata stored in TOML frontmatter (Tech Spec §8.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +100,10 @@ impl MemoryStore {
             MemoryOp::Write => {
                 if entry_path.exists() {
                     return MemoryOutcome::Rejected {
-                        reason: format!("an entry named '{}' already exists; use 'update' to overwrite", req.name),
+                        reason: format!(
+                            "an entry named '{}' already exists; use 'update' to overwrite",
+                            req.name
+                        ),
                     };
                 }
                 self.write_entry(dir, &entry_path, req)
@@ -117,12 +120,10 @@ impl MemoryStore {
                 }
             }
             MemoryOp::Recall => {
-                let body = std::fs::read_to_string(&entry_path)
-                    .ok()
-                    .map(|text| {
-                        let (_, body) = split_frontmatter(&text);
-                        body.trim().to_string()
-                    });
+                let body = std::fs::read_to_string(&entry_path).ok().map(|text| {
+                    let (_, body) = split_frontmatter(&text);
+                    body.trim().to_string()
+                });
                 MemoryOutcome::Recalled {
                     body,
                     origin: req.scope,
@@ -132,12 +133,7 @@ impl MemoryStore {
     }
 
     /// Write an entry file with frontmatter + body, then regenerate the index.
-    fn write_entry(
-        &self,
-        dir: &Path,
-        path: &Path,
-        req: &MemoryRequest,
-    ) -> MemoryOutcome {
+    fn write_entry(&self, dir: &Path, path: &Path, req: &MemoryRequest) -> MemoryOutcome {
         let meta = EntryMeta {
             name: req.name.clone(),
             description: req.description.clone().unwrap_or_default(),
@@ -321,7 +317,9 @@ fn build_index(dir: &Path) -> (String, usize) {
 /// Split a leading `+++` TOML frontmatter fence from the body. Returns
 /// `(frontmatter, body)` or `(text, "")` when there is no fence.
 pub fn split_frontmatter(text: &str) -> (Option<&str>, &str) {
-    let text = text.strip_prefix("+++\n").or_else(|| text.strip_prefix("+++\r\n"));
+    let text = text
+        .strip_prefix("+++\n")
+        .or_else(|| text.strip_prefix("+++\r\n"));
     match text {
         Some(rest) => {
             if let Some(end) = rest.find("\n+++\n").or_else(|| rest.find("\n+++\r\n")) {

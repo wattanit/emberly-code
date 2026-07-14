@@ -586,7 +586,8 @@ async fn run() -> anyhow::Result<()> {
     };
 
     let (engine_ports, frontend_ports) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx) = Engine::new(config, engine_ports.events_tx);
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx) =
+        Engine::new(config, engine_ports.events_tx);
     let engine_task = tokio::spawn(engine.run(
         engine_ports.commands_rx,
         asks_rx,

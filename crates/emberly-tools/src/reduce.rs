@@ -399,10 +399,7 @@ mod tests {
             let letter = (b'a' + (i as u8 % 26)) as char;
             stdout.push(format!("{letter}_{i}"));
         }
-        let raw = format!(
-            "exit code: 0\n--- stdout ---\n{}\n",
-            stdout.join("\n")
-        );
+        let raw = format!("exit code: 0\n--- stdout ---\n{}\n", stdout.join("\n"));
         let r = reduce_output("bash", &raw);
         assert!(r.reduced);
         assert!(r.content.contains("a_0"), "head kept");
@@ -411,10 +408,7 @@ mod tests {
         assert!(r.content.contains("[reduced:"));
         assert!(r.content.contains("stdout lines elided"));
         // Middle lines gone.
-        assert!(
-            !r.content.contains("c_80\n"),
-            "middle should be elided"
-        );
+        assert!(!r.content.contains("c_80\n"), "middle should be elided");
         assert!(r.withheld.contains("stdout lines elided"));
     }
 
@@ -447,10 +441,7 @@ mod tests {
             let letter = (b'a' + (i as u8 % 26)) as char;
             stdout.push(format!("{letter}_{i}"));
         }
-        let raw = format!(
-            "exit code: 0\n--- stdout ---\n{}\n",
-            stdout.join("\n")
-        );
+        let raw = format!("exit code: 0\n--- stdout ---\n{}\n", stdout.join("\n"));
         let r = reduce_output("bash", &raw);
         assert!(r.reduced);
         assert!(r.content.contains("Downloading 1%"), "first progress kept");

@@ -241,10 +241,7 @@ fn prompt_accepts(root: &Path) -> bool {
 /// `yes`, or `y` grants; **anything else declines** (the safe default). Pure,
 /// so the no-unsafe-default rule is testable.
 fn accepts(line: &str) -> bool {
-    matches!(
-        line.trim().to_lowercase().as_str(),
-        "trust" | "yes" | "y"
-    )
+    matches!(line.trim().to_lowercase().as_str(), "trust" | "yes" | "y")
 }
 
 // ---- helpers -------------------------------------------------------------

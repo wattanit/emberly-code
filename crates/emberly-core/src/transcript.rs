@@ -195,9 +195,7 @@ pub enum TranscriptEvent {
     /// list is recorded on every update (replace, not merge). Additive — older
     /// readers warn-skip it, so no `SCHEMA_VERSION` bump (like `AskUser`/
     /// `EffortChange`).
-    TaskList {
-        items: Vec<emberly_tools::TaskItem>,
-    },
+    TaskList { items: Vec<emberly_tools::TaskItem> },
 
     /// Clean session end.
     SessionEnd {

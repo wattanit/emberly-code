@@ -161,7 +161,9 @@ pub async fn run(
 fn redraw(guard: &mut TerminalGuard, app: &mut App) -> io::Result<()> {
     let mut hit_map = HitMap::new();
     let view: &App = app;
-    guard.terminal().draw(|f| render::frame(f, view, &mut hit_map))?;
+    guard
+        .terminal()
+        .draw(|f| render::frame(f, view, &mut hit_map))?;
     app.hit_map = hit_map;
     Ok(())
 }
@@ -238,12 +240,16 @@ async fn run_memory_edit(
     let slug: String = edit
         .name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
-    let path = std::env::temp_dir().join(format!(
-        "emberly-memory-{}-{slug}.md",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("emberly-memory-{}-{slug}.md", std::process::id()));
     if let Err(e) = std::fs::write(&path, &edit.body) {
         app.notice(format!("could not stage memory edit: {e}"));
         return Ok(());

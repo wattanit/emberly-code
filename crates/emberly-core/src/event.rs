@@ -183,9 +183,7 @@ pub enum UiEvent {
     /// full list is sent on every update (replace, not merge). The sidebar's
     /// Tasks section and the inline checklist both render from this. Additive —
     /// older frontends warn-skip it.
-    TaskListUpdated {
-        items: Vec<emberly_tools::TaskItem>,
-    },
+    TaskListUpdated { items: Vec<emberly_tools::TaskItem> },
 
     /// Memory entry counts for the sidebar inspector (T-13, FR-6, Design §4.9).
     /// `user` is the global count; `project` is the project-scoped count (0
@@ -197,7 +195,9 @@ pub enum UiEvent {
     /// §4.9). Emitted at session start and when the set changes. Each entry
     /// carries name, description, and origin (user vs project — origin is how
     /// the user reads trust). Additive — older frontends warn-skip it.
-    SkillsAvailable { skills: Vec<emberly_tools::SkillMeta> },
+    SkillsAvailable {
+        skills: Vec<emberly_tools::SkillMeta>,
+    },
 
     /// The memory inspector's grouped entry list (FR-6, Design §4.9), sent in
     /// reply to [`Command::MemoryList`](crate::command::Command::MemoryList).

@@ -100,10 +100,7 @@ mod tests {
     fn view_cache_path_mirrors_sidecar_pattern() {
         let transcript = Path::new(".agents/sessions/abc123.jsonl");
         let cache = view_cache_path(transcript);
-        assert_eq!(
-            cache,
-            Path::new(".agents/sessions/abc123-view.json")
-        );
+        assert_eq!(cache, Path::new(".agents/sessions/abc123-view.json"));
     }
 
     #[test]

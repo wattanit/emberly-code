@@ -193,20 +193,14 @@ impl ToolCtx {
     /// path to the task-list gate; touches no filesystem or network, so it is
     /// **not permission-gated** (§6). The model always sends the complete list
     /// (replace, not merge).
-    pub async fn set_task_list(
-        &self,
-        items: Vec<TaskItem>,
-    ) -> Result<(), TaskListError> {
+    pub async fn set_task_list(&self, items: Vec<TaskItem>) -> Result<(), TaskListError> {
         self.task_list.set_task_list(items).await
     }
 
     /// Read or write a durable memory entry (T-13). The single path to the
     /// memory gate; harness-managed persistence that does not widen HC-4
     /// (FR-6). Not permission-gated.
-    pub async fn memory_op(
-        &self,
-        req: MemoryRequest,
-    ) -> Result<MemoryOutcome, MemoryError> {
+    pub async fn memory_op(&self, req: MemoryRequest) -> Result<MemoryOutcome, MemoryError> {
         self.memory.memory_op(req).await
     }
 
@@ -214,10 +208,7 @@ impl ToolCtx {
     /// The single path to the skill gate; reads instruction text from
     /// trust-resolved dirs, executes nothing, and is not permission-gated
     /// (FR-7 honesty clause, Tech Spec §8.2).
-    pub async fn invoke_skill(
-        &self,
-        name: String,
-    ) -> Result<Option<SkillInvocation>, SkillError> {
+    pub async fn invoke_skill(&self, name: String) -> Result<Option<SkillInvocation>, SkillError> {
         self.skill.invoke_skill(name).await
     }
 

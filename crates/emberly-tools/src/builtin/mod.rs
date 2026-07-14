@@ -24,12 +24,12 @@ pub use bash::BashTool;
 pub use edit::EditFileTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
+pub use memory::MemoryTool;
 pub use read::ReadFileTool;
 pub use read_image::ReadImageTool;
 pub use recall::RecallTool;
 pub use skill::SkillTool;
 pub use task_list::TaskListTool;
-pub use memory::MemoryTool;
 pub use web_search::WebSearchTool;
 pub use write::WriteFileTool;
 

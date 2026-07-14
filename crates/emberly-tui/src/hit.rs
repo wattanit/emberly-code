@@ -114,7 +114,10 @@ impl HitMap {
 /// Whether `(col, row)` falls inside `r`. First-party (not `Rect::contains`) so
 /// the containment rule is explicit and version-independent.
 fn contains(r: Rect, col: u16, row: u16) -> bool {
-    col >= r.x && col < r.x.saturating_add(r.width) && row >= r.y && row < r.y.saturating_add(r.height)
+    col >= r.x
+        && col < r.x.saturating_add(r.width)
+        && row >= r.y
+        && row < r.y.saturating_add(r.height)
 }
 
 #[cfg(test)]

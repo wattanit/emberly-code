@@ -688,17 +688,23 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             true,
         );
     }
-    if field(&project, |c: &ConfigFile| c.context.keep_recent_turns.is_some())
-        || field(&global, |c: &ConfigFile| c.context.keep_recent_turns.is_some())
-    {
+    if field(&project, |c: &ConfigFile| {
+        c.context.keep_recent_turns.is_some()
+    }) || field(&global, |c: &ConfigFile| {
+        c.context.keep_recent_turns.is_some()
+    }) {
         record(
             &mut provenance,
             "context.keep_recent_turns",
             source_of(
                 false,
                 false,
-                field(&project, |c: &ConfigFile| c.context.keep_recent_turns.is_some()),
-                field(&global, |c: &ConfigFile| c.context.keep_recent_turns.is_some()),
+                field(&project, |c: &ConfigFile| {
+                    c.context.keep_recent_turns.is_some()
+                }),
+                field(&global, |c: &ConfigFile| {
+                    c.context.keep_recent_turns.is_some()
+                }),
             ),
             true,
         );
@@ -790,17 +796,23 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             true,
         );
     }
-    if field(&project, |c: &ConfigFile| c.memory.max_index_entries.is_some())
-        || field(&global, |c: &ConfigFile| c.memory.max_index_entries.is_some())
-    {
+    if field(&project, |c: &ConfigFile| {
+        c.memory.max_index_entries.is_some()
+    }) || field(&global, |c: &ConfigFile| {
+        c.memory.max_index_entries.is_some()
+    }) {
         record(
             &mut provenance,
             "memory.max_index_entries",
             source_of(
                 false,
                 false,
-                field(&project, |c: &ConfigFile| c.memory.max_index_entries.is_some()),
-                field(&global, |c: &ConfigFile| c.memory.max_index_entries.is_some()),
+                field(&project, |c: &ConfigFile| {
+                    c.memory.max_index_entries.is_some()
+                }),
+                field(&global, |c: &ConfigFile| {
+                    c.memory.max_index_entries.is_some()
+                }),
             ),
             true,
         );
@@ -1178,9 +1190,10 @@ pub fn show(project_root: &Path) -> anyhow::Result<()> {
     // project skills dir exists (always trusted here — `config show` runs after
     // the trust gate, or the user invoked it explicitly).
     if resolved.skills.enabled {
-        if let (Some(user_dir), Some(project_dir)) =
-            (skills_dir(), Some(project_root.join(".agents").join("skills")))
-        {
+        if let (Some(user_dir), Some(project_dir)) = (
+            skills_dir(),
+            Some(project_root.join(".agents").join("skills")),
+        ) {
             let catalog = emberly_core::skills::SkillCatalog::new(user_dir, Some(project_dir));
             let (_, shadows) = catalog.discover();
             if !shadows.is_empty() {
@@ -1217,7 +1230,11 @@ pub fn show(project_root: &Path) -> anyhow::Result<()> {
         let registered = resolved.search.enabled && resolved.search.endpoint.is_some();
         println!(
             "  status: {}",
-            if registered { "registered" } else { "not registered" }
+            if registered {
+                "registered"
+            } else {
+                "not registered"
+            }
         );
     }
 

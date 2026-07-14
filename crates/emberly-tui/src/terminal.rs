@@ -48,7 +48,10 @@ impl TerminalGuard {
         Self::enter_modes(capture_mouse)?;
         install_panic_hook();
         let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-        Ok(Self { terminal, capture_mouse })
+        Ok(Self {
+            terminal,
+            capture_mouse,
+        })
     }
 
     /// Apply the TUI terminal modes (raw + alternate screen + optional mouse
@@ -57,7 +60,12 @@ impl TerminalGuard {
     fn enter_modes(capture_mouse: bool) -> io::Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, cursor::Hide)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            cursor::Hide
+        )?;
         // The single mouse-capture control point (Tech Spec §9, like the §6.4
         // animation ticker): capture the pointer only when `ui.mouse` is on.
         // Off ⇒ the terminal owns the mouse (native selection everywhere).

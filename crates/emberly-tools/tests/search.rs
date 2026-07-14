@@ -448,10 +448,7 @@ async fn web_search_denied_by_gate() {
     let tool = search_tool(&server.uri());
 
     let outcome = tool
-        .execute(
-            json!({ "query": "rust async" }),
-            &ctx_deny(&root),
-        )
+        .execute(json!({ "query": "rust async" }), &ctx_deny(&root))
         .await;
 
     assert!(!outcome.ok);
@@ -460,7 +457,10 @@ async fn web_search_denied_by_gate() {
         "content should mention denial, got: {}",
         outcome.content
     );
-    assert!(!outcome.untrusted, "denied outcomes are not untrusted web content");
+    assert!(
+        !outcome.untrusted,
+        "denied outcomes are not untrusted web content"
+    );
 }
 
 #[tokio::test]
@@ -562,10 +562,7 @@ async fn web_search_returns_results_tagged_untrusted() {
 
     let tool = search_tool(&server.uri());
     let outcome = tool
-        .execute(
-            json!({ "query": "rust language" }),
-            &ctx_allow(&root),
-        )
+        .execute(json!({ "query": "rust language" }), &ctx_allow(&root))
         .await;
 
     assert!(outcome.ok, "should succeed");
@@ -592,10 +589,7 @@ async fn web_search_failure_is_structured_not_panic() {
 
     let tool = search_tool(&server.uri());
     let outcome = tool
-        .execute(
-            json!({ "query": "test" }),
-            &ctx_allow(&root),
-        )
+        .execute(json!({ "query": "test" }), &ctx_allow(&root))
         .await;
 
     assert!(!outcome.ok, "a server error is a structured failure");
@@ -622,10 +616,7 @@ async fn web_search_empty_results_is_success() {
 
     let tool = search_tool(&server.uri());
     let outcome = tool
-        .execute(
-            json!({ "query": "nothing here" }),
-            &ctx_allow(&root),
-        )
+        .execute(json!({ "query": "nothing here" }), &ctx_allow(&root))
         .await;
 
     assert!(outcome.ok, "empty results is a success, not a failure");

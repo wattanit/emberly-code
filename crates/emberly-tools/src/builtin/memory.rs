@@ -135,23 +135,21 @@ impl Tool for MemoryTool {
                 format!("Memory updated. Index: {user} user, {project} project entries."),
                 format!("remembered · {scope_label} · {user}u {project}p"),
             ),
-            Ok(MemoryOutcome::Recalled { body: Some(body), origin }) => {
+            Ok(MemoryOutcome::Recalled {
+                body: Some(body),
+                origin,
+            }) => {
                 let origin_label = match origin {
                     MemoryScope::User => "user",
                     MemoryScope::Project => "project",
                 };
-                ToolOutcome::success(
-                    body,
-                    format!("recalled · {origin_label}"),
-                )
+                ToolOutcome::success(body, format!("recalled · {origin_label}"))
             }
             Ok(MemoryOutcome::Recalled { body: None, .. }) => ToolOutcome::failure(
                 "No memory entry found with that name in this scope.",
                 "not found",
             ),
-            Ok(MemoryOutcome::Rejected { reason }) => {
-                ToolOutcome::failure(reason.clone(), reason)
-            }
+            Ok(MemoryOutcome::Rejected { reason }) => ToolOutcome::failure(reason.clone(), reason),
             Err(_) => ToolOutcome::failure(
                 "Memory could not be updated (the engine is unreachable).",
                 "engine unreachable",

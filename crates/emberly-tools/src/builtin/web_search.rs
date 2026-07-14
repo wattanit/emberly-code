@@ -79,9 +79,7 @@ impl Tool for WebSearchTool {
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: WebSearchArgs = match serde_json::from_value(args) {
             Ok(a) => a,
-            Err(e) => {
-                return ToolOutcome::failure(format!("invalid arguments: {e}"), "bad args")
-            }
+            Err(e) => return ToolOutcome::failure(format!("invalid arguments: {e}"), "bad args"),
         };
 
         // Authorize first (Tech Spec §6.1). `outside_root` MUST be `false` — a
@@ -126,10 +124,7 @@ impl Tool for WebSearchTool {
             Err(e) => {
                 // A connect/non-2xx/parse failure is a structured HC-6 failure
                 // the model can react to — never a panic (Tech Spec §5.5).
-                ToolOutcome::failure(
-                    format!("Web search failed: {e}"),
-                    "search failed",
-                )
+                ToolOutcome::failure(format!("Web search failed: {e}"), "search failed")
             }
         }
     }

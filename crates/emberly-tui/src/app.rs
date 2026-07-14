@@ -2637,9 +2637,9 @@ mod tests {
         assert!(rows[*selected].current);
         assert_eq!(rows[*selected].label, "normal");
         // Auto tiers are annotated as needing confinement.
-        assert!(rows
-            .iter()
-            .any(|r| r.label.starts_with("auto-accept-edits") && r.label.contains("OS confinement")));
+        assert!(rows.iter().any(
+            |r| r.label.starts_with("auto-accept-edits") && r.label.contains("OS confinement")
+        ));
         assert!(rows
             .iter()
             .any(|r| r.label == "auto  (needs OS confinement)" || r.label.starts_with("auto  (")));
@@ -2649,7 +2649,9 @@ mod tests {
     fn mode_picker_switches_to_normal_on_enter() {
         let mut a = app();
         a.mode = Mode::Auto;
-        a.sandbox = Some(SandboxStatus::Confined { backend: "landlock".into() });
+        a.sandbox = Some(SandboxStatus::Confined {
+            backend: "landlock".into(),
+        });
         a.open_mode_picker();
         // Current is Auto; move up to AutoAcceptEdits, then up to Normal.
         let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Up));
@@ -2679,7 +2681,9 @@ mod tests {
     #[test]
     fn slash_mode_arg_sets_directly_and_validates() {
         let mut a = app();
-        a.sandbox = Some(SandboxStatus::Confined { backend: "landlock".into() });
+        a.sandbox = Some(SandboxStatus::Confined {
+            backend: "landlock".into(),
+        });
         // A direct arg with confinement active → SetMode.
         assert_eq!(
             a.run_slash("mode auto"),
@@ -3145,7 +3149,10 @@ mod tests {
         by_key.on_key(KeyEvent::from(KeyCode::Down)); // focus row 2
         let key_action = by_key.on_key(KeyEvent::from(KeyCode::Enter));
 
-        assert_eq!(click_action, key_action, "clicking a choice == arrow + Enter");
+        assert_eq!(
+            click_action, key_action,
+            "clicking a choice == arrow + Enter"
+        );
         assert!(
             by_click.overlays.is_empty(),
             "confirming a choice closes the picker, like Enter"
@@ -3182,7 +3189,10 @@ mod tests {
         a.on_click(0, 0);
         assert!(matches!(
             a.conversation.first(),
-            Some(ConvItem::Reasoning { expanded: false, .. })
+            Some(ConvItem::Reasoning {
+                expanded: false,
+                ..
+            })
         ));
     }
 
@@ -3343,8 +3353,10 @@ mod tests {
             width: 20,
             height: 1,
         };
-        a.hit_map
-            .push(region, ClickTarget::PermissionChoice(PermissionChoice::Deny));
+        a.hit_map.push(
+            region,
+            ClickTarget::PermissionChoice(PermissionChoice::Deny),
+        );
         assert!(matches!(
             a.on_click(0, 0),
             Action::Command(Command::PermissionAnswer {
@@ -4139,7 +4151,7 @@ mod tests {
             project: vec![],
         });
         a.on_key(key(KeyCode::Down)); // select Beta (index 1)
-        // A re-list with fewer entries reuses the overlay and clamps selection.
+                                      // A re-list with fewer entries reuses the overlay and clamps selection.
         a.apply_event(UiEvent::MemoryEntries {
             user: vec![mem_summary("Alpha", "a", MemoryScope::User)],
             project: vec![],

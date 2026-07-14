@@ -203,9 +203,7 @@ fn user_content(message: &Message) -> Value {
         .content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => {
-                Some(json!({ "type": "text", "text": text }))
-            }
+            ContentBlock::Text { text } => Some(json!({ "type": "text", "text": text })),
             ContentBlock::Image { media_type, data } => Some(json!({
                 "type": "image_url",
                 "image_url": {
@@ -444,10 +442,7 @@ mod tests {
             panic!("array when image present");
         };
         assert_eq!(parts.len(), 2);
-        assert_eq!(
-            parts[0].get("type").and_then(Value::as_str),
-            Some("text")
-        );
+        assert_eq!(parts[0].get("type").and_then(Value::as_str), Some("text"));
         assert_eq!(
             parts[1].get("type").and_then(Value::as_str),
             Some("image_url")

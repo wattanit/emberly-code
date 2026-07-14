@@ -1240,7 +1240,10 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
         let glyph_style = ratatui::style::Style::default()
             .fg(glow(theme.palette().accent, glow_pct(app.anim_frame())))
             .add_modifier(ratatui::style::Modifier::BOLD);
-        spans.push(Span::styled(format!(" {} ", app.spinner_glyph()), glyph_style));
+        spans.push(Span::styled(
+            format!(" {} ", app.spinner_glyph()),
+            glyph_style,
+        ));
         spans.push(Span::styled(format!("{verb}{elapsed}  "), theme.chrome()));
     } else {
         spans.push(Span::raw(" "));
@@ -1848,14 +1851,11 @@ mod tests {
             Vec::new(),
             String::new(),
         );
-        app.apply_event(emberly_core::UiEvent::ReasoningDelta {
-            text: "why".into(),
-        });
+        app.apply_event(emberly_core::UiEvent::ReasoningDelta { text: "why".into() });
         app.apply_event(emberly_core::UiEvent::AssistantDelta { text: "a".into() });
         let hit = hit_map_of(&app, 100, 24);
-        let found = (0..24).any(|y| {
-            (0..100).any(|x| hit.hit(x, y) == Some(ClickTarget::ReasoningToggle))
-        });
+        let found =
+            (0..24).any(|y| (0..100).any(|x| hit.hit(x, y) == Some(ClickTarget::ReasoningToggle)));
         assert!(found, "the collapsed reasoning line is clickable");
     }
 
@@ -1899,8 +1899,8 @@ mod tests {
         pending(&mut app, false, "rm -rf build"); // a permission prompt owns input
         let hit = hit_map_of(&app, 120, 40);
         assert!(
-            (0..40).all(|y| (0..120)
-                .all(|x| hit.hit(x, y) != Some(ClickTarget::OpenMemoryInspector))),
+            (0..40)
+                .all(|y| (0..120).all(|x| hit.hit(x, y) != Some(ClickTarget::OpenMemoryInspector))),
             "the sidebar is inert while a permission decision is pending (§5)"
         );
     }
@@ -1949,14 +1949,22 @@ mod tests {
         pending(&mut app, false, "line1\nline2\nline3\nline4\nline5\nline6");
         let hit = hit_map_of(&app, 100, 24);
         let has = |c: PermissionChoice| {
-            (0..24).any(|y| (0..100).any(|x| hit.hit(x, y) == Some(ClickTarget::PermissionChoice(c))))
+            (0..24)
+                .any(|y| (0..100).any(|x| hit.hit(x, y) == Some(ClickTarget::PermissionChoice(c))))
         };
         assert!(has(PermissionChoice::Allow), "Allow affordance clickable");
-        assert!(has(PermissionChoice::Session), "Session affordance clickable");
+        assert!(
+            has(PermissionChoice::Session),
+            "Session affordance clickable"
+        );
         assert!(has(PermissionChoice::Deny), "Deny affordance clickable");
         // The header/body is inert — no click-through, no click-to-approve, and
         // no click-to-scroll (Design §5). Row 3 is well inside the header/body.
-        assert_eq!(hit.hit(40, 3), None, "the prompt body/header is not clickable");
+        assert_eq!(
+            hit.hit(40, 3),
+            None,
+            "the prompt body/header is not clickable"
+        );
     }
 
     #[test]
@@ -2311,10 +2319,7 @@ mod tests {
             screen.contains("untrusted web content"),
             "untrusted label visible in rich mode"
         );
-        assert!(
-            screen.contains("https://tokio.rs"),
-            "source URL visible"
-        );
+        assert!(screen.contains("https://tokio.rs"), "source URL visible");
     }
 
     #[test]
