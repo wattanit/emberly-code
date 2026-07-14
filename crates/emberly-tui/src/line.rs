@@ -12,8 +12,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use emberly_core::{
-    AskAnswer, AskId, Command, FrontendPorts, LoopResolution, Mode, PermissionDecision,
-    PermissionId, PermissionRendering, SandboxStatus, UiEvent,
+    AskAnswer, AskId, Command, EntrySummary, FrontendPorts, LoopResolution, MemoryOp, MemoryScope,
+    Mode, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus, SkillMeta,
+    SkillOrigin, UiEvent,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -169,6 +170,25 @@ impl LineRenderer {
                     writeln!(out, "note: {line}")?;
                 }
             }
+            // Memory inspector, degraded form (FR-6, Design §4.9, §7): the
+            // grouped list printed inline, read-only, ASCII — inspection is not
+            // rich-only. `/memory` requests this; unsolicited it never fires.
+            UiEvent::MemoryEntries { user, project } => {
+                self.render_memory_entries(user, project, out)?;
+            }
+            UiEvent::MemoryBody { scope, name, body } => {
+                self.render_memory_body(*scope, name, body, out)?;
+            }
+            // Skills inspector body, degraded form (FR-7, §4.9): read-only, ASCII
+            // — "what could this skill tell the model to do" before it ever runs.
+            UiEvent::SkillBody {
+                name,
+                origin,
+                body,
+                resources,
+            } => {
+                self.render_skill_body(name, *origin, body, resources, out)?;
+            }
             UiEvent::CompactionStatus { .. }
             | UiEvent::ContextUsage { .. }
             | UiEvent::CostEstimate { .. }
@@ -265,6 +285,150 @@ impl LineRenderer {
         writeln!(out, "{}", s::LINE_PROMPT)?;
         Ok(())
     }
+
+    /// The memory list in degraded form (FR-6, Design §4.9, §7): grouped by
+    /// scope with an ASCII header per group (origin is how the user reads
+    /// trust), `name - description` per entry. The project group is simply
+    /// absent on an untrusted root (FR-1). Read-only inline text.
+    fn render_memory_entries(
+        &self,
+        user: &[EntrySummary],
+        project: &[EntrySummary],
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        use crate::strings::memory as m;
+        writeln!(out)?;
+        if user.is_empty() && project.is_empty() {
+            writeln!(out, "{}", m::EMPTY)?;
+            return Ok(());
+        }
+        for (entries, header) in [(user, m::HEADER_USER), (project, m::HEADER_PROJECT)] {
+            if entries.is_empty() {
+                continue;
+            }
+            writeln!(out, "{header}:")?;
+            for e in entries {
+                if e.description.is_empty() {
+                    writeln!(out, "  {}", e.name)?;
+                } else {
+                    writeln!(out, "  {} - {}", e.name, e.description)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A single memory entry's body in degraded form (FR-6, §4.6). Read-only
+    /// inline text bracketed by ASCII rules; the body is fetched on demand
+    /// (progressive disclosure — never pinned).
+    fn render_memory_body(
+        &self,
+        scope: MemoryScope,
+        name: &str,
+        body: &str,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        use crate::strings::memory as m;
+        let s = match scope {
+            MemoryScope::User => m::SCOPE_USER,
+            MemoryScope::Project => m::SCOPE_PROJECT,
+        };
+        writeln!(out, "\n--- memory: {name} ({s}) ---")?;
+        if body.trim().is_empty() {
+            writeln!(out, "{}", m::EMPTY_BODY)?;
+        } else {
+            for line in body.lines() {
+                writeln!(out, "{line}")?;
+            }
+        }
+        writeln!(out, "---")?;
+        Ok(())
+    }
+
+    /// A skill's instruction body in degraded form (FR-7, §4.9): read-only
+    /// inline text with the origin and any bundled resource paths — "what could
+    /// this skill tell the model to do" before it ever runs. Displaying the body
+    /// runs no bundled script (FR-7).
+    fn render_skill_body(
+        &self,
+        name: &str,
+        origin: SkillOrigin,
+        body: &str,
+        resources: &[String],
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        use crate::strings::skills as s;
+        let o = match origin {
+            SkillOrigin::User => s::ORIGIN_USER,
+            SkillOrigin::Project => s::ORIGIN_PROJECT,
+        };
+        writeln!(out, "\n--- skill: {name} ({o}) ---")?;
+        if body.trim().is_empty() {
+            writeln!(out, "{}", s::EMPTY_BODY)?;
+        } else {
+            for line in body.lines() {
+                writeln!(out, "{line}")?;
+            }
+        }
+        if !resources.is_empty() {
+            writeln!(out, "{}", s::RESOURCES_HEADER)?;
+            for r in resources {
+                writeln!(out, "  {r}")?;
+            }
+        }
+        writeln!(out, "---")?;
+        Ok(())
+    }
+}
+
+/// The available skills in degraded form (FR-7, Design §4.9, §7): `name -
+/// description (origin)` per line, read-only inline text. Free function (not a
+/// [`LineRenderer`] method) because the plain frontend holds the catalog in the
+/// run loop, not the renderer — the skills list is standing state, not an event.
+fn render_skill_list(skills: &[SkillMeta], out: &mut impl Write) -> io::Result<()> {
+    use crate::strings::skills as s;
+    writeln!(out)?;
+    if skills.is_empty() {
+        writeln!(out, "{}", s::EMPTY)?;
+        return Ok(());
+    }
+    for skill in skills {
+        let origin = match skill.origin {
+            SkillOrigin::User => s::ORIGIN_USER,
+            SkillOrigin::Project => s::ORIGIN_PROJECT,
+        };
+        if skill.description.is_empty() {
+            writeln!(out, "  {} ({origin})", skill.name)?;
+        } else {
+            writeln!(out, "  {} - {} ({origin})", skill.name, skill.description)?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a memory entry name to its scope from the last-listed entries (user
+/// first, then project). `None` when the name is unknown — the plain frontend
+/// asks the user to `/memory` first so the list is current.
+fn resolve_memory_scope(
+    name: &str,
+    user: &[EntrySummary],
+    project: &[EntrySummary],
+) -> Option<MemoryScope> {
+    if user.iter().any(|e| e.name == name) {
+        Some(MemoryScope::User)
+    } else if project.iter().any(|e| e.name == name) {
+        Some(MemoryScope::Project)
+    } else {
+        None
+    }
+}
+
+/// The display label for a memory scope (parity with the rich inspector).
+fn scope_label(scope: MemoryScope) -> &'static str {
+    match scope {
+        MemoryScope::User => crate::strings::memory::SCOPE_USER,
+        MemoryScope::Project => crate::strings::memory::SCOPE_PROJECT,
+    }
 }
 
 impl Default for LineRenderer {
@@ -333,6 +497,10 @@ enum Pending {
     Permission(PermissionId),
     Ask { id: AskId, options: Vec<String> },
     Loop,
+    /// An inline delete-confirm for the memory inspector (FR-6, §4.9): the next
+    /// line confirms (`y`) or cancels. Delete is destructive, so it never
+    /// happens on a single command — parity with the rich overlay's y/N step.
+    MemoryDelete { scope: MemoryScope, name: String },
 }
 
 /// Run the line-mode frontend: render events to stdout, forward stdin lines to
@@ -372,6 +540,13 @@ pub async fn run(
     // Track the current tier so `/mode` can cycle it (the engine gates the auto
     // tiers on confinement and echoes a ModeChanged / Notice back).
     let mut mode = Mode::default();
+    // Standing inspector state (FR-6/FR-7): the skill catalog (from
+    // `SkillsAvailable`, so `/skills` prints without a round-trip) and the last
+    // memory listing (so `/memory <name>` and `/memory delete <name>` resolve a
+    // name to its scope). The engine owns the store; the frontend never reads it.
+    let mut skills: Vec<SkillMeta> = Vec::new();
+    let mut mem_user: Vec<EntrySummary> = Vec::new();
+    let mut mem_project: Vec<EntrySummary> = Vec::new();
     let mut stdin_open = true;
     loop {
         tokio::select! {
@@ -392,6 +567,17 @@ pub async fn run(
                         UiEvent::LoopHalted { .. } => {
                             pending = Some(Pending::Loop);
                         }
+                        // Keep the standing inspector state current. The catalog
+                        // is rendered on demand by `/skills` (not printed here);
+                        // the memory list was already printed by `render` above,
+                        // and is retained so name-based commands can resolve it.
+                        UiEvent::SkillsAvailable { skills: s } => {
+                            skills = s;
+                        }
+                        UiEvent::MemoryEntries { user, project } => {
+                            mem_user = user;
+                            mem_project = project;
+                        }
                         _ => {}
                     }
                 }
@@ -409,6 +595,21 @@ pub async fn run(
                             }
                             Pending::Loop => {
                                 let _ = tx.send(Command::ResolveLoop { resolution: parse_loop_resolution(&line) }).await;
+                            }
+                            Pending::MemoryDelete { scope, name } => {
+                                // Destructive: only an explicit `y` deletes; the
+                                // harness performs the write (FR-6), then we
+                                // re-list so the updated set prints.
+                                if matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+                                    let _ = tx.send(Command::MemoryMutate {
+                                        op: MemoryOp::Remove, scope, name: name.clone(),
+                                        description: None, type_: None, body: None,
+                                    }).await;
+                                    let _ = tx.send(Command::MemoryList).await;
+                                    println!("deleted {name}");
+                                } else {
+                                    println!("cancelled");
+                                }
                             }
                         }
                     } else if line.trim() == "/cancel" {
@@ -469,6 +670,55 @@ pub async fn run(
                                 let _ = tx.send(Command::SetEffort { effort }).await;
                             }
                             None => println!("usage: /effort <low|medium|high|max>"),
+                        }
+                    } else if let Some(rest) = line
+                        .trim()
+                        .strip_prefix("/memory")
+                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+                    {
+                        // Full inspection inline (FR-6, §4.9 — not rich-only):
+                        // list, view a body, or a confirmed delete. Edit is a
+                        // rich-TUI affordance (the plain frontend deliberately
+                        // never launches $EDITOR — its stdin is the line reader,
+                        // like /config/prompt), so it is not offered here.
+                        let rest = rest.trim();
+                        if rest.is_empty() {
+                            let _ = tx.send(Command::MemoryList).await;
+                        } else if let Some(name) = rest.strip_prefix("delete ").map(str::trim) {
+                            match resolve_memory_scope(name, &mem_user, &mem_project) {
+                                Some(scope) => {
+                                    println!(
+                                        "delete {name} ({})?  [y] confirm, anything else cancels",
+                                        scope_label(scope)
+                                    );
+                                    pending = Some(Pending::MemoryDelete { scope, name: name.to_string() });
+                                }
+                                None => println!("no memory entry named '{name}' — run /memory to list"),
+                            }
+                        } else if rest == "delete" {
+                            println!("usage: /memory delete <name>");
+                        } else {
+                            match resolve_memory_scope(rest, &mem_user, &mem_project) {
+                                Some(scope) => {
+                                    let _ = tx.send(Command::MemoryView { scope, name: rest.to_string() }).await;
+                                }
+                                None => println!("no memory entry named '{rest}' — run /memory to list"),
+                            }
+                        }
+                    } else if let Some(rest) = line
+                        .trim()
+                        .strip_prefix("/skills")
+                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+                    {
+                        // The catalog is standing state, so listing needs no
+                        // round-trip; a named skill's body is fetched read-only
+                        // (FR-7 — inspectable before it ever runs).
+                        let rest = rest.trim();
+                        if rest.is_empty() {
+                            let _ = render_skill_list(&skills, &mut stdout);
+                            let _ = stdout.flush();
+                        } else {
+                            let _ = tx.send(Command::InspectSkill { name: rest.to_string() }).await;
                         }
                     } else if !line.trim().is_empty() {
                         let _ = tx.send(Command::UserInput { text: line }).await;
@@ -714,6 +964,28 @@ mod tests {
                     status: emberly_core::TaskStatus::InProgress,
                 }],
             },
+            // Inspector events must be ASCII/no-ANSI in degraded mode too
+            // (FR-6/FR-7, Design §7) — inspection is not rich-only.
+            UiEvent::MemoryEntries {
+                user: vec![EntrySummary {
+                    name: "หน่วยความจำ".into(),
+                    description: "ทดสอบ".into(),
+                    type_: None,
+                    scope: MemoryScope::User,
+                }],
+                project: vec![],
+            },
+            UiEvent::MemoryBody {
+                scope: MemoryScope::User,
+                name: "note".into(),
+                body: "จดจำสิ่งนี้".into(),
+            },
+            UiEvent::SkillBody {
+                name: "pdf-fill".into(),
+                origin: SkillOrigin::User,
+                body: "ขั้นตอนที่ 1".into(),
+                resources: vec!["/abs/template.txt".into()],
+            },
             // read_image reference line (P-11, Design §4.8): ASCII-only in
             // degraded mode, no ANSI. No-vision failure also ASCII-only.
             UiEvent::ToolFinished {
@@ -868,5 +1140,126 @@ mod tests {
             untrusted: false,
         });
         assert!(!out.contains("[web]"), "ordinary results have no [web] label");
+    }
+
+    // ---- inspectors, degraded parity (FR-6/FR-7, Design §4.9, §7) ---------
+
+    fn mem_sum(name: &str, desc: &str, scope: emberly_core::MemoryScope) -> EntrySummary {
+        EntrySummary {
+            name: name.into(),
+            description: desc.into(),
+            type_: None,
+            scope,
+        }
+    }
+
+    #[test]
+    fn memory_list_renders_grouped_ascii_inline() {
+        let out = render_to_string(&UiEvent::MemoryEntries {
+            user: vec![mem_sum("Build", "how to build", MemoryScope::User)],
+            project: vec![mem_sum("Conventions", "team style", MemoryScope::Project)],
+        });
+        assert!(out.contains("user memory:"), "user group header: {out:?}");
+        assert!(out.contains("Build - how to build"));
+        assert!(out.contains("project memory:"), "project group header");
+        assert!(out.contains("Conventions - team style"));
+        assert!(!out.contains('\u{1b}'), "no ANSI in degraded mode");
+    }
+
+    #[test]
+    fn memory_list_empty_renders_calm_message() {
+        let out = render_to_string(&UiEvent::MemoryEntries {
+            user: vec![],
+            project: vec![],
+        });
+        assert!(out.contains("no stored memory"), "empty message: {out:?}");
+    }
+
+    #[test]
+    fn memory_list_untrusted_root_shows_only_user_group() {
+        // The project group is simply absent when it is empty (FR-1) — the
+        // untrusted-root shape, driven by the engine returning no project rows.
+        let out = render_to_string(&UiEvent::MemoryEntries {
+            user: vec![mem_sum("Build", "b", MemoryScope::User)],
+            project: vec![],
+        });
+        assert!(out.contains("user memory:"));
+        assert!(
+            !out.contains("project memory"),
+            "no project group when empty: {out:?}"
+        );
+    }
+
+    #[test]
+    fn memory_body_renders_inline_read_only() {
+        let out = render_to_string(&UiEvent::MemoryBody {
+            scope: MemoryScope::User,
+            name: "Build".into(),
+            body: "cargo build".into(),
+        });
+        assert!(out.contains("memory: Build (user)"), "header with origin: {out:?}");
+        assert!(out.contains("cargo build"));
+        assert!(!out.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn skill_body_renders_inline_with_resources() {
+        let out = render_to_string(&UiEvent::SkillBody {
+            name: "pdf-fill".into(),
+            origin: SkillOrigin::User,
+            body: "Step 1: open the template.".into(),
+            resources: vec!["/abs/template.txt".into()],
+        });
+        assert!(out.contains("skill: pdf-fill (user)"), "header with origin: {out:?}");
+        assert!(out.contains("Step 1: open the template."));
+        assert!(out.contains("bundled files:"));
+        assert!(out.contains("template.txt"), "resource path listed");
+        assert!(!out.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn skill_list_renders_names_origin_and_empty() {
+        let skills = vec![
+            SkillMeta {
+                name: "pdf-fill".into(),
+                description: "Fill PDF forms".into(),
+                origin: SkillOrigin::User,
+            },
+            SkillMeta {
+                name: "linter".into(),
+                description: String::new(),
+                origin: SkillOrigin::Project,
+            },
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(render_skill_list(&skills, &mut buf).is_ok());
+        let out = String::from_utf8(buf).unwrap_or_default();
+        assert!(out.contains("pdf-fill - Fill PDF forms (user)"), "{out:?}");
+        assert!(out.contains("linter (project)"), "no-desc skill + origin");
+        assert!(!out.contains('\u{1b}'));
+
+        let mut empty: Vec<u8> = Vec::new();
+        assert!(render_skill_list(&[], &mut empty).is_ok());
+        assert!(String::from_utf8(empty)
+            .unwrap_or_default()
+            .contains("no skills available"));
+    }
+
+    #[test]
+    fn resolve_memory_scope_prefers_user_then_project() {
+        let user = vec![mem_sum("Shared", "", MemoryScope::User)];
+        let project = vec![
+            mem_sum("Shared", "", MemoryScope::Project),
+            mem_sum("ProjOnly", "", MemoryScope::Project),
+        ];
+        assert_eq!(
+            resolve_memory_scope("Shared", &user, &project),
+            Some(MemoryScope::User)
+        );
+        assert_eq!(
+            resolve_memory_scope("ProjOnly", &user, &project),
+            Some(MemoryScope::Project)
+        );
+        assert_eq!(resolve_memory_scope("Nope", &user, &project), None);
     }
 }

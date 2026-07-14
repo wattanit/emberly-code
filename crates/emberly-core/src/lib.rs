@@ -36,6 +36,8 @@ pub use emberly_providers::{Message, RetryPolicy};
 pub use emberly_tools::AskUserOutcome;
 pub use emberly_tools::{TaskItem, TaskStatus};
 pub use emberly_tools::{SkillMeta, SkillOrigin};
+pub use emberly_tools::{MemoryOp, MemoryScope};
+pub use memory::EntrySummary;
 pub use engine::{ContextConfig, Engine, EngineConfig, LoopConfig, MemoryConfig, SkillsConfig};
 pub use event::UiEvent;
 pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfig};

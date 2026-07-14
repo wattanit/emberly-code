@@ -93,6 +93,43 @@ pub mod mode {
     pub const AUTO: &str = "auto";
 }
 
+/// Memory inspector (`/memory`, FR-6, Design §4.9). Origin (scope) is how the
+/// user reads trust, so it labels every group.
+pub mod memory {
+    pub const TITLE: &str = "memory";
+    pub const SCOPE_USER: &str = "user";
+    pub const SCOPE_PROJECT: &str = "project";
+    /// Group headers (dimmed chrome, not accent — §2).
+    pub const HEADER_USER: &str = "user memory";
+    pub const HEADER_PROJECT: &str = "project memory";
+    /// Shown when neither scope has any entries.
+    pub const EMPTY: &str = "(no stored memory yet)";
+    /// Shown when a viewed entry has an empty body.
+    pub const EMPTY_BODY: &str = "(this entry has an empty body)";
+    /// The action hint at the foot of the inspector.
+    pub const HINT: &str = " Enter view · e edit · d delete · Esc close";
+    /// Confirm-delete prompt (the entry name is inserted between the two).
+    pub const CONFIRM_PREFIX: &str = " delete ";
+    pub const CONFIRM_SUFFIX: &str = "?  y confirm · any other key cancels";
+}
+
+/// Skills inspector (`/skills`, FR-7, Design §4.9). Read-only: skills are
+/// externally-authored folders; the inspector shows what a skill could tell the
+/// model to do before it ever runs. Origin is how the user reads trust.
+pub mod skills {
+    pub const TITLE: &str = "skills";
+    pub const ORIGIN_USER: &str = "user";
+    pub const ORIGIN_PROJECT: &str = "project";
+    /// Shown when no skills are available.
+    pub const EMPTY: &str = "(no skills available)";
+    /// Shown when a skill's instruction body is empty.
+    pub const EMPTY_BODY: &str = "(this skill has an empty instruction body)";
+    /// Header before the bundled-resource list in the body view.
+    pub const RESOURCES_HEADER: &str = "bundled files:";
+    /// The action hint at the foot of the inspector.
+    pub const HINT: &str = " Enter view · ↑↓ move · Esc close";
+}
+
 /// Keybinding hints for the status bar (Design §3.1, §6.2 — 2–5 words each).
 /// Hints change with state; the permission set is shown while a prompt is open.
 pub mod hints {
