@@ -97,9 +97,9 @@ surfaces the prior phases built and is otherwise self-contained in `emberly-tui`
 | 3. Click hit-testing infrastructure: retained `HitMap` of `Rect → Target` (`emberly-tui`) | [x] | `hit.rs` (`HitMap`/`ClickTarget`); `frame` builds it (out-param); `on_click` = focus+Enter; tui click arm; palette+choice rows wired (rest → group 4) |
 | 4. Click = focus+Enter on keyboard-parity surfaces: palette rows, picker rows, reasoning expand, overlay rows, sidebar (`emberly-tui`) | [x] | palette/choice (grp 3) + session/memory/skill overlay rows + reasoning toggle + sidebar diff/memory/skills open (sidebar-geometry refactor); all via key/command twins |
 | 5. Permission-prompt click safety + native Shift-selection passthrough + `ui.mouse=false` off switch (`emberly-tui`) | [x] | affordances reuse `on_permission_key`; body/header inert (no click-through/approve); Shift-gate + `/help` doc; single `mouse_capture_enabled` predicate |
-| 6. Tests (offline — §14.7) + exit criterion (`emberly-tui`) | [ ] | capture-off predicate, wheel routing, click→action, click-never-approves, degraded |
+| 6. Tests (offline — §14.7) + exit criterion (`emberly-tui`) | [x] | capture-off predicate, wheel routing, click→action, click-never-approves, degraded — all green (577 workspace tests, 0 fail); exit criterion MET |
 
-**Overall Phase 6: IN PROGRESS — Groups 1–5 done (capture gate + wheel parity + click hit-testing + full click dispatch incl. sidebar + permission click safety). Remaining: group 6 (consolidated tests + exit criterion).**
+**Overall Phase 6: COMPLETE — all 6 groups done.** `ui.mouse` capture gate (single control point, off in degraded/`--plain`/`ui.mouse=false`), wheel-scroll parity, retained click hit-map, full click dispatch (palette/pickers/overlay rows/reasoning toggle/sidebar diff+memory+skills) all via keyboard/command twins, and permission-prompt click safety (affordances only, never a default-approve). Offline suite green (577 workspace tests, 0 failures), clippy-clean under §1, **no new dependency (HC-2)**. Exit criterion MET (Tech Spec §14.7/§15). **On merge, M8 and the 0.4 feature set are complete.**
 
 ---
 
@@ -273,30 +273,41 @@ each target — the mouse adds no capability the keyboard lacks (the invariant).
 
 ## 6. Tests + exit criterion  *(Tech Spec §14.7 offline, deterministic)*
 
-- [ ] **Capture gated (the §14.7 mouse test, Tech Spec §15 exit):** the capture predicate
-      is `false` when `ui.mouse = false` and in degraded mode (assert via the predicate /
-      that `line::run` never calls `EnableMouseCapture`, and that `tui::run` skips it when
-      `ui.mouse=false`).
-- [ ] **Wheel routing:** extend `wheel_scrolls_conversation_and_routes_to_overlay`
-      (`app.rs:2562`) — a wheel event scrolls the focused pane, the open overlay, the
-      permission body, and (new) the open palette.
-- [ ] **Click selects an interactive row:** a synthesized click on a palette row / picker
-      row activates the same action the Enter key would (assert the resulting `Command` /
-      state change); a click to expand the reasoning trail toggles it.
-- [ ] **Click never synthesizes a permission approval (Design §3.4/§5):** with a permission
-      prompt up, a click never yields Allow unless it lands on the Allow affordance and,
-      when content is unscrolled, cannot bypass the same guard the key path enforces; a
-      click elsewhere leaves the prompt pending (defaults never auto-approve). Sits beside
-      `permission_defaults_to_deny_on_enter` (`app.rs:2608`).
-- [ ] **Degraded parity:** the plain frontend renders unchanged with no mouse capture and
-      no ANSI (keep `degraded_output_has_no_ansi_escapes` `line.rs:672` green); no feature
-      depends on the pointer to carry meaning (Design §7).
-- [ ] **Exit criterion (Phase 6 done when):** a mouse unit test asserts capture is disabled
-      under `ui.mouse=false` and in degraded mode, that a wheel event scrolls the focused
-      pane, that a click selects an interactive row, and that a click never synthesizes a
-      permission approval (Tech Spec §14.7, Design §3.4/§5). Workspace clippy-clean under
-      the §1 lint policy; offline suite green. No new external dependency (`crossterm`
-      already locked, HC-2). **This is the last 0.4 phase — on merge, M8 is complete.**
+- [x] **Capture gated (the §14.7 mouse test, Tech Spec §15 exit):** the single predicate
+      `terminal::mouse_capture_enabled(rich, ui_mouse)` is `false` for `ui.mouse = false`
+      **and** for any non-rich (degraded) frontend — `mouse_capture_gated_on_rich_and_ui_mouse`
+      (terminal). `tui::run` calls it with `rich = true` (so `false` iff `ui.mouse = false`);
+      `line::run` sets no terminal modes at all (structurally capture-free — verified:
+      `grep` finds no `MouseCapture`/`TerminalGuard`/`enter_modes` in `line.rs`).
+      `degraded_mode_never_captures_the_mouse` (frontend) ties the degraded decision to the
+      predicate. Config side: `ui_mouse_parses_and_merges`.
+- [x] **Wheel routing:** covered across `wheel_scrolls_conversation_and_routes_to_overlay`
+      (conversation + open overlay), `wheel_routes_to_the_open_palette`, and
+      `wheel_scrolls_a_permission_prompt_without_deciding` (permission body, never decides) —
+      all four focused surfaces (group 2).
+- [x] **Click selects an interactive row:** `click_on_a_palette_row_is_focus_plus_enter`,
+      `click_on_a_choice_row_is_focus_plus_enter` (grp 3), `click_memory_row_is_focus_plus_enter`,
+      `click_reasoning_toggle_matches_ctrl_r` (grp 4), `click_sidebar_sections_match_their_keyboard_actions`
+      (grp 4) — each asserts the click yields the *same* `Action`/state as the key/command twin.
+- [x] **Click never synthesizes a permission approval (Design §3.4/§5):**
+      `a_click_off_the_permission_affordances_never_decides` (a non-affordance click leaves the
+      prompt pending — no default-approve), `click_permission_affordances_match_their_keys`
+      (Allow/Session/Deny == `y`/`s`/Enter), `permission_affordances_are_the_only_click_targets`
+      (body/header inert; no click-through) (grp 5). Sits beside `permission_defaults_to_deny_on_enter`.
+- [x] **Degraded parity:** `line.rs` sets no terminal modes and emits no ANSI
+      (`degraded_output_has_no_ansi_escapes` green); no feature depends on the pointer to carry
+      meaning (Design §7) — every click/scroll target has a keyboard/command twin (asserted by
+      the parity tests above).
+- [x] **Exit criterion — MET.** Mouse unit tests assert capture is disabled under
+      `ui.mouse=false` and in degraded mode, that a wheel event scrolls the focused pane, that a
+      click selects an interactive row, and that a click never synthesizes a permission approval
+      (Tech Spec §14.7, Design §3.4/§5). **Workspace offline suite green (577 tests, 0
+      failures);** workspace lib/bin clippy shows only the 2 pre-existing `emberly-core/engine.rs`
+      `too_many_arguments` warnings (unrelated, §1 policy honored). **No new external dependency
+      — `Cargo.lock` unchanged within Phase 6** (only `Cargo.toml` names the already-default
+      crossterm `events` feature; HC-2). End-to-end smoke: the real `emberly config show`
+      surfaces `ui.mouse ← project` when set to a non-default and omits it at the default.
+      **Last 0.4 phase — on merge, M8 (and the 0.4 feature set) is complete.**
 
 ---
 
@@ -354,6 +365,20 @@ each target — the mouse adds no capability the keyboard lacks (the invariant).
   reports the last reasoning header's line index; `render_conversation` pushes a
   `ReasoningToggle` region). All dispatch via the synthetic-Enter pattern → parity by
   construction. +4 tests (183 green), `emberly-tui` clippy-clean, no new dep.
+- **Group 6 DONE — Phase 6 COMPLETE (exit criterion MET).** The exit-criterion properties were
+  already covered by tests accumulated in groups 1–5; group 6 verified the whole and closed the
+  last gaps: added `degraded_mode_never_captures_the_mouse` (frontend — ties the degraded
+  decision to the capture predicate) and confirmed `line.rs` is structurally capture-free (no
+  `MouseCapture`/`TerminalGuard`). **Full workspace offline suite: 577 tests, 0 failures.**
+  Workspace lib/bin clippy clean except the 2 pre-existing `emberly-core/engine.rs`
+  `too_many_arguments` (unrelated). **`Cargo.lock` unchanged within Phase 6** (branch point
+  `26819f7` → HEAD) — only `Cargo.toml` names the already-default crossterm `events` feature;
+  **no new external dependency (HC-2).** End-to-end smoke of the real binary: `emberly config
+  show` prints `ui.mouse ← project:.agents/config.toml` when set to `false` and omits it at the
+  default — the group-1 config plumbing works outside the test harness. _Note: interactive
+  real-terminal mouse verification (actual click/scroll events) is not drivable headless; the
+  deterministic offline synthesis of clicks/scrolls is the §14.7 contract, and the
+  terminal-dependent Shift-passthrough stays a release-verification open item (Tech Spec §16)._
 - **Group 5 DONE (permission click safety + Shift passthrough + off switch).** Permission
   clicks are the sharpest safety surface, so they get the strictest treatment: `render_permission`
   clears the hit-map (no click-through to anything behind the modal) and registers **only** the
