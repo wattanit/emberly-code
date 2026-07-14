@@ -8,7 +8,7 @@
 //! (context %, mode) live only on the status bar (Design §3.2) — everything the
 //! sidebar shows is also reachable by command, so nothing is sidebar-exclusive.
 
-use emberly_core::{Mode, SandboxStatus, TaskStatus};
+use emberly_core::{EntrySummary, Mode, SandboxStatus, SkillMeta, SkillOrigin, TaskStatus};
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::text::{Line, Span};
@@ -181,12 +181,13 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
 
     // The picker keeps its selection in view (forced_scroll); read-only panes
     // scroll freely, so their forced_scroll is None.
-    let (lines, forced_scroll, hint_base): (Vec<Line>, Option<usize>, &str) = match &overlay.content
+    let (lines, forced_scroll, hint_base): (Vec<Line>, Option<usize>, String) = match &overlay
+        .content
     {
         OverlayContent::Diff(unified) => (
             crate::diffview::render_unified(unified, theme),
             None,
-            " Esc close · ↑↓ PgUp/PgDn scroll",
+            " Esc close · ↑↓ PgUp/PgDn scroll".to_string(),
         ),
         OverlayContent::Text(body) => (
             body.split('\n')
@@ -194,15 +195,51 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect) {
                 .map(|row| Line::from(Span::styled(row, theme.primary())))
                 .collect(),
             None,
-            " Esc close · ↑↓ PgUp/PgDn scroll",
+            " Esc close · ↑↓ PgUp/PgDn scroll".to_string(),
         ),
         OverlayContent::Sessions { rows, selected } => {
             let (lines, sel_line) = session_picker_lines(rows, *selected, theme);
-            (lines, Some(sel_line), " Enter resume · ↑↓ move · Esc close")
+            (
+                lines,
+                Some(sel_line),
+                " Enter resume · ↑↓ move · Esc close".to_string(),
+            )
         }
         OverlayContent::Choices { rows, selected, .. } => {
             let (lines, sel_line) = choice_picker_lines(rows, *selected, theme);
-            (lines, Some(sel_line), " Enter select · ↑↓ move · Esc close")
+            (
+                lines,
+                Some(sel_line),
+                " Enter select · ↑↓ move · Esc close".to_string(),
+            )
+        }
+        OverlayContent::MemoryEntries {
+            user,
+            project,
+            selected,
+            confirm_delete,
+        } => {
+            let (lines, sel_line) = memory_inspector_lines(user, project, *selected, theme);
+            let hint = if *confirm_delete {
+                let name = user
+                    .iter()
+                    .chain(project.iter())
+                    .nth(*selected)
+                    .map_or("", |e| e.name.as_str());
+                format!(
+                    "{}{}{}",
+                    strings::memory::CONFIRM_PREFIX,
+                    name,
+                    strings::memory::CONFIRM_SUFFIX
+                )
+            } else {
+                strings::memory::HINT.to_string()
+            };
+            (lines, Some(sel_line), hint)
+        }
+        OverlayContent::SkillList { skills, selected } => {
+            let (lines, sel_line) = skill_list_lines(skills, *selected, theme);
+            (lines, Some(sel_line), strings::skills::HINT.to_string())
         }
     };
 
@@ -310,6 +347,114 @@ fn choice_picker_lines(
         if row.current {
             spans.push(Span::styled("  (current)".to_string(), theme.success()));
         }
+        lines.push(Line::from(spans));
+    }
+    (lines, sel_line)
+}
+
+/// Render the memory inspector (`/memory`, FR-6, Design §4.9): entries grouped
+/// by scope, each `name — description`, with a dimmed scope header per group.
+/// Origin (the header) is how the user reads trust; the selected entry is
+/// marked and accented. Returns the lines and the selected entry's line index
+/// (so the pane scrolls it into view). `selected` indexes the flattened list
+/// (user entries, then project entries).
+fn memory_inspector_lines(
+    user: &[EntrySummary],
+    project: &[EntrySummary],
+    selected: usize,
+    theme: &crate::theme::Theme,
+) -> (Vec<Line<'static>>, usize) {
+    let mut lines: Vec<Line> = Vec::new();
+    if user.is_empty() && project.is_empty() {
+        lines.push(Line::from(Span::styled(
+            strings::memory::EMPTY.to_string(),
+            theme.chrome(),
+        )));
+        return (lines, 0);
+    }
+    let mut sel_line = 0;
+    // A running index over the flattened entry list, matched against `selected`.
+    let mut gi = 0usize;
+    for (entries, header) in [
+        (user, strings::memory::HEADER_USER),
+        (project, strings::memory::HEADER_PROJECT),
+    ] {
+        if entries.is_empty() {
+            continue;
+        }
+        lines.push(Line::from(Span::styled(header.to_string(), theme.chrome())));
+        for entry in entries {
+            if gi == selected {
+                sel_line = lines.len();
+            }
+            let marker = if gi == selected { "▶ " } else { "  " };
+            let name_style = if gi == selected {
+                theme.strong()
+            } else {
+                theme.primary()
+            };
+            let mut spans = vec![
+                Span::styled(marker.to_string(), theme.accent()),
+                Span::styled(entry.name.clone(), name_style),
+            ];
+            if !entry.description.is_empty() {
+                spans.push(Span::styled(
+                    format!(" — {}", entry.description),
+                    theme.chrome(),
+                ));
+            }
+            lines.push(Line::from(spans));
+            gi += 1;
+        }
+        lines.push(Line::from(String::new()));
+    }
+    (lines, sel_line)
+}
+
+/// Render the skills inspector (`/skills`, FR-7, Design §4.9): the available
+/// skills as `name — description` rows with a dimmed `(origin)` suffix (origin
+/// is how the user reads trust). The selected row is marked and accented.
+/// Returns the lines and the selected row's line index (to scroll it into
+/// view).
+fn skill_list_lines(
+    skills: &[SkillMeta],
+    selected: usize,
+    theme: &crate::theme::Theme,
+) -> (Vec<Line<'static>>, usize) {
+    let mut lines: Vec<Line> = Vec::new();
+    if skills.is_empty() {
+        lines.push(Line::from(Span::styled(
+            strings::skills::EMPTY.to_string(),
+            theme.chrome(),
+        )));
+        return (lines, 0);
+    }
+    let mut sel_line = 0;
+    for (i, skill) in skills.iter().enumerate() {
+        if i == selected {
+            sel_line = lines.len();
+        }
+        let marker = if i == selected { "▶ " } else { "  " };
+        let name_style = if i == selected {
+            theme.strong()
+        } else {
+            theme.primary()
+        };
+        let origin = match skill.origin {
+            SkillOrigin::User => strings::skills::ORIGIN_USER,
+            SkillOrigin::Project => strings::skills::ORIGIN_PROJECT,
+        };
+        let mut spans = vec![
+            Span::styled(marker.to_string(), theme.accent()),
+            Span::styled(skill.name.clone(), name_style),
+        ];
+        if !skill.description.is_empty() {
+            spans.push(Span::styled(
+                format!(" — {}", skill.description),
+                theme.chrome(),
+            ));
+        }
+        spans.push(Span::styled(format!("  ({origin})"), theme.chrome()));
         lines.push(Line::from(spans));
     }
     (lines, sel_line)
