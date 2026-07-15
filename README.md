@@ -1,6 +1,6 @@
 # Emberly Code
 
-> **Currently on v0.4** — feature-complete for the milestone, install from source.
+> **Currently on v0.4.1** — feature-complete for the milestone, install from source.
 
 **An AI coding agent for your terminal — provider-agnostic, fully auditable, and
 built in pure Rust.**
@@ -149,7 +149,7 @@ adapter  = "openai"                          # or "anthropic"
 base_url = "https://my-endpoint.example/v1"
 auth     = { scheme = "bearer", key = "myserver" }   # → MYSERVER_API_KEY
 
-# Optional per-model metadata → live cost estimate, /effort, and image input:
+# Optional per-model metadata → live cost estimate, /effort, and image/document input:
 [providers.myserver.models."my-model"]
 context_window = 128000
 max_output     = 8192
@@ -157,6 +157,7 @@ pricing        = { input = 1.0, output = 2.0 }   # USD per million tokens
 effort         = "medium"        # default reasoning level; enables /effort
 effort_levels  = ["low", "medium", "high"]       # optional subset
 vision         = true            # model accepts image input (P-11)
+documents      = true            # model accepts document/PDF input (P-12)
 ```
 
 Baked-in profiles can be tweaked the same way — set just the field you want to
@@ -177,11 +178,13 @@ is picked up automatically as standing context.
 | `[ui] mouse` | `true` | Wheel-scroll + click-to-select in the rich TUI |
 | `[trust] trusted_dirs` | `[]` | Folders pre-approved for the trust gate (global config only) |
 | `[loop] enabled` | `true` | Loop-breaking guardrail (+ `repeat_window`, `max_no_progress_turns`) |
+| `[completion] enabled` | `true` | Completion gate: holds the loop to registered checks before "done" (+ `max_attempts`, `[[completion.check]]`) |
 | `[context] window_turns` | _auto_ | Adaptive context window (+ `keep_recent_turns`) |
 | `[context] auto_compact` | `true` | Auto-summarize older turns (+ `auto_compact_threshold`) |
 | `[context] pin_task_list` | `true` | Keep the agent's task list pinned in context |
 | `[truncate] reduce` | `true` | Salient reduction of tool output (+ `max_lines`/`max_bytes`/`head_lines`/`tail_lines`) |
 | `[image] max_bytes` | _limit_ | Max size for an image read into the conversation |
+| `[document] max_bytes` | _limit_ | Max size for a PDF read into the conversation |
 | `[memory] enabled` | `true` | Persistent cross-session memory (+ `max_index_entries`) |
 | `[skills] enabled` | `true` | The skill system |
 | `[search] enabled` | `true` | Register the `web_search` tool (needs `adapter`/`endpoint`/`auth` to work; `max_results` caps results) |
@@ -275,6 +278,12 @@ Emberly is built around auditability and bounded action, in two layers — a
 - **Loop-breaking guardrail.** If the agent starts spinning without making
   progress, Emberly halts it and hands the decision back to you — **keep going**,
   **stop**, or **say something** to steer — rather than burning tokens.
+- **Completion gate.** The sibling guardrail: if you register pass/fail checks
+  (`[[completion.check]]` — e.g. a test suite), the agent can't declare a task
+  done while they fail. A failing check re-opens the loop as feedback; after
+  repeated failures Emberly halts and asks you to keep going, steer, stop, or
+  **finish anyway** (an explicit override, never presented as passing).
+  Inert until you register a check.
 
 #### Reasoning effort & the thinking trail
 
@@ -300,7 +309,7 @@ records the trace to the transcript).
   instructions before it ever runs** — "what could this tell the model to do" is
   always inspectable.
 
-#### Web search & image input
+#### Web search & image/document input
 
 - **Web search.** The `web_search` tool is registered by default but does
   nothing until you point it at a search service — set `[search]` `adapter`
@@ -310,6 +319,11 @@ records the trace to the transcript).
 - **Image input.** For vision-capable models (`vision = true`), the agent can
   read an image file inside your project into the conversation via the
   `read_image` tool — point it at a screenshot or diagram and ask about it.
+- **Document input.** For document-capable models (`documents = true`), the
+  agent can read a PDF file inside your project into the conversation via the
+  `read_document` tool — the same pattern as image input, applied to
+  documents. The harness never parses the PDF; it just forwards the bytes, so
+  there's no page count or extracted text, only size and format.
 
 #### Sessions & long conversations
 
@@ -353,10 +367,10 @@ minimal terminals.
 
 ### Project status
 
-Feature-complete for the **v0.4** milestone (M8), installable from source. The
-interactive TUI, live providers, session persistence, the permission rule
+Feature-complete for the **v0.4.1** milestone (M9), installable from source.
+The interactive TUI, live providers, session persistence, the permission rule
 engine, auto-accept modes, and OS confinement (Linux Landlock, macOS Seatbelt)
-all work today, alongside the full 0.2–0.4 stack described below. **Not yet
+all work today, alongside the full 0.2–0.4.1 stack described below. **Not yet
 shipped:** prebuilt binaries and Windows support (no Landlock/Seatbelt
 equivalent).
 
@@ -371,9 +385,10 @@ as it grows. _(Affectionate, not official.)_
 | **v0.2** | M6 | 🏡 _Hearth_ | Configurable and safe to live with — endpoint-configurable provider profiles (incl. Z.ai), in-app config/prompt editing, reasoning effort + thinking trail, the ask-you-a-question tool, tool-call explanations, workspace trust, and the loop-breaking guardrail. |
 | **v0.3** | M7 | 🔥 _Slow Burn_ | The economy layer — salient tool-result reduction, the adaptive context window + `recall`, automatic + manual compaction, and the derived resume cache. Longer, cheaper sessions from the same fuel. |
 | **v0.4** | M8 | 🌲🔥 _Wildfire_ | New capability surface — planning (task list), sight (image input), durable memory, extensible skills, live web search, and pointer interaction. |
+| **v0.4.1** | M9 | 🌲🔥 _Wildfire_ | A completion gate that holds the loop to registered pass/fail checks before it may declare a task done, and document (PDF) input — the same pattern as image input, applied to documents. |
 
-Prior as-built plans live under `docs/version-0-1/`, `docs/version-0-2/`, and
-`docs/version-0-3/`.
+Prior as-built plans live under `docs/version-0-1/`, `docs/version-0-2/`,
+`docs/version-0-3/`, and `docs/version-0-4/`.
 
 ### Architecture
 
@@ -421,10 +436,10 @@ Release targets (v1): `x86_64-unknown-linux-musl`,
 
 **Documents** (the SFD standard — Requirements → Design → Tech Spec):
 
-- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.7)
-- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.7)
-- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.8)
-- [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) — phased build plan (+ per-phase `PHASE*_TODO.md`)
+- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.8)
+- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.8)
+- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.9)
+- [`docs/version-0-4-1/IMPLEMENTATION_PLAN.md`](docs/version-0-4-1/IMPLEMENTATION_PLAN.md) — phased build plan (+ per-phase `PHASE*_TODO.md`)
 
 ## License
 
