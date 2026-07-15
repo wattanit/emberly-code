@@ -1,11 +1,11 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.8 
-**Status:** approved   
-**Date:** 2026-07-12
+**Version:** 0.9 
+**Status:** approved
+**Date:** 2026-07-15
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.7 (upstream contract),
-Design Guideline v0.7 (upstream for all UI/UX decisions)
+**Companion documents:** Requirements Document v0.8 (upstream contract),
+Design Guideline v0.8 (upstream for all UI/UX decisions)
 
 This document defines HOW Emberly Code is built. Requirements-level
 identifiers (HC-n, FR-n, P-n, T-n, C-n, S-n, A-n) refer to the Requirements
@@ -95,6 +95,13 @@ tool calls, so they flow through the existing `ToolStarted`/`ToolFinished`
 events (Design renders origin and untrusted-content labels from the tool
 result payload, §4.9/§4.10) — no per-feature UiEvent for them.
 
+The 0.4.1 feature set adds `CompletionGateHalted{failing: Vec<CheckResult>, attempts: usize}` (S-6, §7) — the harness-voice halt after bounded failed
+completion attempts, awaiting a user resolution (Design §8.7). A failing check's
+reason returns to the model as ordinary tool-result content (agent-world, HC-6),
+so per-check results need no UiEvent — only the halt does; and a document read is
+an ordinary tool call flowing through `ToolStarted`/`ToolFinished` like an image
+read (Design renders the §4.11 reference line from the result payload).
+
 Workspace trust (FR-1) is **not** a `UiEvent`: it is a pre-engine gate in the
 binary (§6.7), resolved before the engine loop starts and before any project
 file is read into a prompt, so it never crosses the engine↔frontend channel.
@@ -139,7 +146,15 @@ the project-relative path in `tool_call` args; the image bytes are re-derived
 from that file when building the provider request (§4.1), so the transcript
 references the image without duplicating it, and a web search records its
 query and the returned results (untrusted content, Design §4.10) in the
-`tool_result` like any tool.
+`tool_result` like any tool. The 0.4.1 feature set adds `completion_check` (one
+per gate evaluation: check name, pass/fail, and the structured reason — S-6, §7)
+and `completion_gate_halt` (the failing checks, the attempt count, and the
+user's resolution, including `override: true` when the user finished over a red
+gate — S-6, Design §8.7); both are additive, older readers warn-skip, no
+`SCHEMA_VERSION` bump. A document read needs no new transcript type — it is a
+`tool_call`/`tool_result` pair recording the project-relative path in args, the
+document bytes re-derived from the file when building the provider request
+(§4.1) exactly as an image read.
 - The transcript is ground truth; the in-context conversation is rebuilt
 from it (resume) or maintained in parallel with it (live session).
 Nothing ever rewrites a transcript line (HC-7, Requirements §8.2). The
@@ -214,6 +229,15 @@ unsupported-capability result (§5.2, HC-6) instead of dropping the image.
 (`data` is base64 of the file bytes; P-11); each adapter maps it to the
 provider's native shape (§4.2), and no wire type crosses the boundary (P-1).
 
+`ModelInfo` likewise declares a `documents: bool` capability (P-12), read to
+decide whether a `ContentBlock::Document{media_type, data}` (base64 of the file
+bytes, alongside image and text blocks) can be sent to the active model —
+producing the structured unsupported-capability result (§5.2, HC-6) when it
+cannot, never dropping the document. Each adapter maps the block to the
+provider's native document shape (§4.2); no wire type crosses the boundary
+(P-1). The harness never parses the document — it forwards the bytes — so no
+PDF-parsing dependency enters the tree (HC-2, §12).
+
 `CompletionStream` yields normalized `StreamEvent`s: `TextDelta`,
 `ReasoningDelta` (model thinking, distinct from the answer — P-10),
 `ReasoningSignature{signature, redacted}` (emitted once when a reasoning
@@ -227,15 +251,21 @@ reasoning simply never emits `ReasoningDelta`.
 
 - **Anthropic Messages API** — content blocks, `tool_use`/`tool_result`
 mapping, SSE streaming. Image blocks map to an `image` content block with a
-base64 `source` and media type (P-11).
+base64 `source` and media type (P-11); document blocks map to a `document`
+content block with a base64 `source` of media type `application/pdf` (P-12).
 - **OpenAI-compatible** — `tool_calls` mapping, SSE streaming; base URL
 configurable, which transitively covers Ollama, vLLM, OpenRouter,
 private deployments (P-2). Image blocks map to an `image_url` content part
-with a `data:` URI (P-11).
+with a `data:` URI (P-11). Document blocks map to the endpoint's file/document
+input part where it supports one; an OpenAI-compatible endpoint that does not is
+declared `documents:false` (below), so `read_document` returns the
+unsupported-capability result rather than sending (P-12).
 
 Both declare `vision` in `ModelInfo` per configured model (§8 pricing/model
 config gains an optional `vision` flag; default `false`, so an image is never
-sent to a model not declared vision-capable — P-11).
+sent to a model not declared vision-capable — P-11). Each configured model
+likewise carries an optional `documents` flag (default `false`), so a document
+is never sent to a model not declared document-capable (P-12).
 
 Both are thin first-party clients on `reqwest` (default features off,
 `rustls-tls`, `json`, `stream` on) — no vendor SDK crates (P-4). Two
@@ -350,6 +380,7 @@ proxying JSON-RPC (T-7); nothing else in the engine changes.
 | `recall`     | Returns earlier conversation turns dropped from the working window (T-10, FR-3, §7). Args: a turn range (or the id referenced by a window-elision marker). Returns the engine's **normalized, reduced** messages for that range — never raw JSONL — so recall costs tokens proportional to what is recalled, not the transcript's raw size. Reads only the current session's own history from the transcript records the engine already holds; touches no filesystem or network, so like `ask_user` it bypasses the sandbox and is not permission-gated (§6), while still flowing through the `Tool` trait. |
 | `todo`       | Sets/updates the model's task list (T-11). Args: the full list of `{text, status: pending|in_progress|done}` items — the model always sends the complete list, so the engine never merges partial edits. Engine state, emitted as `TaskListUpdated` (§3.1) and logged as `task_list` (§3.2); touches no filesystem/network, so like `recall`/`ask_user` it bypasses the sandbox and is **not permission-gated** (§6).                                                                                                                                                                                       |
 | `read_image` | Reads an image file within the root (T-12). Path-normalized and root-checked exactly as `read_file`; governed by the same read rules (§6.2). Detects format + dimensions (header-only, `imagesize`), base64-encodes the bytes (`base64`), and appends a `ContentBlock::Image` to the turn (P-11, §4.1). Formats: PNG, JPEG, GIF (first frame), WebP. Rejects files over `image.max_bytes` (default 5 MiB) and, on a non-`vision` model (§4.2), returns the structured unsupported-capability result (HC-6) rather than sending it.                                                                          |
+| `read_document` | Reads a document file within the root (T-16). Path-normalized and root-checked exactly as `read_file`; governed by the same read rules (§6.2). Sniffs the type by magic bytes (PDF: a leading `%PDF-` — a first-party byte-prefix check, no parser, HC-2) and rejects a non-PDF or a file over `document.max_bytes` (default 32 MiB). Base64-encodes the bytes (`base64`, already locked) and appends a `ContentBlock::Document` to the turn (P-12, §4.1); reports file size and format only, never a page count or extracted text (unparsed). On a non-`documents` model (§4.2) returns the structured unsupported-capability result (HC-6) rather than sending. |
 | `memory`     | Writes/updates/removes/recalls durable memory entries (T-13, §8.1). Args are **content fields, never a path** (`op`, `scope`, `name`, `description?`, `type?`, `body?`); the engine derives the filename within the fixed scope directory and rejects `..`/absolute/separator in `name`. Harness-managed persistence (like the transcript/trust store), so it does not widen HC-4 (FR-6) and is not a sandboxed filesystem write; refreshes `MemoryStatus` (§3.1).                                                                                                                                          |
 | `web_search` | Searches the web via the harness-owned backend (T-14, §5.5). Args: query (+ optional count ≤ `search.max_results`). A first-party `reqwest` call to the configured search endpoint; returns `{title, url, snippet}` results marked as **untrusted web content** (Design §4.10). **Permission-gated** (default `ask`, allowlistable — §6.1); it is a harness-process network egress, not a sandboxed child (§5.5).                                                                                                                                                                                           |
 | `skill`      | Invokes a skill by name (T-15, §8.2). Args: skill name. Loads that skill's `SKILL.md` body (and lists its bundled resources) into the tool result for the model; metadata for all skills is already in context (§7). Reads only from the resolved, trust-gated skill folders (§6.7); running a skill's bundled script is a separate ordinary `bash` call under the full permission/sandbox model (§6) — the `skill` tool itself only reads instruction text, so it is not separately permission-gated.                                                                                                      |
@@ -471,8 +502,9 @@ Note: `sed` is intentionally absent — a prefix rule would match the
 destructive `sed -i`/`sed >` forms too, and §6.5 forbids flag-parsing
 as a matching mechanism. Use `read_file` with `start_line`/`end_line`
 for a prompt-free ranged read instead.
-- Non-bash tool defaults: `read`/`glob`/`grep`/`read_image` inside the root →
-`allow`; `write`/`edit` inside the root → `ask` (unchanged); `web_search` →
+- Non-bash tool defaults: `read`/`glob`/`grep`/`read_image`/`read_document`
+inside the root → `allow`; `write`/`edit` inside the root → `ask` (unchanged);
+`web_search` →
 `ask`, allowlistable (§5.5, T-14). The engine-only tools (`todo`, `recall`,
 `ask_user`, `skill`) take no rule — they touch no filesystem/network and are
 not permission-gated (§5.2).
@@ -678,6 +710,48 @@ stop / steer, Design §8.5). Config `[loop] enabled, repeat_window, max_no_progr
 tool results differ (genuine progress); it is a heuristic (Requirements
 S-5), and the guarantee is termination-into-a-decision, not perfect
 classification.
+- **Completion gate (S-6).** Registered completion checks gate the loop's claim
+of *done* — the model-driven analog to the guardrail above: S-5 stops a loop
+that re-treads, S-6 stops one that lands early. Checks are registered from config
+(the shipped path) and, by the same internal registration hook, by a frontend or
+a tool (Requirements S-6); the engine holds a `Vec<CompletionCheck>` populated at
+startup. A config check is a command with an expected exit status:
+
+  ```toml
+  [[completion.check]]
+  name        = "tests"
+  command     = "cargo test"
+  expect_exit = 0        # pass iff the command exits with this status
+  ```
+
+  - **Evaluation timing.** The gate evaluates on a *completion attempt* — the
+  agent loop reaching a natural stop (an assistant turn with no tool calls). With
+  no checks registered the gate is inert and the loop ends exactly as today; with
+  checks, each runs and any failure re-opens the loop.
+  - **Failure re-opens the loop (HC-6).** A failing check's name and structured
+  reason (exit status + the §5.3-reduced tail of its output) are appended as a
+  tool-result-shaped message the model reads and reacts to (agent-world, Design
+  §8.7), and the loop continues; a passing gate lets the loop terminate.
+  - **Checks run under §6, un-prompted.** A command check executes through the
+  sandbox exactly as `bash` (§6.2/§6.3 confinement, the `S-4` timeout) — it has
+  **no privileged path around the safety model** (Requirements S-6 honesty
+  clause). It is *not* re-prompted per evaluation: being registered in
+  trust-gated config is the authorization, exactly as a project-config allowlist
+  entry is (§6.1). Containment still applies; only the ask is waived, and only
+  because the user authored the check.
+  - **Bounded attempts → halt.** After `completion.max_attempts` failed
+  completion attempts (default `3`; initial, tune with use) the engine stops
+  issuing provider calls, emits `CompletionGateHalted{failing, attempts}` (UiEvent
+  + `completion_gate_halt` transcript event, §3), and awaits a
+  `Command::ResolveCompletionGate` — `resume` (try again), `steer(text)` (hand
+  guidance to the model), `stop`, or `finish` (**override**: end the task as done
+  over a still-failing gate, recorded with `override: true` — the gate binds the
+  model's claim of done, never the user's authority, Requirements S-6). This is
+  the same termination-into-a-decision guarantee as S-5 and prevents an S-6/S-5
+  standoff: a model that cannot satisfy a check cannot spin forever.
+  - Every evaluation is a `completion_check` transcript event (name, pass/fail,
+  reason — HC-7). Config `[completion] enabled` (default `true`, but inert
+  without registered checks), `max_attempts`.
 
 ## 8. Configuration & Prompts
 
@@ -732,6 +806,13 @@ a `read_image` (§5.2, T-12) and the optional per-model `vision = bool`
 `skills.enabled` (**default `true`**) (§8.2, FR-7); `ui.mouse = bool`
 (**default `true`**) enables pointer capture in the rich TUI (§9, Design
 §3.4). Memory and skill *store locations* are fixed (§8.1/§8.2), not config.
+- **New config keys, 0.4.1 feature set** (initial; tune with use):
+`[[completion.check]]` entries (`name`, `command`, `expect_exit`) register gate
+checks, and `[completion]` — `enabled` (**default `true`**, inert without
+registered checks) and `max_attempts` (**default `3`**) — drive the completion
+gate (§7, S-6); `document.max_bytes` (**default `32 MiB`**) caps a
+`read_document` (§5.2, T-16) and the optional per-model `documents = bool`
+(**default `false`**) gates document sends (§4.2, P-12).
 - **Trust:** store at `~/.config/emberly/trust.toml`, `0600`, global only;
 optional `trust.trusted_dirs` pre-trust allowlist in global config
 (§6.7) — neither is ever a project key (Requirements FR-1).
@@ -949,6 +1030,12 @@ first-party frontmatter splitting (no YAML crate — deliberate, HC-2); mouse
 handling (Design §3.4) is `crossterm`, already locked. `emberly-sandbox`'s
 frozen dependency list is untouched.
 
+The 0.4.1 feature set adds **no new dependencies**: document input (P-12/T-16)
+base64-encodes with the already-locked `base64` and sniffs PDF by a first-party
+`%PDF-` magic-byte check (no PDF parser — HC-2, the passthrough promise of §4.1),
+and the completion gate (S-6) is engine/config logic running check commands
+through the existing `bash`/sandbox path. `emberly-sandbox` is untouched.
+
 Policy (Requirements §10): additions require `cargo vet` acceptance;
 `cargo deny` (licenses, duplicates, advisories) + `cargo geiger` report
 in CI; `emberly-sandbox` additions require explicit owner sign-off.
@@ -1031,6 +1118,19 @@ test suite incl. degraded-mode and Thai-fixture tests, `cargo deny`,
    and capped at `max_results` (T-14); and a mouse unit test asserting capture
    is disabled under `ui.mouse=false` and in degraded mode and that a click
    never synthesizes a permission approval (Design §3.4/§5).
+8. **0.4.1 feature coverage** (offline via `FakeProvider` where possible): a
+  document round-trip asserting `read_document` root-confines its path, rejects
+   an oversize / `.git/` / non-PDF (magic-byte) file, appends a
+   `ContentBlock::Document`, and — on a `documents:false` model — returns the
+   structured unsupported-capability result instead of sending (T-16/P-12); and
+   completion-gate tests — a `FakeProvider` script attempting completion with a
+   registered check failing, asserting the failure re-opens the loop as a
+   tool-result while a passing check lets it terminate; a check command proven to
+   run through the sandboxed `bash` path (contained, not re-prompted); the
+   bounded-attempt halt firing `CompletionGateHalted` after `max_attempts` with
+   each resolution (`resume`/`steer`/`stop`/`finish`) behaving correctly and
+   `finish` recording `override: true`; and an inert gate (no registered checks)
+   leaving loop termination unchanged (S-6).
 
 Agent *quality* evaluation (does it code well) is explicitly out of
 scope for this spec — post-release discipline with separate tooling.
@@ -1067,8 +1167,40 @@ harness reaches capability parity with mature coding agents — planning, sight,
 durable memory, extensible skills, live web reach, and pointer interaction —
 without conceding provider-agnosticism (§1), the pure-Rust build (HC-2), or the
 safety model (§6).*
+M9 — 0.4.1 feature set: the completion gate (S-6) and document (PDF) input
+(P-12) with the read-document tool (T-16). *Proves the 0.4.1 scope: the loop can
+be held to registered checks before it declares done, and the model can read the
+document formats real-world source material arrives in — both with no new
+dependencies (§12), and the gate with no privileged path around the safety model
+(§6).*
 
 ## 16. Open Items
+
+**v0.9 (2026-07-15, 0.4.1 cross-project feature set).** Two capabilities
+requested by TREEGAL Yggdrasil (a consumer of the engine) and absorbed into
+Requirements v0.8 land as engine/config/TUI logic with **no new dependencies**
+(§12). New IDs realized: S-6 (completion gate, §7/§3/§8), P-12 + T-16 (document
+input, §4.1/§4.2/§5.2). The `completion_check` and `completion_gate_halt`
+transcript events and the `ContentBlock::Document` block are additive (no
+`SCHEMA_VERSION` bump). Minor, additive bump; Requirements bumped to v0.8 and
+Design to v0.8 in lockstep (pins refreshed). A third request (Windows supervised
+posture) was **held, not absorbed** — the requester targets macOS only for its
+prototyping stage — so §13's Windows-deferred posture is unchanged.
+
+Open items introduced by the 0.4.1 scope:
+
+- **Document formats and caps (P-12/T-16, §5.2).** PDF only (Requirements §2.3
+declines docx and other word-processor formats); the 32 MiB byte cap and the
+`%PDF-` magic-byte sniff are the initial set. Confirm the `document` block maps
+cleanly to the Anthropic native document block and to each OpenAI-compatible
+endpoint's document input (or is correctly declared `documents:false`) against
+live endpoints in M9, and confirm provider page/token limits surface as clean
+unsupported/oversize results, not crashes.
+- **Completion-gate defaults and registration (S-6, §7).** `max_attempts = 3`
+is a placeholder; tune so the gate stops a premature landing without recreating
+an S-5 spin. Confirm the config command-check shape (`expect_exit`) covers the
+common coding checks (test/lint/build), and validate the frontend/tool
+registration hook against a real non-config registrant when one exists.
 
 **v0.8 (2026-07-12, 0.4 capability-parity scope).** The 0.4 feature set lands
 across `emberly-core`/`-tools`/`-tui` and is the first version since v0.1 to add

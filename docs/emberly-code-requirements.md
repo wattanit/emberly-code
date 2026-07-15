@@ -1,8 +1,8 @@
 # Emberly Code AI Coding Harness — Requirements Document
 
-**Version:** 0.7    
-**Status:** approved    
-**Date:** 2026-07-12    
+**Version:** 0.8    
+**Status:** approved
+**Date:** 2026-07-15    
 **Owner:** Wattanit    
 **Companion documents:** Design Guideline v0.7 (downstream), Technical  
 Specification v0.8 (downstream)
@@ -120,6 +120,20 @@ to any function. Its patterns and degradation are an interaction decision
 and belong to the Design Guideline; Requirements holds no separate ID for
 it (routing: interaction patterns are Design's, not Requirements').
 
+Added in the 0.4.1 feature set (capabilities requested by TREEGAL Yggdrasil,
+a separate product that consumes Emberly as its engine, and absorbed on their
+own domain-agnostic merits — not by any upstream/downstream obligation; each
+item carries an ID and full statement in the section cited; this list is the
+scope overview, not the requirement):
+
+- A completion gate: named pass/fail checks a frontend, tool, or config
+registers for a session, which block the loop's own claim of "done" while any
+check fails and halt to the user after bounded failed attempts — the
+loop-control sibling of S-5 (§11, S-6).
+- Document (PDF) input: the provider abstraction carries document content
+blocks (§4, P-12), and a tool lets the model read a project document into
+context (§5, T-16) — the P-11/T-12 image pattern applied to documents.
+
 ### 2.2 Explicitly deferred (designed-for, not yet built)
 
 - **MCP client support.** The internal tool abstraction must permit a future
@@ -150,6 +164,16 @@ must never become the only way a capability works.
 `.git/` from non-git writes; it does not prevent destructive but
 legitimate git operations).
 - Deep shell-semantics parsing as a security mechanism (see §6.5).
+- Non-PDF document formats (docx and other word-processor formats) as harness
+input. PDF is accepted as a provider-native passthrough block (P-12, T-16);
+other formats require harness-side conversion or extraction — a dependency and
+a domain concern a coding harness has no reason to carry, better handled
+outside the harness or as a skill (FR-7). This is a firmer line than a deferred
+door: the harness reads the document formats providers accept natively and no
+others.
+- Document creation and editing. Reading documents into context is a tool
+(T-16); producing or modifying documents is a domain capability that ships as
+a skill (FR-7), never harness core.
 
 ## 3. Hard Constraints
 
@@ -251,6 +275,19 @@ provider reports image token usage it feeds token and cost accounting (P-6).
 Image support lives behind the Provider abstraction (P-1), not in the tool:
 this is what makes the read-image tool (T-12) portable across providers
 rather than tied to one vendor.
+- **P-12 — Document input.** The harness's normalized message type carries
+document content blocks (initially PDF; format list in the Technical
+Specification) alongside text and image blocks; each adapter maps them to its
+provider's native document representation. The harness does not parse or render
+the document — it passes the document bytes through to the provider exactly as
+it passes image bytes (P-11), so no document-parsing dependency enters the tree
+and HC-2 is untouched. A provider or model without document support returns a
+structured, informative unsupported-capability result (HC-6) — never a silent
+drop, never a crash. Where the provider reports document token usage it feeds
+token and cost accounting (P-6). Document support lives behind the Provider
+abstraction (P-1), not in the tool, so the read-document tool (T-16) is
+portable across providers rather than tied to one vendor — the same reasoning
+as P-11.
 
 ## 5. Tool Suite
 
@@ -360,6 +397,18 @@ instructions, skill provenance and trust are governed per FR-7 and workspace
 trust (FR-1, §6) — a skill has no privileged path around the safety model.
 Skills give the harness extensible, shareable capabilities without hard-coding
 each one.
+- **T-16 — Read-document tool.** A built-in tool the model calls to read a
+document file within the project root into context as a document content block
+(P-12). The path is normalized and root-confined exactly as read_file (T-1) and
+read-image (T-12), governed by the same permission rules as any project read
+(§6.2). On a provider without document support it returns the structured
+unsupported-capability result of P-12 (HC-6), never a crash. Supported formats
+are PDF (size/page/token caps named in the Technical Specification); non-PDF
+word-processor formats such as docx are out of scope (§2.3), and document
+creation and editing are not built-in tools — those are skills (FR-7), never
+core. An agent working against real-world source material must read the formats
+that material actually arrives in; a harness that can see images but not
+documents draws the line at the wrong place.
 
 ## 6. Permission and Safety Model
 
@@ -753,6 +802,28 @@ that a runaway loop always ends in a user decision, never in silent
 unbounded spend. The detection thresholds are tunable configuration
 (defaults set in the Technical Specification); the guardrail must never
 interrupt a loop that is genuinely progressing.
+- **S-6 — Completion gate.** The harness supports registered completion
+checks: named checks a frontend, tool, or configuration registers for a
+session, each returning pass or fail with a structured reason. While any
+registered check fails, the agent loop may not terminate as "done": on a
+completion attempt the failing checks return to the model as structured tool
+results (HC-6) and the loop continues, or — after a bounded number of failed
+completion attempts (threshold tunable; default set in the Technical
+Specification) — the harness halts and returns control to the user, in the
+harness's own voice, exactly as S-5 does for a non-progressing loop. S-4 stops
+a hung child; S-5 stops a spinning loop; S-6 stops a premature landing. A
+check that executes a command (e.g. a test suite) runs under the full
+permission and sandbox model of §6 like any other command — a completion check
+has no privileged path around the safety model, the same principle that governs
+a skill's bundled scripts (FR-7). The gate binds only the *model's* claim of
+completion: it never blocks the user from ending a session, and a user may
+always stop over a failing gate. Every gate evaluation, its result, and its
+reasons are transcript events (HC-7). A session with no registered checks
+behaves exactly as today — the gate is inert until something registers into it.
+Honesty clause: the gate governs the loop's claim of completion, not the truth
+of the checks; a check is only as good as what it verifies, and a passing gate
+is never presented to the user as a guarantee beyond what the registered checks
+actually tested.
 
 ## 12. Deliverables and Document Plan
 
@@ -794,6 +865,12 @@ and project skills (FR-7). Tech Spec sets the initial scheme; tune with use.
 - Whether the task list is pinned across compaction (§8.3) or may be dropped
 and re-read like other turns (T-11). Tech Spec sets the initial policy; tune
 with use.
+- Completion-gate check registration mechanics, gate-evaluation timing, and the
+default number of failed completion attempts before the harness halts to the
+user (S-6). Tech Spec sets initial values; tune with use so the gate stops a
+premature landing without recreating an S-5 spin.
+- Supported document formats beyond PDF and per-document size/page/token caps
+(P-12, T-16). Tech Spec sets the initial set; tune with use.
 
 Resolved since v0.1: product/command name (Emberly Code / `emberly`,
 Design Guideline §1.1); default bash allowlist initial contents (Tech
@@ -854,3 +931,27 @@ recall and ask-user (T-11). Mouse interaction resolved as a **Design-owned
 interaction capability** — additive to keyboard control, never the sole path to
 a function — carrying no separate Requirements ID (routing: interaction is
 Design's, §2.1).
+
+Resolved since v0.7 (0.4.1 feature set): three capabilities requested by
+**TREEGAL Yggdrasil** — a separate product that consumes Emberly as its engine,
+not an SFD-downstream document — were assessed on their own domain-agnostic
+merits (Yggdrasil is a consumer, so absorbing these is a choice to serve the
+engine's users, never an upstream obligation) and routed as follows. The
+**completion gate** is absorbed as **S-6** (§11), sibling to S-5: registered
+pass/fail checks gate the loop's claim of "done," with a bounded-attempts halt
+to the user so an unsatisfiable check cannot recreate the S-5 spin it exists to
+stop. Two honesty clauses were added on absorption — a check that runs a command
+has no privileged path around §6, and the gate binds only the model's
+done-claim, never the user's ability to stop. **Document input** is absorbed as
+**P-12** (§4) and **T-16** (§5), the P-11/T-12 image pattern applied to
+documents: PDF only, passed through to the provider unparsed so HC-2 is
+untouched. Non-PDF formats (docx) are declined to §2.3 as harness-side
+conversion a coding harness need not carry, and document creation/editing stay
+skills (FR-7), never core. The **Windows supervised-posture** request is
+**held, not absorbed**: the requesting consumer targets macOS only for its
+prototyping stage, so the scope reversal — and the §3 honesty work it would
+require, since HC-4/HC-5 become structurally policy-level-only on a platform
+with no confinement implementation — is deferred until a real platform need
+exists. A fourth request (compile-time tool profiles) was withdrawn by the
+requester before absorption. S-6, P-12, and T-16 are the IDs the Yggdrasil
+foundation suite will cite as their origin when drafted (G-24/G-25).
