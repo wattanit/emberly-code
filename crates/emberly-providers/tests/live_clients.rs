@@ -35,6 +35,7 @@ fn model_info() -> ModelInfo {
         effort_levels: Vec::new(),
         default_effort: None,
         vision: false,
+        documents: false,
     }
 }
 

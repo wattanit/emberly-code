@@ -94,6 +94,36 @@ pub enum LoopResolution {
     Steer(String),
 }
 
+/// The outcome of one completion-gate check evaluation (S-6, Tech Spec §3.2,
+/// §7): its name, whether it passed, and a human-readable reason (built from
+/// the exit status plus a reduced output tail on failure).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckResult {
+    pub name: String,
+    pub passed: bool,
+    pub reason: String,
+}
+
+/// The user's decision after the completion gate halts on `max_attempts`
+/// failed attempts (S-6, Design §8.7). Mirrors [`LoopResolution`] with one
+/// addition: `Finish` is the user's override — end the task as done over a
+/// still-failing gate. The gate never resumes or abandons on its own; the user
+/// always chooses one of these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateResolution {
+    /// Keep going — try the completion attempt again.
+    Resume,
+    /// Stop here — end the turn cleanly, gate still unsatisfied.
+    Stop,
+    /// Hand a steer back to the model: push this text as a user message and
+    /// try again.
+    Steer(String),
+    /// End the task as done over the still-failing gate — the user's override,
+    /// never presented as though the checks passed (Design §8.7).
+    Finish,
+}
+
 /// Provider-reported or estimated token counts for a completion
 /// (Requirements P-6, Tech Spec §4.4). Drives the context indicator and the
 /// cost estimate. Defined in `emberly-providers` and re-exported so the two

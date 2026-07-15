@@ -12,9 +12,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use emberly_core::{
-    AskAnswer, AskId, Command, EntrySummary, FrontendPorts, LoopResolution, MemoryOp, MemoryScope,
-    Mode, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus, SkillMeta,
-    SkillOrigin, UiEvent,
+    AskAnswer, AskId, CheckResult, Command, EntrySummary, FrontendPorts, GateResolution,
+    LoopResolution, MemoryOp, MemoryScope, Mode, PermissionDecision, PermissionId,
+    PermissionRendering, SandboxStatus, SkillMeta, SkillOrigin, UiEvent,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -117,6 +117,9 @@ impl LineRenderer {
                 question, options, ..
             } => self.render_ask(question, options, out)?,
             UiEvent::LoopHalted { reason } => self.render_loop_halt(reason, out)?,
+            UiEvent::CompletionGateHalted { failing, attempts } => {
+                self.render_completion_gate(failing, *attempts, out)?
+            }
             UiEvent::HarnessError { what, why, next } => {
                 writeln!(out, "\nerror: {what}")?;
                 writeln!(out, "  why:  {why}")?;
@@ -282,6 +285,36 @@ impl LineRenderer {
         writeln!(out)?;
         writeln!(out, "{}", s::HEADING)?;
         writeln!(out, "  {reason}")?;
+        writeln!(out, "{}", s::LINE_PROMPT)?;
+        Ok(())
+    }
+
+    /// The completion-gate halt surface in degraded form (S-6, Design §8.7,
+    /// §7): the harness voice, calm — the failing checks, the attempt count,
+    /// then the choices. No alarm styling; "finish anyway" is offered as an
+    /// override, never as though the checks passed.
+    fn render_completion_gate(
+        &self,
+        failing: &[CheckResult],
+        attempts: usize,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        use crate::strings::completion_gate as s;
+        writeln!(out)?;
+        writeln!(out, "{}", s::HEADING)?;
+        writeln!(
+            out,
+            "  {attempts} attempt{} —",
+            if attempts == 1 { "" } else { "s" }
+        )?;
+        for check in failing {
+            writeln!(
+                out,
+                "    {}: {}",
+                check.name,
+                check.reason.lines().next().unwrap_or("")
+            )?;
+        }
         writeln!(out, "{}", s::LINE_PROMPT)?;
         Ok(())
     }
@@ -490,6 +523,21 @@ pub fn parse_loop_resolution(line: &str) -> LoopResolution {
     }
 }
 
+/// Interpret a completion-gate halt answer line (S-6, Design §8.7). `keep`/
+/// `go`/`resume`/`1` → resume; `stop`/`2` → stop; an empty line → stop (never
+/// keep spending unattended); `finish`/`f`/`4` → the explicit override; anything
+/// else is a steer message handed back to the model.
+#[must_use]
+pub fn parse_gate_resolution(line: &str) -> GateResolution {
+    let text = line.trim();
+    match text.to_lowercase().as_str() {
+        "keep" | "go" | "resume" | "keep going" | "1" => GateResolution::Resume,
+        "stop" | "2" | "" => GateResolution::Stop,
+        "finish" | "f" | "finish anyway" | "4" => GateResolution::Finish,
+        _ => GateResolution::Steer(text.to_string()),
+    }
+}
+
 /// A decision prompt awaiting the next stdin line. Only one is ever open at a
 /// time (the engine serializes tool calls), but keeping them in one enum makes
 /// it impossible for a permission answer and a question answer to cross wires.
@@ -500,6 +548,9 @@ enum Pending {
         options: Vec<String>,
     },
     Loop,
+    /// The completion-gate halt (S-6, Design §8.7): the next line is a
+    /// resume/steer/stop/finish answer.
+    CompletionGate,
     /// An inline delete-confirm for the memory inspector (FR-6, §4.9): the next
     /// line confirms (`y`) or cancels. Delete is destructive, so it never
     /// happens on a single command — parity with the rich overlay's y/N step.
@@ -573,6 +624,9 @@ pub async fn run(
                         UiEvent::LoopHalted { .. } => {
                             pending = Some(Pending::Loop);
                         }
+                        UiEvent::CompletionGateHalted { .. } => {
+                            pending = Some(Pending::CompletionGate);
+                        }
                         // Keep the standing inspector state current. The catalog
                         // is rendered on demand by `/skills` (not printed here);
                         // the memory list was already printed by `render` above,
@@ -601,6 +655,9 @@ pub async fn run(
                             }
                             Pending::Loop => {
                                 let _ = tx.send(Command::ResolveLoop { resolution: parse_loop_resolution(&line) }).await;
+                            }
+                            Pending::CompletionGate => {
+                                let _ = tx.send(Command::ResolveCompletionGate { resolution: parse_gate_resolution(&line) }).await;
                             }
                             Pending::MemoryDelete { scope, name } => {
                                 // Destructive: only an explicit `y` deletes; the
@@ -900,6 +957,45 @@ mod tests {
     }
 
     #[test]
+    fn completion_gate_renders_harness_voice_no_alarm() {
+        let out = render_to_string(&UiEvent::CompletionGateHalted {
+            failing: vec![CheckResult {
+                name: "tests".into(),
+                passed: false,
+                reason: "2 failed".into(),
+            }],
+            attempts: 3,
+        });
+        assert!(out.contains("Stopped"), "harness heading: {out:?}");
+        assert!(out.contains("3 attempts"));
+        assert!(out.contains("tests"));
+        assert!(out.contains("2 failed"));
+        assert!(
+            out.contains("keep going") && out.contains("stop") && out.contains("finish anyway"),
+            "all four choices offered (Design §8.7): {out:?}"
+        );
+        // Not a safety prompt, and never presented as though the checks passed.
+        assert!(!out.contains("!!"));
+        assert!(!out.contains("checks passed"));
+    }
+
+    #[test]
+    fn parse_gate_resolution_maps_keep_stop_finish_empty_and_steer() {
+        assert_eq!(parse_gate_resolution("keep"), GateResolution::Resume);
+        assert_eq!(parse_gate_resolution("1"), GateResolution::Resume);
+        assert_eq!(parse_gate_resolution("stop"), GateResolution::Stop);
+        // Empty stops — never keep spending unattended.
+        assert_eq!(parse_gate_resolution("   "), GateResolution::Stop);
+        assert_eq!(parse_gate_resolution("finish"), GateResolution::Finish);
+        assert_eq!(parse_gate_resolution("f"), GateResolution::Finish);
+        // Anything else is a steer message handed back to the model.
+        assert_eq!(
+            parse_gate_resolution("fix the failing test"),
+            GateResolution::Steer("fix the failing test".into())
+        );
+    }
+
+    #[test]
     fn parse_ask_answer_handles_number_text_and_empty() {
         let options = vec!["dev".to_string(), "prod".to_string()];
         assert_eq!(
@@ -1005,6 +1101,23 @@ mod tests {
                 call_id: ToolCallId::new("img2"),
                 ok: false,
                 summary: "no vision".into(),
+                preview: String::new(),
+                untrusted: false,
+            },
+            // read_document reference line (P-12, Design §4.11): ASCII-only in
+            // degraded mode, no ANSI. No-document-support failure also
+            // ASCII-only.
+            UiEvent::ToolFinished {
+                call_id: ToolCallId::new("doc"),
+                ok: true,
+                summary: "read document report.pdf \u{00b7} 12.3 KB \u{00b7} PDF".into(),
+                preview: String::new(),
+                untrusted: false,
+            },
+            UiEvent::ToolFinished {
+                call_id: ToolCallId::new("doc2"),
+                ok: false,
+                summary: "no document support".into(),
                 preview: String::new(),
                 untrusted: false,
             },

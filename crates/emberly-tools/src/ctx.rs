@@ -45,6 +45,9 @@ impl Default for TruncateConfig {
 /// Default maximum image file size: 5 MiB (Tech Spec §5.2).
 const IMAGE_MAX_BYTES_DEFAULT: usize = 5 * 1024 * 1024;
 
+/// Default maximum document file size: 32 MiB (Tech Spec §5.2).
+const DOCUMENT_MAX_BYTES_DEFAULT: usize = 32 * 1024 * 1024;
+
 /// Everything a tool needs to run: the project root (for confinement checks),
 /// the truncation config, and the permission gate. Cheap to clone (the gate is
 /// an `Arc`).
@@ -68,6 +71,11 @@ pub struct ToolCtx {
     vision: bool,
     /// Maximum image file size in bytes (Tech Spec §5.2, default 5 MiB).
     image_max_bytes: usize,
+    /// Whether the active model accepts document input (P-12). `read_document`
+    /// checks this to produce the HC-6 unsupported result before encoding.
+    documents: bool,
+    /// Maximum document file size in bytes (Tech Spec §5.2, default 32 MiB).
+    document_max_bytes: usize,
 }
 
 impl ToolCtx {
@@ -94,6 +102,8 @@ impl ToolCtx {
             skill: Arc::new(DropSkillGate),
             vision: false,
             image_max_bytes: IMAGE_MAX_BYTES_DEFAULT,
+            documents: false,
+            document_max_bytes: DOCUMENT_MAX_BYTES_DEFAULT,
         }
     }
 
@@ -149,6 +159,21 @@ impl ToolCtx {
     #[must_use]
     pub fn with_image_max_bytes(mut self, max_bytes: usize) -> Self {
         self.image_max_bytes = max_bytes;
+        self
+    }
+
+    /// Set whether the active model accepts document input (P-12). Kept a
+    /// builder so existing callers and tests default to `false`.
+    #[must_use]
+    pub fn with_documents(mut self, documents: bool) -> Self {
+        self.documents = documents;
+        self
+    }
+
+    /// Set the maximum document file size in bytes (Tech Spec §5.2).
+    #[must_use]
+    pub fn with_document_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.document_max_bytes = max_bytes;
         self
     }
 
@@ -222,5 +247,17 @@ impl ToolCtx {
     #[must_use]
     pub fn image_max_bytes(&self) -> usize {
         self.image_max_bytes
+    }
+
+    /// Whether the active model accepts document input (P-12).
+    #[must_use]
+    pub fn documents(&self) -> bool {
+        self.documents
+    }
+
+    /// Maximum document file size in bytes (Tech Spec §5.2).
+    #[must_use]
+    pub fn document_max_bytes(&self) -> usize {
+        self.document_max_bytes
     }
 }

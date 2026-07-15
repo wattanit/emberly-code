@@ -98,6 +98,12 @@ pub struct ModelInfo {
     /// vision-capable. `default`s to `false` for older `ModelInfo` values.
     #[serde(default)]
     pub vision: bool,
+    /// Whether the model accepts document input (P-12, Tech Spec §4.1).
+    /// **Default `false`** so a document is never sent to a model not
+    /// declared document-capable. `default`s to `false` for older `ModelInfo`
+    /// values.
+    #[serde(default)]
+    pub documents: bool,
 }
 
 /// Per-model pricing in USD per million tokens (Tech Spec §4.4). Sourced from
@@ -191,6 +197,7 @@ mod tests {
         assert!(info.effort_levels.is_empty());
         assert_eq!(info.default_effort, None);
         assert!(!info.vision);
+        assert!(!info.documents);
     }
 
     #[test]
@@ -203,6 +210,7 @@ mod tests {
             effort_levels: vec![Effort::Low, Effort::High],
             default_effort: Some(Effort::Low),
             vision: false,
+            documents: false,
         };
         let json = to_json(&info);
         assert_eq!(from_json::<ModelInfo>(&json), info);

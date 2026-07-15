@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use emberly_tools::{MemoryOp, MemoryScope};
 
 use crate::id::{AskId, PermissionId, SessionId};
-use crate::types::{AskAnswer, Effort, LoopResolution, Mode, PermissionDecision};
+use crate::types::{AskAnswer, Effort, GateResolution, LoopResolution, Mode, PermissionDecision};
 
 /// A command issued to the engine. `#[non_exhaustive]` so new commands are not
 /// a breaking change.
@@ -39,6 +39,12 @@ pub enum Command {
     /// loop (S-5, Design §8.5): resume, stop, or steer. The engine is parked on
     /// this after emitting [`UiEvent::LoopHalted`](crate::event::UiEvent::LoopHalted).
     ResolveLoop { resolution: LoopResolution },
+
+    /// The user's decision after the completion gate halted on `max_attempts`
+    /// failed completion attempts (S-6, Design §8.7): keep-going, stop, steer,
+    /// or finish (the override). The engine is parked on this after emitting
+    /// [`UiEvent::CompletionGateHalted`](crate::event::UiEvent::CompletionGateHalted).
+    ResolveCompletionGate { resolution: GateResolution },
 
     /// Change the auto-accept mode (Requirements §6.4). Handled from Phase 2;
     /// the engine validates the transition against the sandbox status.

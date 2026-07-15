@@ -27,6 +27,17 @@ struct BashArgs {
     timeout_secs: Option<u64>,
 }
 
+/// Environment variables passed through to a confined child (Tech Spec §5.2);
+/// everything else in the harness's environment is scrubbed. Shared by the
+/// `bash` tool and the completion gate's check runner (S-6) so both spawn
+/// paths scrub identically.
+pub const DEFAULT_ENV_ALLOWLIST: &[&str] = &["PATH", "HOME", "LANG", "TERM"];
+
+/// The default per-command timeout (S-4), shared with the completion gate's
+/// check runner (S-6): a check has no per-check timeout override, so it runs
+/// under the same default ceiling as an un-timed `bash` call.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
+
 /// The `bash` tool. Timeouts and the environment allowlist are configurable.
 pub struct BashTool {
     /// Default per-command timeout when the model does not specify one.
@@ -41,9 +52,9 @@ pub struct BashTool {
 impl Default for BashTool {
     fn default() -> Self {
         Self {
-            timeout_default: Duration::from_secs(120),
+            timeout_default: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             timeout_ceiling: Duration::from_secs(600),
-            env_allowlist: ["PATH", "HOME", "LANG", "TERM"]
+            env_allowlist: DEFAULT_ENV_ALLOWLIST
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),

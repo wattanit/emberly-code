@@ -11,8 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use emberly_tools::{
     AskUserGate, AskUserOutcome, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool,
-    PermissionGate, PermissionOutcome, PermissionRequest, PlainSandbox, ReadFileTool,
-    ReadImageTool, Sandbox, Tool, ToolCtx, TruncateConfig, WriteFileTool,
+    PermissionGate, PermissionOutcome, PermissionRequest, PlainSandbox, ReadDocumentTool,
+    ReadFileTool, ReadImageTool, Sandbox, Tool, ToolCtx, TruncateConfig, WriteFileTool,
 };
 use serde_json::json;
 
@@ -719,4 +719,135 @@ async fn read_image_detects_webp_format() {
     let image = outcome.image.as_ref().expect("image payload");
     assert_eq!(image.media_type, "image/webp");
     assert!(outcome.summary.contains("WebP"));
+}
+
+// ---- read_document (T-16, P-12) --------------------------------------------
+
+/// A minimal, valid-enough PDF: just the `%PDF-` magic prefix `read_document`
+/// sniffs on (P-12) — the harness never parses past it (HC-2).
+fn tiny_pdf_bytes() -> Vec<u8> {
+    b"%PDF-1.4\n%%EOF".to_vec()
+}
+
+/// A ctx with document input enabled (P-12).
+fn ctx_documents(root: &Path, allow: bool) -> ToolCtx {
+    ctx(root, allow).with_documents(true)
+}
+
+#[tokio::test]
+async fn read_document_on_non_documents_model_returns_unsupported() {
+    // HC-6: the model learns it could not read the document, rather than
+    // assuming it did.
+    let root = temp_project();
+    write_bytes(&root, "doc.pdf", &tiny_pdf_bytes());
+    let outcome = ReadDocumentTool
+        .execute(json!({ "path": "doc.pdf" }), &ctx(&root, true)) // documents=false
+        .await;
+    assert!(!outcome.ok);
+    assert!(
+        outcome.content.contains("no document support") || outcome.content.contains("document")
+    );
+    assert!(outcome.document.is_none());
+}
+
+#[tokio::test]
+async fn read_document_success_appends_document_payload() {
+    let root = temp_project();
+    write_bytes(&root, "doc.pdf", &tiny_pdf_bytes());
+    let outcome = ReadDocumentTool
+        .execute(json!({ "path": "doc.pdf" }), &ctx_documents(&root, true))
+        .await;
+    assert!(outcome.ok);
+    assert!(outcome.document.is_some());
+    let document = outcome.document.as_ref().expect("document payload");
+    assert_eq!(document.media_type, "application/pdf");
+    assert!(!document.data.is_empty());
+    // Summary matches the Design §4.11 reference-line form: no page count.
+    assert!(outcome.summary.contains("·"));
+    assert!(outcome.summary.contains("PDF"));
+    assert!(!outcome.summary.to_lowercase().contains("page"));
+}
+
+#[tokio::test]
+async fn read_document_rejects_oversize() {
+    let root = temp_project();
+    let pdf = tiny_pdf_bytes();
+    write_bytes(&root, "doc.pdf", &pdf);
+    let ctx_small = ctx_documents(&root, true).with_document_max_bytes(1);
+    let outcome = ReadDocumentTool
+        .execute(json!({ "path": "doc.pdf" }), &ctx_small)
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("exceeds") || outcome.content.contains("limit"));
+}
+
+#[tokio::test]
+async fn read_document_rejects_non_pdf() {
+    let root = temp_project();
+    write_file(&root, "data.bin", "this is not a pdf");
+    let outcome = ReadDocumentTool
+        .execute(json!({ "path": "data.bin" }), &ctx_documents(&root, true))
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("not") || outcome.content.contains("PDF"));
+}
+
+#[tokio::test]
+async fn read_document_outside_root_requests_permission() {
+    let root = temp_project();
+    let pdf = tiny_pdf_bytes();
+    // Write a file in a sibling dir (outside the project root).
+    let outside = std::env::temp_dir().join(format!(
+        "emberly-outside-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::create_dir_all(&outside);
+    let _ = std::fs::write(outside.join("ext.pdf"), &pdf);
+    let abs = outside.join("ext.pdf").display().to_string();
+
+    // Denied → the tool returns a denied outcome.
+    let outcome = ReadDocumentTool
+        .execute(json!({ "path": abs.clone() }), &ctx_documents(&root, false))
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("denied"));
+
+    // Allow → the document loads.
+    let outcome2 = ReadDocumentTool
+        .execute(json!({ "path": abs }), &ctx_documents(&root, true))
+        .await;
+    assert!(outcome2.ok);
+    assert!(outcome2.document.is_some());
+}
+
+#[tokio::test]
+async fn read_document_missing_file_is_a_failure_not_a_crash() {
+    let root = temp_project();
+    let outcome = ReadDocumentTool
+        .execute(json!({ "path": "nope.pdf" }), &ctx_documents(&root, true))
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("nope.pdf"));
+}
+
+#[tokio::test]
+async fn read_document_git_dir_requests_permission_like_any_outside_path() {
+    // `.git/` is inside the project tree, not outside-root, so this proves
+    // the tool has no special-case for it — the ordinary in-root Allow rule
+    // (group 6) covers it exactly like any other project-relative path.
+    let root = temp_project();
+    write_bytes(&root, ".git/doc.pdf", &tiny_pdf_bytes());
+    let outcome = ReadDocumentTool
+        .execute(
+            json!({ "path": ".git/doc.pdf" }),
+            &ctx_documents(&root, true),
+        )
+        .await;
+    assert!(
+        outcome.ok,
+        "in-root .git/ path should succeed: {}",
+        outcome.content
+    );
+    assert!(outcome.document.is_some());
 }

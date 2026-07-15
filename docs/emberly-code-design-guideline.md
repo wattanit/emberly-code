@@ -1,11 +1,11 @@
 # Emberly Code — Design Guideline
 
-**Version:** 0.7 
-**Status:** approved   
-**Date:** 2026-07-12
+**Version:** 0.8 
+**Status:** approved
+**Date:** 2026-07-15
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.7 (upstream), Technical
-Specification v0.8 (downstream — this document constrains it)
+**Companion documents:** Requirements Document v0.8 (upstream), Technical
+Specification v0.9 (downstream — this document constrains it)
 
 This document defines how Emberly Code looks, feels, and speaks. It is the
 second of three project documents. Where a decision here has technical
@@ -363,6 +363,26 @@ the caps) and long result sets follow the §8.6 reduction economy — search is
 not a context flood. The permission gate for reaching the network at all is
 §5.2.
 
+### 4.11 Documents in a terminal
+
+Documents (Requirements T-16/P-12) get the identical treatment to images
+(§4.8), for the identical reason: the terminal cannot paint a PDF, and the value
+is the *model* reading the document, not the user re-seeing a file they already
+have. A read-document call renders as a labeled reference line in tool-activity
+styling — `read document  contract.pdf · 240 KB · PDF` — naming the file, its
+size, and its format. It deliberately does **not** show a page count or extracted
+text: the harness passes the document to the provider unparsed (P-12), so it
+reports only what it knows without opening the file. The honesty is explicit, as
+with images: the line states the document went to the model, not to the screen.
+
+- If the active model cannot read documents (Requirements P-12), the
+unsupported-capability result renders as a calm tool-result note — "this model
+can't read documents; switch model (§3.1) or extract the text" — never a harness
+error (§6.1), so model and user both learn the document was not seen.
+- Degraded mode (§7): the same reference line, ASCII-only.
+- Only PDF is read (Requirements §2.3 declines other document formats); the
+reference line never implies a format the harness does not send.
+
 ## 5. The Permission Prompt
 
 The most important screen in the product. It is where the safety model
@@ -534,6 +554,10 @@ read is a plain ASCII reference line (§4.8); memory/skill/search activity
 and their origins are plain labeled lines; and the web-search prompt keeps
 its full permission-prompt guarantees in capitals (§5.2). No 0.4 feature
 relies on color, motion, or the pointer to carry meaning.
+- The 0.4.1 surfaces degrade the same way: a document read is a plain ASCII
+reference line (§4.11), and the completion-gate halt (§8.7) keeps its full
+harness-voice guarantees with the four choices as capitalized deliberate keys.
+Neither relies on color, motion, or the pointer.
 - Degraded mode is a supported, tested configuration, not a best-effort
 fallback.
 
@@ -662,6 +686,43 @@ transcript, it says so in one dimmed harness-voice line rather than
 reopening silently slower — silence about the fast path, speech about the
 fallback.
 
+### 8.7 When completion is gated
+
+When a session has registered completion checks (Requirements S-6) — for a
+coding deployment, "tests/lint/build must pass" — the gate governs the loop's
+claim of *done*, and its visible moments stay calm and honest, never alarm.
+
+- **A failed completion attempt is agent-world (§6.1), not a harness event.**
+When the model tries to finish and a check fails, the failing checks return to
+the model as ordinary tool-result content — the check name and its structured
+reason (e.g. `tests: 2 failed`) — and the loop simply continues. The user
+watches the model react and fix, exactly as with any tool failure; the harness
+does not editorialize. A passing evaluation is quiet — one dim tool-activity
+line, never a celebration.
+- **The halt is a harness-world moment (§6.1), in the harness's own voice** —
+reached only after a bounded number of failed completion attempts (Requirements
+S-6), because a model that cannot satisfy a check must not spin (the same
+promise as §8.5). One calm line of what happened — "Stopped: the completion
+checks still fail after 3 attempts (tests: 2 failed)." — then the choices:
+**keep going** (let the model try again), **say something** (steer it), **stop
+here**, or **finish anyway** (end the task as done despite the failing gate).
+- **"Finish anyway" is a deliberate, recorded override.** The gate binds the
+*model's* claim of done, never the user's authority (Requirements S-6): a user
+who judges a check wrong or irrelevant may end the session, and that override is
+written to the transcript as an explicit user decision — never silently, and
+never presented as though the checks passed. The honesty clause holds in the UI:
+a green gate is never styled as a guarantee beyond what the checks tested, and a
+gate overridden red is labeled as overridden.
+- **Gate status is visible only when checks are registered**, alongside sandbox
+and context status (§3.1): a dim line naming the registered checks and their
+last result. A session with no registered checks shows nothing — the gate is
+inert and, like the Tasks/Memory sections (§3.1), never a "None" stub.
+- It is distinct from the loop-break (§8.5): S-5 stops a loop that is
+*re-treading*; S-6 stops one that is *landing early*. Both end in a user decision
+in the harness voice; a session may meet either.
+- Degraded mode (§7): the halt keeps its guarantees — plain harness-voice lines,
+ASCII, the four choices as capitalized deliberate keys.
+
 ## 9. Design-Driven Requirements Feedback
 
 Decisions in this document that add to or refine the Requirements doc,
@@ -734,6 +795,23 @@ absorbs the capture/passthrough mechanics.
 - **Task-list glyphs never color-only** (§4.7) — realizes Requirements T-11 as
 a two-place (inline + sidebar) render with ASCII-fallback status markers,
 consistent with §7.
+- **Completion-gate halt offers resume / steer / stop / finish-anyway** (§8.7) —
+realizes Requirements S-6's "returns control to the user" as four concrete
+choices in the harness voice, and refines S-6 with a **user override**: the user
+may end a task as done over a still-failing gate, recorded in the transcript as
+an explicit override (the gate binds the model's claim, never the user's
+authority). The override choice and its transcript record are a Design commitment
+the Tech Spec absorbs.
+- **A failed check is agent-world, the halt is harness-world** (§8.7) — refines
+Requirements S-6's surfacing: a failing check returns to the model as ordinary
+tool-result content (the model fixes and retries), while only the bounded-attempt
+halt speaks in the harness voice, consistent with the §6.1 two-register split and
+§8.5's loop-break.
+- **No terminal document painting** (§4.11) — realizes Requirements T-16/P-12 as
+a labeled reference line (file · size · format), never in-terminal rendering and
+never a page count or extracted text, since the harness passes the document
+unparsed. The Tech Spec absorbs the read-document surface as a reference, not
+content.
 
 ## 10. Open Questions
 
@@ -760,6 +838,9 @@ Spec's caps. Tune with use.
 - Whether clicking should also select *text* within a pane (beyond entries),
 or leave in-pane text selection entirely to the terminal via the Shift
 modifier (§3.4). Lean to the latter until a real need appears.
+- Completion-gate halt wording and how the registered-checks status reads in the
+sidebar (§8.7) — candidate lines are examples; tune against real gated sessions
+so the halt informs without nagging when a check fails repeatedly.
 
 Resolved since v0.4: reasoning-trail default view — `collapsed` (§4.4,
 owner); tool-call explanation line — on by default, config-defeatable
@@ -786,3 +867,13 @@ Mouse interaction is additive-never-exclusive: it speeds safe navigation, buys
 nothing on a permission decision, preserves the terminal's native Shift-drag
 selection, and is off in degraded mode and under `mouse = false` (§3.4). All
 six degrade to plain, tested, meaning-preserving output (§7).
+
+Resolved since v0.7 (0.4.1 feature set): the two absorbed capabilities are given
+feel under the identity's calm-and-honest rules. Documents render as a labeled
+reference line (file · size · format), never in-terminal pixels and never a
+parsed page count — the image treatment (§4.8) applied to PDF (§4.11). The
+completion gate (Requirements S-6) surfaces in two registers: a failed check is
+agent-world content the model reacts to, and the bounded-attempt halt is a
+harness-voice moment offering keep-going / steer / stop / finish-anyway, where
+"finish anyway" is a deliberate, transcript-recorded user override of a red gate
+(§8.7). Both degrade to plain, tested, meaning-preserving output (§7).

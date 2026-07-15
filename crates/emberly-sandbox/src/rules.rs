@@ -348,6 +348,14 @@ fn builtin_defaults(bash_allowlist_active: bool) -> Vec<Rule> {
             action: Decision::Allow,
             source: RuleSource::Builtin,
         },
+        // A document read is an ordinary project read, root-confined exactly
+        // as `read_file` (§6.2, P-12/T-16) — same in-root allow.
+        Rule {
+            tool: ToolSelector::Named("read_document".to_string()),
+            matcher: Matcher::Any,
+            action: Decision::Allow,
+            source: RuleSource::Builtin,
+        },
         // Explicit so the documented §6.1 behavior is visible and `config show`
         // is honest. The fall-through would be `Ask` anyway (decide:257), but a
         // silent default is not the same as a stated one.
@@ -492,6 +500,24 @@ mod tests {
         );
         assert_eq!(
             e.evaluate(&file("edit_file", false), Mode::Normal).decision,
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn read_document_in_root_allows_outside_root_asks() {
+        // P-12/T-16, Tech Spec §6.1: read_document is an ordinary project
+        // read, same in-root allow as read_file — but the outside-root hard
+        // gate (§6.2/HC-4) still applies.
+        let e = confined();
+        assert_eq!(
+            e.evaluate(&file("read_document", false), Mode::Normal)
+                .decision,
+            Decision::Allow
+        );
+        assert_eq!(
+            e.evaluate(&file("read_document", true), Mode::Normal)
+                .decision,
             Decision::Ask
         );
     }

@@ -11,10 +11,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use emberly_core::{
-    resume, AskAnswer, AskId, Command, Effort, EntrySummary, LoopResolution, MemoryOp, MemoryScope,
-    Mode, PermissionDecision, PermissionId, PermissionRendering, SandboxStatus, SessionId,
-    SkillMeta, SkillOrigin, TaskItem, TokenUsage, ToolCallId, TranscriptEvent, TranscriptRecord,
-    UiEvent,
+    resume, AskAnswer, AskId, CheckResult, Command, Effort, EntrySummary, GateResolution,
+    LoopResolution, MemoryOp, MemoryScope, Mode, PermissionDecision, PermissionId,
+    PermissionRendering, SandboxStatus, SessionId, SkillMeta, SkillOrigin, TaskItem, TokenUsage,
+    ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
 };
 
 use std::collections::HashMap;
@@ -324,6 +324,31 @@ impl LoopHaltPrompt {
     }
 }
 
+/// A pending completion-gate halt decision (S-6, Design §8.7). The harness
+/// stepping in after a bounded number of failed completion attempts —
+/// rendered in the harness voice, distinct from a failing check's agent-world
+/// tool-result. The user picks keep-going / stop / say-something / **finish
+/// anyway** (the explicit override); choosing to steer opens the free-text
+/// field.
+pub struct CompletionGatePrompt {
+    pub failing: Vec<CheckResult>,
+    pub attempts: usize,
+    /// False = the four-choice menu; true = typing a steer message.
+    pub steering: bool,
+    pub editor: LineEditor,
+}
+
+impl CompletionGatePrompt {
+    fn new(failing: Vec<CheckResult>, attempts: usize) -> Self {
+        Self {
+            failing,
+            attempts,
+            steering: false,
+            editor: LineEditor::new(),
+        }
+    }
+}
+
 /// The complete view-model the renderer reads.
 pub struct App {
     pub session: SessionInfo,
@@ -373,6 +398,12 @@ pub struct App {
     /// The skill catalog for the sidebar (T-15, FR-7, Design §4.9). Updated
     /// from `UiEvent::SkillsAvailable`; cleared on a new session.
     pub skills: Vec<SkillMeta>,
+    /// The registered completion checks' most recent results, for the
+    /// sidebar's gate-status line (S-6, Design §8.7, §3.1). Updated from
+    /// `UiEvent::CompletionStatus`; empty (and so hidden — never a "None"
+    /// stub) until the gate has run at least once, and cleared on a new
+    /// session.
+    pub completion_status: Vec<CheckResult>,
     /// The inspector's in-flight body fetch (FR-6, §4.6): the selected entry
     /// and whether the user wants to view or edit it. Set when a `MemoryView`
     /// is issued; consumed when the `MemoryBody` reply arrives.
@@ -394,6 +425,10 @@ pub struct App {
     /// A pending loop-halt decision (S-5, Design §8.5) — the harness stepping in.
     /// While set it owns the screen; harness voice, not the question prompt.
     pub pending_loop_halt: Option<LoopHaltPrompt>,
+    /// A pending completion-gate halt decision (S-6, Design §8.7) — the
+    /// harness stepping in after a bounded number of failed completion
+    /// attempts. While set it owns the screen; harness voice.
+    pub pending_completion_gate: Option<CompletionGatePrompt>,
     pub sidebar_visible: bool,
     /// Conversation scrollback offset in rows *from the bottom*: 0 follows the
     /// latest output; larger values scroll up into history. Clamped to content
@@ -462,11 +497,13 @@ impl App {
             memory_user: 0,
             memory_project: 0,
             skills: Vec::new(),
+            completion_status: Vec::new(),
             memory_fetch: None,
             pending_memory_edit: None,
             pending_permission: None,
             pending_ask: None,
             pending_loop_halt: None,
+            pending_completion_gate: None,
             permission_scroll: 0,
             sidebar_visible: true,
             scroll: 0,
@@ -669,6 +706,10 @@ impl App {
                 self.streaming = false;
                 self.pending_loop_halt = Some(LoopHaltPrompt::new(reason));
             }
+            UiEvent::CompletionGateHalted { failing, attempts } => {
+                self.streaming = false;
+                self.pending_completion_gate = Some(CompletionGatePrompt::new(failing, attempts));
+            }
             UiEvent::ContextUsage { pct, tokens } => {
                 self.context_pct = pct;
                 self.context_tokens = tokens;
@@ -752,6 +793,9 @@ impl App {
                 self.memory_user = user;
                 self.memory_project = project;
             }
+            UiEvent::CompletionStatus { checks } => {
+                self.completion_status = checks;
+            }
             UiEvent::SkillsAvailable { skills } => {
                 self.skills = skills;
             }
@@ -822,6 +866,12 @@ impl App {
         // harness stepping in; the user always decides what happens next.
         if self.pending_loop_halt.is_some() {
             return self.on_loop_halt_key(key);
+        }
+        // The completion-gate halt surface owns the keyboard too (S-6, Design
+        // §8.7) — the harness stepping in after a bounded number of failed
+        // completion attempts.
+        if self.pending_completion_gate.is_some() {
+            return self.on_completion_gate_key(key);
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -962,13 +1012,15 @@ impl App {
         self.busy || self.overlay_ease > 0 || self.sidebar_settle > 0
     }
 
-    /// Whether a decision prompt (permission, question, or loop halt) is open —
-    /// those screens are perfectly still (Design §5, §5.1, §6.4, §8.5).
+    /// Whether a decision prompt (permission, question, loop halt, or
+    /// completion-gate halt) is open — those screens are perfectly still
+    /// (Design §5, §5.1, §6.4, §8.5, §8.7).
     #[must_use]
     fn is_deciding(&self) -> bool {
         self.pending_permission.is_some()
             || self.pending_ask.is_some()
             || self.pending_loop_halt.is_some()
+            || self.pending_completion_gate.is_some()
     }
 
     /// Advance one animation frame. Called by the ticker only while
@@ -1337,6 +1389,71 @@ impl App {
     fn resolve_loop(&mut self, resolution: LoopResolution) -> Action {
         self.pending_loop_halt = None;
         Action::Command(Command::ResolveLoop { resolution })
+    }
+
+    /// Keys while the completion-gate halt surface is open (S-6, Design
+    /// §8.7). The menu: `g` keep going, `s` stop, `t`/Enter say something,
+    /// **`f` finish anyway** (the explicit override). In the steer field: type
+    /// a message, Enter sends it, Esc goes back to the menu. Esc on the menu
+    /// stops (the conservative choice, mirroring the loop-halt surface).
+    fn on_completion_gate_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(prompt) = self.pending_completion_gate.as_mut() else {
+            return Action::None;
+        };
+        if prompt.steering {
+            return match key.code {
+                KeyCode::Esc => {
+                    prompt.steering = false;
+                    prompt.editor.clear();
+                    Action::None
+                }
+                KeyCode::Enter => {
+                    let text = prompt.editor.text().trim().to_string();
+                    if text.is_empty() {
+                        Action::None
+                    } else {
+                        self.resolve_completion_gate(GateResolution::Steer(text))
+                    }
+                }
+                KeyCode::Char('j') if ctrl => {
+                    prompt.editor.newline();
+                    Action::None
+                }
+                KeyCode::Backspace => {
+                    prompt.editor.backspace();
+                    Action::None
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    prompt.editor.insert_char(c);
+                    Action::None
+                }
+                _ => Action::None,
+            };
+        }
+        match key.code {
+            KeyCode::Char('g') | KeyCode::Char('G') => {
+                self.resolve_completion_gate(GateResolution::Resume)
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Esc => {
+                self.resolve_completion_gate(GateResolution::Stop)
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Enter => {
+                prompt.steering = true;
+                Action::None
+            }
+            // Finish anyway — the user's explicit override (Design §8.7),
+            // never presented as though the checks passed.
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                self.resolve_completion_gate(GateResolution::Finish)
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn resolve_completion_gate(&mut self, resolution: GateResolution) -> Action {
+        self.pending_completion_gate = None;
+        Action::Command(Command::ResolveCompletionGate { resolution })
     }
 
     // ---- overlays ---------------------------------------------------------
@@ -2142,6 +2259,7 @@ impl App {
         self.memory_user = 0;
         self.memory_project = 0;
         self.skills.clear();
+        self.completion_status.clear();
         self.memory_fetch = None;
         self.pending_memory_edit = None;
         self.latest_diffs.clear();
@@ -3603,6 +3721,133 @@ mod tests {
         halt(&mut a);
         assert!(!a.is_working(), "the halt screen is perfectly still");
         assert!(!a.is_animating());
+    }
+
+    // ---- completion-gate halt surface (S-6, Design §8.7) -----------------
+
+    fn gate_halt(a: &mut App) {
+        a.apply_event(UiEvent::CompletionGateHalted {
+            failing: vec![CheckResult {
+                name: "tests".into(),
+                passed: false,
+                reason: "exit 1".into(),
+            }],
+            attempts: 3,
+        });
+    }
+
+    #[test]
+    fn completion_gate_keep_going_resumes() {
+        let mut a = app();
+        gate_halt(&mut a);
+        let action = a.on_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(
+            action,
+            Action::Command(Command::ResolveCompletionGate {
+                resolution: GateResolution::Resume
+            })
+        );
+        assert!(a.pending_completion_gate.is_none());
+    }
+
+    #[test]
+    fn completion_gate_stop_and_esc_both_stop() {
+        for key in [KeyCode::Char('s'), KeyCode::Esc] {
+            let mut a = app();
+            gate_halt(&mut a);
+            let action = a.on_key(KeyEvent::from(key));
+            assert_eq!(
+                action,
+                Action::Command(Command::ResolveCompletionGate {
+                    resolution: GateResolution::Stop
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn completion_gate_finish_anyway_is_a_distinct_choice() {
+        // "Finish anyway" is a fourth, separate key from stop — the explicit
+        // override the loop-halt surface has no equivalent of (Design §8.7).
+        let mut a = app();
+        gate_halt(&mut a);
+        let action = a.on_key(KeyEvent::from(KeyCode::Char('f')));
+        assert_eq!(
+            action,
+            Action::Command(Command::ResolveCompletionGate {
+                resolution: GateResolution::Finish
+            })
+        );
+        assert!(a.pending_completion_gate.is_none());
+    }
+
+    #[test]
+    fn completion_gate_say_something_then_steer() {
+        let mut a = app();
+        gate_halt(&mut a);
+        a.on_key(KeyEvent::from(KeyCode::Char('t')));
+        assert!(a
+            .pending_completion_gate
+            .as_ref()
+            .is_some_and(|h| h.steering));
+        for c in "fix the failing test".chars() {
+            a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            action,
+            Action::Command(Command::ResolveCompletionGate {
+                resolution: GateResolution::Steer("fix the failing test".into())
+            })
+        );
+    }
+
+    #[test]
+    fn completion_gate_steer_esc_returns_to_menu() {
+        let mut a = app();
+        gate_halt(&mut a);
+        a.on_key(KeyEvent::from(KeyCode::Char('t')));
+        a.on_key(KeyEvent::from(KeyCode::Char('x')));
+        a.on_key(KeyEvent::from(KeyCode::Esc)); // back to menu, not a decision
+        assert!(a
+            .pending_completion_gate
+            .as_ref()
+            .is_some_and(|h| !h.steering));
+        let action = a.on_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(
+            action,
+            Action::Command(Command::ResolveCompletionGate {
+                resolution: GateResolution::Resume
+            })
+        );
+    }
+
+    #[test]
+    fn completion_gate_stills_motion() {
+        let mut a = app();
+        a.busy = true;
+        a.motion = true;
+        gate_halt(&mut a);
+        assert!(!a.is_working(), "the halt screen is perfectly still");
+        assert!(!a.is_animating());
+    }
+
+    #[test]
+    fn completion_gate_status_hidden_until_first_evaluation() {
+        let mut a = app();
+        assert!(
+            a.completion_status.is_empty(),
+            "no gate status before any evaluation — never a \"None\" stub"
+        );
+        a.apply_event(UiEvent::CompletionStatus {
+            checks: vec![CheckResult {
+                name: "tests".into(),
+                passed: true,
+                reason: "exit 0".into(),
+            }],
+        });
+        assert_eq!(a.completion_status.len(), 1);
+        assert!(a.completion_status[0].passed);
     }
 
     #[test]

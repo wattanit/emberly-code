@@ -37,7 +37,10 @@ pub use emberly_tools::AskUserOutcome;
 pub use emberly_tools::{MemoryOp, MemoryScope};
 pub use emberly_tools::{SkillMeta, SkillOrigin};
 pub use emberly_tools::{TaskItem, TaskStatus};
-pub use engine::{ContextConfig, Engine, EngineConfig, LoopConfig, MemoryConfig, SkillsConfig};
+pub use engine::{
+    CompletionCheck, CompletionConfig, ContextConfig, Engine, EngineConfig, LoopConfig,
+    MemoryConfig, SkillsConfig,
+};
 pub use event::UiEvent;
 pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfig};
 pub use gate::{AskUserAsk, MemoryAsk, PermissionAsk, SkillAsk, TaskListAsk};
@@ -48,8 +51,8 @@ pub use transcript::{
     TranscriptEvent, TranscriptRecord, TranscriptSink, SCHEMA_VERSION,
 };
 pub use types::{
-    AskAnswer, Effort, LoopResolution, Mode, PermissionDecision, PermissionRendering,
-    SandboxStatus, TokenUsage,
+    AskAnswer, CheckResult, Effort, GateResolution, LoopResolution, Mode, PermissionDecision,
+    PermissionRendering, SandboxStatus, TokenUsage,
 };
 pub use view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
 // The rule engine and confinement probe live in the security crate; re-export

@@ -578,6 +578,7 @@ dependencies = [
  "emberly-sandbox",
  "emberly-tools",
  "futures",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "thiserror",

@@ -51,6 +51,15 @@ pub struct ImageContent {
     pub data: String,
 }
 
+/// A document payload carried on a [`ToolOutcome`] so the engine can append a
+/// `ContentBlock::Document` to the conversation (P-12, T-16). `data` is the
+/// base64-encoded file bytes; `media_type` is always `application/pdf`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentContent {
+    pub media_type: String,
+    pub data: String,
+}
+
 /// The result of running a tool, always handed to the model as data (HC-6).
 ///
 /// `ok == false` is a *structured failure* (file not found, no edit match,
@@ -73,6 +82,11 @@ pub struct ToolOutcome {
     /// engine adds a `ContentBlock::Image` alongside the text `tool_result`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ImageContent>,
+    /// A document to append to the conversation (P-12, T-16). When `Some`,
+    /// the engine adds a `ContentBlock::Document` alongside the text
+    /// `tool_result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<DocumentContent>,
     /// Whether the result is **untrusted web content** (T-14, Design §4.10).
     /// When `true`, the TUI renders it as fetched web data with visible source
     /// URLs — never in harness or assistant voice. Reusable by a future
@@ -91,6 +105,7 @@ impl ToolOutcome {
             summary: summary.into(),
             file_change: None,
             image: None,
+            document: None,
             untrusted: false,
         }
     }
@@ -105,6 +120,7 @@ impl ToolOutcome {
             summary: summary.into(),
             file_change: None,
             image: None,
+            document: None,
             untrusted: false,
         }
     }
@@ -121,6 +137,14 @@ impl ToolOutcome {
     #[must_use]
     pub fn with_image(mut self, image: ImageContent) -> Self {
         self.image = Some(image);
+        self
+    }
+
+    /// Attach a document payload so the engine appends a
+    /// `ContentBlock::Document` to the conversation (P-12, T-16).
+    #[must_use]
+    pub fn with_document(mut self, document: DocumentContent) -> Self {
+        self.document = Some(document);
         self
     }
 

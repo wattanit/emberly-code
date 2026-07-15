@@ -23,6 +23,7 @@ use emberly_tools::{
     RecallOutcome, Reduction, Sandbox, ToolCtx, ToolRegistry, TruncateConfig,
 };
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 
@@ -40,7 +41,9 @@ use crate::transcript::{
     CompactTrigger, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord,
     TranscriptSink,
 };
-use crate::types::{LoopResolution, PermissionRendering, SandboxStatus, TokenUsage};
+use crate::types::{
+    CheckResult, GateResolution, LoopResolution, PermissionRendering, SandboxStatus, TokenUsage,
+};
 use crate::view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
 
 /// The session title is the first user message, clipped to this many chars
@@ -70,6 +73,36 @@ impl Default for LoopConfig {
             enabled: true,
             repeat_window: 3,
             max_no_progress_turns: 6,
+        }
+    }
+}
+
+/// A single pass/fail command check the completion gate runs before the loop
+/// may declare a task done (S-6, Tech Spec §7). Passes iff the command exits
+/// with `expect_exit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionCheck {
+    pub name: String,
+    pub command: String,
+    pub expect_exit: i32,
+}
+
+/// The completion gate's tunables (S-6, Tech Spec §7). The gate is inert —
+/// behaves exactly as no gate at all — until at least one [`CompletionCheck`]
+/// is registered, regardless of `enabled`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionConfig {
+    pub enabled: bool,
+    /// Failed completion attempts allowed before the engine halts to the user
+    /// (default 3).
+    pub max_attempts: usize,
+}
+
+impl Default for CompletionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_attempts: 3,
         }
     }
 }
@@ -167,6 +200,11 @@ pub struct EngineConfig {
     pub trust_granted: bool,
     /// Loop-breaking guardrail tunables (S-5, Tech Spec §7).
     pub loop_config: LoopConfig,
+    /// Completion-gate tunables (S-6, Tech Spec §7).
+    pub completion_config: CompletionConfig,
+    /// Completion checks registered at startup, from `[[completion.check]]`
+    /// config (S-6, Tech Spec §7/§8).
+    pub completion_checks: Vec<CompletionCheck>,
     /// Adaptive context-window + compaction config (FR-3, Tech Spec §7/§8).
     pub context: ContextConfig,
     pub truncate: TruncateConfig,
@@ -230,6 +268,9 @@ pub struct EngineConfig {
     /// Maximum image file size in bytes for the `read_image` tool (Tech Spec
     /// §5.2, default 5 MiB).
     pub image_max_bytes: usize,
+    /// Maximum document file size in bytes for the `read_document` tool (Tech
+    /// Spec §5.2, default 32 MiB).
+    pub document_max_bytes: usize,
     /// Memory config (FR-6, Tech Spec §8.1).
     pub memory: MemoryConfig,
     /// User-global memory directory (`~/.config/emberly/memory/`). Always `Some`
@@ -349,7 +390,10 @@ impl AdoptedState {
 
 /// Outcome of running one tool call.
 enum ToolCallResult {
-    Completed(emberly_tools::ToolOutcome),
+    // Boxed: `ToolOutcome` grew past clippy's large-enum-variant threshold
+    // once it carried both an optional image and an optional document
+    // payload (P-11/P-12); `Canceled` carries no data at all.
+    Completed(Box<emberly_tools::ToolOutcome>),
     Canceled,
 }
 
@@ -460,6 +504,40 @@ fn resolution_label(r: &LoopResolution) -> String {
     }
 }
 
+/// The audit label for a completion-gate resolution (S-6, Tech Spec §3.2).
+fn gate_resolution_label(r: &GateResolution) -> String {
+    match r {
+        GateResolution::Resume => "resume".into(),
+        GateResolution::Stop => "stop".into(),
+        GateResolution::Steer(_) => "steer".into(),
+        GateResolution::Finish => "finish".into(),
+    }
+}
+
+/// Whether a completion attempt may terminate the turn or must re-open the
+/// loop (S-6, Tech Spec §7).
+enum CompletionGateOutcome {
+    /// No checks registered, or every registered check passed.
+    Terminate,
+    /// At least one check failed; the failure was appended to the
+    /// conversation and the turn must continue.
+    ReOpen,
+}
+
+/// Render failing completion checks as agent-world content the model reads
+/// and reacts to (HC-6, Design §8.7) — the check name and its structured
+/// reason, exactly as an ordinary tool result; the harness never editorializes.
+fn render_gate_failure(failing: &[CheckResult]) -> String {
+    let mut body = String::from("completion check failed:\n");
+    for result in failing {
+        body.push_str(&result.name);
+        body.push_str(": ");
+        body.push_str(&result.reason);
+        body.push('\n');
+    }
+    body
+}
+
 /// A permission ask awaiting the user's answer: the id shown to the frontend,
 /// the oneshot the blocked tool waits on, and the original request (kept so an
 /// "allow for session"/"always allow" answer can be turned into a grant).
@@ -477,6 +555,40 @@ struct PendingUserAsk {
     question: String,
     options: Vec<String>,
     reply: tokio::sync::oneshot::Sender<AskUserOutcome>,
+}
+
+/// SIGKILLs a completion check's entire process group on drop (S-6, mirrors
+/// the `bash` tool's group-kill guard, S-4): fires on a timeout or when the
+/// engine drops the check future, reaping any grandchildren an `sh -c` spawns
+/// that `kill_on_drop` (leader-only) would leave behind. Disarmed after a
+/// clean wait.
+struct CompletionCheckKillGuard {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pgid: Option<i32>,
+}
+
+impl CompletionCheckKillGuard {
+    fn arm(child_pid: Option<u32>) -> Self {
+        Self {
+            pgid: child_pid.and_then(|p| i32::try_from(p).ok()),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.pgid = None;
+    }
+}
+
+impl Drop for CompletionCheckKillGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid {
+            if let Some(pid) = rustix::process::Pid::from_raw(pgid) {
+                // Best-effort: an already-exited group yields ESRCH, ignored.
+                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+            }
+        }
+    }
 }
 
 /// The agent engine.
@@ -512,6 +624,14 @@ pub struct Engine {
     loop_same_sig_streak: usize,
     /// Consecutive no-progress turns (any signature).
     loop_no_progress_streak: usize,
+    /// Completion-gate tunables (S-6, Tech Spec §7).
+    completion_config: CompletionConfig,
+    /// Registered completion checks the gate evaluates on a completion attempt
+    /// (S-6). Populated from config at startup; empty means the gate is inert.
+    completion_checks: Vec<CompletionCheck>,
+    /// Consecutive failed completion attempts this session (S-6). Reset on a
+    /// new session and when the gate passes or is resolved to try again.
+    completion_attempts: usize,
     truncate: TruncateConfig,
     retry: RetryPolicy,
     gate: Arc<ChannelGate>,
@@ -604,6 +724,9 @@ pub struct Engine {
     /// Maximum image file size in bytes (Tech Spec §5.2). Threaded to the
     /// `read_image` tool via `ToolCtx`.
     image_max_bytes: usize,
+    /// Maximum document file size in bytes (Tech Spec §5.2). Threaded to the
+    /// `read_document` tool via `ToolCtx`.
+    document_max_bytes: usize,
     /// Memory config (FR-6, Tech Spec §8.1).
     memory_config: MemoryConfig,
     /// The durable memory store (FR-6, T-13). `None` when memory is disabled
@@ -708,6 +831,9 @@ impl Engine {
             loop_last_sig: None,
             loop_same_sig_streak: 0,
             loop_no_progress_streak: 0,
+            completion_config: config.completion_config,
+            completion_checks: config.completion_checks,
+            completion_attempts: 0,
             truncate: config.truncate,
             retry: config.retry,
             gate: Arc::new(ChannelGate { asks: asks_tx }),
@@ -747,6 +873,7 @@ impl Engine {
             config_reloader: config.config_reloader,
             task_list: Vec::new(),
             image_max_bytes: config.image_max_bytes,
+            document_max_bytes: config.document_max_bytes,
             memory_config: config.memory.clone(),
             memory_store,
             memory_user_index: String::new(),
@@ -783,6 +910,14 @@ impl Engine {
             memory_rx,
             skill_rx,
         )
+    }
+
+    /// Register a completion check the gate evaluates on every completion
+    /// attempt (S-6, Requirements S-6). Config is the shipped registrant
+    /// (`[[completion.check]]`); this seam also lets a future frontend or tool
+    /// register a check programmatically.
+    pub fn register_completion_check(&mut self, check: CompletionCheck) {
+        self.completion_checks.push(check);
     }
 
     /// Run the engine until the command channel closes. Idle between turns,
@@ -883,7 +1018,8 @@ impl Engine {
                 Command::Cancel
                 | Command::PermissionAnswer { .. }
                 | Command::AskUserAnswer { .. }
-                | Command::ResolveLoop { .. } => {}
+                | Command::ResolveLoop { .. }
+                | Command::ResolveCompletionGate { .. } => {}
                 // Idle is already a clean boundary — compact immediately.
                 Command::Compact => {
                     self.compact(CompactTrigger::Manual).await;
@@ -1070,6 +1206,7 @@ impl Engine {
         self.session_cost_usd = state.session_cost_usd;
         self.context_tokens_authoritative = state.context_tokens_authoritative;
         self.next_permission_id = 0;
+        self.completion_attempts = 0;
         self.task_list.clear();
         // Reload memory indexes for the new session (user-global unchanged,
         // project re-pointed to the new root). The store reads from disk, so a
@@ -1275,7 +1412,14 @@ impl Engine {
                     self.emit_context_usage().await;
                     self.emit(UiEvent::AssistantDone).await;
                     if tool_calls.is_empty() {
-                        return; // model finished its turn
+                        // S-6: the model claims done. With no checks
+                        // registered the gate is inert (zero behavior
+                        // change); with checks, a failure re-opens the loop
+                        // instead of letting the turn end here.
+                        match self.evaluate_completion_gate(commands_rx).await {
+                            CompletionGateOutcome::Terminate => return,
+                            CompletionGateOutcome::ReOpen => continue,
+                        }
                     }
                     if self
                         .run_tool_calls(
@@ -1522,7 +1666,9 @@ impl Engine {
                 )
                 .await
             {
-                ToolCallResult::Completed(outcome) => self.ingest_tool_result(&call, outcome).await,
+                ToolCallResult::Completed(outcome) => {
+                    self.ingest_tool_result(&call, *outcome).await
+                }
                 ToolCallResult::Canceled => {
                     self.push_canceled_result(&call).await;
                     for remaining in iter {
@@ -1532,7 +1678,7 @@ impl Engine {
                 }
             }
         }
-        ToolCallResult::Completed(emberly_tools::ToolOutcome::success("", ""))
+        ToolCallResult::Completed(Box::new(emberly_tools::ToolOutcome::success("", "")))
     }
 
     /// Fold the just-completed tool-call turn into the loop-guardrail state and
@@ -1634,6 +1780,215 @@ impl Engine {
         resolution
     }
 
+    /// Run one registered completion check (S-6, Tech Spec §7, §6.1). Spawns
+    /// through the identical confined path as the `bash` tool
+    /// (`sandbox().bash_invocation()`, env scrubbed to the same allowlist,
+    /// its own process group, the same default timeout) but **never** raises a
+    /// `PermissionRequest` — the deliberate divergence from `bash` (S-6 honesty
+    /// clause: contained, not re-prompted, because registering the check in
+    /// trusted config is the authorization).
+    async fn run_completion_check(&self, check: &CompletionCheck) -> CheckResult {
+        let invocation = self
+            .sandbox_spawn
+            .bash_invocation(&check.command, &self.project_root);
+        let mut command = tokio::process::Command::new(&invocation.program);
+        command.args(&invocation.args);
+        command.current_dir(&self.project_root);
+        command.env_clear();
+        for key in emberly_tools::DEFAULT_ENV_ALLOWLIST {
+            if let Ok(value) = std::env::var(key) {
+                command.env(key, value);
+            }
+        }
+        for (key, value) in &invocation.extra_env {
+            command.env(key, value);
+        }
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+
+        let timeout = std::time::Duration::from_secs(emberly_tools::DEFAULT_TIMEOUT_SECS);
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                return CheckResult {
+                    name: check.name.clone(),
+                    passed: false,
+                    reason: format!("failed to start check command: {e}"),
+                }
+            }
+        };
+        let mut group_kill = CompletionCheckKillGuard::arm(child.id());
+
+        match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(Ok(output)) => {
+                group_kill.disarm();
+                let exit_code = output.status.code().unwrap_or(-1);
+                let passed = output.status.code() == Some(check.expect_exit);
+                let reason = if passed {
+                    format!("exit {exit_code}")
+                } else {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let mut combined = format!("exit code: {exit_code}\n");
+                    if !stdout.is_empty() {
+                        combined.push_str("--- stdout ---\n");
+                        combined.push_str(&stdout);
+                    }
+                    if !stderr.is_empty() {
+                        combined.push_str("--- stderr ---\n");
+                        combined.push_str(&stderr);
+                    }
+                    // Same reduction the tool pipeline applies (§5.3): salient
+                    // reduction first, then the size backstop — so a noisy
+                    // failing check does not flood the re-opened turn.
+                    let reduced = reduce_output("bash", &combined);
+                    truncate_output(&reduced.content, &self.truncate).content
+                };
+                CheckResult {
+                    name: check.name.clone(),
+                    passed,
+                    reason,
+                }
+            }
+            Ok(Err(e)) => CheckResult {
+                name: check.name.clone(),
+                passed: false,
+                reason: format!("check command error: {e}"),
+            },
+            // Timeout: leave the guard armed — its drop SIGKILLs the whole
+            // process group, exactly as a `bash` tool-call timeout does (S-4).
+            Err(_elapsed) => CheckResult {
+                name: check.name.clone(),
+                passed: false,
+                reason: format!(
+                    "check timed out after {}s and was killed",
+                    timeout.as_secs()
+                ),
+            },
+        }
+    }
+
+    /// Evaluate the completion gate at a completion attempt — a turn ending
+    /// with no tool calls (S-6, Tech Spec §7). The mirror of `evaluate_loop`,
+    /// hooking the branch S-5 deliberately ignores (`:1548`). **Inert when no
+    /// checks are registered:** returns `Terminate` immediately, zero
+    /// behavior change (S-6). Every check that runs is recorded as a
+    /// `completion_check` transcript event, win or lose (HC-7).
+    async fn evaluate_completion_gate(
+        &mut self,
+        commands_rx: &mut mpsc::Receiver<Command>,
+    ) -> CompletionGateOutcome {
+        if self.completion_checks.is_empty() {
+            return CompletionGateOutcome::Terminate;
+        }
+        let checks = self.completion_checks.clone();
+        let mut all = Vec::with_capacity(checks.len());
+        let mut failing = Vec::new();
+        for check in &checks {
+            let result = self.run_completion_check(check).await;
+            self.write_transcript(TranscriptEvent::CompletionCheck {
+                name: result.name.clone(),
+                passed: result.passed,
+                reason: result.reason.clone(),
+            });
+            if !result.passed {
+                failing.push(result.clone());
+            }
+            all.push(result);
+        }
+        // Sidebar gate status (Design §8.7, §3.1): the last result per check,
+        // win or lose. Only emitted when checks are registered (this branch
+        // is unreachable otherwise), so an inert gate never shows the line.
+        self.emit(UiEvent::CompletionStatus { checks: all }).await;
+        if failing.is_empty() {
+            self.completion_attempts = 0;
+            return CompletionGateOutcome::Terminate;
+        }
+        self.completion_attempts += 1;
+        // Agent-world content (Design §8.7): the failing checks return to the
+        // model as ordinary tool-result-shaped content — the harness does not
+        // editorialize; the model reacts and fixes like any tool failure.
+        self.push_conversation_message(Message::user_text(render_gate_failure(&failing)));
+        self.emit_context_usage().await;
+
+        if self.completion_attempts < self.completion_config.max_attempts {
+            return CompletionGateOutcome::ReOpen;
+        }
+
+        // S-6: the bounded number of failed attempts is reached — hand
+        // control to the user (resume / steer / stop / finish), exactly as
+        // S-5 does at its own bound. Never spin on.
+        match self
+            .await_completion_resolution(commands_rx, failing, self.completion_attempts)
+            .await
+        {
+            GateResolution::Resume => {
+                self.completion_attempts = 0;
+                CompletionGateOutcome::ReOpen
+            }
+            GateResolution::Steer(text) => {
+                self.completion_attempts = 0;
+                self.record_user_message(&text);
+                self.push_conversation_message(Message::user_text(text));
+                self.emit_context_usage().await;
+                CompletionGateOutcome::ReOpen
+            }
+            // `Stop` ends the turn with the gate still unsatisfied; `Finish`
+            // ends it as the user's explicit override (Design §8.7) — both
+            // just terminate the turn here, the transcript event written by
+            // `await_completion_resolution` is what distinguishes them.
+            GateResolution::Stop | GateResolution::Finish => CompletionGateOutcome::Terminate,
+        }
+    }
+
+    /// Surface the completion-gate halt (harness voice) and park until the
+    /// user decides (S-6, Design §8.7): resume / stop / steer / finish.
+    /// Cancel or a departed frontend resolves to stop — the gate never
+    /// quietly resumes or grants the override on its own. Records one
+    /// `completion_gate_halt` transcript event with the chosen resolution;
+    /// `override_finish` is `true` only for `Finish` (Design §8.7 — never
+    /// presented as though the checks passed).
+    async fn await_completion_resolution(
+        &mut self,
+        commands_rx: &mut mpsc::Receiver<Command>,
+        failing: Vec<CheckResult>,
+        attempts: usize,
+    ) -> GateResolution {
+        self.emit(UiEvent::CompletionGateHalted {
+            failing: failing.clone(),
+            attempts,
+        })
+        .await;
+        let resolution = loop {
+            match commands_rx.recv().await {
+                Some(Command::ResolveCompletionGate { resolution }) => break resolution,
+                // Esc/Ctrl-C while halted = stop here.
+                Some(Command::Cancel) => break GateResolution::Stop,
+                // A mode toggle applies immediately; keep waiting for a decision.
+                Some(Command::SetMode { mode }) => self.set_mode(mode).await,
+                // Queue a compaction for after we resume (if we do).
+                Some(Command::Compact) => self.request_compaction(CompactTrigger::Manual),
+                // Strays (permission/ask answers with no pending prompt): ignore.
+                Some(_) => {}
+                // Frontend gone: stop, fail-safe (never spin unattended).
+                None => break GateResolution::Stop,
+            }
+        };
+        let override_finish = matches!(resolution, GateResolution::Finish);
+        self.write_transcript(TranscriptEvent::CompletionGateHalt {
+            failing,
+            attempts,
+            resolution: Some(gate_resolution_label(&resolution)),
+            override_finish,
+        });
+        resolution
+    }
+
     /// Run one tool call, driving its execution concurrently with permission
     /// asks and cancellation.
     #[allow(clippy::too_many_arguments)]
@@ -1659,10 +2014,10 @@ impl Engine {
         }
 
         let Some(tool) = self.tools.get(&call.name) else {
-            return ToolCallResult::Completed(emberly_tools::ToolOutcome::failure(
+            return ToolCallResult::Completed(Box::new(emberly_tools::ToolOutcome::failure(
                 format!("unknown tool: {}", call.name),
                 "unknown tool",
-            ));
+            )));
         };
 
         // Describe the invocation from its arguments (e.g. `run: cargo test`,
@@ -1688,7 +2043,7 @@ impl Engine {
 
         loop {
             tokio::select! {
-                outcome = &mut exec => return ToolCallResult::Completed(outcome),
+                outcome = &mut exec => return ToolCallResult::Completed(Box::new(outcome)),
                 Some(ask) = asks_rx.recv() => self.on_permission_ask(ask, &mut pending).await,
                 Some(ask) = user_asks_rx.recv() => self.on_user_ask(ask, &mut pending_user).await,
                 Some(recall) = recall_rx.recv() => self.on_recall(recall).await,
@@ -2196,6 +2551,22 @@ impl Engine {
             });
         }
 
+        // A document from `read_document` (P-12): append a
+        // `ContentBlock::Document` the same way an image is appended — a
+        // synthetic user message so both adapters can carry it (Tech Spec
+        // §4.2). The bytes are NOT in the transcript (HC-7); the `tool_call`
+        // recorded the path, and the block lives only in the live
+        // conversation (re-derived from disk on resume).
+        if let Some(document) = outcome.document {
+            self.push_conversation_message(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Document {
+                    media_type: document.media_type,
+                    data: document.data,
+                }],
+            });
+        }
+
         self.emit(UiEvent::ToolFinished {
             call_id: call.id.clone(),
             ok: outcome.ok,
@@ -2499,6 +2870,8 @@ impl Engine {
         .with_skill_gate(self.skill_gate.clone())
         .with_vision(self.provider.model_info().vision)
         .with_image_max_bytes(self.image_max_bytes)
+        .with_documents(self.provider.model_info().documents)
+        .with_document_max_bytes(self.document_max_bytes)
     }
 
     /// Reload the memory index strings from the store into the cached fields.
@@ -2852,6 +3225,11 @@ impl Engine {
                     // budget with raw base64 length (initial; tune with use,
                     // Requirements §13).
                     ContentBlock::Image { .. } => IMAGE_TOKEN_ESTIMATE,
+                    // A document's token cost is not chars/4 of its base64
+                    // either — same reasoning as the image estimate above,
+                    // refined by provider-reported usage where available
+                    // (P-12).
+                    ContentBlock::Document { .. } => DOCUMENT_TOKEN_ESTIMATE,
                 });
             }
         }
@@ -2899,6 +3277,11 @@ fn render_for_summary(messages: &[Message]) -> String {
                 ContentBlock::Image { media_type, .. } => {
                     format!("[image: {media_type}]")
                 }
+                // A document is summarized by its media type, not its bytes
+                // (HC-2 — the harness never parses it).
+                ContentBlock::Document { media_type, .. } => {
+                    format!("[document: {media_type}]")
+                }
             };
             if !piece.is_empty() {
                 out.push_str(role);
@@ -2945,6 +3328,9 @@ fn render_recall(messages: &[Message], reduce: bool) -> String {
                 ContentBlock::Image { media_type, .. } => {
                     format!("[image: {media_type}]")
                 }
+                ContentBlock::Document { media_type, .. } => {
+                    format!("[document: {media_type}]")
+                }
             };
             if !piece.is_empty() {
                 out.push_str(role);
@@ -2968,6 +3354,12 @@ const PREVIEW_CHARS: usize = 600;
 /// arrives, this fixed estimate avoids inflating the budget. Initial; tune with
 /// use (Requirements §13, Tech Spec §16).
 const IMAGE_TOKEN_ESTIMATE: u64 = 765;
+
+/// Rough per-document token cost for the context-budget estimate (P-12). A
+/// PDF's cost is not chars/4 of its base64 either; same reasoning as
+/// [`IMAGE_TOKEN_ESTIMATE`]. Initial; tune with use (Requirements §13, Tech
+/// Spec §16).
+const DOCUMENT_TOKEN_ESTIMATE: u64 = 765;
 
 /// A short excerpt of a tool's output for the conversation (Design §6.1): the
 /// first few lines, char-capped. The full output goes to the model; this is

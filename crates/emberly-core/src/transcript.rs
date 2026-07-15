@@ -151,6 +151,32 @@ pub enum TranscriptEvent {
         resolution: Option<String>,
     },
 
+    /// One completion-gate check evaluation (S-6, Tech Spec §3.2, §7): its
+    /// name, pass/fail, and the reason (HC-7 — every evaluation is recorded,
+    /// win or lose). Additive — older readers warn-skip it, no
+    /// `SCHEMA_VERSION` bump.
+    CompletionCheck {
+        name: String,
+        passed: bool,
+        reason: String,
+    },
+
+    /// The completion gate halted after `max_attempts` failed completion
+    /// attempts (S-6, Tech Spec §3.2, §7): the failing checks, the attempt
+    /// count, and the user's chosen resolution (`resume`/`stop`/`steer`/
+    /// `finish`, `None` until resolved). `override_finish` is `true` only when
+    /// the user chose `finish` — the gate binds the model's claim of done,
+    /// never the user's authority (Design §8.7). Additive — older readers
+    /// warn-skip it, no `SCHEMA_VERSION` bump.
+    CompletionGateHalt {
+        failing: Vec<crate::types::CheckResult>,
+        attempts: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        override_finish: bool,
+    },
+
     /// The model asked the user a question and it was resolved (T-8, Tech Spec
     /// §3.2): the question, any options offered, and the user's answer — or
     /// `None` when they declined. Additive — older readers warn-skip it, so no

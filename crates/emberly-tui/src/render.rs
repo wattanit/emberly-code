@@ -8,7 +8,9 @@
 //! (context %, mode) live only on the status bar (Design §3.2) — everything the
 //! sidebar shows is also reachable by command, so nothing is sidebar-exclusive.
 
-use emberly_core::{EntrySummary, Mode, SandboxStatus, SkillMeta, SkillOrigin, TaskStatus};
+use emberly_core::{
+    CheckResult, EntrySummary, Mode, SandboxStatus, SkillMeta, SkillOrigin, TaskStatus,
+};
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::text::{Line, Span};
@@ -67,6 +69,8 @@ pub fn frame(f: &mut Frame, app: &App, hit: &mut HitMap) {
         render_ask(f, app, main);
     } else if app.pending_loop_halt.is_some() {
         render_loop_halt(f, app, main);
+    } else if app.pending_completion_gate.is_some() {
+        render_completion_gate(f, app, main);
     } else {
         // Conversation over the input box.
         let input_rows = app.editor.line_count().clamp(1, MAX_INPUT_ROWS);
@@ -979,6 +983,13 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
         ]));
     }
     lines.push(sandbox_line(theme, app.sandbox.as_ref(), w));
+    // Completion-gate status (S-6, Design §8.7, §3.1): a dim line naming the
+    // registered checks and their last result, beside sandbox/context status.
+    // Absent until the gate has run at least once — never a "None" stub, like
+    // Tasks/Memory/Skills below (Design §3.1).
+    if !app.completion_status.is_empty() {
+        lines.push(gate_status_line(theme, &app.completion_status, w));
+    }
     lines.push(Line::from(""));
 
     // Modified files (Design §3.1): path + add/remove counts.
@@ -1133,6 +1144,34 @@ fn sandbox_line(theme: &Theme, status: Option<&SandboxStatus>, width: usize) -> 
     Line::from(vec![label, value])
 }
 
+/// The completion-gate status line (S-6, Design §8.7, §3.1): a dim line
+/// naming each registered check and its last result (win or lose, HC-7).
+/// Never styled as a guarantee beyond what the checks tested — a fail turns
+/// the whole line the warning tone, the same one `sandbox_line` uses for a
+/// degraded/partial status, never the error/safety band.
+fn gate_status_line(theme: &Theme, checks: &[CheckResult], width: usize) -> Line<'static> {
+    let label = Span::styled(format!("{} ", strings::status::GATE_LABEL), theme.chrome());
+    let all_pass = checks.iter().all(|c| c.passed);
+    let summary = checks
+        .iter()
+        .map(|c| {
+            let mark = if c.passed {
+                markers::OK
+            } else {
+                markers::FAILED
+            };
+            format!("{} {mark}", c.name)
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let style = if all_pass {
+        theme.chrome()
+    } else {
+        theme.warning()
+    };
+    Line::from(vec![label, Span::styled(fit(&summary, width), style)])
+}
+
 fn context_style(theme: &Theme, pct: u8) -> ratatui::style::Style {
     if pct >= 90 {
         theme.error()
@@ -1211,6 +1250,12 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
             strings::loop_halt::STEER_HINT
         } else {
             strings::loop_halt::HINT
+        }
+    } else if let Some(halt) = &app.pending_completion_gate {
+        if halt.steering {
+            strings::completion_gate::STEER_HINT
+        } else {
+            strings::completion_gate::HINT
         }
     } else {
         strings::hints::NORMAL
@@ -1539,6 +1584,97 @@ fn render_loop_halt(f: &mut Frame, app: &App, area: Rect) {
             ("g", s::KEEP_GOING),
             ("s", s::STOP),
             ("t", s::SAY_SOMETHING),
+        ] {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  [{key}] "), theme.accent()),
+                Span::styled(label, theme.primary()),
+            ]));
+        }
+    }
+
+    let footer_h = 1u16;
+    let body_h = inner.height.saturating_sub(footer_h).max(1);
+    let body_area = Rect {
+        height: body_h,
+        ..inner
+    };
+    let footer_area = Rect {
+        y: inner.y + inner.height - footer_h,
+        height: footer_h,
+        ..inner
+    };
+    let hint = if halt.steering {
+        s::STEER_HINT
+    } else {
+        s::HINT
+    };
+    f.render_widget(Paragraph::new(lines), body_area);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(hint, theme.chrome()))),
+        footer_area,
+    );
+}
+
+// ---- completion-gate halt surface — the harness stepping in (Design §8.7) -
+
+/// Render the completion-gate halt surface (S-6). The **harness voice**, calm
+/// and out-of-band — not model output, and distinct from a failing check's
+/// agent-world tool-result (that keeps the model reacting turn over turn;
+/// this is the harness stepping in once the bounded attempts are spent). No
+/// alarm styling, never the safety band; the user always chooses keep-going /
+/// stop / say-something / finish-anyway (an explicit override, never
+/// presented as though the checks passed).
+fn render_completion_gate(f: &mut Frame, app: &App, area: Rect) {
+    use strings::completion_gate as s;
+    let theme = &app.theme;
+    let Some(halt) = &app.pending_completion_gate else {
+        return;
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.chrome())
+        .title(Span::styled(format!(" {} ", s::TITLE), theme.warning()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 3 || inner.width == 0 {
+        return;
+    }
+    let width = usize::from(inner.width);
+
+    let mut lines: Vec<Line> = Vec::new();
+    // The calm harness line, then the failing checks and attempt count.
+    lines.push(Line::from(Span::styled(s::HEADING, theme.strong())));
+    let summary = format!(
+        "{} attempt{} — {}",
+        halt.attempts,
+        if halt.attempts == 1 { "" } else { "s" },
+        halt.failing
+            .iter()
+            .map(|c| format!("{}: {}", c.name, c.reason.lines().next().unwrap_or("")))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for row in text::wrap(&summary, width) {
+        lines.push(Line::from(Span::styled(row, theme.chrome())));
+    }
+    lines.push(Line::from(""));
+
+    if halt.steering {
+        // The steer field (hand a message back to the model).
+        lines.push(Line::from(Span::styled(s::STEER_LABEL, theme.chrome())));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", markers::USER_PROMPT), theme.accent()),
+            Span::styled(halt.editor.text().to_string(), theme.primary()),
+            Span::styled("▏", theme.accent()),
+        ]));
+    } else {
+        // The four choices — "finish anyway" is always labeled an override.
+        for (key, label) in [
+            ("g", s::KEEP_GOING),
+            ("s", s::STOP),
+            ("t", s::SAY_SOMETHING),
+            ("f", s::FINISH_ANYWAY),
         ] {
             lines.push(Line::from(vec![
                 Span::styled(format!("  [{key}] "), theme.accent()),
