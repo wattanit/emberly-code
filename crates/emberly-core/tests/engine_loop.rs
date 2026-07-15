@@ -14,9 +14,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use emberly_core::{
-    channel, AskAnswer, CaptureSink, Command, CompactTrigger, ContextConfig, Engine, EngineConfig,
-    FileTranscript, LoopConfig, LoopResolution, Mode, PermissionDecision, RetryPolicy, RuleEngine,
-    RuleSource, SandboxStatus, SessionId, TranscriptEvent, TranscriptSink, UiEvent,
+    channel, AskAnswer, CaptureSink, Command, CompactTrigger, CompletionCheck, CompletionConfig,
+    ContextConfig, Engine, EngineConfig, FileTranscript, GateResolution, LoopConfig,
+    LoopResolution, Mode, PermissionDecision, RetryPolicy, RuleEngine, RuleSource, SandboxStatus,
+    SessionId, TranscriptEvent, TranscriptSink, UiEvent,
 };
 use emberly_providers::{
     ContentBlock, Effort, FakeProvider, Message, ModelInfo, Pricing, Provider, ProviderError, Role,
@@ -66,6 +67,8 @@ fn make_config(
             enabled: false,
             ..LoopConfig::default()
         },
+        completion_config: emberly_core::CompletionConfig::default(),
+        completion_checks: Vec::new(),
         truncate: TruncateConfig::default(),
         context: ContextConfig::default(),
         // Fast retries so retry tests don't wait on real backoff.
@@ -4723,5 +4726,365 @@ async fn inspect_skill_untrusted_project_emits_notice_not_body() {
         events.iter().any(|e| matches!(e,
             UiEvent::Notice { message } if message.contains("proj-only"))),
         "a Notice explains the skill is unavailable"
+    );
+}
+
+// ---- completion gate: evaluation on a completion attempt (S-6, group 4) ---
+
+/// A config with one completion check registered (`make_config`'s default is
+/// an empty list — inert).
+fn completion_gate_config(
+    provider: Arc<dyn Provider>,
+    root: PathBuf,
+    transcript: Box<dyn TranscriptSink>,
+    checks: Vec<CompletionCheck>,
+) -> EngineConfig {
+    let mut config = make_config(provider, root, transcript);
+    config.completion_checks = checks;
+    config
+}
+
+#[tokio::test]
+async fn completion_gate_inert_with_no_checks_registered() {
+    // S-6: a session with no registered checks behaves exactly as today —
+    // the turn terminates on the model's first no-tool-call turn, no
+    // completion_check transcript events, no extra completion attempt.
+    let root = temp_project();
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("done")]));
+    let sink = CaptureSink::new();
+    let config = completion_gate_config(fake, root, Box::new(sink.clone()), Vec::new());
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "finish up".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert_eq!(deltas(&events), "done");
+    assert!(
+        events.iter().any(|e| matches!(e, UiEvent::TurnEnded)),
+        "the turn terminates on the first no-tool-call reply"
+    );
+    assert!(
+        !sink
+            .records()
+            .iter()
+            .any(|r| matches!(r.event, TranscriptEvent::CompletionCheck { .. })),
+        "no completion_check events when no checks are registered"
+    );
+}
+
+#[tokio::test]
+async fn completion_gate_failing_check_reopens_then_passing_check_terminates() {
+    // S-6: a failing check re-opens the loop (HC-6, the failure lands as
+    // agent-world content the model reacts to); once the check passes, the
+    // turn terminates normally. A marker file flips the check from fail to
+    // pass between the two completion attempts, so one FakeProvider script of
+    // two text turns exercises both halves of the round trip.
+    let root = temp_project();
+    let marker = root.join("gate-marker");
+    let check = CompletionCheck {
+        name: "tests".into(),
+        command: format!(
+            "test -f {} && exit 0 || {{ touch {}; exit 1; }}",
+            marker.display(),
+            marker.display()
+        ),
+        expect_exit: 0,
+    };
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::text("first attempt"),
+        ScriptedResponse::text("second attempt"),
+    ]));
+    let sink = CaptureSink::new();
+    let config = completion_gate_config(fake, root, Box::new(sink.clone()), vec![check]);
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "finish up".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    // Both scripted turns ran: the first attempt's failure re-opened the loop
+    // instead of ending the turn, and the second attempt's pass let it end.
+    assert_eq!(deltas(&events), "first attemptsecond attempt");
+    assert!(
+        events.iter().any(|e| matches!(e, UiEvent::TurnEnded)),
+        "the turn terminates once the check passes"
+    );
+
+    let records = sink.records();
+    let checks: Vec<(bool, String)> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            TranscriptEvent::CompletionCheck { passed, reason, .. } => {
+                Some((*passed, reason.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        checks.len(),
+        2,
+        "one completion_check event per evaluation, win or lose (HC-7): {checks:?}"
+    );
+    assert!(!checks[0].0, "the first evaluation failed");
+    assert!(checks[1].0, "the second evaluation passed");
+
+    // The failing check's reason reached the model as an ordinary user-role
+    // message (agent-world content, Design §8.7) before the second attempt.
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::AssistantDelta { text } if text == "second attempt")),
+        "the model got a second turn after the failure re-opened the loop"
+    );
+}
+
+// ---- S-6: completion gate — bounded halt + resolutions (group 5) ----------
+
+fn spawn_with_gate(
+    scripts: Vec<ScriptedResponse>,
+    root: PathBuf,
+    checks: Vec<CompletionCheck>,
+    max_attempts: usize,
+) -> (Harness, CaptureSink) {
+    let sink = CaptureSink::new();
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(scripts)),
+        root,
+        Box::new(sink.clone()),
+    );
+    config.completion_checks = checks;
+    config.completion_config = CompletionConfig {
+        enabled: true,
+        max_attempts,
+    };
+    (spawn(config), sink)
+}
+
+/// Drive a turn to completion, answering the first `CompletionGateHalted`
+/// with `resolution` (mirrors `drive_resolving_loop`, S-5's analog).
+async fn drive_resolving_gate(h: &mut Harness, resolution: GateResolution) -> Vec<UiEvent> {
+    let mut events = Vec::new();
+    let mut pending = Some(resolution);
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(500), h.events_rx.recv()).await
+    {
+        if matches!(event, UiEvent::CompletionGateHalted { .. }) {
+            if let Some(r) = pending.take() {
+                h.send(Command::ResolveCompletionGate { resolution: r })
+                    .await;
+            }
+        }
+        events.push(event);
+    }
+    events
+}
+
+/// A check that never passes — drives straight to the bounded halt.
+fn always_fail_check() -> CompletionCheck {
+    CompletionCheck {
+        name: "tests".into(),
+        command: "exit 1".into(),
+        expect_exit: 0,
+    }
+}
+
+/// A check that fails until a counter file (under `root`) reaches
+/// `passes_on_attempt`, then passes — for exercising resolutions that try the
+/// check again (`resume`/`steer`), which must eventually let the turn end.
+fn counting_check(root: &Path, passes_on_attempt: u32) -> CompletionCheck {
+    let counter = root.join("gate-counter").display().to_string();
+    CompletionCheck {
+        name: "tests".into(),
+        command: format!(
+            "n=$(cat {counter} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {counter}; \
+             [ $n -ge {passes_on_attempt} ] && exit 0 || exit 1"
+        ),
+        expect_exit: 0,
+    }
+}
+
+#[tokio::test]
+async fn completion_gate_halts_once_then_resume_tries_again() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::text("t1"),
+        ScriptedResponse::text("t2"),
+        ScriptedResponse::text("t3"),
+    ];
+    // Fails attempts 1 and 2 (hitting the max_attempts=2 cap), passes on 3.
+    let (mut h, sink) = spawn_with_gate(scripts, root.clone(), vec![counting_check(&root, 3)], 2);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_resolving_gate(&mut h, GateResolution::Resume).await;
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, UiEvent::CompletionGateHalted { .. }))
+            .count(),
+        1,
+        "halts once, not on every failed attempt"
+    );
+    assert_eq!(deltas(&events), "t1t2t3");
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::CompletionGateHalt { resolution: Some(res), override_finish: false, .. }
+            if res == "resume"
+    )));
+    let checks: Vec<bool> = sink
+        .records()
+        .iter()
+        .filter_map(|r| match &r.event {
+            TranscriptEvent::CompletionCheck { passed, .. } => Some(*passed),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(checks, vec![false, false, true]);
+}
+
+#[tokio::test]
+async fn completion_gate_stop_ends_the_turn() {
+    let root = temp_project();
+    let scripts = vec![ScriptedResponse::text("t1"), ScriptedResponse::text("t2")];
+    let (mut h, sink) = spawn_with_gate(scripts, root, vec![always_fail_check()], 2);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_resolving_gate(&mut h, GateResolution::Stop).await;
+
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::CompletionGateHalted { .. })));
+    assert!(
+        events.iter().any(|e| matches!(e, UiEvent::TurnEnded)),
+        "stop ends the turn cleanly, gate still unsatisfied"
+    );
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::CompletionGateHalt { resolution: Some(res), override_finish: false, .. }
+            if res == "stop"
+    )));
+}
+
+#[tokio::test]
+async fn completion_gate_finish_overrides_the_red_gate() {
+    let root = temp_project();
+    let scripts = vec![ScriptedResponse::text("t1"), ScriptedResponse::text("t2")];
+    let (mut h, sink) = spawn_with_gate(scripts, root, vec![always_fail_check()], 2);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_resolving_gate(&mut h, GateResolution::Finish).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e, UiEvent::TurnEnded)),
+        "finish ends the turn as done, over the still-failing gate"
+    );
+    assert!(
+        sink.records().iter().any(|r| matches!(
+            &r.event,
+            TranscriptEvent::CompletionGateHalt { resolution: Some(res), override_finish: true, .. }
+                if res == "finish"
+        )),
+        "the override is recorded explicitly (Design §8.7), never silently"
+    );
+}
+
+#[tokio::test]
+async fn completion_gate_steer_injects_a_message_and_tries_again() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::text("t1"),
+        ScriptedResponse::text("t2"),
+        ScriptedResponse::text("t3"),
+    ];
+    let (mut h, sink) = spawn_with_gate(scripts, root.clone(), vec![counting_check(&root, 3)], 2);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_resolving_gate(
+        &mut h,
+        GateResolution::Steer("focus on the failing case".into()),
+    )
+    .await;
+
+    assert_eq!(deltas(&events), "t1t2t3");
+    assert!(
+        sink.records().iter().any(|r| matches!(
+            &r.event,
+            TranscriptEvent::UserMessage { text, .. } if text == "focus on the failing case"
+        )),
+        "the steer text is recorded as an ordinary user message"
+    );
+    assert!(sink.records().iter().any(|r| matches!(
+        &r.event,
+        TranscriptEvent::CompletionGateHalt { resolution: Some(res), override_finish: false, .. }
+            if res == "steer"
+    )));
+}
+
+#[tokio::test]
+async fn completion_gate_check_execution_never_prompts() {
+    // S-6 honesty clause: registering a check in trusted config is the
+    // authorization — the check runs through the sandboxed `bash` path but
+    // is never routed through a `PermissionRequest`, even though these tests'
+    // default rules (degraded, allowlist suspended) ask on every ordinary
+    // `bash` tool call.
+    let root = temp_project();
+    let scripts = vec![ScriptedResponse::text("t1")];
+    let (mut h, _sink) = spawn_with_gate(scripts, root, vec![always_fail_check()], 1);
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let events = drive_resolving_gate(&mut h, GateResolution::Stop).await;
+
+    assert_eq!(
+        prompt_count(&events),
+        0,
+        "a completion check must never raise a PermissionRequest"
+    );
+}
+
+/// HC-7: the `completion_check`/`completion_gate_halt` transcript events are
+/// additive — resume tolerates them without crashing (mirrors
+/// `todo_transcript_event_is_additive_for_resume`).
+#[tokio::test]
+async fn completion_gate_transcript_events_are_additive_for_resume() {
+    let root = temp_project();
+    let session_dir = root.join(".agents").join("sessions");
+    let _ = std::fs::create_dir_all(&session_dir);
+    let sid = SessionId::new();
+    let path = session_dir.join(format!("{sid}.jsonl"));
+
+    let scripts = vec![ScriptedResponse::text("t1")];
+    let sink = match FileTranscript::open(&path) {
+        Ok(sink) => sink,
+        Err(error) => panic!("open transcript {}: {error}", path.display()),
+    };
+    let mut config = make_config(Arc::new(FakeProvider::new(scripts)), root, Box::new(sink));
+    config.completion_checks = vec![always_fail_check()];
+    config.completion_config = CompletionConfig {
+        enabled: true,
+        max_attempts: 1,
+    };
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput { text: "go".into() }).await;
+    let _ = drive_resolving_gate(&mut h, GateResolution::Stop).await;
+
+    let records = emberly_core::resume::read_records(&path);
+    assert!(
+        records.is_ok(),
+        "resume reader tolerates completion_check/completion_gate_halt events"
+    );
+    let loaded = records.expect("checked ok");
+    assert!(
+        loaded
+            .records
+            .iter()
+            .any(|r| matches!(&r.event, TranscriptEvent::CompletionCheck { .. })),
+        "transcript contains completion_check events"
+    );
+    assert!(
+        loaded
+            .records
+            .iter()
+            .any(|r| matches!(&r.event, TranscriptEvent::CompletionGateHalt { .. })),
+        "transcript contains a completion_gate_halt event"
     );
 }

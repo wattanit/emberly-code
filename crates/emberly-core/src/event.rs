@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::{AskId, PermissionId, SessionId, ToolCallId};
-use crate::types::{Effort, Mode, PermissionRendering, SandboxStatus, TokenUsage};
+use crate::types::{CheckResult, Effort, Mode, PermissionRendering, SandboxStatus, TokenUsage};
 
 /// An event emitted by the engine for a frontend to render.
 ///
@@ -90,6 +90,28 @@ pub enum UiEvent {
     /// prompt. The frontend offers resume / stop / steer and replies with
     /// [`Command::ResolveLoop`](crate::command::Command::ResolveLoop).
     LoopHalted { reason: String },
+
+    /// The completion gate halted after `max_attempts` failed completion
+    /// attempts (S-6, Tech Spec §7, Design §8.7). A **harness-world** moment,
+    /// the S-6 mirror of [`LoopHalted`]: rendered in the harness's own
+    /// out-of-band voice, distinct from a failing check's agent-world
+    /// tool-result. The frontend offers keep-going / steer / stop / finish
+    /// (an explicit override, never presented as though the checks passed)
+    /// and replies with
+    /// [`Command::ResolveCompletionGate`](crate::command::Command::ResolveCompletionGate).
+    CompletionGateHalted {
+        failing: Vec<CheckResult>,
+        attempts: usize,
+    },
+
+    /// The registered completion checks' most recent results (S-6, Design
+    /// §8.7, §3.1), for the sidebar's gate-status line. Emitted after every
+    /// completion-gate evaluation (win or lose); never emitted when no checks
+    /// are registered, so a session with none shows nothing — like
+    /// [`MemoryStatus`](UiEvent::MemoryStatus) and
+    /// [`SkillsAvailable`](UiEvent::SkillsAvailable), the sidebar is silently
+    /// absent rather than a "None" stub until the gate has run at least once.
+    CompletionStatus { checks: Vec<CheckResult> },
 
     /// Context-window usage against the budget (Requirements §8.4). Always
     /// visible in the UI; invisible exhaustion is a defect.

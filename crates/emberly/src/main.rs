@@ -545,6 +545,8 @@ async fn run() -> anyhow::Result<()> {
         tool_explanations: resolved.tool_explanations,
         trust_granted,
         loop_config: resolved.loop_config,
+        completion_config: resolved.completion_config.clone(),
+        completion_checks: resolved.completion_checks.clone(),
         truncate: resolved.truncate,
         context: resolved.context,
         retry: emberly_core::RetryPolicy::default(),

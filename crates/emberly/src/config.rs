@@ -43,6 +43,10 @@ pub struct ConfigFile {
     /// `[loop]` guardrail settings (S-5). Threaded to the engine (Tech Spec §7).
     #[serde(default, rename = "loop")]
     pub loop_: LoopConfig,
+    /// `[completion]` + `[[completion.check]]` — the completion gate (S-6,
+    /// Tech Spec §7/§8). Threaded to the engine.
+    #[serde(default)]
+    pub completion: CompletionConfigFile,
     /// `[truncate]` tool-result reduction + size backstop (FR-2, Tech Spec §8).
     #[serde(default)]
     pub truncate: TruncateConfigFile,
@@ -98,6 +102,27 @@ pub struct LoopConfig {
     pub enabled: Option<bool>,
     pub repeat_window: Option<u32>,
     pub max_no_progress_turns: Option<u32>,
+}
+
+/// `[completion]` — the completion gate (S-6, Tech Spec §7). All optional;
+/// the engine applies defaults when unset. Inert until at least one
+/// `[[completion.check]]` is registered, regardless of `enabled`.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct CompletionConfigFile {
+    pub enabled: Option<bool>,
+    pub max_attempts: Option<usize>,
+    /// Registered pass/fail checks the gate runs on a completion attempt.
+    #[serde(default)]
+    pub check: Vec<CompletionCheckFile>,
+}
+
+/// One `[[completion.check]]` entry: a named command and the exit code that
+/// counts as a pass (S-6, Tech Spec §7).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompletionCheckFile {
+    pub name: String,
+    pub command: String,
+    pub expect_exit: Option<i32>,
 }
 
 /// `[context]` — the adaptive context window and compaction tail (FR-3, Tech
@@ -364,6 +389,19 @@ impl ConfigFile {
         if higher.loop_.max_no_progress_turns.is_some() {
             self.loop_.max_no_progress_turns = higher.loop_.max_no_progress_turns;
         }
+        // `[completion]` (S-6) merges scalar fields normally; a project's
+        // `[[completion.check]]` list **replaces** the whole list rather than
+        // concatenating with the lower tier's, mirroring "project wins per
+        // key" (a project that wants the global checks too must repeat them).
+        if higher.completion.enabled.is_some() {
+            self.completion.enabled = higher.completion.enabled;
+        }
+        if higher.completion.max_attempts.is_some() {
+            self.completion.max_attempts = higher.completion.max_attempts;
+        }
+        if !higher.completion.check.is_empty() {
+            self.completion.check = higher.completion.check;
+        }
         // `[truncate]` (FR-2) merges field-by-field.
         if higher.truncate.reduce.is_some() {
             self.truncate.reduce = higher.truncate.reduce;
@@ -472,6 +510,10 @@ pub struct Resolved {
     pub mouse: bool,
     /// Resolved loop-breaking guardrail tunables (S-5), ready for the engine.
     pub loop_config: emberly_core::LoopConfig,
+    /// Resolved completion-gate tunables (S-6), ready for the engine.
+    pub completion_config: emberly_core::CompletionConfig,
+    /// Resolved completion checks (S-6) to register at startup.
+    pub completion_checks: Vec<emberly_core::CompletionCheck>,
     /// Resolved truncation/reduction config (FR-2, §8.1), ready for the engine.
     pub truncate: emberly_tools::TruncateConfig,
     /// Resolved adaptive context-window config (FR-3, Tech Spec §7/§8).
@@ -652,6 +694,55 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         ),
         merged.ui.mouse.is_some(),
     );
+
+    // Completion gate (S-6): record provenance when a user tier sets any
+    // `[completion]` scalar field, plus a count line when checks are
+    // registered — closing the `[loop]` provenance gap (a pre-existing gap
+    // this phase deliberately does not repeat for `[completion]`).
+    if field(&project, |c: &ConfigFile| c.completion.enabled.is_some())
+        || field(&global, |c: &ConfigFile| c.completion.enabled.is_some())
+    {
+        record(
+            &mut provenance,
+            "completion.enabled",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.completion.enabled.is_some()),
+                field(&global, |c: &ConfigFile| c.completion.enabled.is_some()),
+            ),
+            true,
+        );
+    }
+    if field(&project, |c: &ConfigFile| {
+        c.completion.max_attempts.is_some()
+    }) || field(&global, |c: &ConfigFile| {
+        c.completion.max_attempts.is_some()
+    }) {
+        record(
+            &mut provenance,
+            "completion.max_attempts",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| {
+                    c.completion.max_attempts.is_some()
+                }),
+                field(&global, |c: &ConfigFile| {
+                    c.completion.max_attempts.is_some()
+                }),
+            ),
+            true,
+        );
+    }
+    if !merged.completion.check.is_empty() {
+        record(
+            &mut provenance,
+            "completion.check",
+            format!("{} registered", merged.completion.check.len()),
+            true,
+        );
+    }
 
     // Truncation/reduction (FR-2): record provenance when a user tier sets any
     // `[truncate]` field (speech about deviations from the baked-in defaults).
@@ -949,6 +1040,23 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
                     .map_or(d.max_no_progress_turns, |v| v as usize),
             }
         },
+        completion_config: {
+            let d = emberly_core::CompletionConfig::default();
+            emberly_core::CompletionConfig {
+                enabled: merged.completion.enabled.unwrap_or(d.enabled),
+                max_attempts: merged.completion.max_attempts.unwrap_or(d.max_attempts),
+            }
+        },
+        completion_checks: merged
+            .completion
+            .check
+            .iter()
+            .map(|c| emberly_core::CompletionCheck {
+                name: c.name.clone(),
+                command: c.command.clone(),
+                expect_exit: c.expect_exit.unwrap_or(0),
+            })
+            .collect(),
         truncate: {
             let d = emberly_tools::TruncateConfig::default();
             emberly_tools::TruncateConfig {
@@ -1571,6 +1679,94 @@ mod tests {
         base.merge(cfg);
         assert_eq!(base.loop_.enabled, Some(false));
         assert_eq!(base.loop_.repeat_window, Some(5));
+    }
+
+    #[test]
+    fn completion_config_parses_and_merges_scalars() {
+        let cfg = ConfigFile::parse(
+            "[completion]\nenabled = false\nmax_attempts = 5\n\
+             [[completion.check]]\nname = \"tests\"\ncommand = \"cargo test\"\n",
+        )
+        .expect("completion");
+        assert_eq!(cfg.completion.enabled, Some(false));
+        assert_eq!(cfg.completion.max_attempts, Some(5));
+        assert_eq!(cfg.completion.check.len(), 1);
+        assert_eq!(cfg.completion.check[0].name, "tests");
+        assert_eq!(cfg.completion.check[0].expect_exit, None);
+
+        let mut base = ConfigFile::default();
+        base.merge(cfg);
+        assert_eq!(base.completion.enabled, Some(false));
+        assert_eq!(base.completion.max_attempts, Some(5));
+        assert_eq!(base.completion.check.len(), 1);
+    }
+
+    #[test]
+    fn completion_check_list_replaces_rather_than_concatenates_on_merge() {
+        // A project's [[completion.check]] list replaces the lower tier's
+        // whole list (mirrors "project wins per key") rather than
+        // concatenating global + project checks.
+        let global = ConfigFile::parse(
+            "[[completion.check]]\nname = \"global-check\"\ncommand = \"true\"\n",
+        )
+        .expect("global");
+        let project = ConfigFile::parse(
+            "[[completion.check]]\nname = \"project-check\"\ncommand = \"true\"\n",
+        )
+        .expect("project");
+
+        let mut merged = ConfigFile::default();
+        merged.merge(global);
+        merged.merge(project);
+        assert_eq!(merged.completion.check.len(), 1);
+        assert_eq!(merged.completion.check[0].name, "project-check");
+    }
+
+    #[test]
+    fn completion_gate_resolves_defaults_and_checks_with_provenance() {
+        let dir = tmp();
+        let agents = dir.join(".agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("config.toml"),
+            "[completion]\nmax_attempts = 5\n\
+             [[completion.check]]\nname = \"tests\"\ncommand = \"cargo test\"\n",
+        )
+        .unwrap();
+
+        let resolved = load(&dir, &CliOverrides::default()).unwrap();
+        // `enabled` defaults to true (unset), `max_attempts` came from project.
+        assert!(resolved.completion_config.enabled);
+        assert_eq!(resolved.completion_config.max_attempts, 5);
+        assert_eq!(resolved.completion_checks.len(), 1);
+        assert_eq!(resolved.completion_checks[0].name, "tests");
+        assert_eq!(resolved.completion_checks[0].command, "cargo test");
+        // expect_exit defaults to 0 when unset in the file.
+        assert_eq!(resolved.completion_checks[0].expect_exit, 0);
+
+        assert!(resolved
+            .provenance
+            .iter()
+            .any(|p| p.piece == "completion.max_attempts" && p.source.starts_with("project")));
+        assert!(resolved
+            .provenance
+            .iter()
+            .any(|p| p.piece == "completion.check" && p.source == "1 registered"));
+    }
+
+    #[test]
+    fn completion_gate_inert_defaults_when_unconfigured() {
+        // No [completion] section anywhere: defaults apply and no checks are
+        // registered — the gate stays inert (S-6), with no provenance noise.
+        let dir = tmp();
+        let resolved = load(&dir, &CliOverrides::default()).unwrap();
+        assert!(resolved.completion_config.enabled);
+        assert_eq!(resolved.completion_config.max_attempts, 3);
+        assert!(resolved.completion_checks.is_empty());
+        assert!(!resolved
+            .provenance
+            .iter()
+            .any(|p| p.piece.starts_with("completion")));
     }
 
     #[cfg(unix)]

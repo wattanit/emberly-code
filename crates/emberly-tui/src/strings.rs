@@ -69,6 +69,30 @@ pub mod loop_halt {
     pub const LINE_PROMPT: &str = "[keep] keep going · [stop] stop · or type a message to steer";
 }
 
+/// The completion-gate halt surface (S-6, Design §8.7). The **harness**
+/// stepping in after a bounded number of failed completion attempts — its own
+/// out-of-band voice, calm, no blame, no alarm styling. Distinct from a
+/// failing check's agent-world tool-result (that is ordinary tool output the
+/// model reacts to; this is the harness stepping in once the model has had
+/// its bounded chances). Shared by both frontends.
+pub mod completion_gate {
+    pub const TITLE: &str = "stopped";
+    /// The calm one-liner (Design §8.7). The failing checks and attempt count
+    /// follow on their own lines.
+    pub const HEADING: &str = "Stopped — the completion checks still fail.";
+    pub const KEEP_GOING: &str = "keep going";
+    pub const STOP: &str = "stop here";
+    pub const SAY_SOMETHING: &str = "say something";
+    /// Labeled as an override (Design §8.7) — never "checks passed".
+    pub const FINISH_ANYWAY: &str = "finish anyway (override)";
+    pub const HINT: &str = "g keep going · s stop · t say something · f finish anyway";
+    pub const STEER_HINT: &str = "type a steer · Enter send · Esc back";
+    pub const STEER_LABEL: &str = "your steer";
+    /// Degraded-mode prompt line.
+    pub const LINE_PROMPT: &str =
+        "[keep] keep going · [stop] stop · [finish] finish anyway · or type a message to steer";
+}
+
 /// Status-bar and sidebar chrome (Design §3).
 pub mod status {
     pub const CONTEXT_ABBR: &str = "ctx";
@@ -79,6 +103,8 @@ pub mod status {
     pub const TOKENS_IN: &str = "↑";
     pub const TOKENS_OUT: &str = "↓";
     pub const SANDBOX_LABEL: &str = "sandbox";
+    /// The completion-gate sidebar status line's label (S-6, Design §8.7).
+    pub const GATE_LABEL: &str = "gate";
     pub const SANDBOX_UNKNOWN: &str = "—";
     pub const MODIFIED_FILES_TITLE: &str = "modified files";
     pub const MODEL_LABEL: &str = "model";

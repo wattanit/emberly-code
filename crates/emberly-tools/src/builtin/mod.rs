@@ -20,7 +20,7 @@ mod web_search;
 mod write;
 
 pub use ask_user::AskUserTool;
-pub use bash::BashTool;
+pub use bash::{BashTool, DEFAULT_ENV_ALLOWLIST, DEFAULT_TIMEOUT_SECS};
 pub use edit::EditFileTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;

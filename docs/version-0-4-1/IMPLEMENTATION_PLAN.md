@@ -1,8 +1,8 @@
 # Emberly Code — Implementation Plan (0.4.1 feature set)
 
-**Status:** 📋 **planned** — not yet started. Two phases expanding Tech Spec
-milestone **M9** (the 0.4.1 cross-project feature set): the completion gate
-(S-6) and document (PDF) input (P-12 + T-16).
+**Status:** 🚧 **in progress** — Phase 1 (completion gate, S-6) is **done**;
+Phase 2 (document/PDF input, P-12 + T-16) is not yet started. Two phases
+expanding Tech Spec milestone **M9** (the 0.4.1 cross-project feature set).
 **Date:** 2026-07-15 (planned)
 **Owner:** Wattanit
 **Source documents** (G-14 as-built pin for the 0.4.1 release):
@@ -81,7 +81,7 @@ requester targets macOS only for its prototyping stage — and is not in this pl
 
 ---
 
-## Phase 1 — Completion gate (S-6)
+## Phase 1 — Completion gate (S-6) — ✅ DONE (2026-07-15)
 
 **Goal:** Let a session hold the agent loop to registered pass/fail checks before
 it may declare a task done — the model-driven analog of the loop guardrail (S-5):
