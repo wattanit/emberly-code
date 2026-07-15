@@ -31,8 +31,8 @@ pub mod truncate;
 pub use ask_user::{AskUserGate, AskUserOutcome};
 pub use builtin::{
     default_registry, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, MemoryTool,
-    ReadFileTool, ReadImageTool, RecallTool, SkillTool, TaskListTool, WebSearchTool, WriteFileTool,
-    DEFAULT_ENV_ALLOWLIST, DEFAULT_TIMEOUT_SECS,
+    ReadDocumentTool, ReadFileTool, ReadImageTool, RecallTool, SkillTool, TaskListTool,
+    WebSearchTool, WriteFileTool, DEFAULT_ENV_ALLOWLIST, DEFAULT_TIMEOUT_SECS,
 };
 pub use ctx::{ToolCtx, TruncateConfig};
 pub use memory::{

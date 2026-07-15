@@ -1104,6 +1104,23 @@ mod tests {
                 preview: String::new(),
                 untrusted: false,
             },
+            // read_document reference line (P-12, Design §4.11): ASCII-only in
+            // degraded mode, no ANSI. No-document-support failure also
+            // ASCII-only.
+            UiEvent::ToolFinished {
+                call_id: ToolCallId::new("doc"),
+                ok: true,
+                summary: "read document report.pdf \u{00b7} 12.3 KB \u{00b7} PDF".into(),
+                preview: String::new(),
+                untrusted: false,
+            },
+            UiEvent::ToolFinished {
+                call_id: ToolCallId::new("doc2"),
+                ok: false,
+                summary: "no document support".into(),
+                preview: String::new(),
+                untrusted: false,
+            },
         ];
         for e in events {
             let s = render_to_string(&e);

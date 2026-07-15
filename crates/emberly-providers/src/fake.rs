@@ -145,6 +145,7 @@ impl FakeProvider {
                 effort_levels: Effort::ALL.to_vec(),
                 default_effort: Some(Effort::Medium),
                 vision: false,
+                documents: false,
             },
             scripts: Mutex::new(scripts.into_iter().collect()),
             last_request: Mutex::new(None),

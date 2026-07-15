@@ -56,6 +56,9 @@ pub struct ConfigFile {
     /// `[image]` read_image size cap (P-11, Tech Spec §5.2).
     #[serde(default)]
     pub image: ImageConfigFile,
+    /// `[document]` read_document size cap (P-12, Tech Spec §5.2).
+    #[serde(default)]
+    pub document: DocumentConfigFile,
     /// `[memory]` persistent memory (FR-6, Tech Spec §8.1).
     #[serde(default)]
     pub memory: MemoryConfigFile,
@@ -149,6 +152,14 @@ pub struct ContextConfigFile {
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct ImageConfigFile {
     /// Maximum image file size in bytes (default 5 MiB).
+    pub max_bytes: Option<usize>,
+}
+
+/// `[document]` — the `read_document` size cap (P-12, Tech Spec §5.2). All
+/// optional; the engine applies the 32 MiB default when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct DocumentConfigFile {
+    /// Maximum document file size in bytes (default 32 MiB).
     pub max_bytes: Option<usize>,
 }
 
@@ -251,6 +262,9 @@ pub struct ModelFile {
     /// Whether the model accepts image input (P-11, Tech Spec §4.2). Default
     /// `false`; set `true` for a vision-capable model.
     pub vision: Option<bool>,
+    /// Whether the model accepts document input (P-12, Tech Spec §4.2).
+    /// Default `false`; set `true` for a document-capable model.
+    pub documents: Option<bool>,
 }
 
 impl ProfileFile {
@@ -438,6 +452,10 @@ impl ConfigFile {
         if higher.image.max_bytes.is_some() {
             self.image.max_bytes = higher.image.max_bytes;
         }
+        // `[document]` (P-12) merges field-by-field.
+        if higher.document.max_bytes.is_some() {
+            self.document.max_bytes = higher.document.max_bytes;
+        }
         // `[memory]` (FR-6) merges field-by-field.
         if higher.memory.enabled.is_some() {
             self.memory.enabled = higher.memory.enabled;
@@ -521,6 +539,9 @@ pub struct Resolved {
     /// Resolved image size limit in bytes for `read_image` (P-11, Tech Spec
     /// §5.2). Default 5 MiB.
     pub image_max_bytes: usize,
+    /// Resolved document size limit in bytes for `read_document` (P-12, Tech
+    /// Spec §5.2). Default 32 MiB.
+    pub document_max_bytes: usize,
     /// Resolved memory config (FR-6, Tech Spec §8.1), ready for the engine.
     pub memory: emberly_core::MemoryConfig,
     /// Resolved skills config (FR-7, Tech Spec §8.2), ready for the engine.
@@ -870,6 +891,24 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         );
     }
 
+    // Document size cap (P-12): record provenance when a user tier sets
+    // `[document] max_bytes` (speech about deviations, silent on the default).
+    if field(&project, |c: &ConfigFile| c.document.max_bytes.is_some())
+        || field(&global, |c: &ConfigFile| c.document.max_bytes.is_some())
+    {
+        record(
+            &mut provenance,
+            "document.max_bytes",
+            source_of(
+                false,
+                false,
+                field(&project, |c: &ConfigFile| c.document.max_bytes.is_some()),
+                field(&global, |c: &ConfigFile| c.document.max_bytes.is_some()),
+            ),
+            true,
+        );
+    }
+
     // Memory (FR-6): record provenance when a user tier sets any `[memory]`
     // field.
     if field(&project, |c: &ConfigFile| c.memory.enabled.is_some())
@@ -1093,6 +1132,7 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             }
         },
         image_max_bytes: merged.image.max_bytes.unwrap_or(5 * 1024 * 1024),
+        document_max_bytes: merged.document.max_bytes.unwrap_or(32 * 1024 * 1024),
         memory: {
             let d = emberly_core::MemoryConfig::default();
             emberly_core::MemoryConfig {
@@ -1767,6 +1807,48 @@ mod tests {
             .provenance
             .iter()
             .any(|p| p.piece.starts_with("completion")));
+    }
+
+    #[test]
+    fn document_config_parses_and_merges_scalars() {
+        let cfg = ConfigFile::parse("[document]\nmax_bytes = 1048576\n").expect("document");
+        assert_eq!(cfg.document.max_bytes, Some(1_048_576));
+
+        let mut base = ConfigFile::default();
+        base.merge(cfg);
+        assert_eq!(base.document.max_bytes, Some(1_048_576));
+    }
+
+    #[test]
+    fn document_max_bytes_resolves_with_provenance() {
+        let dir = tmp();
+        let agents = dir.join(".agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("config.toml"),
+            "[document]\nmax_bytes = 1048576\n",
+        )
+        .unwrap();
+
+        let resolved = load(&dir, &CliOverrides::default()).unwrap();
+        assert_eq!(resolved.document_max_bytes, 1_048_576);
+        assert!(resolved
+            .provenance
+            .iter()
+            .any(|p| p.piece == "document.max_bytes" && p.source.starts_with("project")));
+    }
+
+    #[test]
+    fn document_max_bytes_defaults_to_32_mib_when_unconfigured() {
+        // No [document] section anywhere: the 32 MiB default applies (Tech
+        // Spec §5.2, P-12) with no provenance noise (silent on the default).
+        let dir = tmp();
+        let resolved = load(&dir, &CliOverrides::default()).unwrap();
+        assert_eq!(resolved.document_max_bytes, 32 * 1024 * 1024);
+        assert!(!resolved
+            .provenance
+            .iter()
+            .any(|p| p.piece == "document.max_bytes"));
     }
 
     #[cfg(unix)]

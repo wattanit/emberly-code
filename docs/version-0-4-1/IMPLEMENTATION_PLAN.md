@@ -1,8 +1,8 @@
 # Emberly Code — Implementation Plan (0.4.1 feature set)
 
-**Status:** 🚧 **in progress** — Phase 1 (completion gate, S-6) is **done**;
-Phase 2 (document/PDF input, P-12 + T-16) is not yet started. Two phases
-expanding Tech Spec milestone **M9** (the 0.4.1 cross-project feature set).
+**Status:** ✅ **done** — Phase 1 (completion gate, S-6) and Phase 2
+(document/PDF input, P-12 + T-16) are both **done**. Two phases expanding Tech
+Spec milestone **M9** (the 0.4.1 cross-project feature set).
 **Date:** 2026-07-15 (planned)
 **Owner:** Wattanit
 **Source documents** (G-14 as-built pin for the 0.4.1 release):
@@ -146,7 +146,7 @@ termination unchanged (Tech Spec §14.8, S-6).
 
 ---
 
-## Phase 2 — Document (PDF) input (P-12, T-16)
+## Phase 2 — Document (PDF) input (P-12, T-16) — ✅ DONE (2026-07-15)
 
 **Goal:** Let the model *read* a document — a PDF already in the project — into
 context as a document content block, behind the provider abstraction so it works

@@ -268,6 +268,9 @@ pub struct EngineConfig {
     /// Maximum image file size in bytes for the `read_image` tool (Tech Spec
     /// §5.2, default 5 MiB).
     pub image_max_bytes: usize,
+    /// Maximum document file size in bytes for the `read_document` tool (Tech
+    /// Spec §5.2, default 32 MiB).
+    pub document_max_bytes: usize,
     /// Memory config (FR-6, Tech Spec §8.1).
     pub memory: MemoryConfig,
     /// User-global memory directory (`~/.config/emberly/memory/`). Always `Some`
@@ -387,7 +390,10 @@ impl AdoptedState {
 
 /// Outcome of running one tool call.
 enum ToolCallResult {
-    Completed(emberly_tools::ToolOutcome),
+    // Boxed: `ToolOutcome` grew past clippy's large-enum-variant threshold
+    // once it carried both an optional image and an optional document
+    // payload (P-11/P-12); `Canceled` carries no data at all.
+    Completed(Box<emberly_tools::ToolOutcome>),
     Canceled,
 }
 
@@ -718,6 +724,9 @@ pub struct Engine {
     /// Maximum image file size in bytes (Tech Spec §5.2). Threaded to the
     /// `read_image` tool via `ToolCtx`.
     image_max_bytes: usize,
+    /// Maximum document file size in bytes (Tech Spec §5.2). Threaded to the
+    /// `read_document` tool via `ToolCtx`.
+    document_max_bytes: usize,
     /// Memory config (FR-6, Tech Spec §8.1).
     memory_config: MemoryConfig,
     /// The durable memory store (FR-6, T-13). `None` when memory is disabled
@@ -864,6 +873,7 @@ impl Engine {
             config_reloader: config.config_reloader,
             task_list: Vec::new(),
             image_max_bytes: config.image_max_bytes,
+            document_max_bytes: config.document_max_bytes,
             memory_config: config.memory.clone(),
             memory_store,
             memory_user_index: String::new(),
@@ -1656,7 +1666,9 @@ impl Engine {
                 )
                 .await
             {
-                ToolCallResult::Completed(outcome) => self.ingest_tool_result(&call, outcome).await,
+                ToolCallResult::Completed(outcome) => {
+                    self.ingest_tool_result(&call, *outcome).await
+                }
                 ToolCallResult::Canceled => {
                     self.push_canceled_result(&call).await;
                     for remaining in iter {
@@ -1666,7 +1678,7 @@ impl Engine {
                 }
             }
         }
-        ToolCallResult::Completed(emberly_tools::ToolOutcome::success("", ""))
+        ToolCallResult::Completed(Box::new(emberly_tools::ToolOutcome::success("", "")))
     }
 
     /// Fold the just-completed tool-call turn into the loop-guardrail state and
@@ -2002,10 +2014,10 @@ impl Engine {
         }
 
         let Some(tool) = self.tools.get(&call.name) else {
-            return ToolCallResult::Completed(emberly_tools::ToolOutcome::failure(
+            return ToolCallResult::Completed(Box::new(emberly_tools::ToolOutcome::failure(
                 format!("unknown tool: {}", call.name),
                 "unknown tool",
-            ));
+            )));
         };
 
         // Describe the invocation from its arguments (e.g. `run: cargo test`,
@@ -2031,7 +2043,7 @@ impl Engine {
 
         loop {
             tokio::select! {
-                outcome = &mut exec => return ToolCallResult::Completed(outcome),
+                outcome = &mut exec => return ToolCallResult::Completed(Box::new(outcome)),
                 Some(ask) = asks_rx.recv() => self.on_permission_ask(ask, &mut pending).await,
                 Some(ask) = user_asks_rx.recv() => self.on_user_ask(ask, &mut pending_user).await,
                 Some(recall) = recall_rx.recv() => self.on_recall(recall).await,
@@ -2539,6 +2551,22 @@ impl Engine {
             });
         }
 
+        // A document from `read_document` (P-12): append a
+        // `ContentBlock::Document` the same way an image is appended — a
+        // synthetic user message so both adapters can carry it (Tech Spec
+        // §4.2). The bytes are NOT in the transcript (HC-7); the `tool_call`
+        // recorded the path, and the block lives only in the live
+        // conversation (re-derived from disk on resume).
+        if let Some(document) = outcome.document {
+            self.push_conversation_message(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Document {
+                    media_type: document.media_type,
+                    data: document.data,
+                }],
+            });
+        }
+
         self.emit(UiEvent::ToolFinished {
             call_id: call.id.clone(),
             ok: outcome.ok,
@@ -2842,6 +2870,8 @@ impl Engine {
         .with_skill_gate(self.skill_gate.clone())
         .with_vision(self.provider.model_info().vision)
         .with_image_max_bytes(self.image_max_bytes)
+        .with_documents(self.provider.model_info().documents)
+        .with_document_max_bytes(self.document_max_bytes)
     }
 
     /// Reload the memory index strings from the store into the cached fields.
@@ -3195,6 +3225,11 @@ impl Engine {
                     // budget with raw base64 length (initial; tune with use,
                     // Requirements §13).
                     ContentBlock::Image { .. } => IMAGE_TOKEN_ESTIMATE,
+                    // A document's token cost is not chars/4 of its base64
+                    // either — same reasoning as the image estimate above,
+                    // refined by provider-reported usage where available
+                    // (P-12).
+                    ContentBlock::Document { .. } => DOCUMENT_TOKEN_ESTIMATE,
                 });
             }
         }
@@ -3242,6 +3277,11 @@ fn render_for_summary(messages: &[Message]) -> String {
                 ContentBlock::Image { media_type, .. } => {
                     format!("[image: {media_type}]")
                 }
+                // A document is summarized by its media type, not its bytes
+                // (HC-2 — the harness never parses it).
+                ContentBlock::Document { media_type, .. } => {
+                    format!("[document: {media_type}]")
+                }
             };
             if !piece.is_empty() {
                 out.push_str(role);
@@ -3288,6 +3328,9 @@ fn render_recall(messages: &[Message], reduce: bool) -> String {
                 ContentBlock::Image { media_type, .. } => {
                     format!("[image: {media_type}]")
                 }
+                ContentBlock::Document { media_type, .. } => {
+                    format!("[document: {media_type}]")
+                }
             };
             if !piece.is_empty() {
                 out.push_str(role);
@@ -3311,6 +3354,12 @@ const PREVIEW_CHARS: usize = 600;
 /// arrives, this fixed estimate avoids inflating the budget. Initial; tune with
 /// use (Requirements §13, Tech Spec §16).
 const IMAGE_TOKEN_ESTIMATE: u64 = 765;
+
+/// Rough per-document token cost for the context-budget estimate (P-12). A
+/// PDF's cost is not chars/4 of its base64 either; same reasoning as
+/// [`IMAGE_TOKEN_ESTIMATE`]. Initial; tune with use (Requirements §13, Tech
+/// Spec §16).
+const DOCUMENT_TOKEN_ESTIMATE: u64 = 765;
 
 /// A short excerpt of a tool's output for the conversation (Design §6.1): the
 /// first few lines, char-capped. The full output goes to the model; this is

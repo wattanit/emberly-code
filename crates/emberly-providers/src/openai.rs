@@ -187,16 +187,19 @@ fn joined_text(message: &Message) -> String {
         .join("")
 }
 
-/// Build the `content` value for a `user`-role message (P-11, Tech Spec §4.2).
-/// When the message carries any image block, returns an array of text + image
-/// parts; otherwise returns a plain string for back-compat with every existing
-/// text-only turn. OpenAI tool-role messages cannot carry image parts.
+/// Build the `content` value for a `user`-role message (P-11/P-12, Tech Spec
+/// §4.2). When the message carries any image or document block, returns an
+/// array of text + media parts; otherwise returns a plain string for
+/// back-compat with every existing text-only turn. OpenAI tool-role messages
+/// cannot carry image or document parts.
 fn user_content(message: &Message) -> Value {
-    let has_image = message
-        .content
-        .iter()
-        .any(|block| matches!(block, ContentBlock::Image { .. }));
-    if !has_image {
+    let has_media = message.content.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::Image { .. } | ContentBlock::Document { .. }
+        )
+    });
+    if !has_media {
         return Value::String(joined_text(message));
     }
     let parts: Vec<Value> = message
@@ -208,6 +211,17 @@ fn user_content(message: &Message) -> Value {
                 "type": "image_url",
                 "image_url": {
                     "url": format!("data:{media_type};base64,{data}")
+                }
+            })),
+            // A document maps to the endpoint's file input part (P-12, Tech
+            // Spec §4.2). `ContentBlock::Document` carries no filename (HC-2 —
+            // the harness never tracks more than media type + bytes), so a
+            // fixed, format-matching name is used.
+            ContentBlock::Document { media_type, data } => Some(json!({
+                "type": "file",
+                "file": {
+                    "filename": "document.pdf",
+                    "file_data": format!("data:{media_type};base64,{data}")
                 }
             })),
             _ => None,
@@ -452,5 +466,40 @@ mod tests {
             .and_then(|iu| iu.get("url"))
             .and_then(Value::as_str);
         assert_eq!(url, Some("data:image/png;base64,iVBOR"));
+    }
+
+    #[test]
+    fn document_in_user_message_produces_file_data_uri() {
+        // P-12, Tech Spec §4.2: a document in a user message maps to a `file`
+        // part with a `file_data` `data:` URI — the same structured-content
+        // path a document triggers as an image does (the `has_media` guard).
+        let msg = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "what does this say?".into(),
+                },
+                ContentBlock::Document {
+                    media_type: "application/pdf".into(),
+                    data: "JVBERi0".into(),
+                },
+            ],
+        };
+        let content = user_content(&msg);
+        let Some(parts) = content.as_array() else {
+            panic!("array when document present");
+        };
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].get("type").and_then(Value::as_str), Some("text"));
+        assert_eq!(parts[1].get("type").and_then(Value::as_str), Some("file"));
+        let file = parts[1].get("file");
+        assert_eq!(
+            file.and_then(|f| f.get("filename")).and_then(Value::as_str),
+            Some("document.pdf")
+        );
+        let file_data = file
+            .and_then(|f| f.get("file_data"))
+            .and_then(Value::as_str);
+        assert_eq!(file_data, Some("data:application/pdf;base64,JVBERi0"));
     }
 }

@@ -43,6 +43,7 @@ impl Provider for PlaceholderProvider {
             effort_levels: Vec::new(),
             default_effort: None,
             vision: false,
+            documents: false,
         }
     }
 

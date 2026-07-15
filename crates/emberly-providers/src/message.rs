@@ -58,6 +58,12 @@ pub enum ContentBlock {
     /// (`image/png`, `image/jpeg`, `image/gif`, `image/webp`). Each adapter maps
     /// this to its provider's native image content shape (Tech Spec §4.2).
     Image { media_type: String, data: String },
+    /// A document to send to the model (P-12, Tech Spec §4.1). `data` is the
+    /// base64 encoding of the file bytes; `media_type` is always
+    /// `application/pdf` (PDF only, Requirements §2.3). The harness never
+    /// parses the bytes (HC-2); each adapter maps this to its provider's
+    /// native document content shape (Tech Spec §4.2).
+    Document { media_type: String, data: String },
 }
 
 /// `skip_serializing_if` helper: omit `redacted` from the wire when false.

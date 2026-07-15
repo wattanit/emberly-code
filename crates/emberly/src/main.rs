@@ -575,6 +575,7 @@ async fn run() -> anyhow::Result<()> {
         ))),
         config_reloader: Some(config_reloader),
         image_max_bytes: resolved.image_max_bytes,
+        document_max_bytes: resolved.document_max_bytes,
         memory: resolved.memory.clone(),
         user_memory_dir: config::memory_dir(),
         // The trust gate exits on decline (FR-1), so reaching this point means

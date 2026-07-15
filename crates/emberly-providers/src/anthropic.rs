@@ -234,6 +234,20 @@ fn block_to_anthropic(block: &ContentBlock) -> Value {
                 }
             })
         }
+        // Map a document to the Anthropic base64 `document` source shape
+        // (P-12, Tech Spec §4.2). Pulled forward from group 4: `ContentBlock`
+        // is not `#[non_exhaustive]`, so this match must cover `Document` for
+        // the crate to compile at all once the variant exists.
+        ContentBlock::Document { media_type, data } => {
+            json!({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                }
+            })
+        }
     }
 }
 
@@ -614,6 +628,33 @@ mod tests {
         assert_eq!(
             source.and_then(|s| s.get("data")).and_then(Value::as_str),
             Some("iVBOR")
+        );
+    }
+
+    #[test]
+    fn document_block_maps_to_anthropic_base64_source() {
+        // P-12, Tech Spec §4.2: the Document variant maps to the Anthropic
+        // `document` block with a `base64` source shape.
+        let block = ContentBlock::Document {
+            media_type: "application/pdf".into(),
+            data: "JVBERi0".into(),
+        };
+        let wire = block_to_anthropic(&block);
+        assert_eq!(wire.get("type").and_then(Value::as_str), Some("document"));
+        let source = wire.get("source");
+        assert_eq!(
+            source.and_then(|s| s.get("type")).and_then(Value::as_str),
+            Some("base64")
+        );
+        assert_eq!(
+            source
+                .and_then(|s| s.get("media_type"))
+                .and_then(Value::as_str),
+            Some("application/pdf")
+        );
+        assert_eq!(
+            source.and_then(|s| s.get("data")).and_then(Value::as_str),
+            Some("JVBERi0")
         );
     }
 }

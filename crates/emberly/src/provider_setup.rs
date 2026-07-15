@@ -105,6 +105,7 @@ fn build_profile(
             .and_then(Effort::parse),
         effort_levels: effort_levels_from(meta),
         vision: meta.and_then(|m| m.vision).unwrap_or(false),
+        documents: meta.and_then(|m| m.documents).unwrap_or(false),
     };
     let client = build_https_client()?;
 
@@ -379,6 +380,7 @@ mod tests {
                 effort: None,
                 effort_levels: None,
                 vision: None,
+                documents: None,
             },
         );
         let mut providers = HashMap::new();
@@ -388,6 +390,31 @@ mod tests {
             .model_info();
         assert_eq!(info.context_window, 123_456);
         assert_eq!(info.max_output_tokens, 4_321);
+    }
+
+    #[test]
+    fn documents_flag_feeds_model_info() {
+        // P-12: a model declaring `documents = true` in config surfaces as
+        // `ModelInfo.documents` (mirrors the `vision` flag round trip).
+        let mut prof = profile("openai", Some("http://localhost:0/v1"));
+        prof.models.insert(
+            "m".to_string(),
+            ModelFile {
+                context_window: None,
+                max_output: None,
+                pricing: None,
+                effort: None,
+                effort_levels: None,
+                vision: None,
+                documents: Some(true),
+            },
+        );
+        let mut providers = HashMap::new();
+        providers.insert("p".to_string(), prof);
+        let info = build_profile(&providers, "p", "m")
+            .expect("builds")
+            .model_info();
+        assert!(info.documents);
     }
 
     #[test]
