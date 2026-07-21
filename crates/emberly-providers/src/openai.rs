@@ -319,8 +319,22 @@ impl SseMapper for OpenAiMapper {
                 let function = &call["function"];
                 if let std::collections::hash_map::Entry::Vacant(entry) = self.tool_ids.entry(index)
                 {
-                    let id =
-                        ToolCallId::new(call.get("id").and_then(Value::as_str).unwrap_or_default());
+                    // Some OpenAI-compatible backends omit `id` (or send it
+                    // empty/null) on every chunk of a parallel tool call, not
+                    // just the later ones the spec allows dropping it on. An
+                    // empty-string fallback would let two such calls collide
+                    // on the same id downstream (engine.rs matches
+                    // ToolCallDelta by id equality), silently merging their
+                    // argument buffers — e.g. two concurrent `write_file`
+                    // calls' JSON interleaving into one, corrupting content.
+                    // `index` is unique per parallel call by construction, so
+                    // fall back to it instead of a shared empty id.
+                    let id = ToolCallId::new(
+                        call.get("id")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .map_or_else(|| format!("call_{index}"), str::to_string),
+                    );
                     let name = function
                         .get("name")
                         .and_then(Value::as_str)
@@ -425,6 +439,82 @@ mod tests {
     fn plain_content_delta_emits_no_reasoning() {
         let events = map_one(r#"{"choices":[{"delta":{"content":"hi"},"index":0}]}"#);
         assert_eq!(events, vec![StreamEvent::TextDelta { text: "hi".into() }]);
+    }
+
+    #[test]
+    fn parallel_tool_calls_get_distinct_ids_when_backend_omits_id() {
+        // Regression: some OpenAI-compatible backends never send `id` on a
+        // tool_calls chunk, not even the first one for a given index. A
+        // shared empty-string fallback id would make engine.rs's id-keyed
+        // buffer lookup merge two concurrent calls' argument deltas into one
+        // buffer, corrupting content (e.g. two `write_file` calls' JSON
+        // interleaving, garbling embedded `\n` escapes).
+        let mut mapper = OpenAiMapper::default();
+        let feed = |mapper: &mut OpenAiMapper, data: Value| -> Vec<StreamEvent> {
+            mapper
+                .map(SseEvent {
+                    event: None,
+                    data: data.to_string(),
+                })
+                .into_iter()
+                .filter_map(Result::ok)
+                .collect()
+        };
+
+        let start0 = feed(
+            &mut mapper,
+            json!({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"name": "write_file", "arguments": ""}}
+            ]}}]}),
+        );
+        let start1 = feed(
+            &mut mapper,
+            json!({"choices": [{"delta": {"tool_calls": [
+                {"index": 1, "function": {"name": "write_file", "arguments": ""}}
+            ]}}]}),
+        );
+        let id0 = match &start0[0] {
+            StreamEvent::ToolCallStart { id, .. } => id.clone(),
+            other => panic!("expected ToolCallStart, got {other:?}"),
+        };
+        let id1 = match &start1[0] {
+            StreamEvent::ToolCallStart { id, .. } => id.clone(),
+            other => panic!("expected ToolCallStart, got {other:?}"),
+        };
+        assert_ne!(
+            id0, id1,
+            "parallel calls must not collide on a shared fallback id"
+        );
+
+        let args0 = r#"{"path":"a.txt","content":"line1\nline2"}"#;
+        let args1 = r#"{"path":"b.txt","content":"other\ncontent"}"#;
+        let delta0 = feed(
+            &mut mapper,
+            json!({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": args0}}
+            ]}}]}),
+        );
+        let delta1 = feed(
+            &mut mapper,
+            json!({"choices": [{"delta": {"tool_calls": [
+                {"index": 1, "function": {"arguments": args1}}
+            ]}}]}),
+        );
+
+        match &delta0[0] {
+            StreamEvent::ToolCallDelta { id, args_delta } => {
+                assert_eq!(*id, id0);
+                assert_eq!(args_delta, args0);
+            }
+            other => panic!("expected ToolCallDelta, got {other:?}"),
+        }
+        match &delta1[0] {
+            StreamEvent::ToolCallDelta { id, args_delta } => {
+                assert_eq!(*id, id1);
+                assert_eq!(args_delta, args1);
+            }
+            other => panic!("expected ToolCallDelta, got {other:?}"),
+        }
     }
 
     #[test]
