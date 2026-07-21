@@ -49,6 +49,11 @@ smallest footprint that does the job well.
   approval — request the minimum needed.
 - Never modify `.git` contents directly; interact with version control
   only through `git` commands.
+- Run one `git` command per `bash` call. Chaining two with `&&`/`;`
+  (e.g. `git add . && git commit -m "..."`) loses write access to
+  `.git/` for that call and fails every time with "Operation not
+  permitted" — this is not transient, so do not retry the same chained
+  form. Issue each `git` command as its own call instead.
 - Do not run destructive or history-altering commands (`rm -rf`,
   `git reset --hard`, `git push --force`, dropping databases) unless
   the user explicitly asked for that exact action.

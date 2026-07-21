@@ -7,6 +7,15 @@ every session's `session_start` transcript record, so a session (or a resume)
 records which prompt set produced it. Bump `VERSION` whenever a prompt changes
 and add an entry here.
 
+## v5 — 2026-07-22
+- `system.md`: added a "Boundaries" bullet telling the model to run one
+  `git` command per `bash` call — chaining with `&&`/`;` loses the
+  `.git/`-writable sandbox grant for that call (Requirements §6.5, HC-5) and
+  fails deterministically, not transiently, so the model should not retry the
+  same chained form. Without this, the model had no way to learn the
+  constraint except by repeatedly hitting the failure. `compact.md` and
+  `tool_explanation.md` unchanged.
+
 ## v4 — 2026-07-11
 - `system.md`: strengthened the "Using tools" section to steer the model toward
   the first-party tools (`grep`/`glob`/`read_file`) over their shell equivalents
