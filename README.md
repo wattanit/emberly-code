@@ -233,6 +233,7 @@ agent's task list, and changed files.
 | `Enter` | Send your message |
 | `Shift+Enter` / `Alt+Enter` | Newline (compose a multi-line message) |
 | `Esc` | Cancel the current turn / dismiss an overlay |
+| `Ctrl-C` | Cancel the current turn; quits when idle and the input line is empty |
 | `↑` `↓` `PgUp` `PgDn` / mouse wheel | Scroll the conversation or an overlay |
 | `Ctrl-R` | Toggle the reasoning trail open/closed |
 | `Ctrl-P` | Open the command palette |

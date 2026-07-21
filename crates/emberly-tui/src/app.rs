@@ -988,13 +988,19 @@ impl App {
                 Action::None
             }
             KeyCode::Char('c') if ctrl => {
-                if self.editor.is_empty() {
+                if self.busy {
+                    Action::Command(Command::Cancel)
+                } else if self.editor.is_empty() {
                     Action::Quit
                 } else {
                     self.editor.clear();
                     Action::None
                 }
             }
+            // Cancel an in-flight turn (Command::Cancel doc, README keybinding
+            // table). No modal is open here (those handle their own Esc
+            // above), so idle Esc has nothing to dismiss.
+            KeyCode::Esc if self.busy => Action::Command(Command::Cancel),
             KeyCode::Char('b') if ctrl => {
                 self.sidebar_visible = !self.sidebar_visible;
                 Action::None
@@ -3500,6 +3506,39 @@ mod tests {
         a.apply_event(UiEvent::TurnEnded);
         assert!(!a.busy);
         assert!(!a.is_animating());
+    }
+
+    #[test]
+    fn esc_cancels_an_in_flight_turn() {
+        let mut a = app();
+        // Idle: Esc has nothing to dismiss and no modal is open.
+        assert!(matches!(
+            a.on_key(KeyEvent::from(KeyCode::Esc)),
+            Action::None
+        ));
+        assert!(!a.busy);
+
+        a.on_key(KeyEvent::from(KeyCode::Char('h')));
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(a.busy);
+        let action = a.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(action, Action::Command(Command::Cancel)));
+    }
+
+    #[test]
+    fn ctrl_c_cancels_an_in_flight_turn_but_quits_when_idle() {
+        let mut a = app();
+        // Idle + empty input: unchanged behavior, Ctrl+C quits.
+        assert!(matches!(
+            a.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Action::Quit
+        ));
+
+        a.on_key(KeyEvent::from(KeyCode::Char('h')));
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(a.busy);
+        let action = a.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(matches!(action, Action::Command(Command::Cancel)));
     }
 
     #[test]
