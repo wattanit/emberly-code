@@ -1,11 +1,11 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.9 
+**Version:** 0.10 
 **Status:** approved
-**Date:** 2026-07-15
+**Date:** 2026-07-21
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.8 (upstream contract),
-Design Guideline v0.8 (upstream for all UI/UX decisions)
+**Companion documents:** Requirements Document v0.9 (upstream contract),
+Design Guideline v0.9 (upstream for all UI/UX decisions)
 
 This document defines HOW Emberly Code is built. Requirements-level
 identifiers (HC-n, FR-n, P-n, T-n, C-n, S-n, A-n) refer to the Requirements
@@ -775,14 +775,33 @@ in transcripts (requests are logged with auth headers redacted).
 files via the editable overlay or `$EDITOR` handoff (Design §4.6). Writes
 target the project tier (Requirements C-1); the value's provenance
 (`config show`, C-3) is shown before the edit. Prompts and most config
-live-reload on save; keys that require a restart are a static list in the
-config module, and the editor names them at save time — the type carries
-a `reload: Live | RestartRequired` flag per key so "does this need a
-restart" is not a guess.
+live-reload on save via a per-field comparison in the engine's
+`reload_config` (system/compact prompt, provider profiles and their
+content, loop/completion/truncate/context tunables, tool explanations,
+image/document limits, memory/skills config, the tool registry, and
+permission rules, preserving in-session grants); `sandbox.require` is the
+one setting that cannot be re-applied to an already-running process and
+is named as restart-only at reload time rather than silently dropped.
 - **In-app model/provider/effort switching (C-6).** `Command::SwitchModel {profile}` and `Command::SetEffort{level}` swap the active `Provider` /
 effort for subsequent turns; both are transcript events and never rewrite
 prior turns. The picker (Design §3.1) lists the `[providers.*]` profiles
 (§4.5) and the active model's effort levels (§4.6).
+- **Guided provider/model setup (C-7).** The wizard's four answers
+(adapter, endpoint, model id, key) build a `ProfileFile` through the same
+construction `build_profile`/`resolve_auth` (§4.5) already validate — a
+wizard-created profile cannot reach a state raw editing wouldn't also
+allow. Writing `.agents/config.toml` is parse → insert/replace the
+`[providers.<name>]` table → reserialize with the existing `toml` crate
+(no new dependency, §12); comments/formatting elsewhere in the file are
+not guaranteed to survive that reserialization. The key is
+read-merge-written into `~/.config/emberly/keys.toml` (creating it at
+`0600` if absent, same enforcement as above) — one entry added or
+overwritten, the rest of the table untouched. On success, the same
+`Command::ReloadConfig` (C-5) fires — the wizard has no bespoke
+apply/reload path of its own, and does not auto-switch the active session
+(consistent with C-6's "reload never auto-switches" policy); the user
+picks the new profile from the same picker afterward. No new transcript
+event — matches the existing (untranscripted) `/config` reload behavior.
 - **New config keys** (initial; tune with use): `[providers.<name>]`
 (§4.5); per-model effort default (§4.6); `reasoning = collapsed | expanded | hidden` view default, **default `collapsed`** (Design §4.4);
 `ui.tool_explanations = bool`, **default `true`** (§5.4); `[loop] enabled, repeat_window, max_no_progress_turns` (§7).
@@ -910,6 +929,16 @@ never a placeholder.
 - **In-app editor & pickers (Design §3.1, §4.6):** editable overlay reusing
 the §4.2 overlay machinery, plus `$EDITOR` handoff; model/provider and
 effort pickers as overlays fed by `[providers.*]` and `ModelInfo`.
+- **Guided setup wizard (Design §4.6, C-7):** a new `Overlay` variant built
+from the same `Choices` (adapter step) and `LineEditor` (endpoint/model/key
+steps) primitives already used elsewhere in this section — no new
+input-handling code, only new screens. Entered via a trailing row in the
+existing model/provider picker. Writing to disk is behind a new
+frontend-side injected trait (mirroring `ConfigReloader`'s seam, §8)
+implemented by the binary composition root, so `emberly-tui` gains a
+wizard without owning `config.toml`/`keys.toml` schema knowledge itself
+(A-1). The key-entry step renders `•` per keystroke; the real text lives
+only in that step's `LineEditor` buffer until the write, never elsewhere.
 - **Question prompt (Design §5.1):** the `ask_user` surface — neutral
 styling, never the reserved safety band, selectable options + free-text,
 no unsafe default; Esc returns a structured decline.
@@ -1035,6 +1064,11 @@ base64-encodes with the already-locked `base64` and sniffs PDF by a first-party
 `%PDF-` magic-byte check (no PDF parser — HC-2, the passthrough promise of §4.1),
 and the completion gate (S-6) is engine/config logic running check commands
 through the existing `bash`/sandbox path. `emberly-sandbox` is untouched.
+
+The 0.4.2 feature set adds **no new dependencies**: guided provider setup
+(C-7) reuses the existing `toml` crate for the config.toml write (accepting
+the reformatting tradeoff, §8) and the existing `LineEditor`/`Choices` TUI
+primitives (§9) for the wizard's screens. `emberly-sandbox` is untouched.
 
 Policy (Requirements §10): additions require `cargo vet` acceptance;
 `cargo deny` (licenses, duplicates, advisories) + `cargo geiger` report
@@ -1173,8 +1207,44 @@ be held to registered checks before it declares done, and the model can read the
 document formats real-world source material arrives in — both with no new
 dependencies (§12), and the gate with no privileged path around the safety model
 (§6).*
+M10 — 0.4.2 feature set: guided provider/model setup (C-7) — a step-by-step
+wizard entered from the model/provider picker that creates a new
+`[providers.<name>]` profile and its `keys.toml` entry without hand-editing
+either file, reusing the existing config-reload path (C-5) to apply live.
+*Proves the 0.4.2 scope: going from zero to a working provider is an in-app
+guided flow, not a raw-TOML editing exercise, with no compromise to the C-1
+tier model, C-3 provenance, or the never-in-transcript secret-handling
+guarantee.*
 
 ## 16. Open Items
+
+**v0.10 (2026-07-21, 0.4.2 feature set).** Guided provider/model setup,
+absorbed as C-7, lands as TUI + binary logic with **no new dependencies**
+(§12) — the existing `toml` crate handles the config.toml write
+(parse-mutate-reserialize; comments/formatting elsewhere in the file are not
+guaranteed to survive, §8) and the existing `LineEditor`/`Choices` TUI
+primitives cover the multi-step flow (§9). New ID realized: C-7 (guided
+setup, §8/§9). No new transcript event type — the wizard's completion reuses
+the existing `Command::ReloadConfig` path (C-5), so no `SCHEMA_VERSION`
+bump. Minor, additive bump; Requirements bumped to v0.9 and Design to v0.9
+in lockstep (pins refreshed).
+
+Open items introduced by the 0.4.2 scope:
+
+- **Config.toml write fidelity (C-7, §8).** Reserializing the whole file on
+a wizard write does not preserve user comments/formatting outside the
+touched `[providers.<name>]` table (decided against adding `toml_edit`,
+§12); confirm in M10 this is an acceptable tradeoff in practice, and
+revisit if it draws complaints.
+- **Wizard scope: create-only vs. edit-existing (C-7, Requirements §13 open
+question).** Initial scope is creating a new profile only; editing an
+existing profile's fields through the same wizard is deferred to a later
+tune-with-use pass.
+- **Adapter/auth-scheme coverage in the wizard (C-7, §8).** Initial wizard
+supports the two adapters (`anthropic`/`openai`) and the auth schemes
+`build_profile`/`resolve_auth` already validate (bearer/x-api-key/header/
+none); a non-standard scheme still requires raw editing (C-5) as the
+stated fallback.
 
 **v0.9 (2026-07-15, 0.4.1 cross-project feature set).** Two capabilities
 requested by TREEGAL Yggdrasil (a consumer of the engine) and absorbed into

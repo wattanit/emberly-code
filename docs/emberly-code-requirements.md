@@ -1,11 +1,11 @@
 # Emberly Code AI Coding Harness — Requirements Document
 
-**Version:** 0.8    
+**Version:** 0.9    
 **Status:** approved
-**Date:** 2026-07-15    
+**Date:** 2026-07-21    
 **Owner:** Wattanit    
-**Companion documents:** Design Guideline v0.7 (downstream), Technical  
-Specification v0.8 (downstream)
+**Companion documents:** Design Guideline v0.9 (downstream), Technical  
+Specification v0.10 (downstream)
 
 This document defines WHAT the harness must do and WHY. HOW it is built is
 deferred to the Technical Specification. UX, visual, and voice decisions are
@@ -133,6 +133,13 @@ loop-control sibling of S-5 (§11, S-6).
 - Document (PDF) input: the provider abstraction carries document content
 blocks (§4, P-12), and a tool lets the model read a project document into
 context (§5, T-16) — the P-11/T-12 image pattern applied to documents.
+
+Added in the 0.4.2 feature set (each item carries an ID and full statement in
+the section cited; this list is the scope overview, not the requirement):
+
+- Guided provider/model setup: a step-by-step in-app flow to add a new
+provider profile — including its API key — without hand-editing
+`config.toml` or `keys.toml` (§7, C-7).
 
 ### 2.2 Explicitly deferred (designed-for, not yet built)
 
@@ -565,6 +572,20 @@ profiles (P-8). A switch applies to subsequent turns, is a transcript
 event (HC-7), and never rewrites prior turns. This makes model choice a
 per-task decision the user owns mid-session, not a launch-time
 commitment.
+- **C-7 — Guided provider/model setup.** The user must be able to add a new
+provider profile — adapter, endpoint, and the API key it needs — from within
+a running session through a guided, step-by-step flow, without hand-editing
+`config.toml` or `keys.toml`. The result must be indistinguishable from a
+profile configured by hand: it lands in the project config tier (C-1), is
+provenance-visible (C-3), live-reloads (C-5), and is immediately selectable
+through existing profile switching (C-6). A key entered through the flow
+must never be written to project-tier config, never printed to the screen or
+a log, and never recorded in the session transcript — the same handling a
+hand-placed `keys.toml` entry already gets, with no exemption for the guided
+path. Guided setup is an additional path onto the same configuration, not a
+parallel system: raw editing (C-5) remains available as the fallback for any
+profile shape (per-model metadata, a non-standard auth scheme) the guided
+flow's fixed field set does not cover.
 
 ### 7.1 Persistent memory
 
@@ -871,6 +892,9 @@ user (S-6). Tech Spec sets initial values; tune with use so the gate stops a
 premature landing without recreating an S-5 spin.
 - Supported document formats beyond PDF and per-document size/page/token caps
 (P-12, T-16). Tech Spec sets the initial set; tune with use.
+- Guided provider setup's exact wizard-supported field/auth-scheme coverage,
+and whether it can edit an existing profile or only create new ones (C-7).
+Tech Spec sets the initial scope; tune with use.
 
 Resolved since v0.1: product/command name (Emberly Code / `emberly`,
 Design Guideline §1.1); default bash allowlist initial contents (Tech

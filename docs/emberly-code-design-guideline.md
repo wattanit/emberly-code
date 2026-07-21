@@ -1,11 +1,11 @@
 # Emberly Code — Design Guideline
 
-**Version:** 0.8 
+**Version:** 0.9 
 **Status:** approved
-**Date:** 2026-07-15
+**Date:** 2026-07-21
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.8 (upstream), Technical
-Specification v0.9 (downstream — this document constrains it)
+**Companion documents:** Requirements Document v0.9 (upstream), Technical
+Specification v0.10 (downstream — this document constrains it)
 
 This document defines how Emberly Code looks, feels, and speaks. It is the
 second of three project documents. Where a decision here has technical
@@ -273,10 +273,30 @@ baked-in defaults, and shows the written path.
 config, hand off to `$VISUAL`/`$EDITOR` (the §4.3 fallback order),
 reloading on save. This reuses the user's real editor rather than
 growing a text editor inside the TUI.
+- **Guided setup — a step-by-step wizard (Requirements C-7).** A focused
+sequence of single-question screens — adapter, endpoint, model id, then
+the API key — Enter to advance, Esc/Back to step back. Reachable as a
+trailing "Add new provider…" row at the bottom of the existing
+model/provider picker (§3.1, Requirements C-6), not a new top-level
+command: the picker a user already opens to switch models is where
+they'd also think to add one. A summary screen (profile name, adapter,
+endpoint, and the key redacted to its last 4 characters) precedes the
+write — the same "shows the written path" honesty as quick edit, before
+the point of no return, not after. On completion the session reports the
+change exactly as a `/config` reload would — no separate "wizard
+complete" voice; one reload story for every path onto the same
+configuration. The typed key is masked character-by-character as it's
+entered (`•` per keystroke) and never echoed in full again anywhere in
+the interface, matching C-7's never-printed guarantee.
 
-Either way, a change that cannot take effect until restart is named as such
-at the moment of saving — silence about live changes, speech about the ones
-that need a restart.
+Guided setup is not available in degraded mode (§7): a multi-screen
+wizard needs cursor repositioning that plain mode does not have, so
+degraded mode falls back to the existing full `$EDITOR` edit — the same
+fallback `/model` already takes there.
+
+Whichever path, a change that cannot take effect until restart is named as
+such at the moment of saving — silence about live changes, speech about the
+ones that need a restart.
 
 ### 4.7 The task list
 
@@ -558,6 +578,9 @@ relies on color, motion, or the pointer to carry meaning.
 reference line (§4.11), and the completion-gate halt (§8.7) keeps its full
 harness-voice guarantees with the four choices as capitalized deliberate keys.
 Neither relies on color, motion, or the pointer.
+- The 0.4.2 surface degrades by falling back rather than reflowing: guided
+provider setup (§4.6) is not offered in degraded mode; the full `$EDITOR`
+edit path covers the same ground.
 - Degraded mode is a supported, tested configuration, not a best-effort
 fallback.
 
@@ -581,6 +604,16 @@ line per overridden piece (Requirements C-3). Silence about defaults;
 speech about deviations. If the sandbox is unavailable or partial, a
 one-time plain-language notice explains what that means and what was
 tightened (Requirements §6.7) — calm warning styling, not alarm.
+
+- **No provider configured yet.** When the session is running on the
+offline placeholder (no `provider =` selected), the model line in the
+session-start header names the gap and points straight at the fix in the
+same breath — e.g. *"model: none configured — /model to add a
+provider"* — rather than raw env-var instructions, now that guided setup
+(§4.6, Requirements C-7) is the easier path. Degraded mode keeps the same
+line in plain text. This is the header's normal one-time content, not a
+popup to dismiss — silence about defaults, speech about the one
+deviation that actually blocks the user from doing anything.
 
 ### 8.3 Session end / crash
 
