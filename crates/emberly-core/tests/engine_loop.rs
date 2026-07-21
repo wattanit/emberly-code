@@ -231,6 +231,52 @@ fn has_tool_finished(events: &[UiEvent], ok: bool) -> bool {
 }
 
 #[tokio::test]
+async fn no_provider_configured_refuses_before_a_turn_runs() {
+    // C-7: the binary substitutes an inert stand-in Provider (id
+    // "placeholder") when no [providers.*] profile is configured. Sending a
+    // message must refuse up front — never round-trip through it as if it
+    // were a real reply, and never record it as a turn (so the real first
+    // message still claims the "original task"/turn-0 slot once a provider
+    // is actually added).
+    let fake = Arc::new(
+        FakeProvider::new(vec![ScriptedResponse::text("should never be reached")])
+            .with_id("placeholder"),
+    );
+    let sink = CaptureSink::new();
+    let config = make_config(fake.clone(), temp_project(), Box::new(sink.clone()));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "hello".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            UiEvent::Notice { message } if message.contains("no provider configured")
+        )),
+        "events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, UiEvent::TurnEnded)),
+        "the busy/working affordance must still clear"
+    );
+    assert!(
+        fake.last_request().is_none(),
+        "the placeholder provider must never actually be called"
+    );
+    assert!(
+        !sink
+            .records()
+            .iter()
+            .any(|r| matches!(&r.event, TranscriptEvent::UserMessage { .. })),
+        "a refused message must not be recorded as a real turn"
+    );
+}
+
+#[tokio::test]
 async fn text_only_turn_streams_and_reports_usage() {
     let mut h = start(vec![ScriptedResponse::text("hello สวัสดี")], temp_project());
     h.send(Command::UserInput { text: "hi".into() }).await;

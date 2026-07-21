@@ -1,8 +1,10 @@
-//! A stand-in [`Provider`] for the Phase 1 binary. The engine, tools,
-//! permission gate, and line frontend are all wired and working, but no live
-//! model backend exists until Phase 3 (Anthropic + OpenAI-compatible). This
-//! placeholder streams a fixed reply for any request so `emberly` runs
-//! end-to-end and the whole stack can be exercised by hand.
+//! A stand-in [`Provider`] used only to satisfy `EngineConfig.provider` when
+//! no `[providers.*]` profile is configured — `Engine` now refuses a
+//! `Command::UserInput` before ever calling it (Requirements C-7: `/model`'s
+//! guided wizard is the fix, not a canned reply), so `stream_completion`
+//! below should be unreachable in normal operation. It stays deliberately
+//! inert rather than a plausible-looking fake reply, in case some future
+//! code path calls it anyway.
 
 use async_trait::async_trait;
 use emberly_providers::{
@@ -10,9 +12,7 @@ use emberly_providers::{
     StopReason, StreamEvent, TokenEstimate,
 };
 
-const REPLY: &str = "I'm the Phase 1 placeholder model — the engine, tools, \
-permission gate, and line frontend are wired and working. Connect a real \
-provider (Anthropic or an OpenAI-compatible endpoint) in Phase 3.";
+const REPLY: &str = "no provider is configured for this session — run /model to add one";
 
 pub struct PlaceholderProvider;
 

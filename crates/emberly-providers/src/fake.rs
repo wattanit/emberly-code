@@ -179,6 +179,15 @@ impl FakeProvider {
         self
     }
 
+    /// Override the reported provider id — for testing id-dependent engine
+    /// gates (e.g. the "no provider configured" refusal, C-7 — the binary's
+    /// inert stand-in `Provider` reports id `"placeholder"`).
+    #[must_use]
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = ProviderId::new(id);
+        self
+    }
+
     /// Pop the next scripted response, recovering from a poisoned lock rather
     /// than panicking (HC-3: no `unwrap`/`expect`).
     fn pop(&self) -> Option<ScriptedResponse> {

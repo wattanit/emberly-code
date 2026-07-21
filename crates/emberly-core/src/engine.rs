@@ -15,7 +15,7 @@ use std::sync::{Arc, RwLock};
 
 use emberly_providers::{
     CompletionRequest, CompletionStream, ContentBlock, Effort, Message, Provider, ProviderError,
-    RetryPolicy, Role, StreamEvent, ToolCallId, ToolSchema,
+    ProviderId, RetryPolicy, Role, StreamEvent, ToolCallId, ToolSchema,
 };
 use emberly_sandbox::{Decision, Mode, Query, Rule, RuleEngine};
 use emberly_tools::{
@@ -1042,6 +1042,27 @@ impl Engine {
         while let Some(command) = commands_rx.recv().await {
             match command {
                 Command::UserInput { text } => {
+                    // No provider configured (C-7): refuse before it ever
+                    // becomes a turn, rather than round-tripping through the
+                    // inert stand-in `Provider` the binary substitutes in
+                    // this case (id "placeholder" — never a real backend, and
+                    // distinct from `configured_provider`, which is just
+                    // config-reload bookkeeping and legitimately `None` in
+                    // tests that use a real `FakeProvider`). Not
+                    // recorded/pushed — a message that never ran shouldn't
+                    // burn a turn number or claim the "original task" slot;
+                    // the real first message still gets both once a
+                    // provider is added.
+                    if self.provider.id() == ProviderId::new("placeholder") {
+                        self.emit(UiEvent::Notice {
+                            message: "no provider configured — run /model to add one before \
+                                      sending a message"
+                                .into(),
+                        })
+                        .await;
+                        self.emit(UiEvent::TurnEnded).await;
+                        continue;
+                    }
                     self.record_user_message(&text);
                     self.push_conversation_message(Message::user_text(text));
                     self.emit_context_usage().await;
