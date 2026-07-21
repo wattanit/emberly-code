@@ -55,16 +55,63 @@ pub fn is_genuine_git(command: &str, recorded: Option<&Path>, root: &Path, path_
 /// themselves write to `.git/` (a bare `$` without `$(`/`${` only expands to an
 /// argument). This is conservative on purpose (§6.5): borderline commands run
 /// without `.git/` write rather than risk it.
+///
+/// Quote-aware: a metacharacter is only dangerous where the shell would
+/// actually treat it as one. Single-quoted text is entirely literal in POSIX
+/// shell (not even `$(`/backslash are special there); double-quoted text
+/// neutralizes chaining/redirection/subshell punctuation but *not* command or
+/// parameter substitution, which the shell still expands inside `"..."`. A
+/// commit message like `-m "fix (#123); see <a@b.com>"` must keep the
+/// `.git/`-writable grant — those characters never reach the shell unquoted.
+/// An unterminated quote is itself suspicious and stays fail-closed.
 fn has_dangerous_shell_syntax(command: &str) -> bool {
-    if command.contains("$(") || command.contains("${") {
-        return true;
+    #[derive(PartialEq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
     }
-    command.chars().any(|c| {
-        matches!(
-            c,
-            ';' | '&' | '|' | '<' | '>' | '(' | ')' | '`' | '\n' | '\r' | '\\'
-        )
-    })
+    let chars: Vec<char> = command.chars().collect();
+    let mut quote = Quote::None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match quote {
+            Quote::Single => {
+                if c == '\'' {
+                    quote = Quote::None;
+                }
+                i += 1;
+            }
+            Quote::Double => match c {
+                '"' => {
+                    quote = Quote::None;
+                    i += 1;
+                }
+                // Backslash escapes the next character inside double quotes
+                // (e.g. `\"` for a literal quote) — skip both without
+                // reinterpreting it, so an escaped `"` never closes the string.
+                '\\' => i += 2,
+                '`' => return true,
+                '$' if matches!(chars.get(i + 1), Some('(' | '{')) => return true,
+                _ => i += 1,
+            },
+            Quote::None => match c {
+                '\'' => {
+                    quote = Quote::Single;
+                    i += 1;
+                }
+                '"' => {
+                    quote = Quote::Double;
+                    i += 1;
+                }
+                ';' | '&' | '|' | '<' | '>' | '(' | ')' | '`' | '\n' | '\r' | '\\' => return true,
+                '$' if matches!(chars.get(i + 1), Some('(' | '{')) => return true,
+                _ => i += 1,
+            },
+        }
+    }
+    quote != Quote::None
 }
 
 /// Resolve `program` against a `PATH`-style string: the first entry holding an
@@ -190,6 +237,47 @@ mod tests {
                 "must be safe-closed: {command}"
             );
         }
+    }
+
+    #[test]
+    fn quoted_metacharacters_in_a_commit_message_still_qualify() {
+        // Regression: a commit message containing shell metacharacters that
+        // are safely quoted (never reaching the shell unescaped) must not
+        // lose the .git/-writable grant — this was denying real `git commit`
+        // calls with "Operation not permitted" on .git/index.lock whenever
+        // the message happened to contain e.g. `(`, `<`, `;`, or `&`.
+        let Some((git, path_env)) = system_git() else {
+            eprintln!("SKIP: no system git");
+            return;
+        };
+        let root = tmp();
+        for command in [
+            r#"git commit -m "fix (#123): retry & polish""#,
+            r#"git commit -m "Reviewed-by: A <a@b.com>""#,
+            r#"git commit -m "note: a; b | c > d < e""#,
+            r#"git commit -m "she said \"hi\"""#,
+            "git commit -m 'literal $(not substituted) here'",
+        ] {
+            assert!(
+                is_genuine_git(command, Some(&git), &root, &path_env),
+                "quoted metacharacters must still qualify: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn unterminated_quote_stays_safe_closed() {
+        let Some((git, path_env)) = system_git() else {
+            eprintln!("SKIP: no system git");
+            return;
+        };
+        let root = tmp();
+        assert!(!is_genuine_git(
+            r#"git commit -m "unterminated"#,
+            Some(&git),
+            &root,
+            &path_env
+        ));
     }
 
     #[test]
