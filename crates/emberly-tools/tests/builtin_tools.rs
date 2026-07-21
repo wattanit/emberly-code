@@ -74,6 +74,45 @@ impl PermissionGate for DenyGate {
     }
 }
 
+/// Allows every request and records the last one, so a test can inspect what
+/// the tool actually put in `detail` (Design §5: never truncated to fit).
+struct CapturingGate {
+    last: std::sync::Mutex<Option<PermissionRequest>>,
+}
+
+impl CapturingGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            last: std::sync::Mutex::new(None),
+        })
+    }
+
+    fn last_detail(&self) -> String {
+        match self.last.lock() {
+            Ok(guard) => guard
+                .as_ref()
+                .map_or_else(String::new, |r| r.detail.clone()),
+            Err(e) => panic!("capturing gate mutex poisoned: {e}"),
+        }
+    }
+}
+
+#[async_trait]
+impl PermissionGate for CapturingGate {
+    async fn authorize(&self, request: PermissionRequest) -> PermissionOutcome {
+        match self.last.lock() {
+            Ok(mut guard) => *guard = Some(request),
+            Err(e) => panic!("capturing gate mutex poisoned: {e}"),
+        }
+        PermissionOutcome::Allow
+    }
+}
+
+fn capturing_ctx(root: &Path, gate: Arc<CapturingGate>) -> ToolCtx {
+    let sandbox: Arc<dyn Sandbox> = Arc::new(PlainSandbox);
+    ToolCtx::new(root.to_path_buf(), TruncateConfig::default(), gate, sandbox)
+}
+
 fn ctx(root: &Path, allow: bool) -> ToolCtx {
     let gate: Arc<dyn PermissionGate> = if allow {
         Arc::new(AllowGate)
@@ -172,6 +211,32 @@ async fn write_creates_file_and_reports_line_delta() {
     assert_eq!(change.adds, 3);
     assert_eq!(change.dels, 0);
     assert_eq!(change.path, "src/new.rs");
+}
+
+#[tokio::test]
+async fn write_permission_detail_is_a_full_diff_for_a_new_file() {
+    // Regression: the permission overlay used to collapse a new file's
+    // content to a one-line "Create foo (N lines)" summary instead of
+    // showing it — the diff/edit tool never had this gap. `detail` must
+    // carry the actual content (as added lines) so the user isn't asked to
+    // approve content they can't see (Design §5: never truncated to fit).
+    let root = temp_project();
+    let gate = CapturingGate::new();
+    let outcome = WriteFileTool
+        .execute(
+            json!({ "path": "src/new.rs", "content": "a\nb\nc\n" }),
+            &capturing_ctx(&root, gate.clone()),
+        )
+        .await;
+    assert!(outcome.ok);
+    let detail = gate.last_detail();
+    assert!(
+        !detail.contains("lines)"),
+        "no collapsed summary: {detail:?}"
+    );
+    assert!(detail.contains("+a"), "added content visible: {detail:?}");
+    assert!(detail.contains("+b"), "added content visible: {detail:?}");
+    assert!(detail.contains("+c"), "added content visible: {detail:?}");
 }
 
 #[tokio::test]

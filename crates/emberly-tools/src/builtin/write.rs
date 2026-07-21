@@ -74,15 +74,14 @@ impl Tool for WriteFileTool {
             .unwrap_or_default();
         let rel = display_relative(ctx.project_root(), &resolved.path);
 
-        let detail = if old.is_empty() {
-            format!("Create {rel} ({} lines)", args.content.lines().count())
-        } else {
-            unified_diff(&rel, &old, &args.content)
-        };
         let request = PermissionRequest {
             tool: "write_file".into(),
             summary: format!("write {rel}"),
-            detail,
+            // Always a full diff, matching `edit_file` (Design §5: the
+            // permission detail is never truncated to fit — the frontend
+            // scrolls it). For a new/empty file this diffs against "", so
+            // the whole new content shows as added lines.
+            detail: unified_diff(&rel, &old, &args.content),
             affected_paths: vec![resolved.path.clone()],
             outside_root: resolved.outside_root,
         };
