@@ -39,6 +39,7 @@ pub async fn run(
     config_template: String,
     reasoning_view: crate::app::ReasoningView,
     mouse: bool,
+    provider_writer: Arc<dyn emberly_core::ProviderProfileWriter>,
 ) -> io::Result<()> {
     // The single §3.4 capture gate (Tech Spec §9): reaching `tui::run` already
     // means rich mode (degraded runs `line::run`), so the one predicate is
@@ -46,7 +47,13 @@ pub async fn run(
     // the terminal owns the mouse.
     let capture_mouse = crate::terminal::mouse_capture_enabled(true, mouse);
     let mut guard = TerminalGuard::enter(capture_mouse)?;
-    let mut app = App::new(session, sessions_dir, profiles, config_template);
+    let mut app = App::new(
+        session,
+        sessions_dir,
+        profiles,
+        config_template,
+        provider_writer,
+    );
     // Set the trail view before seeding history so resumed reasoning items
     // render with the configured default (Design §4.4).
     app.reasoning_view = reasoning_view;

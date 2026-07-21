@@ -23,6 +23,7 @@ pub mod gate;
 pub mod id;
 pub mod memory;
 pub mod prompts;
+pub mod provider_writer;
 pub mod resume;
 pub mod skills;
 pub mod spawn;
@@ -46,6 +47,7 @@ pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfi
 pub use gate::{AskUserAsk, MemoryAsk, PermissionAsk, SkillAsk, TaskListAsk};
 pub use id::{AskId, PermissionId, SessionId, ToolCallId};
 pub use memory::EntrySummary;
+pub use provider_writer::{NewProviderProfile, ProviderProfileWriter};
 pub use transcript::{
     append_abnormal_exit, CaptureSink, CompactTrigger, ConfigProvenance, FileTranscript, NoopSink,
     TranscriptEvent, TranscriptRecord, TranscriptSink, SCHEMA_VERSION,

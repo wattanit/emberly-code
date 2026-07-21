@@ -30,6 +30,7 @@ mod config;
 mod init;
 mod placeholder;
 mod provider_setup;
+mod provider_write;
 mod trust;
 use placeholder::PlaceholderProvider;
 
@@ -379,7 +380,9 @@ async fn run() -> anyhow::Result<()> {
         None => (
             Arc::new(PlaceholderProvider::new()) as Arc<dyn Provider>,
             "placeholder".to_string(),
-            "placeholder (offline — set EMBERLY_PROVIDER + EMBERLY_MODEL + API key)".to_string(),
+            // Points at the guided setup wizard (Requirements C-7, Design
+            // §8.2) now that it's the easier path onto a working provider.
+            "none configured — /model to add a provider".to_string(),
         ),
     };
 
@@ -511,6 +514,12 @@ async fn run() -> anyhow::Result<()> {
             resolved.providers.clone(),
         ));
 
+    // Writes a new `[providers.<name>]` profile + its `keys.toml` entry for
+    // the guided setup wizard (C-7); the wizard then fires the same
+    // `Command::ReloadConfig` as `config_reloader` above.
+    let provider_writer: Arc<dyn emberly_core::ProviderProfileWriter> =
+        Arc::new(provider_write::ConfigWriter::new(project_root.clone()));
+
     // Build the tool registry: the built-in suite always, plus `web_search`
     // only when `search.enabled` and an endpoint is configured (Tech Spec §5.5).
     // Shared with the `/config` reload path (C-5) via `build_tool_registry`.
@@ -609,6 +618,7 @@ async fn run() -> anyhow::Result<()> {
         init::CONFIG_TEMPLATE.to_string(),
         resolved.reasoning.clone(),
         resolved.mouse,
+        provider_writer,
     )
     .await?;
 

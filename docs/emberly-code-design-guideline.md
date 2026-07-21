@@ -274,8 +274,14 @@ config, hand off to `$VISUAL`/`$EDITOR` (the §4.3 fallback order),
 reloading on save. This reuses the user's real editor rather than
 growing a text editor inside the TUI.
 - **Guided setup — a step-by-step wizard (Requirements C-7).** A focused
-sequence of single-question screens — adapter, endpoint, model id, then
-the API key — Enter to advance, Esc/Back to step back. Reachable as a
+sequence of single-question screens — profile name, adapter, endpoint,
+model id, then the API key — Enter to advance, Esc/Back to step back. The
+profile name comes first because it is the identifier the user is actually
+choosing (e.g. "deepseek"), distinct from the adapter that follows: the
+adapter step is the wire format, not the provider's brand, and reads as
+"which wire format does it speak? — most third-party and OpenAI-compatible
+APIs, including local models, speak `openai`" so a profile named "deepseek"
+picking adapter `openai` doesn't read as a contradiction. Reachable as a
 trailing "Add new provider…" row at the bottom of the existing
 model/provider picker (§3.1, Requirements C-6), not a new top-level
 command: the picker a user already opens to switch models is where

@@ -12,18 +12,32 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use emberly_core::{
     resume, AskAnswer, AskId, CheckResult, Command, Effort, EntrySummary, GateResolution,
-    LoopResolution, MemoryOp, MemoryScope, Mode, PermissionDecision, PermissionId,
-    PermissionRendering, SandboxStatus, SessionId, SkillMeta, SkillOrigin, TaskItem, TokenUsage,
-    ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
+    LoopResolution, MemoryOp, MemoryScope, Mode, NewProviderProfile, PermissionDecision,
+    PermissionId, PermissionRendering, ProviderProfileWriter, SandboxStatus, SessionId, SkillMeta,
+    SkillOrigin, TaskItem, TokenUsage, ToolCallId, TranscriptEvent, TranscriptRecord, UiEvent,
 };
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::commands::{self, AppCommand};
 use crate::editor::LineEditor;
 use crate::hit::{ClickTarget, PermissionChoice};
 use crate::theme::Theme;
+
+/// A no-op [`ProviderProfileWriter`], for tests that construct an [`App`] but
+/// never exercise the guided setup wizard's write path.
+#[cfg(test)]
+pub(crate) fn test_provider_writer() -> Arc<dyn ProviderProfileWriter> {
+    struct NoopWriter;
+    impl ProviderProfileWriter for NoopWriter {
+        fn write_profile(&self, _profile: NewProviderProfile) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    Arc::new(NoopWriter)
+}
 
 /// Rows the conversation scrolls per PageUp/PageDown.
 const SCROLL_STEP: usize = 5;
@@ -349,6 +363,67 @@ impl CompletionGatePrompt {
     }
 }
 
+/// Adapters the guided setup wizard offers (Requirements C-7, Tech Spec §16
+/// open item): the two wire formats `build_profile` already validates.
+pub const WIZARD_ADAPTERS: [&str; 2] = ["anthropic", "openai"];
+
+/// The model/provider picker's trailing entry point into the guided setup
+/// wizard (Design §4.6). Compared by value in [`App::on_choice_picker_key`]
+/// since `ChoiceRow` carries no variant tag.
+const ADD_PROVIDER_ROW: &str = "+ add new provider…";
+
+/// A step of the guided provider/model setup wizard (Requirements C-7, Design
+/// §4.6). Name comes first — it's the identifier the user is actually
+/// choosing (e.g. "deepseek"), distinct from the adapter (wire format) that
+/// follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WizardStep {
+    Name,
+    Adapter,
+    Endpoint,
+    ModelId,
+    ApiKey,
+    Summary,
+}
+
+/// The guided setup wizard's in-progress state (Requirements C-7). Owns the
+/// screen while set — harness voice, matching the other `pending_*` prompts.
+/// One `editor` is reused across the free-text steps, reset to that step's
+/// already-collected value on entry (so stepping back and forward doesn't
+/// lose anything typed).
+pub struct ProviderWizard {
+    pub step: WizardStep,
+    pub name: String,
+    /// Index into [`WIZARD_ADAPTERS`].
+    pub adapter_selected: usize,
+    pub endpoint: String,
+    pub model_id: String,
+    pub api_key: String,
+    pub editor: LineEditor,
+    /// A name-collision or write failure, shown inline on the `Summary` step
+    /// without losing any collected answer.
+    pub error: Option<String>,
+}
+
+impl ProviderWizard {
+    fn new() -> Self {
+        Self {
+            step: WizardStep::Name,
+            name: String::new(),
+            adapter_selected: 0,
+            endpoint: String::new(),
+            model_id: String::new(),
+            api_key: String::new(),
+            editor: LineEditor::new(),
+            error: None,
+        }
+    }
+
+    pub fn adapter(&self) -> &'static str {
+        WIZARD_ADAPTERS[self.adapter_selected]
+    }
+}
+
 /// The complete view-model the renderer reads.
 pub struct App {
     pub session: SessionInfo,
@@ -429,6 +504,18 @@ pub struct App {
     /// harness stepping in after a bounded number of failed completion
     /// attempts. While set it owns the screen; harness voice.
     pub pending_completion_gate: Option<CompletionGatePrompt>,
+    /// The guided provider/model setup wizard, in progress (Requirements
+    /// C-7, Design §4.6). While set it owns the screen.
+    pub pending_provider_wizard: Option<ProviderWizard>,
+    /// Writes a wizard-completed profile to disk (C-7), injected by the
+    /// binary composition root so this crate never owns `config.toml`/
+    /// `keys.toml` schema knowledge (A-1).
+    provider_writer: Arc<dyn ProviderProfileWriter>,
+    /// Model ids the wizard registered this session, keyed by profile name
+    /// (Requirements C-7): the picker has no other per-profile default model
+    /// to fall back to, so a freshly-added profile would otherwise be tried
+    /// with whatever model was previously active.
+    wizard_created_models: HashMap<String, String>,
     pub sidebar_visible: bool,
     /// Conversation scrollback offset in rows *from the bottom*: 0 follows the
     /// latest output; larger values scroll up into history. Clamped to content
@@ -473,6 +560,7 @@ impl App {
         sessions_dir: PathBuf,
         profiles: Vec<String>,
         config_template: String,
+        provider_writer: Arc<dyn ProviderProfileWriter>,
     ) -> Self {
         Self {
             session,
@@ -504,6 +592,9 @@ impl App {
             pending_ask: None,
             pending_loop_halt: None,
             pending_completion_gate: None,
+            pending_provider_wizard: None,
+            provider_writer,
+            wizard_created_models: HashMap::new(),
             permission_scroll: 0,
             sidebar_visible: true,
             scroll: 0,
@@ -872,6 +963,11 @@ impl App {
         // completion attempts.
         if self.pending_completion_gate.is_some() {
             return self.on_completion_gate_key(key);
+        }
+        // The guided setup wizard owns the keyboard too (Requirements C-7,
+        // Design §4.6) — a focused sequence of single-question screens.
+        if self.pending_provider_wizard.is_some() {
+            return self.on_provider_wizard_key(key);
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1456,6 +1552,225 @@ impl App {
         Action::Command(Command::ResolveCompletionGate { resolution })
     }
 
+    // ---- guided provider/model setup wizard (Requirements C-7) ------------
+
+    /// Keys for the guided setup wizard (Design §4.6): Enter advances after
+    /// validating the current step, Esc steps back one screen (or dismisses
+    /// from the first), plain typing goes to the active step's editor. The
+    /// `Adapter` step is its own tiny inline up/down + Enter list — this
+    /// prompt doesn't use the `overlays` stack at all, matching
+    /// `LoopHaltPrompt`/`CompletionGatePrompt`.
+    fn on_provider_wizard_key(&mut self, key: KeyEvent) -> Action {
+        let Some(step) = self.pending_provider_wizard.as_ref().map(|w| w.step) else {
+            return Action::None;
+        };
+        if step == WizardStep::Adapter {
+            return self.on_provider_wizard_adapter_key(key);
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.provider_wizard_step_back();
+                Action::None
+            }
+            KeyCode::Enter => self.provider_wizard_advance(),
+            KeyCode::Backspace => {
+                let empty = self
+                    .pending_provider_wizard
+                    .as_ref()
+                    .is_some_and(|w| w.editor.is_empty());
+                if empty {
+                    self.provider_wizard_step_back();
+                } else if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                    wizard.editor.backspace();
+                }
+                Action::None
+            }
+            KeyCode::Left => {
+                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                    wizard.editor.left();
+                }
+                Action::None
+            }
+            KeyCode::Right => {
+                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                    wizard.editor.right();
+                }
+                Action::None
+            }
+            KeyCode::Char(c) => {
+                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                    wizard.editor.insert_char(c);
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn on_provider_wizard_adapter_key(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Esc => {
+                self.provider_wizard_step_back();
+                Action::None
+            }
+            KeyCode::Up => {
+                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                    wizard.adapter_selected = wizard.adapter_selected.saturating_sub(1);
+                }
+                Action::None
+            }
+            KeyCode::Down => {
+                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                    wizard.adapter_selected =
+                        (wizard.adapter_selected + 1).min(WIZARD_ADAPTERS.len() - 1);
+                }
+                Action::None
+            }
+            KeyCode::Enter => {
+                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                    let adapter = wizard.adapter();
+                    wizard.step = WizardStep::Endpoint;
+                    wizard.editor = LineEditor::new();
+                    // A helpful starting point, not a forced value — the user
+                    // can still overwrite it (Design §4.6).
+                    if adapter == "openai" {
+                        wizard.editor.insert_str("https://api.openai.com/v1");
+                    }
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    /// Step back one wizard screen, restoring that step's already-collected
+    /// value into a fresh editor — so stepping back and forward again never
+    /// loses anything typed. Esc from the first step dismisses the wizard.
+    fn provider_wizard_step_back(&mut self) {
+        let Some(prev) = self
+            .pending_provider_wizard
+            .as_ref()
+            .and_then(|w| match w.step {
+                WizardStep::Name => None,
+                WizardStep::Adapter => Some(WizardStep::Name),
+                WizardStep::Endpoint => Some(WizardStep::Adapter),
+                WizardStep::ModelId => Some(WizardStep::Endpoint),
+                WizardStep::ApiKey => Some(WizardStep::ModelId),
+                WizardStep::Summary => Some(WizardStep::ApiKey),
+            })
+        else {
+            self.pending_provider_wizard = None;
+            return;
+        };
+        if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+            wizard.error = None;
+            wizard.step = prev;
+            let seed = match prev {
+                WizardStep::Name => wizard.name.clone(),
+                WizardStep::Endpoint => wizard.endpoint.clone(),
+                WizardStep::ModelId => wizard.model_id.clone(),
+                WizardStep::ApiKey => wizard.api_key.clone(),
+                WizardStep::Adapter | WizardStep::Summary => String::new(),
+            };
+            wizard.editor = LineEditor::new();
+            wizard.editor.insert_str(&seed);
+        }
+    }
+
+    /// Validate the current step and advance, or (on the `Summary` step)
+    /// perform the write. Validation stays as light as raw editing gets
+    /// (Tech Spec C-7): only a non-empty name that isn't already a profile,
+    /// and a non-empty model id, are checked here.
+    fn provider_wizard_advance(&mut self) -> Action {
+        let Some(wizard) = self.pending_provider_wizard.as_mut() else {
+            return Action::None;
+        };
+        match wizard.step {
+            WizardStep::Name => {
+                let name = wizard.editor.text().trim().to_string();
+                if name.is_empty() {
+                    return Action::None;
+                }
+                if self.profiles.contains(&name) {
+                    if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                        wizard.error = Some(format!("a profile named '{name}' already exists"));
+                    }
+                    return Action::None;
+                }
+                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                    wizard.name = name;
+                    wizard.error = None;
+                    wizard.step = WizardStep::Adapter;
+                }
+                Action::None
+            }
+            WizardStep::Endpoint => {
+                wizard.endpoint = wizard.editor.text().trim().to_string();
+                wizard.step = WizardStep::ModelId;
+                wizard.editor = LineEditor::new();
+                Action::None
+            }
+            WizardStep::ModelId => {
+                let model_id = wizard.editor.text().trim().to_string();
+                if model_id.is_empty() {
+                    return Action::None;
+                }
+                wizard.model_id = model_id;
+                wizard.step = WizardStep::ApiKey;
+                wizard.editor = LineEditor::new();
+                Action::None
+            }
+            WizardStep::ApiKey => {
+                let key = wizard.editor.text().to_string();
+                if key.is_empty() {
+                    return Action::None;
+                }
+                wizard.api_key = key;
+                wizard.step = WizardStep::Summary;
+                wizard.editor = LineEditor::new();
+                Action::None
+            }
+            WizardStep::Summary => self.provider_wizard_write(),
+            // The Adapter step is handled entirely by
+            // `on_provider_wizard_adapter_key` before this function is
+            // reached (see `on_provider_wizard_key`).
+            WizardStep::Adapter => Action::None,
+        }
+    }
+
+    /// Write the completed profile (Requirements C-7) and, on success, fire
+    /// the same `Command::ReloadConfig` a `/config` save would (C-5) — no
+    /// bespoke apply path, no separate "wizard complete" voice (Design §4.6):
+    /// the reload's own notice is the whole story.
+    fn provider_wizard_write(&mut self) -> Action {
+        let Some(wizard) = self.pending_provider_wizard.as_ref() else {
+            return Action::None;
+        };
+        let profile = NewProviderProfile {
+            name: wizard.name.clone(),
+            adapter: wizard.adapter().to_string(),
+            base_url: (!wizard.endpoint.is_empty()).then(|| wizard.endpoint.clone()),
+            model_id: wizard.model_id.clone(),
+            api_key: wizard.api_key.clone(),
+        };
+        match self.provider_writer.write_profile(profile) {
+            Ok(()) => {
+                if let Some(wizard) = self.pending_provider_wizard.take() {
+                    self.wizard_created_models
+                        .insert(wizard.name, wizard.model_id);
+                }
+                Action::Command(Command::ReloadConfig)
+            }
+            Err(message) => {
+                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                    wizard.error = Some(message);
+                }
+                Action::None
+            }
+        }
+    }
+
     // ---- overlays ---------------------------------------------------------
 
     /// Open the diff overlay for the most-recently-modified file, if any.
@@ -1768,16 +2083,13 @@ impl App {
 
     /// Open the model/provider picker (`/model` with no args, the palette, or a
     /// keybinding — C-6). Rows are the configured profiles, the active one
-    /// marked; Enter issues a `SwitchModel`.
+    /// marked, plus a trailing row into the guided setup wizard (Requirements
+    /// C-7, Design §4.6) — shown even with zero profiles configured, since
+    /// that's exactly when a user most needs it. Enter on a profile row issues
+    /// a `SwitchModel`; Enter on the trailing row starts the wizard instead.
     fn open_model_picker(&mut self) {
-        if self.profiles.is_empty() {
-            self.conversation.push(ConvItem::Notice(
-                "no provider profiles configured — add one in .agents/config.toml".into(),
-            ));
-            return;
-        }
         let active = self.session.provider.clone();
-        let rows: Vec<ChoiceRow> = self
+        let mut rows: Vec<ChoiceRow> = self
             .profiles
             .iter()
             .map(|name| ChoiceRow {
@@ -1786,6 +2098,10 @@ impl App {
             })
             .collect();
         let selected = rows.iter().position(|r| r.current).unwrap_or(0);
+        rows.push(ChoiceRow {
+            label: ADD_PROVIDER_ROW.to_string(),
+            current: false,
+        });
         self.push_overlay(Overlay {
             title: "switch model".into(),
             content: OverlayContent::Choices {
@@ -2478,7 +2794,10 @@ impl App {
                 self.overlays.pop();
                 match kind {
                     ChoiceKind::Model => {
-                        if row.current {
+                        if row.label == ADD_PROVIDER_ROW {
+                            self.pending_provider_wizard = Some(ProviderWizard::new());
+                            Action::None
+                        } else if row.current {
                             self.conversation
                                 .push(ConvItem::Notice(format!("already using {}", row.label)));
                             Action::None
@@ -2488,9 +2807,15 @@ impl App {
                             ));
                             Action::None
                         } else {
+                            // A model just added by this session's wizard is
+                            // known locally (Requirements C-7) even though the
+                            // picker otherwise has no per-profile default model
+                            // to fall back to — everything else keeps today's
+                            // behavior of reusing the previously active model.
+                            let model = self.wizard_created_models.get(&row.label).cloned();
                             Action::Command(Command::SwitchModel {
                                 profile: row.label,
-                                model: None,
+                                model,
                             })
                         }
                     }
@@ -2638,6 +2963,7 @@ mod tests {
             std::env::temp_dir(),
             vec!["anthropic".into(), "openai".into(), "zai".into()],
             "# test config\n".to_string(),
+            test_provider_writer(),
         )
     }
 
@@ -2700,19 +3026,134 @@ mod tests {
     }
 
     #[test]
-    fn model_picker_reports_when_no_profiles() {
+    fn model_picker_offers_add_provider_even_with_no_profiles() {
+        // Requirements C-7: the picker is the entry point for guided setup, so
+        // it must still open (with just the trailing row) when nothing is
+        // configured yet — the exact moment a user most needs it.
         let mut a = App::new(
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         a.open_model_picker();
-        assert!(a.overlays.is_empty(), "no overlay without profiles");
-        assert!(a
-            .conversation
-            .iter()
-            .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("no provider profiles"))));
+        let Some(Overlay {
+            content: OverlayContent::Choices { rows, .. },
+            ..
+        }) = a.overlays.last()
+        else {
+            panic!("expected a choices overlay");
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, ADD_PROVIDER_ROW);
+    }
+
+    /// Type each character of `text` into the active wizard step's editor.
+    fn type_str(a: &mut App, text: &str) {
+        for c in text.chars() {
+            let _ = a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn provider_wizard_happy_path_writes_and_fires_reload() {
+        let mut a = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            vec!["anthropic".into()],
+            String::new(),
+            test_provider_writer(),
+        );
+        a.open_model_picker();
+        // rows: [anthropic, "+ add new provider…"] — move to the trailing row.
+        let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Down));
+        let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Enter));
+        assert!(a.pending_provider_wizard.is_some());
+
+        type_str(&mut a, "deepseek");
+        let _ = a.on_key(KeyEvent::from(KeyCode::Enter)); // Name -> Adapter
+        let _ = a.on_key(KeyEvent::from(KeyCode::Down)); // anthropic -> openai
+        let _ = a.on_key(KeyEvent::from(KeyCode::Enter)); // Adapter -> Endpoint
+        let _ = a.on_key(KeyEvent::from(KeyCode::Enter)); // accept the default endpoint
+        type_str(&mut a, "deepseek-chat");
+        let _ = a.on_key(KeyEvent::from(KeyCode::Enter)); // ModelId -> ApiKey
+        type_str(&mut a, "sk-test");
+        let _ = a.on_key(KeyEvent::from(KeyCode::Enter)); // ApiKey -> Summary
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter)); // write
+
+        assert!(matches!(action, Action::Command(Command::ReloadConfig)));
+        assert!(a.pending_provider_wizard.is_none());
+        assert_eq!(
+            a.wizard_created_models.get("deepseek").map(String::as_str),
+            Some("deepseek-chat")
+        );
+    }
+
+    #[test]
+    fn provider_wizard_rejects_empty_name_and_stays_on_step() {
+        let mut a = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        a.open_model_picker();
+        let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Enter));
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(action, Action::None);
+        let Some(wizard) = a.pending_provider_wizard.as_ref() else {
+            panic!("wizard should still be open");
+        };
+        assert_eq!(wizard.step, WizardStep::Name);
+    }
+
+    #[test]
+    fn provider_wizard_esc_steps_back_without_losing_the_value() {
+        let mut a = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        a.open_model_picker();
+        let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Enter));
+        type_str(&mut a, "zai2");
+        let _ = a.on_key(KeyEvent::from(KeyCode::Enter)); // Name -> Adapter
+        let Some(wizard) = a.pending_provider_wizard.as_ref() else {
+            panic!("wizard should still be open");
+        };
+        assert_eq!(wizard.step, WizardStep::Adapter);
+        let _ = a.on_key(KeyEvent::from(KeyCode::Esc)); // Adapter -> Name
+        let Some(wizard) = a.pending_provider_wizard.as_ref() else {
+            panic!("wizard should still be open");
+        };
+        assert_eq!(wizard.step, WizardStep::Name);
+        assert_eq!(wizard.editor.text(), "zai2");
+    }
+
+    #[test]
+    fn provider_wizard_rejects_a_name_already_in_use() {
+        let mut a = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            vec!["anthropic".into()],
+            String::new(),
+            test_provider_writer(),
+        );
+        a.open_model_picker();
+        let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Down));
+        let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Enter));
+        type_str(&mut a, "anthropic");
+        let action = a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(action, Action::None);
+        let Some(wizard) = a.pending_provider_wizard.as_ref() else {
+            panic!("wizard should still be open");
+        };
+        assert_eq!(wizard.step, WizardStep::Name);
+        assert!(wizard.error.is_some());
     }
 
     #[test]
@@ -2846,6 +3287,7 @@ mod tests {
             sessions,
             Vec::new(),
             "# seeded config\n".to_string(),
+            test_provider_writer(),
         );
 
         let cfg = root.join(".agents").join("config.toml");
@@ -2865,7 +3307,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let sessions = root.join(".agents").join("sessions");
         std::fs::create_dir_all(&sessions).expect("mkdir");
-        let mut a = App::new(SessionInfo::default(), sessions, Vec::new(), String::new());
+        let mut a = App::new(
+            SessionInfo::default(),
+            sessions,
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
 
         let p = root.join(".agents").join("prompts").join("system.md");
         let action = a.run_slash("prompt system");
@@ -2892,6 +3340,7 @@ mod tests {
             sessions,
             Vec::new(),
             "# t\n".to_string(),
+            test_provider_writer(),
         );
 
         // First edit: no project config yet → seeded, told it overrides defaults.

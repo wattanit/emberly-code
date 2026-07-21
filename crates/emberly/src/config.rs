@@ -1444,7 +1444,7 @@ fn global_config_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("config.toml"))
 }
 
-fn global_keys_path() -> Option<PathBuf> {
+pub(crate) fn global_keys_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("keys.toml"))
 }
 

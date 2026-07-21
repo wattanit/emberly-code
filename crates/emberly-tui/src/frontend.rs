@@ -68,6 +68,7 @@ pub async fn run(
     config_template: String,
     reasoning: Option<String>,
     mouse: bool,
+    provider_writer: std::sync::Arc<dyn emberly_core::ProviderProfileWriter>,
 ) -> io::Result<()> {
     let reasoning_view = crate::app::ReasoningView::parse(reasoning.as_deref().unwrap_or(""));
     match kind {
@@ -81,6 +82,7 @@ pub async fn run(
                 config_template,
                 reasoning_view,
                 mouse,
+                provider_writer,
             )
             .await
         }

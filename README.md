@@ -141,7 +141,13 @@ model    = "glm-4.6"
 ```
 
 **Adding a provider is configuration, not code** — a profile names a wire-format
-`adapter` (`anthropic` or `openai`), an endpoint, and a key *reference*:
+`adapter` (`anthropic` or `openai`), an endpoint, and a key *reference*. The
+easiest way in is the **guided setup wizard**: open the model picker
+(`/model`) and pick the trailing "+ add new provider…" row — it walks you
+through a name, adapter, endpoint, model id, and key (masked as you type),
+then writes both files for you. Raw editing below remains the fallback for
+anything the wizard's fixed field set doesn't cover (per-model metadata, a
+non-standard auth scheme):
 
 ```toml
 [providers.myserver]
@@ -204,6 +210,15 @@ creating a new override. On save the change is **applied to the running
 session**; startup-only settings are named as needing a restart. **`/reload`**
 re-reads everything on demand. In plain mode there's no editor handoff — the
 commands print the path to edit yourself, and `/reload` applies it.
+
+Adding a provider has its own guided path: from `/model`, the trailing "+ add
+new provider…" row opens a step-by-step wizard (name → adapter → endpoint →
+model id → key), ending in a summary screen with the key redacted to its last
+4 characters before it writes anything. It writes the profile into the same
+project `.agents/config.toml` and the key into `~/.config/emberly/keys.toml`,
+then reloads exactly like a manual edit would — no separate success message,
+no auto-switch (pick the new profile from `/model` afterward). Not available
+in plain mode, which falls back to the `$EDITOR` handoff above.
 
 ### Commands & features
 
