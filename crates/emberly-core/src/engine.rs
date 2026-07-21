@@ -116,8 +116,11 @@ pub struct ContextConfig {
     /// Spec §7). Older turns are elided from the sent context behind one
     /// marker; they stay in the transcript and the user's scrollback (HC-7).
     pub window_turns: usize,
-    /// How many trailing messages `/compact` keeps verbatim (Tech Spec §7).
-    /// Also the tail manual and automatic compaction (Phase 3) both keep.
+    /// How many trailing turns `/compact` keeps verbatim (Tech Spec §7). Also
+    /// the tail manual and automatic compaction (Phase 3) both keep. A turn
+    /// boundary, not a raw message count (see [`group_turn_starts`]) — so a
+    /// turn with several tool calls is kept or summarized as one unit, never
+    /// split mid-`(tool_use, tool_result)`.
     pub keep_recent_turns: usize,
     /// Whether automatic compaction is enabled (FR-4, Tech Spec §7/§8). When
     /// `true` (default), the engine schedules a compaction at the next clean
@@ -1314,22 +1317,32 @@ impl Engine {
 
     /// Compaction at a clean boundary (Tech Spec §7). Replaces the middle
     /// of the conversation — everything after the pinned original task and
-    /// before the last `context.keep_recent_turns` messages — with a model-written summary,
+    /// before the last `context.keep_recent_turns` turns — with a model-written summary,
     /// keeping the session usable when context grows. The pinned content
     /// (system prompt, original task) is never compacted; the JSONL log is
     /// untouched (the compaction is recorded as one event, replayed on resume).
     /// `trigger` records whether the user or the FR-4 threshold initiated it.
     async fn compact(&mut self, trigger: CompactTrigger) {
         // Pinned = the original task (the system prompt lives outside the
-        // conversation). Keep the tail verbatim; summarize the middle.
+        // conversation). Keep the tail verbatim; summarize the middle. The cut
+        // point is snapped to a turn boundary via `group_turn_starts` — the
+        // same primitive `windowed_messages` uses — so a turn with several
+        // tool calls is never split between the summary and the kept tail
+        // (a `Role::Tool` message left without its preceding `Role::Assistant`
+        // tool_calls message is an invalid request to every provider).
         let pinned = usize::from(!self.conversation.is_empty());
         let len = self.conversation.len();
-        let keep = self
-            .context
-            .keep_recent_turns
-            .min(len.saturating_sub(pinned));
         let from = pinned;
-        let to = len.saturating_sub(keep);
+        let turns = group_turn_starts(&self.conversation[from..]);
+        let keep = self.context.keep_recent_turns.min(turns.len());
+        let elided = turns.len().saturating_sub(keep);
+        let to = if elided == 0 {
+            from
+        } else if elided < turns.len() {
+            from + turns[elided]
+        } else {
+            len
+        };
         if to <= from {
             self.emit(UiEvent::CompactionStatus {
                 message: "nothing to compact yet".into(),
@@ -1385,7 +1398,7 @@ impl Engine {
             replaced_to: u32::try_from(to).unwrap_or(u32::MAX),
             trigger,
         });
-        let turns_compacted = to - from;
+        let turns_compacted = elided;
         self.emit(UiEvent::CompactionStatus {
             message: match trigger {
                 CompactTrigger::Manual => {

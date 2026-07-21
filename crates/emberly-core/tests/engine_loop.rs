@@ -396,17 +396,23 @@ async fn file_sink_session_resumes_to_an_identical_view() {
 
 #[tokio::test]
 async fn compact_summarizes_the_middle_and_records_the_event() {
-    // Four text turns build 8 messages; the fifth scripted response is consumed
-    // by the summarization call that `/compact` makes.
+    // Eight text turns (more than the default `keep_recent_turns` of 6, a
+    // *turn* count — see `group_turn_starts`) so two whole turns are elided;
+    // the ninth scripted response is consumed by the summarization call that
+    // `/compact` makes.
     let scripts = vec![
         ScriptedResponse::text("r1"),
         ScriptedResponse::text("r2"),
         ScriptedResponse::text("r3"),
         ScriptedResponse::text("r4"),
+        ScriptedResponse::text("r5"),
+        ScriptedResponse::text("r6"),
+        ScriptedResponse::text("r7"),
+        ScriptedResponse::text("r8"),
         ScriptedResponse::text("SUMMARY OF THE MIDDLE"),
     ];
     let (mut h, sink) = start_capturing(scripts, temp_project());
-    for i in 0..4 {
+    for i in 0..8 {
         h.send(Command::UserInput {
             text: format!("msg {i}"),
         })
@@ -429,6 +435,89 @@ async fn compact_summarizes_the_middle_and_records_the_event() {
         TranscriptEvent::Compaction { summary, trigger: CompactTrigger::Manual, .. }
             if summary == "SUMMARY OF THE MIDDLE"
     )));
+}
+
+#[tokio::test]
+async fn compact_never_splits_tool_use_from_result() {
+    // FR-4/FR-3 regression: the compaction cut point must land on a turn
+    // boundary, never inside a (ToolUse, ToolResult) pair — a raw
+    // message-count cut (the pre-fix behavior) can leave a lone `Role::Tool`
+    // message with no preceding `tool_calls`, which every provider rejects
+    // (this is the exact shape of the reported HTTP 400 after compaction).
+    let mut conv = vec![Message::user_text("original task")]; // pinned
+                                                              // 8 turns, each with a tool call: [User, Assistant+ToolUse, ToolResult].
+    for i in 0..8 {
+        let call_id = ToolCallId::new(format!("c{i}"));
+        conv.push(Message::user_text(format!("turn {i}")));
+        conv.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: format!("calling tool {i}"),
+                },
+                ContentBlock::ToolUse {
+                    id: call_id.clone(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "x"}),
+                },
+            ],
+        });
+        conv.push(Message::tool_result(call_id, format!("result {i}"), false));
+    }
+
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::text("SUMMARY"),
+        ScriptedResponse::text("ok"),
+    ]));
+    // keep_recent_turns=4 is not a multiple of the 3-message turn length used
+    // here, so a raw message-count cut (the bug) would land mid-turn; a
+    // turn-count cut (the fix) always lands clean.
+    let ctx = ContextConfig {
+        keep_recent_turns: 4,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn_windowed(fake.clone(), temp_project(), ctx, conv, false);
+    h.send(Command::Compact).await;
+    let _ = h.collect(None).await;
+
+    h.send(Command::UserInput {
+        text: "next".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    let msgs = &req.messages;
+
+    // Every Role::Tool message must be immediately preceded by a Role::Assistant
+    // message carrying the matching tool_calls id.
+    for (i, msg) in msgs.iter().enumerate() {
+        if msg.role != Role::Tool {
+            continue;
+        }
+        let call_id = msg.content.iter().find_map(|b| match b {
+            ContentBlock::ToolResult { call_id, .. } => Some(call_id.0.as_str()),
+            _ => None,
+        });
+        let Some(call_id) = call_id else {
+            panic!("tool message at {i} has no ToolResult block");
+        };
+        assert!(i > 0, "tool message at index 0 has no preceding message");
+        let prev = &msgs[i - 1];
+        assert_eq!(
+            prev.role,
+            Role::Assistant,
+            "tool message at {i} (call {call_id}) not preceded by an assistant message: {msgs:#?}"
+        );
+        let matches_call = prev
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id.0.as_str() == call_id));
+        assert!(
+            matches_call,
+            "tool message at {i} (call {call_id}) doesn't match the preceding assistant's tool_calls: {msgs:#?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3098,7 +3187,12 @@ async fn auto_compaction_fires_at_clean_boundary_and_does_not_thrash() {
     let provider: Arc<dyn Provider> = auto_compact_provider(scripts);
     let sink = CaptureSink::new();
     let mut config = make_config(provider, temp_project(), Box::new(sink.clone()));
-    config.context = ContextConfig::default(); // auto_compact = true, threshold = 0.85
+    config.context = ContextConfig {
+        // Small enough that the 5 turns below (a turn count, not a message
+        // count — see `group_turn_starts`) leave something to elide.
+        keep_recent_turns: 3,
+        ..ContextConfig::default() // auto_compact = true, threshold = 0.85
+    };
     let mut h = spawn(config);
 
     // Build up enough turns for compaction to have a range to summarize
@@ -3167,6 +3261,9 @@ async fn auto_compact_disabled_never_auto_fires() {
     let mut config = make_config(provider, temp_project(), Box::new(sink.clone()));
     config.context = ContextConfig {
         auto_compact: false,
+        // Small enough that the 5 turns below leave something to elide when
+        // the manual /compact runs further down.
+        keep_recent_turns: 3,
         ..ContextConfig::default()
     };
     let mut h = spawn(config);
@@ -3249,11 +3346,17 @@ async fn setup_session_with_cache() -> (PathBuf, PathBuf) {
         ScriptedResponse::text("r2"),
         ScriptedResponse::text("r3"),
         ScriptedResponse::text("r4"),
+        ScriptedResponse::text("r5"),
+        ScriptedResponse::text("r6"),
+        ScriptedResponse::text("r7"),
+        ScriptedResponse::text("r8"),
         ScriptedResponse::text("SUMMARY OF MIDDLE"),
         ScriptedResponse::text("after compact"),
     ];
     let mut h = start_with_file_transcript(scripts, root, &path);
-    for i in 0..4 {
+    // More than the default `keep_recent_turns` of 6 (a turn count) so the
+    // compaction below actually has turns to elide.
+    for i in 0..8 {
         h.send(Command::UserInput {
             text: format!("msg {i}"),
         })

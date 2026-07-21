@@ -88,7 +88,8 @@ pub async fn run(
         }
         // Line mode notes the resumed-event count in its banner (see the
         // binary); it does not replay the timeline or offer the picker, but it
-        // supports `/config`, `/prompt`, `/reload`, and `/effort` (C-5, P-9).
+        // supports `/config`, `/prompt`, `/reload`, `/effort`, and `/compact`
+        // (C-5, P-9, §8.3).
         FrontendKind::Plain => {
             line::run(ports, sessions_dir, config_template, reasoning_view).await
         }
