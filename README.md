@@ -242,23 +242,23 @@ agent's task list, and changed files.
 
 | Command | Key | What it does |
 |---|---|---|
-| `/help` | `Ctrl-P` | List commands and keybindings |
+| `/new` (`/clear`) | | Start a fresh session (the current one is saved) |
+| `/session` | | List saved sessions and switch to one |
+| `/compact` | | Summarize older turns to reclaim context space |
+| `/model` | | Switch the active provider/model (`/model <profile>` direct) |
+| `/mode` | `Shift-Tab` | Pick a permission mode (`Shift-Tab` cycles) |
+| `/effort` | | Set reasoning effort (`/effort low\|medium\|high\|max`) |
 | `/view` | | View the last assistant message in full |
 | `/diff` | `Ctrl-O` | Open the latest file's diff |
 | `/files` | | List files changed this session |
-| `/session` | | List saved sessions and switch to one |
-| `/new` (`/clear`) | | Start a fresh session (the current one is saved) |
-| `/mode` | `Shift-Tab` | Pick a permission mode (`Shift-Tab` cycles) |
-| `/model` | | Switch the active provider/model (`/model <profile>` direct) |
-| `/effort` | | Set reasoning effort (`/effort low\|medium\|high\|max`) |
+| `/sidebar` | `Ctrl-B` | Toggle the sidebar |
+| `/cancel` | | Cancel the in-flight turn |
 | `/config` | | Edit `.agents/config.toml` in `$EDITOR` |
 | `/prompt` | | Edit a prompt file (`/prompt system\|compact`) |
 | `/reload` | | Re-read config & prompts from disk and apply them |
 | `/memory` | | Inspect, edit, and delete stored memory |
 | `/skills` | | List available skills and inspect a skill's instructions |
-| `/compact` | | Summarize older turns to reclaim context space |
-| `/sidebar` | `Ctrl-B` | Toggle the sidebar |
-| `/cancel` | | Cancel the in-flight turn |
+| `/help` | `Ctrl-P` | List commands and keybindings |
 | `/quit` | `Ctrl-D` | Exit |
 
 #### Safety: permissions, sandbox, and trust

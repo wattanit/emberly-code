@@ -67,13 +67,47 @@ pub struct CommandSpec {
     pub cmd: AppCommand,
 }
 
-/// The v1 command set. Order is the palette's default (most useful first).
+/// The v1 command set. Order is the palette's default — grouped by frequency
+/// of use (owner's call): session start/switch first, then the runtime
+/// switches reached for constantly mid-session, then inspection/control,
+/// then setup/tuning (reached for rarely, once things are configured), with
+/// `help`/`quit` last.
 pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
-        name: "help",
-        key: Some("Ctrl-P"),
-        desc: "List commands and keybindings",
-        cmd: AppCommand::Help,
+        name: "new",
+        key: None,
+        desc: "Start a fresh session (saves the current one)",
+        cmd: AppCommand::NewSession,
+    },
+    CommandSpec {
+        name: "session",
+        key: None,
+        desc: "List saved sessions and switch to one",
+        cmd: AppCommand::Session,
+    },
+    CommandSpec {
+        name: "compact",
+        key: None,
+        desc: "Summarize older turns to reclaim context space",
+        cmd: AppCommand::Compact,
+    },
+    CommandSpec {
+        name: "model",
+        key: None,
+        desc: "Switch the active provider/model",
+        cmd: AppCommand::Model,
+    },
+    CommandSpec {
+        name: "mode",
+        key: Some("Shift-Tab"),
+        desc: "Cycle permission mode (normal / auto-accept edits / auto)",
+        cmd: AppCommand::CycleMode,
+    },
+    CommandSpec {
+        name: "effort",
+        key: None,
+        desc: "Set the reasoning-effort level (/effort low|medium|high|max)",
+        cmd: AppCommand::Effort,
     },
     CommandSpec {
         name: "view",
@@ -94,34 +128,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: AppCommand::Files,
     },
     CommandSpec {
-        name: "session",
-        key: None,
-        desc: "List saved sessions and switch to one",
-        cmd: AppCommand::Session,
+        name: "sidebar",
+        key: Some("Ctrl-B"),
+        desc: "Toggle the sidebar",
+        cmd: AppCommand::ToggleSidebar,
     },
     CommandSpec {
-        name: "new",
+        name: "cancel",
         key: None,
-        desc: "Start a fresh session (saves the current one)",
-        cmd: AppCommand::NewSession,
-    },
-    CommandSpec {
-        name: "mode",
-        key: Some("Shift-Tab"),
-        desc: "Cycle permission mode (normal / auto-accept edits / auto)",
-        cmd: AppCommand::CycleMode,
-    },
-    CommandSpec {
-        name: "model",
-        key: None,
-        desc: "Switch the active provider/model",
-        cmd: AppCommand::Model,
-    },
-    CommandSpec {
-        name: "effort",
-        key: None,
-        desc: "Set the reasoning-effort level (/effort low|medium|high|max)",
-        cmd: AppCommand::Effort,
+        desc: "Cancel the current turn",
+        cmd: AppCommand::Cancel,
     },
     CommandSpec {
         name: "config",
@@ -154,22 +170,10 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: AppCommand::Skills,
     },
     CommandSpec {
-        name: "compact",
-        key: None,
-        desc: "Summarize older turns to reclaim context space",
-        cmd: AppCommand::Compact,
-    },
-    CommandSpec {
-        name: "sidebar",
-        key: Some("Ctrl-B"),
-        desc: "Toggle the sidebar",
-        cmd: AppCommand::ToggleSidebar,
-    },
-    CommandSpec {
-        name: "cancel",
-        key: None,
-        desc: "Cancel the current turn",
-        cmd: AppCommand::Cancel,
+        name: "help",
+        key: Some("Ctrl-P"),
+        desc: "List commands and keybindings",
+        cmd: AppCommand::Help,
     },
     CommandSpec {
         name: "quit",
