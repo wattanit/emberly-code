@@ -24,7 +24,6 @@ use emberly_core::{
     TranscriptRecord, TranscriptSink,
 };
 use emberly_providers::Provider;
-use emberly_tools::{default_registry, ToolRegistry};
 use emberly_tui::{frontend, SessionInfo};
 
 mod config;
@@ -488,7 +487,7 @@ async fn run() -> anyhow::Result<()> {
     for warning in &rule_warnings {
         eprintln!("emberly: {warning}");
     }
-    let rules = RuleEngine::new(rule_specs, sandbox.bash_allowlist_active());
+    let rules = RuleEngine::new(rule_specs.clone(), sandbox.bash_allowlist_active());
 
     // Build the confined-spawn handle: record the canonical git binary now
     // (`which git`, canonicalized) so only genuine git earns the `.git/`-writable
@@ -509,29 +508,15 @@ async fn run() -> anyhow::Result<()> {
             project_root.clone(),
             &cli_overrides,
             resolved.sandbox_require,
+            resolved.providers.clone(),
         ));
 
     // Build the tool registry: the built-in suite always, plus `web_search`
-    // only when `search.enabled` and an endpoint is configured (Tech Spec §5.5,
-    // structural fact 1 — web_search is the first config-conditionally-registered
-    // tool). `default_registry()` stays config-free for tests.
-    let mut tools: ToolRegistry = default_registry();
-    if resolved.search.enabled {
-        if let Some(endpoint) = &resolved.search.endpoint {
-            let adapter = resolved.search.adapter.as_deref().unwrap_or("json");
-            let tool = provider_setup::build_search_tool(
-                endpoint,
-                adapter,
-                resolved.search.auth.as_ref(),
-                resolved.search.max_results,
-            )
-            .context("failed to build the web_search tool")?;
-            tools.register(std::sync::Arc::new(tool));
-        } else if resolved.search.adapter.is_some() {
-            eprintln!(
-                "emberly: [search] has an adapter but no endpoint — set endpoint = \"…\" or search.enabled = false"
-            );
-        }
+    // only when `search.enabled` and an endpoint is configured (Tech Spec §5.5).
+    // Shared with the `/config` reload path (C-5) via `build_tool_registry`.
+    let (tools, tool_warnings) = provider_setup::build_tool_registry(&resolved)?;
+    for warning in &tool_warnings {
+        eprintln!("emberly: {warning}");
     }
 
     let project_memory_dir = project_root.join(".agents").join("memory");
@@ -557,8 +542,11 @@ async fn run() -> anyhow::Result<()> {
             .provider
             .clone()
             .unwrap_or_else(|| "placeholder".into()),
+        configured_provider: resolved.provider.clone(),
+        configured_model: resolved.model.clone(),
         sandbox,
         rules,
+        rule_specs,
         sandbox_spawn: Some(sandbox_spawn),
         config_provenance: resolved.provenance.clone(),
         transcript,

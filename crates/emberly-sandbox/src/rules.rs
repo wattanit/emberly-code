@@ -184,6 +184,11 @@ pub struct Outcome {
 #[derive(Debug, Clone)]
 pub struct RuleEngine {
     rules: Vec<Rule>,
+    /// Index past the built-in-defaults + config-rules prefix — everything
+    /// after this is an in-memory session grant. Lets [`reload_config_rules`]
+    /// (C-5) rebuild the config-sourced prefix in place without dropping
+    /// grants accrued so far this session.
+    base_len: usize,
 }
 
 impl RuleEngine {
@@ -195,12 +200,26 @@ impl RuleEngine {
     pub fn new(config_rules: Vec<Rule>, bash_allowlist_active: bool) -> Self {
         let mut rules = builtin_defaults(bash_allowlist_active);
         rules.extend(config_rules);
-        Self { rules }
+        let base_len = rules.len();
+        Self { rules, base_len }
     }
 
     /// Add an in-memory session grant ("allow for this session").
     pub fn add_session_grant(&mut self, rule: Rule) {
         self.rules.push(rule);
+    }
+
+    /// Reload the config-sourced portion of the ruleset in place (an in-app
+    /// `/config`/permissions edit, C-5), preserving any session grants added
+    /// since construction — a naive rebuild would otherwise silently drop
+    /// "allow for this session" grants the user already approved.
+    pub fn reload_config_rules(&mut self, config_rules: Vec<Rule>, bash_allowlist_active: bool) {
+        let grants = self.rules.split_off(self.base_len);
+        let mut rules = builtin_defaults(bash_allowlist_active);
+        rules.extend(config_rules);
+        self.base_len = rules.len();
+        rules.extend(grants);
+        self.rules = rules;
     }
 
     /// Evaluate a query under the current [`Mode`]: the base rule decision,
@@ -628,6 +647,44 @@ mod tests {
         assert_eq!(
             e.evaluate(&bash("ls"), Mode::Normal).decision,
             Decision::Deny,
+        );
+    }
+
+    #[test]
+    fn reload_config_rules_preserves_session_grants() {
+        // Start with a project rule that denies all bash.
+        let project_deny = RuleSpec {
+            tool: "bash".into(),
+            matcher: None,
+            action: Decision::Deny,
+        }
+        .into_rule(RuleSource::Project);
+        let mut e = RuleEngine::new(vec![project_deny], true);
+        e.add_session_grant(bash_session_grant("git status"));
+        assert_eq!(
+            e.evaluate(&bash("git status"), Mode::Normal).decision,
+            Decision::Allow,
+            "the session grant applies before reload"
+        );
+
+        // An in-app config edit changes the project rule set (deny lifted).
+        let project_allow = RuleSpec {
+            tool: "bash".into(),
+            matcher: None,
+            action: Decision::Allow,
+        }
+        .into_rule(RuleSource::Project);
+        e.reload_config_rules(vec![project_allow], true);
+
+        assert_eq!(
+            e.evaluate(&bash("git status"), Mode::Normal).decision,
+            Decision::Allow,
+            "the session grant survives a config reload"
+        );
+        assert_eq!(
+            e.evaluate(&bash("ls"), Mode::Normal).decision,
+            Decision::Allow,
+            "the new config rule takes effect"
         );
     }
 

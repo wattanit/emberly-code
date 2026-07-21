@@ -219,7 +219,7 @@ pub struct TruncateConfigFile {
 
 /// A `[providers.<name>]` profile: an adapter (wire format) plus the endpoint
 /// and auth to reach it, so a new provider is configuration, not code (P-8).
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
 pub struct ProfileFile {
     /// Wire-format adapter: `"anthropic"` or `"openai"`.
     pub adapter: Option<String>,
@@ -236,7 +236,7 @@ pub struct ProfileFile {
 
 /// A profile's `auth = { scheme, header?, key }`. `key` is a *reference*
 /// resolved from env / `keys.toml` ([`api_key`]), never a literal secret.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
 pub struct AuthFile {
     /// `"bearer"`, `"x-api-key"`, `"header"`, or `"none"`.
     pub scheme: Option<String>,
@@ -247,7 +247,7 @@ pub struct AuthFile {
 }
 
 /// Optional per-model metadata inside a profile.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
 pub struct ModelFile {
     pub context_window: Option<u32>,
     pub max_output: Option<u32>,
@@ -358,7 +358,7 @@ pub struct SandboxConfig {
     pub require: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 pub struct PricingEntry {
     pub input: f64,
     pub output: f64,

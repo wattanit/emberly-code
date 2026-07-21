@@ -17,7 +17,7 @@ use emberly_providers::{
     CompletionRequest, CompletionStream, ContentBlock, Effort, Message, Provider, ProviderError,
     RetryPolicy, Role, StreamEvent, ToolCallId, ToolSchema,
 };
-use emberly_sandbox::{Decision, Mode, Query, RuleEngine};
+use emberly_sandbox::{Decision, Mode, Query, Rule, RuleEngine};
 use emberly_tools::{
     reduce_output, truncate_output, AskUserOutcome, PermissionOutcome, PermissionRequest,
     RecallOutcome, Reduction, Sandbox, ToolCtx, ToolRegistry, TruncateConfig,
@@ -56,7 +56,7 @@ const OUTPUT_RESERVE: u64 = 8_000;
 
 /// The loop-breaking guardrail's tunables (S-5, Tech Spec §7). Defaults are
 /// initial — tune with use. `enabled = false` turns the guardrail off entirely.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoopConfig {
     pub enabled: bool,
     /// Trip when this many consecutive turns repeat the *same* tool-call
@@ -80,7 +80,7 @@ impl Default for LoopConfig {
 /// A single pass/fail command check the completion gate runs before the loop
 /// may declare a task done (S-6, Tech Spec §7). Passes iff the command exits
 /// with `expect_exit`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletionCheck {
     pub name: String,
     pub command: String,
@@ -90,7 +90,7 @@ pub struct CompletionCheck {
 /// The completion gate's tunables (S-6, Tech Spec §7). The gate is inert —
 /// behaves exactly as no gate at all — until at least one [`CompletionCheck`]
 /// is registered, regardless of `enabled`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletionConfig {
     pub enabled: bool,
     /// Failed completion attempts allowed before the engine halts to the user
@@ -110,7 +110,7 @@ impl Default for CompletionConfig {
 /// Adaptive context-window and compaction configuration (FR-3, Tech Spec
 /// §7/§8). Defaults are placeholders — tune with real long sessions (Tech Spec
 /// §16, Requirements §13). `Copy` so it is cheap to pass into send-time views.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContextConfig {
     /// How many trailing non-pinned turns are sent to the provider (FR-3, Tech
     /// Spec §7). Older turns are elided from the sent context behind one
@@ -148,7 +148,7 @@ impl Default for ContextConfig {
 }
 
 /// Memory config (FR-6, Tech Spec §8.1). Resolved from `[memory]` config.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryConfig {
     /// Whether the memory system is enabled (default `true`). When `false`,
     /// memory ops are rejected and no index is pinned.
@@ -168,7 +168,7 @@ impl Default for MemoryConfig {
 }
 
 /// Skills config (FR-7, Tech Spec §8.2). Resolved from `[skills]` config.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillsConfig {
     /// Whether the skill system is enabled (default `true`). When `false`, no
     /// catalog is built or pinned, and the `skill` tool returns failures.
@@ -191,8 +191,8 @@ pub struct EngineConfig {
     /// Tool-call explanations (T-9, Tech Spec §5.4). When true, an optional
     /// `explanation` property is injected into every tool's schema and the
     /// prompt instruction is appended; when false, both are omitted so the model
-    /// is never prompted and no tokens are spent (Requirements T-9). Fixed for
-    /// the engine's life (a live config reload does not change it).
+    /// is never prompted and no tokens are spent (Requirements T-9). Live —
+    /// an in-app `/config` reload picks up a changed value (C-5).
     pub tool_explanations: bool,
     /// True when workspace trust was *newly* granted at startup this launch
     /// (FR-1) — the engine records a `trust_decision` at session start. A
@@ -222,12 +222,26 @@ pub struct EngineConfig {
     pub active_session_path: Arc<RwLock<PathBuf>>,
     /// Provider label for the transcript `session_start` (e.g. `anthropic`).
     pub provider_label: String,
+    /// The `provider =` / `model =` selectors config.toml currently names as
+    /// the default to use, distinct from the *active* `provider`/`model`
+    /// above (which only changes on an explicit `/model` switch). Retained
+    /// so a `/config` reload (C-5) can notice the configured selection moved
+    /// and tell the user exactly which `/model` command would follow it —
+    /// reload never auto-switches the active session.
+    pub configured_provider: Option<String>,
+    pub configured_model: Option<String>,
     /// OS confinement status at startup (Requirements §6.7).
     pub sandbox: SandboxStatus,
     /// The permission rule engine (Requirements §6.1): built-in defaults plus
     /// global + project rules, with the bash allowlist already toggled for the
     /// sandbox status. Session grants accrue in-memory during the run.
     pub rules: RuleEngine,
+    /// The raw config-sourced rules (global + project `permissions.toml`,
+    /// pre-builtin/pre-grant) that `rules` was built from — retained so a
+    /// `/config` reload (C-5) can tell whether the rule set actually changed
+    /// and rebuild just the config-sourced portion via
+    /// [`RuleEngine::reload_config_rules`].
+    pub rule_specs: Vec<Rule>,
     /// Override for how bash spawns children. `None` (the production path)
     /// builds the host confined-spawn from `sandbox`. Tests inject a plain
     /// spawner so they can report a confined *status* (to exercise the rule and
@@ -681,9 +695,19 @@ pub struct Engine {
     /// Shared with the host so the panic/exit path tracks the current session.
     active_session_path: Arc<RwLock<PathBuf>>,
     provider_label: String,
+    /// The config-configured default `provider =` / `model =` selection, as
+    /// of the last time it was observed (startup or the last `/config`
+    /// reload) — lets a reload detect "the configured default moved" even
+    /// though the active session provider is never auto-switched.
+    configured_provider: Option<String>,
+    configured_model: Option<String>,
     sandbox: SandboxStatus,
     /// The permission rule engine consulted by the gate (Requirements §6).
     rules: RuleEngine,
+    /// The raw config-sourced rules `rules` was built from — retained so a
+    /// `/config` reload (C-5) can detect a change and rebuild just that
+    /// portion via [`RuleEngine::reload_config_rules`].
+    rule_specs: Vec<Rule>,
     /// The current auto-accept mode (Requirements §6.4). Starts [`Mode::Normal`];
     /// changed only through [`Engine::set_mode`], which gates auto tiers on the
     /// sandbox status.
@@ -732,6 +756,11 @@ pub struct Engine {
     /// The durable memory store (FR-6, T-13). `None` when memory is disabled
     /// or no home directory exists.
     memory_store: Option<MemoryStore>,
+    /// Retained from [`EngineConfig`] so a `/config` reload (C-5) can rebuild
+    /// `memory_store` without needing a full `EngineConfig`.
+    user_memory_dir: Option<PathBuf>,
+    /// Retained from [`EngineConfig`] for the same reason as `user_memory_dir`.
+    project_memory_dir: Option<PathBuf>,
     /// Cached user-global memory index text for pinning (Tech Spec §7).
     memory_user_index: String,
     /// Cached project memory index text for pinning (empty when untrusted).
@@ -744,6 +773,11 @@ pub struct Engine {
     /// The skill catalog (FR-7, T-15). `None` when skills are disabled or no
     /// home directory exists.
     skill_catalog: Option<SkillCatalog>,
+    /// Retained from [`EngineConfig`] so a `/config` reload (C-5) can rebuild
+    /// `skill_catalog` without needing a full `EngineConfig`.
+    user_skills_dir: Option<PathBuf>,
+    /// Retained from [`EngineConfig`] for the same reason as `user_skills_dir`.
+    project_skills_dir: Option<PathBuf>,
     /// The built skill metadata for pinning + `SkillsAvailable`.
     skill_metas: Vec<emberly_tools::SkillMeta>,
     /// Cached catalog text for pinning (Tech Spec §7).
@@ -776,8 +810,16 @@ impl Engine {
         let (task_list_tx, task_list_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (memory_tx, memory_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (skill_tx, skill_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
-        let memory_store = build_memory_store(&config);
-        let skill_catalog = build_skill_catalog(&config);
+        let memory_store = build_memory_store(
+            config.memory.enabled,
+            config.user_memory_dir.as_ref(),
+            config.project_memory_dir.clone(),
+        );
+        let skill_catalog = build_skill_catalog(
+            config.skills.enabled,
+            config.user_skills_dir.as_ref(),
+            config.project_skills_dir.clone(),
+        );
         // Capture before `config.sandbox` is moved into the struct below.
         let sandbox_spawn: Arc<dyn Sandbox> = config.sandbox_spawn.unwrap_or_else(|| {
             // Fallback (no explicit spawner): confine from the status, but with
@@ -856,8 +898,11 @@ impl Engine {
             sessions_dir: config.sessions_dir,
             active_session_path: config.active_session_path,
             provider_label: config.provider_label,
+            configured_provider: config.configured_provider,
+            configured_model: config.configured_model,
             sandbox: config.sandbox,
             rules: config.rules,
+            rule_specs: config.rule_specs,
             mode: Mode::Normal,
             sandbox_spawn,
             config_provenance: config.config_provenance,
@@ -876,11 +921,15 @@ impl Engine {
             document_max_bytes: config.document_max_bytes,
             memory_config: config.memory.clone(),
             memory_store,
+            user_memory_dir: config.user_memory_dir,
+            project_memory_dir: config.project_memory_dir,
             memory_user_index: String::new(),
             memory_project_index: String::new(),
             memory_warn_emitted: false,
             skills_config: config.skills.clone(),
             skill_catalog,
+            user_skills_dir: config.user_skills_dir,
+            project_skills_dir: config.project_skills_dir,
             skill_metas: Vec::new(),
             skill_catalog_text: String::new(),
             skill_shadows: Vec::new(),
@@ -2385,23 +2434,128 @@ impl Engine {
             .as_ref()
             .map(|factory| factory.profiles())
             .unwrap_or_default();
-        if reloaded.profiles != old_profiles {
-            changed.push("provider profiles");
+        let profile_names_changed = reloaded.profiles != old_profiles;
+        if profile_names_changed {
             self.emit(UiEvent::ProfilesChanged {
                 profiles: reloaded.profiles.clone(),
             })
             .await;
         }
+        // A profile's content (base_url, auth, model metadata) can change
+        // without its name changing (e.g. filling in a built-in placeholder
+        // profile like `openai`) — `provider_config_changed` catches that so
+        // the notice isn't silent about it (C-5).
+        if profile_names_changed || reloaded.provider_config_changed {
+            changed.push("provider profiles");
+        }
         self.provider_factory = Some(reloaded.provider_factory);
+
+        // The config-configured default `provider =` / `model =` selection
+        // can change independently of the profile set above (e.g. the user
+        // just points an already-configured profile as the default). Never
+        // auto-switches the active session (C-6) — surfaced as a concrete
+        // `/model` command instead.
+        let mut model_hint = None;
+        if reloaded.configured_provider != self.configured_provider
+            || reloaded.configured_model != self.configured_model
+        {
+            self.configured_provider = reloaded.configured_provider;
+            self.configured_model = reloaded.configured_model;
+            changed.push("provider selection");
+            if let (Some(provider), Some(model)) =
+                (&self.configured_provider, &self.configured_model)
+            {
+                model_hint = Some(format!("run /model {provider} {model} to switch"));
+            }
+        }
+
+        if reloaded.tool_explanations != self.tool_explanations {
+            self.tool_explanations = reloaded.tool_explanations;
+            changed.push("tool explanations");
+        }
+        if reloaded.loop_config != self.loop_config {
+            self.loop_config = reloaded.loop_config;
+            changed.push("loop guardrail");
+        }
+        if reloaded.completion_config != self.completion_config {
+            self.completion_config = reloaded.completion_config;
+            changed.push("completion gate");
+        }
+        if reloaded.completion_checks != self.completion_checks {
+            self.completion_checks = reloaded.completion_checks;
+            changed.push("completion checks");
+        }
+        if reloaded.truncate != self.truncate {
+            self.truncate = reloaded.truncate;
+            changed.push("truncation");
+        }
+        if reloaded.context != self.context {
+            self.context = reloaded.context;
+            changed.push("context window");
+        }
+        if reloaded.image_max_bytes != self.image_max_bytes {
+            self.image_max_bytes = reloaded.image_max_bytes;
+            changed.push("image size limit");
+        }
+        if reloaded.document_max_bytes != self.document_max_bytes {
+            self.document_max_bytes = reloaded.document_max_bytes;
+            changed.push("document size limit");
+        }
+        if reloaded.memory != self.memory_config {
+            self.memory_config = reloaded.memory;
+            self.memory_store = build_memory_store(
+                self.memory_config.enabled,
+                self.user_memory_dir.as_ref(),
+                self.project_memory_dir.clone(),
+            );
+            self.refresh_memory_indexes();
+            changed.push("memory");
+        }
+        if reloaded.skills != self.skills_config {
+            self.skills_config = reloaded.skills;
+            self.skill_catalog = build_skill_catalog(
+                self.skills_config.enabled,
+                self.user_skills_dir.as_ref(),
+                self.project_skills_dir.clone(),
+            );
+            self.refresh_skill_catalog();
+            changed.push("skills");
+        }
+        let mut old_tool_names = self.tools.names();
+        old_tool_names.sort();
+        self.tools = reloaded.tools;
+        let mut new_tool_names = self.tools.names();
+        new_tool_names.sort();
+        if new_tool_names != old_tool_names {
+            changed.push("tools");
+        }
+        if reloaded.rule_specs != self.rule_specs {
+            self.rules.reload_config_rules(
+                reloaded.rule_specs.clone(),
+                self.sandbox.bash_allowlist_active(),
+            );
+            self.rule_specs = reloaded.rule_specs;
+            changed.push("permission rules");
+        }
 
         let mut message = if changed.is_empty() {
             "reloaded config — no live changes".to_string()
         } else {
             format!("reloaded: {}", changed.join(", "))
         };
+        if let Some(hint) = model_hint {
+            message.push_str("; ");
+            message.push_str(&hint);
+        } else if changed.contains(&"provider profiles") {
+            message.push_str("; run /model to use it");
+        }
         for note in &reloaded.restart_notes {
             message.push_str("; ");
             message.push_str(note);
+        }
+        for warning in &reloaded.warnings {
+            message.push_str("; ");
+            message.push_str(warning);
         }
         self.emit(UiEvent::Notice { message }).await;
     }
@@ -3410,28 +3564,31 @@ fn render_memory_block(user_index: &str, project_index: &str) -> String {
 
 /// Build the memory store from the engine config (FR-6, Tech Spec §8.1). Returns
 /// `None` when memory is disabled or no home directory exists.
-fn build_memory_store(config: &EngineConfig) -> Option<MemoryStore> {
-    if !config.memory.enabled {
+fn build_memory_store(
+    enabled: bool,
+    user_dir: Option<&PathBuf>,
+    project_dir: Option<PathBuf>,
+) -> Option<MemoryStore> {
+    if !enabled {
         return None;
     }
-    let user_dir = config.user_memory_dir.as_ref()?;
-    Some(MemoryStore::new(
-        user_dir.clone(),
-        config.project_memory_dir.clone(),
-    ))
+    let user_dir = user_dir?;
+    Some(MemoryStore::new(user_dir.clone(), project_dir))
 }
 
-/// Build the skill catalog from the engine config (FR-7, Tech Spec §8.2).
-/// Returns `None` when skills are disabled or no home directory exists.
-fn build_skill_catalog(config: &EngineConfig) -> Option<SkillCatalog> {
-    if !config.skills.enabled {
+/// Build the skill catalog (FR-7, Tech Spec §8.2). Returns `None` when skills
+/// are disabled or no home directory exists. Plain params (rather than
+/// `&EngineConfig`) so a `/config` reload (C-5) can rebuild it too.
+fn build_skill_catalog(
+    enabled: bool,
+    user_dir: Option<&PathBuf>,
+    project_dir: Option<PathBuf>,
+) -> Option<SkillCatalog> {
+    if !enabled {
         return None;
     }
-    let user_dir = config.user_skills_dir.as_ref()?;
-    Some(SkillCatalog::new(
-        user_dir.clone(),
-        config.project_skills_dir.clone(),
-    ))
+    let user_dir = user_dir?;
+    Some(SkillCatalog::new(user_dir.clone(), project_dir))
 }
 
 /// Enrich a tool's [`PermissionRequest`] into a UI [`PermissionRendering`] with

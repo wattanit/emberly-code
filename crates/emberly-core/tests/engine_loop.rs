@@ -81,12 +81,15 @@ fn make_config(
         sessions_dir: std::env::temp_dir(),
         active_session_path: std::sync::Arc::new(std::sync::RwLock::new(std::path::PathBuf::new())),
         provider_label: "fake".into(),
+        configured_provider: None,
+        configured_model: None,
         sandbox: SandboxStatus::Unavailable {
             reason: "test".into(),
         },
         // Degraded (allowlist suspended) → every bash asks, matching the Phase 1
         // gate behavior these tests were written against.
         rules: RuleEngine::new(Vec::new(), false),
+        rule_specs: Vec::new(),
         // Tests run bash plainly even when reporting a confined status, so the
         // self-exec shim never re-executes the test binary.
         sandbox_spawn: Some(std::sync::Arc::new(emberly_tools::PlainSandbox)),
@@ -1084,7 +1087,10 @@ async fn switch_model_unknown_profile_errors_without_switching() {
 }
 
 /// A fake [`ConfigReloader`](emberly_core::ConfigReloader): reports a changed
-/// system prompt, a new profile set, and a restart-only change (C-5).
+/// system prompt, a new profile set, a changed configured provider/model
+/// selection, two other live-reloadable changes (`tool_explanations`,
+/// `truncate`), and a restart-only change (C-5). Everything else matches
+/// `make_config`'s defaults so only the intended pieces show up as "changed".
 struct FakeReloader;
 
 impl emberly_core::ConfigReloader for FakeReloader {
@@ -1094,7 +1100,29 @@ impl emberly_core::ConfigReloader for FakeReloader {
             summary_prompt: None,
             provider_factory: Arc::new(FakeFactory),
             profiles: vec!["new".to_string(), "zai".to_string()],
+            configured_provider: Some("zai".to_string()),
+            configured_model: Some("glm-4.6".to_string()),
+            provider_config_changed: true,
+            tool_explanations: true,
+            loop_config: LoopConfig {
+                enabled: false,
+                ..LoopConfig::default()
+            },
+            completion_config: CompletionConfig::default(),
+            completion_checks: Vec::new(),
+            truncate: TruncateConfig {
+                max_lines: 999,
+                ..TruncateConfig::default()
+            },
+            context: ContextConfig::default(),
+            image_max_bytes: 5 * 1024 * 1024,
+            document_max_bytes: 32 * 1024 * 1024,
+            memory: emberly_core::MemoryConfig::default(),
+            skills: emberly_core::SkillsConfig::default(),
+            tools: default_registry(),
+            rule_specs: Vec::new(),
             restart_notes: vec!["sandbox.require changed — restart to apply".to_string()],
+            warnings: Vec::new(),
         })
     }
 }
@@ -1127,8 +1155,154 @@ async fn reload_config_applies_and_reports() {
             .any(|e| matches!(e, UiEvent::Notice { message }
             if message.contains("reloaded")
                 && message.contains("system prompt")
+                && message.contains("tool explanations")
+                && message.contains("truncation")
+                && message.contains("provider profiles")
+                && message.contains("provider selection")
+                && message.contains("run /model zai glm-4.6 to switch")
                 && message.contains("restart"))),
-        "the notice reports live changes and the restart-only one"
+        "the notice reports live changes (incl. non-prompt settings), a concrete /model \
+         command for the new configured selection, and the restart-only one"
+    );
+}
+
+/// A provider profile's *content* can change (e.g. filling in `base_url`/
+/// `auth` on a profile that already existed, such as a built-in placeholder
+/// like `openai`) without its name changing — `provider_config_changed`
+/// must still surface this as "provider profiles" even though the name list
+/// (and so `ProfilesChanged`) is untouched (C-5).
+struct ContentOnlyReloader;
+
+impl emberly_core::ConfigReloader for ContentOnlyReloader {
+    fn reload(&self) -> Result<emberly_core::ReloadedConfig, String> {
+        Ok(emberly_core::ReloadedConfig {
+            system: None,
+            summary_prompt: None,
+            provider_factory: Arc::new(FakeFactory),
+            profiles: Vec::new(),
+            configured_provider: None,
+            configured_model: None,
+            provider_config_changed: true,
+            tool_explanations: false,
+            loop_config: LoopConfig {
+                enabled: false,
+                ..LoopConfig::default()
+            },
+            completion_config: CompletionConfig::default(),
+            completion_checks: Vec::new(),
+            truncate: TruncateConfig::default(),
+            context: ContextConfig::default(),
+            image_max_bytes: 5 * 1024 * 1024,
+            document_max_bytes: 32 * 1024 * 1024,
+            memory: emberly_core::MemoryConfig::default(),
+            skills: emberly_core::SkillsConfig::default(),
+            tools: default_registry(),
+            rule_specs: Vec::new(),
+            restart_notes: Vec::new(),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn reload_config_reports_provider_content_change_without_name_change() {
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        temp_project(),
+        EngineConfig::no_transcript(),
+    );
+    config.config_reloader = Some(Arc::new(ContentOnlyReloader));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await;
+
+    h.send(Command::ReloadConfig).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ProfilesChanged { .. })),
+        "the name list didn't change, so the picker isn't re-emitted"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message }
+                if message.contains("reloaded")
+                    && message.contains("provider profiles")
+                    && message.contains("run /model to use it"))),
+        "a content-only provider change is still reported, not swallowed as \"no live changes\""
+    );
+}
+
+/// The top-level `provider =` / `model =` selectors can change with the
+/// profile *set* and its *content* both untouched (e.g. a user just points
+/// an already-configured, unmodified profile as the new default) — this must
+/// still be reported, with a concrete `/model` command, not swallowed as "no
+/// live changes" (the bug this regression test exists for).
+struct SelectionOnlyReloader;
+
+impl emberly_core::ConfigReloader for SelectionOnlyReloader {
+    fn reload(&self) -> Result<emberly_core::ReloadedConfig, String> {
+        Ok(emberly_core::ReloadedConfig {
+            system: None,
+            summary_prompt: None,
+            provider_factory: Arc::new(FakeFactory),
+            profiles: Vec::new(),
+            configured_provider: Some("openai".to_string()),
+            configured_model: Some("gpt-5.6".to_string()),
+            provider_config_changed: false,
+            tool_explanations: false,
+            loop_config: LoopConfig {
+                enabled: false,
+                ..LoopConfig::default()
+            },
+            completion_config: CompletionConfig::default(),
+            completion_checks: Vec::new(),
+            truncate: TruncateConfig::default(),
+            context: ContextConfig::default(),
+            image_max_bytes: 5 * 1024 * 1024,
+            document_max_bytes: 32 * 1024 * 1024,
+            memory: emberly_core::MemoryConfig::default(),
+            skills: emberly_core::SkillsConfig::default(),
+            tools: default_registry(),
+            rule_specs: Vec::new(),
+            restart_notes: Vec::new(),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn reload_config_reports_a_changed_default_selection_alone() {
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        temp_project(),
+        EngineConfig::no_transcript(),
+    );
+    config.config_reloader = Some(Arc::new(SelectionOnlyReloader));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await;
+
+    h.send(Command::ReloadConfig).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ProfilesChanged { .. })),
+        "neither the name list nor any profile's content changed"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message }
+                if message.contains("reloaded")
+                    && message.contains("provider selection")
+                    && !message.contains("provider profiles")
+                    && message.contains("run /model openai gpt-5.6 to switch"))),
+        "a configured-default-only change is reported with a concrete /model command, \
+         not swallowed as \"no live changes\""
     );
 }
 
