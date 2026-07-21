@@ -124,9 +124,10 @@ pub enum OverlayContent {
         rows: Vec<SessionRow>,
         selected: usize,
     },
-    /// A generic single-choice picker (Design §3.1): the model/provider picker
-    /// now (C-6), the reasoning-effort picker in Phase 3. Enter applies the
-    /// highlighted choice; `kind` decides which command it becomes.
+    /// A generic single-choice picker (Design §3.1): the model/provider
+    /// picker (C-6) and the reasoning-effort picker (P-9) both reuse it.
+    /// Enter applies the highlighted choice; `kind` decides which command it
+    /// becomes.
     Choices {
         kind: ChoiceKind,
         rows: Vec<ChoiceRow>,
@@ -180,8 +181,7 @@ pub struct PendingMemoryEdit {
 }
 
 /// What a [`OverlayContent::Choices`] picker selects, so Enter knows which
-/// command to issue. Reused by the effort picker in Phase 3 and the mode
-/// picker.
+/// command to issue. Shared by the model, effort, and mode pickers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChoiceKind {
     /// Switch the active provider profile (C-6). The row label is the profile

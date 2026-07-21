@@ -3,10 +3,10 @@
 //! permission-id counter). It talks to a frontend only over channels: [`UiEvent`]
 //! out, [`Command`] in. There is no shared mutable state.
 //!
-//! Phase 1 scope: drive a scripted or live provider through completion →
-//! tool-call → tool-result iterations, gate tool actions, truncate results at
-//! ingestion, and handle cancellation. Sandbox rules (Phase 2), retries
-//! (Phase 3), and transcript persistence (Phase 5) layer on later.
+//! Drives a scripted or live provider through completion → tool-call →
+//! tool-result iterations, gates tool actions against the sandbox rule
+//! engine, truncates results at ingestion, retries transient stream drops,
+//! persists the transcript, and handles cancellation.
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
@@ -328,7 +328,7 @@ enum StreamEnd {
     Done { tool_calls: Vec<PendingToolCall> },
     /// The user canceled mid-stream.
     Interrupted,
-    /// A mid-stream provider error (Phase 3 will retry; Phase 1 surfaces it).
+    /// A mid-stream provider error — retried per `RetryPolicy`, then surfaced.
     Errored(ProviderError),
     /// The stream ended without a `Done` — a dropped connection.
     Dropped,

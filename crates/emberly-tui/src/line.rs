@@ -1,8 +1,8 @@
 //! The line-mode frontend (Tech Spec §9 degraded contract, A-1). Plain,
 //! append-only, ASCII-only output and line-buffered input — no color, no
-//! cursor repositioning. It is the seed of `--plain`/degraded mode and the
-//! contract for a future headless frontend; the rich `ratatui` TUI arrives in
-//! Phase 4.
+//! cursor repositioning. Used for `--plain`/degraded mode and any other
+//! headless context; the rich `ratatui` TUI (`crate::tui`) is the primary
+//! interactive frontend.
 //!
 //! Rendering ([`LineRenderer::render`]) is a pure function over a writer, so it
 //! is unit-testable without a terminal. The async [`run`] driver wires stdin

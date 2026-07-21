@@ -281,7 +281,7 @@ mod macos {
     /// The system Seatbelt front-end. Present on every supported macOS and the
     /// only supported road to the kernel sandbox without C FFI (HC-1, Tech Spec
     /// §6.3). Apple has deprecated it, but it is still shipped and functional;
-    /// the risk is noted in `PHASE5_TODO.md` group 8.
+    /// the risk is noted in `docs/version-0-1/PHASE5_TODO.md` group 8.
     pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
     /// Resolve `p` to its real path (following symlinks), falling back to the

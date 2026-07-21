@@ -40,10 +40,6 @@ pub struct PermissionRendering {
 
 /// The user's answer to a permission request. Deny is the safe default and
 /// the meaning of Enter/Esc (Design §5).
-///
-/// Phase 1 wires [`Deny`](PermissionDecision::Deny) and
-/// [`AllowOnce`](PermissionDecision::AllowOnce) only; the persisting grants
-/// arrive with the rule engine in Phase 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionDecision {
@@ -52,9 +48,9 @@ pub enum PermissionDecision {
     Deny,
     /// Allow this single invocation.
     AllowOnce,
-    /// Allow for the rest of this session (in-memory grant; Phase 2).
+    /// Allow for the rest of this session (in-memory grant).
     AllowForSession,
-    /// Persist an allow rule to project `permissions.toml` (Phase 2).
+    /// Persist an allow rule to project `permissions.toml`.
     AlwaysAllowInProject,
 }
 

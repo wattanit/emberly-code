@@ -4,10 +4,10 @@
 //! Transport-agnostic by design so a future MCP adapter implements `Tool`
 //! without engine changes (T-7).
 //!
-//! Phase 1 (current): the trait, [`ToolOutcome`] (structured success/failure,
-//! HC-6), the [`ToolCtx`] execution context with its [`PermissionGate`], the
-//! [`ToolRegistry`], and the built-in read/write/edit/bash tools. Glob and
-//! grep (T-5, T-6) arrive in Phase 2.
+//! The trait, [`ToolOutcome`] (structured success/failure, HC-6), the
+//! [`ToolCtx`] execution context with its [`PermissionGate`], the
+//! [`ToolRegistry`], and the built-in read/write/edit/bash/glob/grep tools
+//! (T-5, T-6).
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 

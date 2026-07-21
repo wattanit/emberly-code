@@ -1,6 +1,7 @@
 //! `bash` (T-4): run a shell command under a timeout, with a scrubbed
-//! environment, always asking for permission in Phase 1 (the default
-//! allowlist arrives with the rule engine in Phase 2).
+//! environment, gated by the rule engine (a built-in allowlist of read-only
+//! commands runs without prompting; everything else asks or is denied per
+//! configured rules).
 //!
 //! Safety (S-4): the child runs in its own process group. On a timeout or a
 //! cancel (the engine drops this future) a [`GroupKillGuard`] SIGKILLs the whole

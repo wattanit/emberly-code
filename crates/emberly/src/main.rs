@@ -3,14 +3,14 @@
 //!
 //! `anyhow` lives here at the edge only; library crates use `thiserror`
 //! (Tech Spec §1, §11). As the composition root, this crate depends on the
-//! concrete `providers` and `tools` crates to construct the provider and tool
-//! registry it wires into the engine (in Phase 3 it will build the live
-//! Anthropic/OpenAI providers here).
+//! concrete `providers` and `tools` crates to construct the live
+//! Anthropic/OpenAI-compatible providers and the tool registry it wires into
+//! the engine (falling back to an inert stand-in when no provider profile is
+//! configured — see `placeholder.rs`).
 //!
-//! Phase 1: the supervisor skeleton plus an end-to-end wiring of the engine
-//! and the line-mode frontend, driven by a placeholder provider. Transcript
-//! persistence and the `abnormal_exit` record land in Phase 5; the panic hook
-//! marks where they attach.
+//! The supervisor skeleton: end-to-end wiring of the engine and both
+//! frontends (rich TUI and line mode), transcript persistence, and the
+//! `abnormal_exit` record the panic hook attaches on a crash.
 #![forbid(unsafe_code)]
 
 use std::io::IsTerminal;

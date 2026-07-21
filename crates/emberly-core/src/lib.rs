@@ -7,10 +7,10 @@
 //! what makes the frontend/engine separation (A-1), testability (A-2), and
 //! the serializable event model (A-3) hold.
 //!
-//! Phase 1, group 1 (current): the event model and channel boundary — the
-//! [`UiEvent`] stream out, the [`Command`] stream in, the durable
-//! [`TranscriptEvent`] record, and the [`channels`] that connect the engine to
-//! a frontend. The agent loop and tools land in later Phase 1 groups.
+//! The event model and channel boundary: the [`UiEvent`] stream out, the
+//! [`Command`] stream in, the durable [`TranscriptEvent`] record, and the
+//! [`channels`] that connect the engine to a frontend — plus the agent loop
+//! and tool orchestration built on top of it.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 

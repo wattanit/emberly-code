@@ -210,7 +210,3 @@ pub mod markers {
     /// §4.10) so the block reads visibly as fetched web data, not tool output.
     pub const WEB: &str = "↩";
 }
-
-/// One-line orientation shown on clean exit (Design §8.3). The richer summary
-/// (name, duration, cost, transcript path) arrives with Phase 5 persistence.
-pub const SESSION_ENDED: &str = "session ended.";
