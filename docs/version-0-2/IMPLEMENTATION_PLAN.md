@@ -24,7 +24,7 @@ This plan expands Tech Spec §15 milestone **M6** (the 0.2 feature set) into
 workable phases. It builds on the shipped v0.1 product (all six crates, the
 agent loop, both live providers, the full TUI, sessions/resume/`/compact`,
 the permission rule engine, and OS confinement on Linux + macOS); the v0.1
-plan is preserved in `docs/phase1/` as the prior as-built record.
+plan is preserved in `docs/version-0-1/` as the prior as-built record.
 
 Unlike v0.1 — where phases were subsystem milestones built from nothing —
 the 0.2 features are cross-cutting additions to a working product. Phases
@@ -278,6 +278,6 @@ Each phase ships on its own.
   still deferred per Requirements §2.2; their seams remain unused, not
   reshaped.
 - **Release-pipeline / prebuilt binaries** — v0.1 shipped compile-from-
-  source with the pipeline deferred by owner (see `docs/phase1/`); this plan
+  source with the pipeline deferred by owner (see `docs/version-0-1/`); this plan
   does not revisit that decision. 0.2 continues to install from source
   unless the owner reopens it.

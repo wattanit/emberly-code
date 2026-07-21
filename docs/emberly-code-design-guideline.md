@@ -1,11 +1,11 @@
 # Emberly Code — Design Guideline
 
-**Version:** 0.8 
+**Version:** 0.9 
 **Status:** approved
-**Date:** 2026-07-15
+**Date:** 2026-07-21
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.8 (upstream), Technical
-Specification v0.9 (downstream — this document constrains it)
+**Companion documents:** Requirements Document v0.9 (upstream), Technical
+Specification v0.10 (downstream — this document constrains it)
 
 This document defines how Emberly Code looks, feels, and speaks. It is the
 second of three project documents. Where a decision here has technical
@@ -259,24 +259,48 @@ tokens spent (Requirements T-9).
 
 ### 4.6 Editing config and prompts in place
 
-In-app editing (Requirements C-5) offers two paths, chosen by the size of
-the edit, both reachable from the command palette (§3.3):
+In-app editing (Requirements C-5) offers two paths, both reachable from the
+command palette (§3.3):
 
-- **Quick edit — a TUI overlay.** A focused, scrollable overlay (the §4.2
-overlay pattern, made editable) for a single config value or a short
-prompt. Before an edit, the overlay shows the value's provenance tier
-(Requirements C-3) in a dimmed line — you always see whether you are
-about to override a baked-in default or an existing project value.
-Saving writes to the project tier (Requirements C-1), never to the
-baked-in defaults, and shows the written path.
-- **Full edit — `$EDITOR` handoff.** For a whole prompt file or the full
-config, hand off to `$VISUAL`/`$EDITOR` (the §4.3 fallback order),
-reloading on save. This reuses the user's real editor rather than
-growing a text editor inside the TUI.
+- **`$EDITOR` handoff.** `/config` and `/prompt` hand off to `$VISUAL`/
+`$EDITOR` (the §4.3 fallback order) on the whole file — the project
+config or a prompt file, seeded from the baked-in default if it doesn't
+exist yet — reloading on save. This reuses the user's real editor rather
+than growing a text editor inside the TUI. In degraded mode (§7), where a
+multi-screen editor handoff isn't available, the command instead prints
+the file's path (creating it first if needed) and waits for the user to
+edit it externally and run `/reload`.
+- **Guided setup — a step-by-step wizard (Requirements C-7).** A focused
+sequence of single-question screens — profile name, adapter, endpoint,
+model id, then the API key — Enter to advance, Esc/Back to step back. The
+profile name comes first because it is the identifier the user is actually
+choosing (e.g. "deepseek"), distinct from the adapter that follows: the
+adapter step is the wire format, not the provider's brand, and reads as
+"which wire format does it speak? — most third-party and OpenAI-compatible
+APIs, including local models, speak `openai`" so a profile named "deepseek"
+picking adapter `openai` doesn't read as a contradiction. Reachable as a
+trailing "Add new provider…" row at the bottom of the existing
+model/provider picker (§3.1, Requirements C-6), not a new top-level
+command: the picker a user already opens to switch models is where
+they'd also think to add one. A summary screen (profile name, adapter,
+endpoint, and the key redacted to its last 4 characters) precedes the
+write — the same "shows the written path" honesty as the `$EDITOR` path,
+before the point of no return, not after. On completion the session reports
+the change exactly as a `/config` reload would — no separate "wizard
+complete" voice; one reload story for every path onto the same
+configuration. The typed key is masked character-by-character as it's
+entered (`•` per keystroke) and never echoed in full again anywhere in
+the interface, matching C-7's never-printed guarantee.
 
-Either way, a change that cannot take effect until restart is named as such
-at the moment of saving — silence about live changes, speech about the ones
-that need a restart.
+Guided setup is not available in degraded mode (§7): a multi-screen
+wizard needs cursor repositioning that plain mode does not have, so
+degraded mode falls back to the same print-the-path-and-`/reload` pattern
+`/config`/`/prompt` already use there — not an `$EDITOR` handoff, which
+degraded mode never offers either way.
+
+Whichever path, a change that cannot take effect until restart is named as
+such at the moment of saving — silence about live changes, speech about the
+ones that need a restart.
 
 ### 4.7 The task list
 
@@ -558,6 +582,10 @@ relies on color, motion, or the pointer to carry meaning.
 reference line (§4.11), and the completion-gate halt (§8.7) keeps its full
 harness-voice guarantees with the four choices as capitalized deliberate keys.
 Neither relies on color, motion, or the pointer.
+- The 0.4.2 surface degrades by falling back rather than reflowing: guided
+provider setup (§4.6) is not offered in degraded mode; the same
+print-the-path-and-`/reload` pattern `/config`/`/prompt` already use there
+covers the same ground.
 - Degraded mode is a supported, tested configuration, not a best-effort
 fallback.
 
@@ -581,6 +609,16 @@ line per overridden piece (Requirements C-3). Silence about defaults;
 speech about deviations. If the sandbox is unavailable or partial, a
 one-time plain-language notice explains what that means and what was
 tightened (Requirements §6.7) — calm warning styling, not alarm.
+
+- **No provider configured yet.** When the session is running on the
+offline placeholder (no `provider =` selected), the model line in the
+session-start header names the gap and points straight at the fix in the
+same breath — e.g. *"model: none configured — /model to add a
+provider"* — rather than raw env-var instructions, now that guided setup
+(§4.6, Requirements C-7) is the easier path. Degraded mode keeps the same
+line in plain text. This is the header's normal one-time content, not a
+popup to dismiss — silence about defaults, speech about the one
+deviation that actually blocks the user from doing anything.
 
 ### 8.3 Session end / crash
 

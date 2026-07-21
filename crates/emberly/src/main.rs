@@ -3,14 +3,14 @@
 //!
 //! `anyhow` lives here at the edge only; library crates use `thiserror`
 //! (Tech Spec §1, §11). As the composition root, this crate depends on the
-//! concrete `providers` and `tools` crates to construct the provider and tool
-//! registry it wires into the engine (in Phase 3 it will build the live
-//! Anthropic/OpenAI providers here).
+//! concrete `providers` and `tools` crates to construct the live
+//! Anthropic/OpenAI-compatible providers and the tool registry it wires into
+//! the engine (falling back to an inert stand-in when no provider profile is
+//! configured — see `placeholder.rs`).
 //!
-//! Phase 1: the supervisor skeleton plus an end-to-end wiring of the engine
-//! and the line-mode frontend, driven by a placeholder provider. Transcript
-//! persistence and the `abnormal_exit` record land in Phase 5; the panic hook
-//! marks where they attach.
+//! The supervisor skeleton: end-to-end wiring of the engine and both
+//! frontends (rich TUI and line mode), transcript persistence, and the
+//! `abnormal_exit` record the panic hook attaches on a crash.
 #![forbid(unsafe_code)]
 
 use std::io::IsTerminal;
@@ -24,13 +24,13 @@ use emberly_core::{
     TranscriptRecord, TranscriptSink,
 };
 use emberly_providers::Provider;
-use emberly_tools::{default_registry, ToolRegistry};
 use emberly_tui::{frontend, SessionInfo};
 
 mod config;
 mod init;
 mod placeholder;
 mod provider_setup;
+mod provider_write;
 mod trust;
 use placeholder::PlaceholderProvider;
 
@@ -380,7 +380,9 @@ async fn run() -> anyhow::Result<()> {
         None => (
             Arc::new(PlaceholderProvider::new()) as Arc<dyn Provider>,
             "placeholder".to_string(),
-            "placeholder (offline — set EMBERLY_PROVIDER + EMBERLY_MODEL + API key)".to_string(),
+            // Points at the guided setup wizard (Requirements C-7, Design
+            // §8.2) now that it's the easier path onto a working provider.
+            "none configured — /model to add a provider".to_string(),
         ),
     };
 
@@ -488,7 +490,7 @@ async fn run() -> anyhow::Result<()> {
     for warning in &rule_warnings {
         eprintln!("emberly: {warning}");
     }
-    let rules = RuleEngine::new(rule_specs, sandbox.bash_allowlist_active());
+    let rules = RuleEngine::new(rule_specs.clone(), sandbox.bash_allowlist_active());
 
     // Build the confined-spawn handle: record the canonical git binary now
     // (`which git`, canonicalized) so only genuine git earns the `.git/`-writable
@@ -509,29 +511,21 @@ async fn run() -> anyhow::Result<()> {
             project_root.clone(),
             &cli_overrides,
             resolved.sandbox_require,
+            resolved.providers.clone(),
         ));
 
+    // Writes a new `[providers.<name>]` profile + its `keys.toml` entry for
+    // the guided setup wizard (C-7); the wizard then fires the same
+    // `Command::ReloadConfig` as `config_reloader` above.
+    let provider_writer: Arc<dyn emberly_core::ProviderProfileWriter> =
+        Arc::new(provider_write::ConfigWriter::new(project_root.clone()));
+
     // Build the tool registry: the built-in suite always, plus `web_search`
-    // only when `search.enabled` and an endpoint is configured (Tech Spec §5.5,
-    // structural fact 1 — web_search is the first config-conditionally-registered
-    // tool). `default_registry()` stays config-free for tests.
-    let mut tools: ToolRegistry = default_registry();
-    if resolved.search.enabled {
-        if let Some(endpoint) = &resolved.search.endpoint {
-            let adapter = resolved.search.adapter.as_deref().unwrap_or("json");
-            let tool = provider_setup::build_search_tool(
-                endpoint,
-                adapter,
-                resolved.search.auth.as_ref(),
-                resolved.search.max_results,
-            )
-            .context("failed to build the web_search tool")?;
-            tools.register(std::sync::Arc::new(tool));
-        } else if resolved.search.adapter.is_some() {
-            eprintln!(
-                "emberly: [search] has an adapter but no endpoint — set endpoint = \"…\" or search.enabled = false"
-            );
-        }
+    // only when `search.enabled` and an endpoint is configured (Tech Spec §5.5).
+    // Shared with the `/config` reload path (C-5) via `build_tool_registry`.
+    let (tools, tool_warnings) = provider_setup::build_tool_registry(&resolved)?;
+    for warning in &tool_warnings {
+        eprintln!("emberly: {warning}");
     }
 
     let project_memory_dir = project_root.join(".agents").join("memory");
@@ -557,8 +551,11 @@ async fn run() -> anyhow::Result<()> {
             .provider
             .clone()
             .unwrap_or_else(|| "placeholder".into()),
+        configured_provider: resolved.provider.clone(),
+        configured_model: resolved.model.clone(),
         sandbox,
         rules,
+        rule_specs,
         sandbox_spawn: Some(sandbox_spawn),
         config_provenance: resolved.provenance.clone(),
         transcript,
@@ -621,6 +618,7 @@ async fn run() -> anyhow::Result<()> {
         init::CONFIG_TEMPLATE.to_string(),
         resolved.reasoning.clone(),
         resolved.mouse,
+        provider_writer,
     )
     .await?;
 

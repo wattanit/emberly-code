@@ -1,8 +1,8 @@
 //! The line-mode frontend (Tech Spec §9 degraded contract, A-1). Plain,
 //! append-only, ASCII-only output and line-buffered input — no color, no
-//! cursor repositioning. It is the seed of `--plain`/degraded mode and the
-//! contract for a future headless frontend; the rich `ratatui` TUI arrives in
-//! Phase 4.
+//! cursor repositioning. Used for `--plain`/degraded mode and any other
+//! headless context; the rich `ratatui` TUI (`crate::tui`) is the primary
+//! interactive frontend.
 //!
 //! Rendering ([`LineRenderer::render`]) is a pure function over a writer, so it
 //! is unit-testable without a terminal. The async [`run`] driver wires stdin
@@ -192,8 +192,15 @@ impl LineRenderer {
             } => {
                 self.render_skill_body(name, *origin, body, resources, out)?;
             }
-            UiEvent::CompactionStatus { .. }
-            | UiEvent::ContextUsage { .. }
+            UiEvent::CompactionStatus { message } => {
+                // Same harness voice as `Notice` (Design §8.2) — plain mode
+                // has no sidebar/status line, so this is the only surface
+                // that ever reports a manual or automatic compaction here.
+                for line in message.lines() {
+                    writeln!(out, "note: {line}")?;
+                }
+            }
+            UiEvent::ContextUsage { .. }
             | UiEvent::CostEstimate { .. }
             | UiEvent::SessionUsage { .. } => {}
             UiEvent::TaskListUpdated { items } => {
@@ -695,6 +702,11 @@ pub async fn run(
                         }
                     } else if line.trim() == "/reload" {
                         let _ = tx.send(Command::ReloadConfig).await;
+                    } else if line.trim() == "/compact" {
+                        // Manual compaction (Requirements §8.3, Tech Spec §7) —
+                        // parity with the rich TUI's `/compact`; the
+                        // `CompactionStatus` render arm above reports the result.
+                        let _ = tx.send(Command::Compact).await;
                     } else if line.trim() == "/config" {
                         // Line mode does not launch $EDITOR (stdin is the line
                         // reader / often a pipe): seed + point at the file, then
@@ -907,6 +919,17 @@ mod tests {
         });
         // Only the call line — no dangling indented caption (no placeholder).
         assert_eq!(out.trim(), "> read_file: read src/main.rs");
+    }
+
+    #[test]
+    fn compaction_status_renders_as_a_note() {
+        // Plain mode has no sidebar/status line, so `CompactionStatus` must
+        // still surface here — both for a manual `/compact` and for the
+        // automatic FR-4 trigger — instead of being silently dropped.
+        let out = render_to_string(&UiEvent::CompactionStatus {
+            message: "Compacted 3 turns into a summary.".into(),
+        });
+        assert_eq!(out.trim(), "note: Compacted 3 turns into a summary.");
     }
 
     #[test]

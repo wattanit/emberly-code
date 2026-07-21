@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context};
 use emberly_providers::{
@@ -18,7 +18,7 @@ use emberly_providers::{
 };
 
 use crate::config::{self, AuthFile, CliOverrides, ProfileFile, Resolved};
-use emberly_tools::{SearchAuth, SearchClient, WebSearchTool};
+use emberly_tools::{default_registry, SearchAuth, SearchClient, ToolRegistry, WebSearchTool};
 
 /// A chosen live provider plus display/label info.
 pub struct Selection {
@@ -172,22 +172,33 @@ impl emberly_core::ProviderFactory for ConfiguredProviders {
 /// A [`ConfigReloader`](emberly_core::ConfigReloader) that re-runs
 /// [`config::load`] for the project on an in-app edit (C-5), so `/config` and
 /// `/prompt` take effect on the running session. Holds the launch-time
-/// `sandbox.require` to detect a restart-only change.
+/// `sandbox.require` to detect a restart-only change, and the last-seen
+/// provider profiles to detect a *content* change (e.g. filling in
+/// `base_url`/`auth` on an already-present profile) that leaves the profile
+/// *name* list untouched — `reload` takes `&self`, so this needs interior
+/// mutability.
 pub struct ConfiguredReloader {
     project_root: PathBuf,
     provider: Option<String>,
     model: Option<String>,
     launch_sandbox_require: bool,
+    last_providers: Mutex<HashMap<String, ProfileFile>>,
 }
 
 impl ConfiguredReloader {
     #[must_use]
-    pub fn new(project_root: PathBuf, cli: &CliOverrides, launch_sandbox_require: bool) -> Self {
+    pub fn new(
+        project_root: PathBuf,
+        cli: &CliOverrides,
+        launch_sandbox_require: bool,
+        initial_providers: HashMap<String, ProfileFile>,
+    ) -> Self {
         Self {
             project_root,
             provider: cli.provider.clone(),
             model: cli.model.clone(),
             launch_sandbox_require,
+            last_providers: Mutex::new(initial_providers),
         }
     }
 }
@@ -205,14 +216,71 @@ impl emberly_core::ConfigReloader for ConfiguredReloader {
         if resolved.sandbox_require != self.launch_sandbox_require {
             restart_notes.push("sandbox.require changed — restart to apply".to_string());
         }
+        let provider_config_changed = {
+            let mut last = self
+                .last_providers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let changed = *last != resolved.providers;
+            *last = resolved.providers.clone();
+            changed
+        };
+        let (rule_specs, rule_warnings) = config::load_permission_rules(&self.project_root);
+        let (tools, tool_warnings) = build_tool_registry(&resolved).map_err(|e| e.to_string())?;
+        let mut warnings = rule_warnings;
+        warnings.extend(tool_warnings);
         Ok(emberly_core::ReloadedConfig {
             system: resolved.system_prompt.clone(),
             summary_prompt: resolved.summary_prompt.clone(),
             provider_factory: Arc::new(ConfiguredProviders::new(&resolved)),
             profiles,
+            configured_provider: resolved.provider.clone(),
+            configured_model: resolved.model.clone(),
+            provider_config_changed,
+            tool_explanations: resolved.tool_explanations,
+            loop_config: resolved.loop_config,
+            completion_config: resolved.completion_config.clone(),
+            completion_checks: resolved.completion_checks.clone(),
+            truncate: resolved.truncate,
+            context: resolved.context,
+            image_max_bytes: resolved.image_max_bytes,
+            document_max_bytes: resolved.document_max_bytes,
+            memory: resolved.memory.clone(),
+            skills: resolved.skills.clone(),
+            tools,
+            rule_specs,
             restart_notes,
+            warnings,
         })
     }
+}
+
+/// Build the tool registry from resolved config (Tech Spec §5.5): the
+/// built-in suite always, plus `web_search` when `[search]` is enabled and
+/// configured. Shared by startup and by [`ConfiguredReloader::reload`] (C-5)
+/// so an in-app config edit can add/remove `web_search` without a restart.
+pub fn build_tool_registry(resolved: &Resolved) -> anyhow::Result<(ToolRegistry, Vec<String>)> {
+    let mut tools = default_registry();
+    let mut warnings = Vec::new();
+    if resolved.search.enabled {
+        if let Some(endpoint) = &resolved.search.endpoint {
+            let adapter = resolved.search.adapter.as_deref().unwrap_or("json");
+            let tool = build_search_tool(
+                endpoint,
+                adapter,
+                resolved.search.auth.as_ref(),
+                resolved.search.max_results,
+            )
+            .context("failed to build the web_search tool")?;
+            tools.register(Arc::new(tool));
+        } else if resolved.search.adapter.is_some() {
+            warnings.push(
+                "[search] has an adapter but no endpoint — set endpoint = \"…\" or search.enabled = false"
+                    .to_string(),
+            );
+        }
+    }
+    Ok((tools, warnings))
 }
 
 /// Turn a profile's `auth` config into an [`Auth`], resolving the key
@@ -468,5 +536,32 @@ mod tests {
             .expect("builds")
             .model_info();
         assert_eq!(info.effort_levels, vec![Effort::Low, Effort::High]);
+    }
+
+    /// [`ConfiguredReloader::reload`]'s `provider_config_changed` detection
+    /// (C-5) relies on `HashMap<String, ProfileFile>` structural equality to
+    /// notice a profile whose *content* changed without its *name* changing
+    /// (e.g. filling in `base_url` on an already-present profile such as a
+    /// built-in placeholder). This pins that assumption directly on the
+    /// types involved, without touching disk / the real `~/.config` tree.
+    #[test]
+    fn profile_file_equality_distinguishes_content_not_just_names() {
+        let mut before = HashMap::new();
+        before.insert("openai".to_string(), profile("openai", None));
+        let mut after = HashMap::new();
+        after.insert(
+            "openai".to_string(),
+            profile("openai", Some("https://api.openai.com/v1")),
+        );
+
+        assert_eq!(
+            before.keys().collect::<Vec<_>>(),
+            after.keys().collect::<Vec<_>>(),
+            "the name set is unchanged"
+        );
+        assert_ne!(
+            before, after,
+            "but the content differs, which the reloader must still catch"
+        );
     }
 }

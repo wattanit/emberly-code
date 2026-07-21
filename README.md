@@ -1,6 +1,6 @@
 # Emberly Code
 
-> **Currently on v0.4.1** — feature-complete for the milestone, install from source.
+> **Currently on v0.4.2** — feature-complete for the milestone, install from source.
 
 **An AI coding agent for your terminal — provider-agnostic, fully auditable, and
 built in pure Rust.**
@@ -141,7 +141,13 @@ model    = "glm-4.6"
 ```
 
 **Adding a provider is configuration, not code** — a profile names a wire-format
-`adapter` (`anthropic` or `openai`), an endpoint, and a key *reference*:
+`adapter` (`anthropic` or `openai`), an endpoint, and a key *reference*. The
+easiest way in is the **guided setup wizard**: open the model picker
+(`/model`) and pick the trailing "+ add new provider…" row — it walks you
+through a name, adapter, endpoint, model id, and key (masked as you type),
+then writes both files for you. Raw editing below remains the fallback for
+anything the wizard's fixed field set doesn't cover (per-model metadata, a
+non-standard auth scheme):
 
 ```toml
 [providers.myserver]
@@ -205,6 +211,17 @@ session**; startup-only settings are named as needing a restart. **`/reload`**
 re-reads everything on demand. In plain mode there's no editor handoff — the
 commands print the path to edit yourself, and `/reload` applies it.
 
+Adding a provider has its own guided path: from `/model`, the trailing "+ add
+new provider…" row opens a step-by-step wizard (name → adapter → endpoint →
+model id → key), ending in a summary screen with the key redacted to its last
+4 characters before it writes anything. It writes the profile into the same
+project `.agents/config.toml` and the key into `~/.config/emberly/keys.toml`,
+then reloads exactly like a manual edit would — no separate success message,
+no auto-switch (pick the new profile from `/model` afterward). Not available
+in plain mode, which falls back to the same print-the-path-and-`/reload`
+pattern as `/config`/`/prompt` above (no `$EDITOR` handoff either way in
+plain mode).
+
 ### Commands & features
 
 The screen is a conversation timeline — your messages and the agent's, tool
@@ -218,6 +235,7 @@ agent's task list, and changed files.
 | `Enter` | Send your message |
 | `Shift+Enter` / `Alt+Enter` | Newline (compose a multi-line message) |
 | `Esc` | Cancel the current turn / dismiss an overlay |
+| `Ctrl-C` | Cancel the current turn; quits when idle and the input line is empty |
 | `↑` `↓` `PgUp` `PgDn` / mouse wheel | Scroll the conversation or an overlay |
 | `Ctrl-R` | Toggle the reasoning trail open/closed |
 | `Ctrl-P` | Open the command palette |
@@ -227,23 +245,23 @@ agent's task list, and changed files.
 
 | Command | Key | What it does |
 |---|---|---|
-| `/help` | `Ctrl-P` | List commands and keybindings |
+| `/new` (`/clear`) | | Start a fresh session (the current one is saved) |
+| `/session` | | List saved sessions and switch to one |
+| `/compact` | | Summarize older turns to reclaim context space |
+| `/model` | | Switch the active provider/model (`/model <profile>` direct) |
+| `/mode` | `Shift-Tab` | Pick a permission mode (`Shift-Tab` cycles) |
+| `/effort` | | Set reasoning effort (`/effort low\|medium\|high\|max`) |
 | `/view` | | View the last assistant message in full |
 | `/diff` | `Ctrl-O` | Open the latest file's diff |
 | `/files` | | List files changed this session |
-| `/session` | | List saved sessions and switch to one |
-| `/new` (`/clear`) | | Start a fresh session (the current one is saved) |
-| `/mode` | `Shift-Tab` | Pick a permission mode (`Shift-Tab` cycles) |
-| `/model` | | Switch the active provider/model (`/model <profile>` direct) |
-| `/effort` | | Set reasoning effort (`/effort low\|medium\|high\|max`) |
+| `/sidebar` | `Ctrl-B` | Toggle the sidebar |
+| `/cancel` | | Cancel the in-flight turn |
 | `/config` | | Edit `.agents/config.toml` in `$EDITOR` |
 | `/prompt` | | Edit a prompt file (`/prompt system\|compact`) |
 | `/reload` | | Re-read config & prompts from disk and apply them |
 | `/memory` | | Inspect, edit, and delete stored memory |
 | `/skills` | | List available skills and inspect a skill's instructions |
-| `/compact` | | Summarize older turns to reclaim context space |
-| `/sidebar` | `Ctrl-B` | Toggle the sidebar |
-| `/cancel` | | Cancel the in-flight turn |
+| `/help` | `Ctrl-P` | List commands and keybindings |
 | `/quit` | `Ctrl-D` | Exit |
 
 #### Safety: permissions, sandbox, and trust
@@ -367,10 +385,10 @@ minimal terminals.
 
 ### Project status
 
-Feature-complete for the **v0.4.1** milestone (M9), installable from source.
+Feature-complete for the **v0.4.2** milestone (M10), installable from source.
 The interactive TUI, live providers, session persistence, the permission rule
 engine, auto-accept modes, and OS confinement (Linux Landlock, macOS Seatbelt)
-all work today, alongside the full 0.2–0.4.1 stack described below. **Not yet
+all work today, alongside the full 0.2–0.4.2 stack described below. **Not yet
 shipped:** prebuilt binaries and Windows support (no Landlock/Seatbelt
 equivalent).
 
@@ -386,9 +404,10 @@ as it grows. _(Affectionate, not official.)_
 | **v0.3** | M7 | 🔥 _Slow Burn_ | The economy layer — salient tool-result reduction, the adaptive context window + `recall`, automatic + manual compaction, and the derived resume cache. Longer, cheaper sessions from the same fuel. |
 | **v0.4** | M8 | 🌲🔥 _Wildfire_ | New capability surface — planning (task list), sight (image input), durable memory, extensible skills, live web search, and pointer interaction. |
 | **v0.4.1** | M9 | 🌲🔥 _Wildfire_ | A completion gate that holds the loop to registered pass/fail checks before it may declare a task done, and document (PDF) input — the same pattern as image input, applied to documents. |
+| **v0.4.2** | M10 | 🌲🔥 _Wildfire_ | Guided provider/model setup — a step-by-step wizard, reachable from the model picker, that writes a new provider profile and its key without hand-editing config. Plus a round of post-ship hardening: compaction, cancellation, permission previews, and parallel tool-call handling. |
 
 Prior as-built plans live under `docs/version-0-1/`, `docs/version-0-2/`,
-`docs/version-0-3/`, and `docs/version-0-4/`.
+`docs/version-0-3/`, `docs/version-0-4/`, and `docs/version-0-4-1/`.
 
 ### Architecture
 
@@ -436,10 +455,10 @@ Release targets (v1): `x86_64-unknown-linux-musl`,
 
 **Documents** (the SFD standard — Requirements → Design → Tech Spec):
 
-- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.8)
-- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.8)
-- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.9)
-- [`docs/version-0-4-1/IMPLEMENTATION_PLAN.md`](docs/version-0-4-1/IMPLEMENTATION_PLAN.md) — phased build plan (+ per-phase `PHASE*_TODO.md`)
+- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.9)
+- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.9)
+- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.10)
+- [`docs/version-0-4-2/IMPLEMENTATION_PLAN.md`](docs/version-0-4-2/IMPLEMENTATION_PLAN.md) — phased build plan (+ per-phase `PHASE*_TODO.md`)
 
 ## License
 

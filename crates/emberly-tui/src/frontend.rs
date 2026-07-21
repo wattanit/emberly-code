@@ -68,6 +68,7 @@ pub async fn run(
     config_template: String,
     reasoning: Option<String>,
     mouse: bool,
+    provider_writer: std::sync::Arc<dyn emberly_core::ProviderProfileWriter>,
 ) -> io::Result<()> {
     let reasoning_view = crate::app::ReasoningView::parse(reasoning.as_deref().unwrap_or(""));
     match kind {
@@ -81,12 +82,14 @@ pub async fn run(
                 config_template,
                 reasoning_view,
                 mouse,
+                provider_writer,
             )
             .await
         }
         // Line mode notes the resumed-event count in its banner (see the
         // binary); it does not replay the timeline or offer the picker, but it
-        // supports `/config`, `/prompt`, `/reload`, and `/effort` (C-5, P-9).
+        // supports `/config`, `/prompt`, `/reload`, `/effort`, and `/compact`
+        // (C-5, P-9, §8.3).
         FrontendKind::Plain => {
             line::run(ports, sessions_dir, config_template, reasoning_view).await
         }

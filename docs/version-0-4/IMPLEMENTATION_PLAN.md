@@ -1,11 +1,11 @@
 # Emberly Code — Implementation Plan (0.4 feature set)
 
-**Status:** 📋 **planned** — not yet started. Six phases expanding Tech Spec
-milestone **M8** (the 0.4 capability-parity feature set): the task-list tool
-(T-11), multimodal image input (P-11 + T-12), persistent memory (FR-6 + T-13),
-the skill system (FR-7 + T-15), the harness-owned web-search backend (T-14),
-and TUI mouse support (Design §3.4).
-**Date:** 2026-07-12 (planned)
+**Status:** ✅ **complete (2026-07-15)** — all six phases implemented and
+shipped. Expanded Tech Spec milestone **M8** (the 0.4 capability-parity
+feature set): the task-list tool (T-11), multimodal image input (P-11 +
+T-12), persistent memory (FR-6 + T-13), the skill system (FR-7 + T-15), the
+harness-owned web-search backend (T-14), and TUI mouse support (Design §3.4).
+**Date:** 2026-07-12 (planned); completed 2026-07-15
 **Owner:** Wattanit
 **Source documents** (G-14 as-built pin for the 0.4 release):
 - Requirements Document v0.7 (`docs/emberly-code-requirements.md`) — WHAT/WHY

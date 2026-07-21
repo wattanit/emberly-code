@@ -81,12 +81,15 @@ fn make_config(
         sessions_dir: std::env::temp_dir(),
         active_session_path: std::sync::Arc::new(std::sync::RwLock::new(std::path::PathBuf::new())),
         provider_label: "fake".into(),
+        configured_provider: None,
+        configured_model: None,
         sandbox: SandboxStatus::Unavailable {
             reason: "test".into(),
         },
         // Degraded (allowlist suspended) → every bash asks, matching the Phase 1
         // gate behavior these tests were written against.
         rules: RuleEngine::new(Vec::new(), false),
+        rule_specs: Vec::new(),
         // Tests run bash plainly even when reporting a confined status, so the
         // self-exec shim never re-executes the test binary.
         sandbox_spawn: Some(std::sync::Arc::new(emberly_tools::PlainSandbox)),
@@ -225,6 +228,52 @@ fn has_tool_finished(events: &[UiEvent], ok: bool) -> bool {
     events
         .iter()
         .any(|e| matches!(e, UiEvent::ToolFinished { ok: o, .. } if *o == ok))
+}
+
+#[tokio::test]
+async fn no_provider_configured_refuses_before_a_turn_runs() {
+    // C-7: the binary substitutes an inert stand-in Provider (id
+    // "placeholder") when no [providers.*] profile is configured. Sending a
+    // message must refuse up front — never round-trip through it as if it
+    // were a real reply, and never record it as a turn (so the real first
+    // message still claims the "original task"/turn-0 slot once a provider
+    // is actually added).
+    let fake = Arc::new(
+        FakeProvider::new(vec![ScriptedResponse::text("should never be reached")])
+            .with_id("placeholder"),
+    );
+    let sink = CaptureSink::new();
+    let config = make_config(fake.clone(), temp_project(), Box::new(sink.clone()));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "hello".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            UiEvent::Notice { message } if message.contains("no provider configured")
+        )),
+        "events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, UiEvent::TurnEnded)),
+        "the busy/working affordance must still clear"
+    );
+    assert!(
+        fake.last_request().is_none(),
+        "the placeholder provider must never actually be called"
+    );
+    assert!(
+        !sink
+            .records()
+            .iter()
+            .any(|r| matches!(&r.event, TranscriptEvent::UserMessage { .. })),
+        "a refused message must not be recorded as a real turn"
+    );
 }
 
 #[tokio::test]
@@ -393,17 +442,23 @@ async fn file_sink_session_resumes_to_an_identical_view() {
 
 #[tokio::test]
 async fn compact_summarizes_the_middle_and_records_the_event() {
-    // Four text turns build 8 messages; the fifth scripted response is consumed
-    // by the summarization call that `/compact` makes.
+    // Eight text turns (more than the default `keep_recent_turns` of 6, a
+    // *turn* count — see `group_turn_starts`) so two whole turns are elided;
+    // the ninth scripted response is consumed by the summarization call that
+    // `/compact` makes.
     let scripts = vec![
         ScriptedResponse::text("r1"),
         ScriptedResponse::text("r2"),
         ScriptedResponse::text("r3"),
         ScriptedResponse::text("r4"),
+        ScriptedResponse::text("r5"),
+        ScriptedResponse::text("r6"),
+        ScriptedResponse::text("r7"),
+        ScriptedResponse::text("r8"),
         ScriptedResponse::text("SUMMARY OF THE MIDDLE"),
     ];
     let (mut h, sink) = start_capturing(scripts, temp_project());
-    for i in 0..4 {
+    for i in 0..8 {
         h.send(Command::UserInput {
             text: format!("msg {i}"),
         })
@@ -426,6 +481,89 @@ async fn compact_summarizes_the_middle_and_records_the_event() {
         TranscriptEvent::Compaction { summary, trigger: CompactTrigger::Manual, .. }
             if summary == "SUMMARY OF THE MIDDLE"
     )));
+}
+
+#[tokio::test]
+async fn compact_never_splits_tool_use_from_result() {
+    // FR-4/FR-3 regression: the compaction cut point must land on a turn
+    // boundary, never inside a (ToolUse, ToolResult) pair — a raw
+    // message-count cut (the pre-fix behavior) can leave a lone `Role::Tool`
+    // message with no preceding `tool_calls`, which every provider rejects
+    // (this is the exact shape of the reported HTTP 400 after compaction).
+    let mut conv = vec![Message::user_text("original task")]; // pinned
+                                                              // 8 turns, each with a tool call: [User, Assistant+ToolUse, ToolResult].
+    for i in 0..8 {
+        let call_id = ToolCallId::new(format!("c{i}"));
+        conv.push(Message::user_text(format!("turn {i}")));
+        conv.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: format!("calling tool {i}"),
+                },
+                ContentBlock::ToolUse {
+                    id: call_id.clone(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "x"}),
+                },
+            ],
+        });
+        conv.push(Message::tool_result(call_id, format!("result {i}"), false));
+    }
+
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::text("SUMMARY"),
+        ScriptedResponse::text("ok"),
+    ]));
+    // keep_recent_turns=4 is not a multiple of the 3-message turn length used
+    // here, so a raw message-count cut (the bug) would land mid-turn; a
+    // turn-count cut (the fix) always lands clean.
+    let ctx = ContextConfig {
+        keep_recent_turns: 4,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn_windowed(fake.clone(), temp_project(), ctx, conv, false);
+    h.send(Command::Compact).await;
+    let _ = h.collect(None).await;
+
+    h.send(Command::UserInput {
+        text: "next".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("request captured");
+    let msgs = &req.messages;
+
+    // Every Role::Tool message must be immediately preceded by a Role::Assistant
+    // message carrying the matching tool_calls id.
+    for (i, msg) in msgs.iter().enumerate() {
+        if msg.role != Role::Tool {
+            continue;
+        }
+        let call_id = msg.content.iter().find_map(|b| match b {
+            ContentBlock::ToolResult { call_id, .. } => Some(call_id.0.as_str()),
+            _ => None,
+        });
+        let Some(call_id) = call_id else {
+            panic!("tool message at {i} has no ToolResult block");
+        };
+        assert!(i > 0, "tool message at index 0 has no preceding message");
+        let prev = &msgs[i - 1];
+        assert_eq!(
+            prev.role,
+            Role::Assistant,
+            "tool message at {i} (call {call_id}) not preceded by an assistant message: {msgs:#?}"
+        );
+        let matches_call = prev
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id.0.as_str() == call_id));
+        assert!(
+            matches_call,
+            "tool message at {i} (call {call_id}) doesn't match the preceding assistant's tool_calls: {msgs:#?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1084,7 +1222,10 @@ async fn switch_model_unknown_profile_errors_without_switching() {
 }
 
 /// A fake [`ConfigReloader`](emberly_core::ConfigReloader): reports a changed
-/// system prompt, a new profile set, and a restart-only change (C-5).
+/// system prompt, a new profile set, a changed configured provider/model
+/// selection, two other live-reloadable changes (`tool_explanations`,
+/// `truncate`), and a restart-only change (C-5). Everything else matches
+/// `make_config`'s defaults so only the intended pieces show up as "changed".
 struct FakeReloader;
 
 impl emberly_core::ConfigReloader for FakeReloader {
@@ -1094,7 +1235,29 @@ impl emberly_core::ConfigReloader for FakeReloader {
             summary_prompt: None,
             provider_factory: Arc::new(FakeFactory),
             profiles: vec!["new".to_string(), "zai".to_string()],
+            configured_provider: Some("zai".to_string()),
+            configured_model: Some("glm-4.6".to_string()),
+            provider_config_changed: true,
+            tool_explanations: true,
+            loop_config: LoopConfig {
+                enabled: false,
+                ..LoopConfig::default()
+            },
+            completion_config: CompletionConfig::default(),
+            completion_checks: Vec::new(),
+            truncate: TruncateConfig {
+                max_lines: 999,
+                ..TruncateConfig::default()
+            },
+            context: ContextConfig::default(),
+            image_max_bytes: 5 * 1024 * 1024,
+            document_max_bytes: 32 * 1024 * 1024,
+            memory: emberly_core::MemoryConfig::default(),
+            skills: emberly_core::SkillsConfig::default(),
+            tools: default_registry(),
+            rule_specs: Vec::new(),
             restart_notes: vec!["sandbox.require changed — restart to apply".to_string()],
+            warnings: Vec::new(),
         })
     }
 }
@@ -1127,8 +1290,154 @@ async fn reload_config_applies_and_reports() {
             .any(|e| matches!(e, UiEvent::Notice { message }
             if message.contains("reloaded")
                 && message.contains("system prompt")
+                && message.contains("tool explanations")
+                && message.contains("truncation")
+                && message.contains("provider profiles")
+                && message.contains("provider selection")
+                && message.contains("run /model zai glm-4.6 to switch")
                 && message.contains("restart"))),
-        "the notice reports live changes and the restart-only one"
+        "the notice reports live changes (incl. non-prompt settings), a concrete /model \
+         command for the new configured selection, and the restart-only one"
+    );
+}
+
+/// A provider profile's *content* can change (e.g. filling in `base_url`/
+/// `auth` on a profile that already existed, such as a built-in placeholder
+/// like `openai`) without its name changing — `provider_config_changed`
+/// must still surface this as "provider profiles" even though the name list
+/// (and so `ProfilesChanged`) is untouched (C-5).
+struct ContentOnlyReloader;
+
+impl emberly_core::ConfigReloader for ContentOnlyReloader {
+    fn reload(&self) -> Result<emberly_core::ReloadedConfig, String> {
+        Ok(emberly_core::ReloadedConfig {
+            system: None,
+            summary_prompt: None,
+            provider_factory: Arc::new(FakeFactory),
+            profiles: Vec::new(),
+            configured_provider: None,
+            configured_model: None,
+            provider_config_changed: true,
+            tool_explanations: false,
+            loop_config: LoopConfig {
+                enabled: false,
+                ..LoopConfig::default()
+            },
+            completion_config: CompletionConfig::default(),
+            completion_checks: Vec::new(),
+            truncate: TruncateConfig::default(),
+            context: ContextConfig::default(),
+            image_max_bytes: 5 * 1024 * 1024,
+            document_max_bytes: 32 * 1024 * 1024,
+            memory: emberly_core::MemoryConfig::default(),
+            skills: emberly_core::SkillsConfig::default(),
+            tools: default_registry(),
+            rule_specs: Vec::new(),
+            restart_notes: Vec::new(),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn reload_config_reports_provider_content_change_without_name_change() {
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        temp_project(),
+        EngineConfig::no_transcript(),
+    );
+    config.config_reloader = Some(Arc::new(ContentOnlyReloader));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await;
+
+    h.send(Command::ReloadConfig).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ProfilesChanged { .. })),
+        "the name list didn't change, so the picker isn't re-emitted"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message }
+                if message.contains("reloaded")
+                    && message.contains("provider profiles")
+                    && message.contains("run /model to use it"))),
+        "a content-only provider change is still reported, not swallowed as \"no live changes\""
+    );
+}
+
+/// The top-level `provider =` / `model =` selectors can change with the
+/// profile *set* and its *content* both untouched (e.g. a user just points
+/// an already-configured, unmodified profile as the new default) — this must
+/// still be reported, with a concrete `/model` command, not swallowed as "no
+/// live changes" (the bug this regression test exists for).
+struct SelectionOnlyReloader;
+
+impl emberly_core::ConfigReloader for SelectionOnlyReloader {
+    fn reload(&self) -> Result<emberly_core::ReloadedConfig, String> {
+        Ok(emberly_core::ReloadedConfig {
+            system: None,
+            summary_prompt: None,
+            provider_factory: Arc::new(FakeFactory),
+            profiles: Vec::new(),
+            configured_provider: Some("openai".to_string()),
+            configured_model: Some("gpt-5.6".to_string()),
+            provider_config_changed: false,
+            tool_explanations: false,
+            loop_config: LoopConfig {
+                enabled: false,
+                ..LoopConfig::default()
+            },
+            completion_config: CompletionConfig::default(),
+            completion_checks: Vec::new(),
+            truncate: TruncateConfig::default(),
+            context: ContextConfig::default(),
+            image_max_bytes: 5 * 1024 * 1024,
+            document_max_bytes: 32 * 1024 * 1024,
+            memory: emberly_core::MemoryConfig::default(),
+            skills: emberly_core::SkillsConfig::default(),
+            tools: default_registry(),
+            rule_specs: Vec::new(),
+            restart_notes: Vec::new(),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn reload_config_reports_a_changed_default_selection_alone() {
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        temp_project(),
+        EngineConfig::no_transcript(),
+    );
+    config.config_reloader = Some(Arc::new(SelectionOnlyReloader));
+    let mut h = spawn(config);
+    let _ = h.collect(None).await;
+
+    h.send(Command::ReloadConfig).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ProfilesChanged { .. })),
+        "neither the name list nor any profile's content changed"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message }
+                if message.contains("reloaded")
+                    && message.contains("provider selection")
+                    && !message.contains("provider profiles")
+                    && message.contains("run /model openai gpt-5.6 to switch"))),
+        "a configured-default-only change is reported with a concrete /model command, \
+         not swallowed as \"no live changes\""
     );
 }
 
@@ -2924,7 +3233,12 @@ async fn auto_compaction_fires_at_clean_boundary_and_does_not_thrash() {
     let provider: Arc<dyn Provider> = auto_compact_provider(scripts);
     let sink = CaptureSink::new();
     let mut config = make_config(provider, temp_project(), Box::new(sink.clone()));
-    config.context = ContextConfig::default(); // auto_compact = true, threshold = 0.85
+    config.context = ContextConfig {
+        // Small enough that the 5 turns below (a turn count, not a message
+        // count — see `group_turn_starts`) leave something to elide.
+        keep_recent_turns: 3,
+        ..ContextConfig::default() // auto_compact = true, threshold = 0.85
+    };
     let mut h = spawn(config);
 
     // Build up enough turns for compaction to have a range to summarize
@@ -2993,6 +3307,9 @@ async fn auto_compact_disabled_never_auto_fires() {
     let mut config = make_config(provider, temp_project(), Box::new(sink.clone()));
     config.context = ContextConfig {
         auto_compact: false,
+        // Small enough that the 5 turns below leave something to elide when
+        // the manual /compact runs further down.
+        keep_recent_turns: 3,
         ..ContextConfig::default()
     };
     let mut h = spawn(config);
@@ -3075,11 +3392,17 @@ async fn setup_session_with_cache() -> (PathBuf, PathBuf) {
         ScriptedResponse::text("r2"),
         ScriptedResponse::text("r3"),
         ScriptedResponse::text("r4"),
+        ScriptedResponse::text("r5"),
+        ScriptedResponse::text("r6"),
+        ScriptedResponse::text("r7"),
+        ScriptedResponse::text("r8"),
         ScriptedResponse::text("SUMMARY OF MIDDLE"),
         ScriptedResponse::text("after compact"),
     ];
     let mut h = start_with_file_transcript(scripts, root, &path);
-    for i in 0..4 {
+    // More than the default `keep_recent_turns` of 6 (a turn count) so the
+    // compaction below actually has turns to elide.
+    for i in 0..8 {
         h.send(Command::UserInput {
             text: format!("msg {i}"),
         })

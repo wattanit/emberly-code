@@ -61,11 +61,13 @@ pub const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/co
 # mouse = true
 "#;
 
-/// A documented `permissions.toml`. The rule engine is Phase 2; this reserves
-/// the pattern and file location so the shape is stable.
+/// A documented `permissions.toml` seeded with an example (commented out) —
+/// the rule engine is fully implemented (`emberly-sandbox::rules`); this file
+/// is empty of active rules by default so a fresh project starts conservative.
 const PERMISSIONS_TEMPLATE: &str = r#"# emberly permission rules (.agents/permissions.toml)
-# The rule engine lands in a later phase; until then every tool action is
-# prompted per-invocation. This file reserves the format:
+# A small built-in allowlist (read-only commands like `ls`, `cat`, `git
+# status`/`diff`/`log`) already runs without prompting; everything else asks
+# until you add rules here to pre-approve matching tool actions:
 #
 #   [[rule]]
 #   tool  = "bash"

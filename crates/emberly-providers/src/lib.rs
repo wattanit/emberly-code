@@ -3,9 +3,9 @@
 //! (Requirements P-1, Tech Spec §4). No provider-specific wire type ever
 //! crosses this boundary.
 //!
-//! Phase 1, group 2 (current): the trait, the normalized types, and the
-//! scripted [`FakeProvider`] (A-2). The live Anthropic and OpenAI-compatible
-//! clients (P-2, P-3) land in Phase 3.
+//! The trait, the normalized types, the scripted [`FakeProvider`] used by
+//! tests (A-2), and the live Anthropic and OpenAI-compatible clients (P-2,
+//! P-3).
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 

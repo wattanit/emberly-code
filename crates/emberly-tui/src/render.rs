@@ -17,7 +17,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, ChoiceRow, ConvItem, Overlay, OverlayContent, SessionRow};
+use crate::app::{
+    App, ChoiceRow, ConvItem, Overlay, OverlayContent, SessionRow, WizardStep, WIZARD_ADAPTERS,
+};
 use crate::hit::{ClickTarget, HitMap, PermissionChoice};
 use crate::text;
 use crate::theme::Theme;
@@ -71,6 +73,8 @@ pub fn frame(f: &mut Frame, app: &App, hit: &mut HitMap) {
         render_loop_halt(f, app, main);
     } else if app.pending_completion_gate.is_some() {
         render_completion_gate(f, app, main);
+    } else if app.pending_provider_wizard.is_some() {
+        render_provider_wizard(f, app, main);
     } else {
         // Conversation over the input box.
         let input_rows = app.editor.line_count().clamp(1, MAX_INPUT_ROWS);
@@ -88,7 +92,9 @@ pub fn frame(f: &mut Frame, app: &App, hit: &mut HitMap) {
         // overlay or palette clears the map afterward, covering those.
         let base_active = app.pending_permission.is_none()
             && app.pending_ask.is_none()
-            && app.pending_loop_halt.is_none();
+            && app.pending_loop_halt.is_none()
+            && app.pending_completion_gate.is_none()
+            && app.pending_provider_wizard.is_none();
         render_sidebar(f, app, area, hit, base_active);
     }
     render_status(f, app, status, sidebar_shown);
@@ -930,7 +936,10 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
 
     // Model block: model, context %, cost estimate, sandbox status.
     let model = if app.session.provider.is_empty() {
-        app.session.model.clone()
+        // No provider configured yet (Requirements C-7, Design §8.2): point
+        // straight at the fix, in the same breath — not the raw placeholder
+        // name, and not env-var instructions now that guided setup exists.
+        strings::status::NO_PROVIDER_CUE.to_string()
     } else {
         format!("{}/{}", app.session.provider, app.session.model)
     };
@@ -1706,6 +1715,125 @@ fn render_completion_gate(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// Render the guided provider/model setup wizard (Requirements C-7, Design
+/// §4.6): a focused sequence of single-question screens, Enter to advance,
+/// Esc/Backspace-on-empty to step back. The **API key step masks input**
+/// (`•` per keystroke) and the summary redacts the key to its last 4
+/// characters — matching C-7's never-printed guarantee.
+fn render_provider_wizard(f: &mut Frame, app: &App, area: Rect) {
+    use strings::provider_wizard as s;
+    let theme = &app.theme;
+    let Some(wizard) = app.pending_provider_wizard.as_ref() else {
+        return;
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.chrome())
+        .title(Span::styled(format!(" {} ", s::TITLE), theme.accent()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 3 || inner.width == 0 {
+        return;
+    }
+    let width = usize::from(inner.width);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let field = |label: &str, value: &str, cursor: bool| {
+        let mut spans = vec![
+            Span::styled(format!("{label}: "), theme.chrome()),
+            Span::styled(value.to_string(), theme.primary()),
+        ];
+        if cursor {
+            spans.push(Span::styled("▏", theme.accent()));
+        }
+        Line::from(spans)
+    };
+
+    match wizard.step {
+        WizardStep::Name => {
+            lines.push(field(s::NAME_LABEL, wizard.editor.text(), true));
+        }
+        WizardStep::Adapter => {
+            for row in text::wrap(s::ADAPTER_EXPLAINER, width) {
+                lines.push(Line::from(Span::styled(row, theme.chrome())));
+            }
+            lines.push(Line::from(""));
+            for (i, adapter) in WIZARD_ADAPTERS.iter().enumerate() {
+                let marker = if i == wizard.adapter_selected {
+                    "▶ "
+                } else {
+                    "  "
+                };
+                let style = if i == wizard.adapter_selected {
+                    theme.strong()
+                } else {
+                    theme.primary()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(marker, theme.accent()),
+                    Span::styled((*adapter).to_string(), style),
+                ]));
+            }
+        }
+        WizardStep::Endpoint => {
+            lines.push(field(s::ENDPOINT_LABEL, wizard.editor.text(), true));
+        }
+        WizardStep::ModelId => {
+            lines.push(field(s::MODEL_ID_LABEL, wizard.editor.text(), true));
+        }
+        WizardStep::ApiKey => {
+            let masked = "•".repeat(wizard.editor.text().chars().count());
+            lines.push(field(s::API_KEY_LABEL, &masked, true));
+        }
+        WizardStep::Summary => {
+            let redacted = if wizard.api_key.len() > 4 {
+                format!("••••{}", &wizard.api_key[wizard.api_key.len() - 4..])
+            } else {
+                "••••".to_string()
+            };
+            lines.push(field(s::SUMMARY_NAME_LABEL, &wizard.name, false));
+            lines.push(field(s::ADAPTER_LABEL, wizard.adapter(), false));
+            let endpoint = if wizard.endpoint.is_empty() {
+                "(adapter default)"
+            } else {
+                &wizard.endpoint
+            };
+            lines.push(field(s::ENDPOINT_LABEL, endpoint, false));
+            lines.push(field(s::MODEL_ID_LABEL, &wizard.model_id, false));
+            lines.push(field(s::SUMMARY_KEY_LABEL, &redacted, false));
+        }
+    }
+    if let Some(error) = &wizard.error {
+        lines.push(Line::from(""));
+        for row in text::wrap(error, width) {
+            lines.push(Line::from(Span::styled(row, theme.warning())));
+        }
+    }
+
+    let footer_h = 1u16;
+    let body_h = inner.height.saturating_sub(footer_h).max(1);
+    let body_area = Rect {
+        height: body_h,
+        ..inner
+    };
+    let footer_area = Rect {
+        y: inner.y + inner.height - footer_h,
+        height: footer_h,
+        ..inner
+    };
+    let hint = if wizard.step == WizardStep::Summary {
+        s::SUMMARY_HINT
+    } else {
+        s::HINT
+    };
+    f.render_widget(Paragraph::new(lines), body_area);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(hint, theme.chrome()))),
+        footer_area,
+    );
+}
+
 /// The pinned footer: a scroll notice (when content remains below) and the
 /// choice line with deny as the default.
 fn footer_lines(theme: &Theme, hidden_below: usize) -> Vec<Line<'static>> {
@@ -1834,6 +1962,7 @@ fn fit(s: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_provider_writer;
     use crate::app::SessionInfo;
     use emberly_core::{PermissionId, PermissionRendering, UiEvent};
     use ratatui::backend::TestBackend;
@@ -1893,6 +2022,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.palette = Some(crate::app::PaletteState::default());
         let hit = hit_map_of(&app, 100, 24);
@@ -1914,6 +2044,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.overlays.push(Overlay {
             title: "permission mode".into(),
@@ -1947,6 +2078,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.apply_event(emberly_core::UiEvent::MemoryEntries {
             user: vec![EntrySummary {
@@ -1986,6 +2118,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.apply_event(emberly_core::UiEvent::ReasoningDelta { text: "why".into() });
         app.apply_event(emberly_core::UiEvent::AssistantDelta { text: "a".into() });
@@ -2002,6 +2135,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.modified_files.push(crate::app::ModifiedFile {
             path: "src/x.rs".into(),
@@ -2030,6 +2164,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.memory_user = 1;
         pending(&mut app, false, "rm -rf build"); // a permission prompt owns input
@@ -2050,6 +2185,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.open_text_overlay("t", "some body text");
         let hit = hit_map_of(&app, 100, 24);
@@ -2080,6 +2216,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         // A body with content below the fold, so the "more below" notice shows.
         pending(&mut app, false, "line1\nline2\nline3\nline4\nline5\nline6");
@@ -2110,6 +2247,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         pending(&mut app, false, "rm -rf build");
         let screen = draw(&app, 100, 24);
@@ -2128,6 +2266,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         pending(&mut app, true, "rm -rf /etc/x");
         let screen = draw(&app, 100, 24);
@@ -2144,6 +2283,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
         pending(&mut app, false, &long);
@@ -2162,6 +2302,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         let id = emberly_core::ToolCallId::new("c1");
         app.apply_event(UiEvent::ToolStarted {
@@ -2193,6 +2334,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.apply_event(UiEvent::ToolStarted {
             call_id: emberly_core::ToolCallId::new("c1"),
@@ -2218,6 +2360,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.apply_event(UiEvent::ToolStarted {
             call_id: emberly_core::ToolCallId::new("c1"),
@@ -2239,6 +2382,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.apply_event(UiEvent::AskUserRequest {
             id: emberly_core::AskId(1),
@@ -2265,6 +2409,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.apply_event(UiEvent::LoopHalted {
             reason: "read_file nope.txt three times".into(),
@@ -2293,6 +2438,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.apply_event(UiEvent::AssistantDelta {
             text: "สวัสดี ที่".into(),
@@ -2310,6 +2456,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         // Sidebar-only chrome present when wide, absent when narrow.
         assert!(draw(&app, 120, 20).contains("modified files"));
@@ -2323,6 +2470,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.apply_event(UiEvent::SessionUsage {
             usage: emberly_core::TokenUsage {
@@ -2349,6 +2497,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.apply_event(UiEvent::ContextUsage {
             pct: 42,
@@ -2374,6 +2523,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         pending(
             &mut app,
@@ -2415,6 +2565,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         app.apply_event(emberly_core::UiEvent::AssistantDelta {
             text: "aaaa bbbb cccc".into(),
@@ -2435,6 +2586,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         let id = emberly_core::ToolCallId::new("ws");
         app.apply_event(UiEvent::ToolStarted {
@@ -2465,6 +2617,7 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            test_provider_writer(),
         );
         let id = emberly_core::ToolCallId::new("c1");
         app.apply_event(UiEvent::ToolStarted {

@@ -110,6 +110,30 @@ pub mod status {
     pub const MODEL_LABEL: &str = "model";
     pub const EFFORT_LABEL: &str = "effort";
     pub const ROOT_LABEL: &str = "root";
+    /// Session-start cue when no provider is configured (Requirements C-7,
+    /// Design §8.2): points straight at the guided setup fix, in both the
+    /// rich sidebar and the degraded-mode banner (same wording, matching
+    /// "one reload story for every path").
+    pub const NO_PROVIDER_CUE: &str = "none configured — /model to add a provider";
+}
+
+/// The guided provider/model setup wizard (Requirements C-7, Design §4.6).
+/// Name comes first — the identifier the user is actually choosing — then
+/// the adapter (wire format, not brand), endpoint, model id, and key.
+pub mod provider_wizard {
+    pub const TITLE: &str = "add a provider";
+    pub const NAME_LABEL: &str = "profile name";
+    pub const ADAPTER_LABEL: &str = "adapter";
+    /// The wire-format-not-brand explainer (Design §4.6).
+    pub const ADAPTER_EXPLAINER: &str =
+        "wire format, not brand — most third-party and OpenAI-compatible APIs, including local models, use \"openai\"";
+    pub const ENDPOINT_LABEL: &str = "endpoint";
+    pub const MODEL_ID_LABEL: &str = "model id";
+    pub const API_KEY_LABEL: &str = "API key";
+    pub const SUMMARY_NAME_LABEL: &str = "name";
+    pub const SUMMARY_KEY_LABEL: &str = "key";
+    pub const HINT: &str = "Enter next · Esc back";
+    pub const SUMMARY_HINT: &str = "Enter to save · Esc back";
 }
 
 /// Mode names for display (Requirements §6.4). Lower-case, terse.
@@ -186,7 +210,3 @@ pub mod markers {
     /// §4.10) so the block reads visibly as fetched web data, not tool output.
     pub const WEB: &str = "↩";
 }
-
-/// One-line orientation shown on clean exit (Design §8.3). The richer summary
-/// (name, duration, cost, transcript path) arrives with Phase 5 persistence.
-pub const SESSION_ENDED: &str = "session ended.";
