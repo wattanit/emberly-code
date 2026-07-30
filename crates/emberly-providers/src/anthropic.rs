@@ -97,11 +97,7 @@ impl Provider for AnthropicProvider {
     }
 
     fn count_tokens(&self, text: &str) -> TokenEstimate {
-        let chars = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
-        TokenEstimate {
-            tokens: chars.div_ceil(4),
-            approximate: true,
-        }
+        crate::model::estimate_tokens(text)
     }
 }
 

@@ -141,11 +141,51 @@ impl TokenUsage {
 
 /// Result of [`Provider::count_tokens`](crate::Provider::count_tokens). The
 /// requirement is a reliable trigger, not exactness, so `approximate` flags a
-/// chars/4-style estimate to callers (P-6).
+/// heuristic (chars-per-token, script-weighted — see [`estimate_tokens`])
+/// estimate to callers (P-6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenEstimate {
     pub tokens: u64,
     pub approximate: bool,
+}
+
+/// Unicode ranges dense enough — no space-delimited words, denser BPE token
+/// packing — that a flat chars/4 ratio badly underestimates them: Thai, Lao,
+/// Myanmar, Khmer, CJK ideographs, Hiragana/Katakana, Hangul (issue #12).
+fn is_dense_script(c: char) -> bool {
+    matches!(c as u32,
+        0x0E00..=0x0E7F   // Thai
+        | 0x0E80..=0x0EFF // Lao
+        | 0x1000..=0x109F // Myanmar
+        | 0x1780..=0x17FF // Khmer
+        | 0x3040..=0x30FF // Hiragana + Katakana
+        | 0x3400..=0x4DBF // CJK Extension A
+        | 0x4E00..=0x9FFF // CJK Unified Ideographs
+        | 0xAC00..=0xD7A3 // Hangul syllables
+        | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+    )
+}
+
+/// Estimate a text's token count without a real tokenizer (P-6, issue #12).
+/// Plain Latin-script text is estimated at ~4 chars/token; text in a script
+/// with no space-delimited words and denser BPE packing (Thai, CJK, ...) is
+/// estimated at ~2 chars/token instead. Weighted per character rather than
+/// classifying the whole string, so mixed-script text (e.g. Thai prose with
+/// English terms) isn't miscounted as entirely one script or the other.
+/// Still a heuristic, not a real tokenizer — always `approximate`.
+#[must_use]
+pub(crate) fn estimate_tokens(text: &str) -> TokenEstimate {
+    let (dense, plain) = text.chars().fold((0u64, 0u64), |(dense, plain), c| {
+        if is_dense_script(c) {
+            (dense + 1, plain)
+        } else {
+            (dense, plain + 1)
+        }
+    });
+    TokenEstimate {
+        tokens: dense.div_ceil(2).saturating_add(plain.div_ceil(4)),
+        approximate: true,
+    }
 }
 
 #[cfg(test)]
@@ -214,5 +254,38 @@ mod tests {
         };
         let json = to_json(&info);
         assert_eq!(from_json::<ModelInfo>(&json), info);
+    }
+
+    #[test]
+    fn ascii_text_keeps_the_chars_over_4_ratio() {
+        let est = estimate_tokens("12345678"); // 8 chars, no dense script
+        assert_eq!(est.tokens, 2);
+        assert!(est.approximate);
+        assert_eq!(estimate_tokens("").tokens, 0);
+    }
+
+    #[test]
+    fn thai_text_is_estimated_at_roughly_double_the_ascii_rate() {
+        // "สวัสดีครับ" ("hello", polite male register) — 10 Thai codepoints,
+        // no whitespace word boundaries (issue #12).
+        let thai = "สวัสดีครับ";
+        assert_eq!(thai.chars().count(), 10);
+        assert_eq!(estimate_tokens(thai).tokens, 5); // 10 / 2, not 10 / 4
+    }
+
+    #[test]
+    fn cjk_and_hangul_use_the_dense_ratio_too() {
+        assert_eq!(estimate_tokens("你好世界").tokens, 2); // 4 chars / 2
+        assert_eq!(estimate_tokens("안녕하세요").tokens, 3); // 5 chars, div_ceil(2)
+    }
+
+    #[test]
+    fn mixed_script_text_is_weighted_per_character() {
+        // 4 ASCII chars (÷4) + 4 Thai chars (÷2): neither ratio alone applies.
+        let mixed = "test ไทย";
+        let est = estimate_tokens(mixed);
+        // "test " = 5 ASCII/space chars → div_ceil(4) = 2; "ไทย" = 3 Thai chars
+        // → div_ceil(2) = 2. Total 4, well above a flat chars/4 of 8/4 = 2.
+        assert_eq!(est.tokens, 4);
     }
 }
