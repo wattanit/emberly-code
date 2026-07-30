@@ -1,6 +1,6 @@
 # Emberly Code
 
-> **Currently on v0.4.2** — feature-complete for the milestone, install from source.
+> **Currently on v0.4.3** — feature-complete for the milestone, install from source.
 
 **An AI coding agent for your terminal — provider-agnostic, fully auditable, and
 built in pure Rust.**
@@ -358,6 +358,13 @@ For long sessions the context-economy layer works automatically; use `/compact`
 to manually summarize the older part when the window fills. Recent messages are
 kept verbatim and the summary is recorded in the transcript, so resuming works.
 
+Each session also gets a disposable scratch directory
+(`.agents/scratch/<id>/`) the agent can stash temporary files in — a script,
+intermediate output, a working note — via the `scratch_write` tool. It's
+harness-managed (the model supplies content, never a path) so it costs no
+permission prompt, and it's gitignored so it never lands in your tracked
+project. Nothing auto-deletes it; reclaim the disk space with `emberly clean`.
+
 #### Command-line reference
 
 ```
@@ -369,6 +376,7 @@ emberly init                Scaffold .agents/ (config, prompts, permissions)
 emberly config show         Show the resolved configuration and its sources
 emberly trust list          List trusted folders
 emberly trust revoke <path> Revoke trust for a folder
+emberly clean [<id>]        Reclaim scratch-space disk usage (all, or one session)
 emberly --version           Print the version
 
   --provider <name>         Select the active provider profile for this run
@@ -385,10 +393,10 @@ minimal terminals.
 
 ### Project status
 
-Feature-complete for the **v0.4.2** milestone (M10), installable from source.
+Feature-complete for the **v0.4.3** milestone (M11), installable from source.
 The interactive TUI, live providers, session persistence, the permission rule
 engine, auto-accept modes, and OS confinement (Linux Landlock, macOS Seatbelt)
-all work today, alongside the full 0.2–0.4.2 stack described below. **Not yet
+all work today, alongside the full 0.2–0.4.3 stack described below. **Not yet
 shipped:** prebuilt binaries and Windows support (no Landlock/Seatbelt
 equivalent).
 
@@ -405,9 +413,11 @@ as it grows. _(Affectionate, not official.)_
 | **v0.4** | M8 | 🌲🔥 _Wildfire_ | New capability surface — planning (task list), sight (image input), durable memory, extensible skills, live web search, and pointer interaction. |
 | **v0.4.1** | M9 | 🌲🔥 _Wildfire_ | A completion gate that holds the loop to registered pass/fail checks before it may declare a task done, and document (PDF) input — the same pattern as image input, applied to documents. |
 | **v0.4.2** | M10 | 🌲🔥 _Wildfire_ | Guided provider/model setup — a step-by-step wizard, reachable from the model picker, that writes a new provider profile and its key without hand-editing config. Plus a round of post-ship hardening: compaction, cancellation, permission previews, and parallel tool-call handling. |
+| **v0.4.3** | M11 | 🌲🔥 _Wildfire_ | Three externally-reported bug fixes (a stalled SSE stream could hang forever; an interrupted turn could commit a message no provider adapter accepts; the token estimate badly undercounted Thai/CJK text), plus session scratch space — a disposable per-session working directory (`scratch_write`, `emberly clean`). |
 
 Prior as-built plans live under `docs/version-0-1/`, `docs/version-0-2/`,
-`docs/version-0-3/`, `docs/version-0-4/`, and `docs/version-0-4-1/`.
+`docs/version-0-3/`, `docs/version-0-4/`, `docs/version-0-4-1/`, and
+`docs/version-0-4-2/`.
 
 ### Architecture
 
@@ -455,10 +465,10 @@ Release targets (v1): `x86_64-unknown-linux-musl`,
 
 **Documents** (the SFD standard — Requirements → Design → Tech Spec):
 
-- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.9)
-- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.9)
-- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.10)
-- [`docs/version-0-4-2/IMPLEMENTATION_PLAN.md`](docs/version-0-4-2/IMPLEMENTATION_PLAN.md) — phased build plan (+ per-phase `PHASE*_TODO.md`)
+- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.10)
+- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.10)
+- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.11)
+- [`docs/version-0-4-3/IMPLEMENTATION_PLAN.md`](docs/version-0-4-3/IMPLEMENTATION_PLAN.md) — phased build plan (+ per-phase `PHASE*_TODO.md`)
 
 ## License
 

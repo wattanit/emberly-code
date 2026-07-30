@@ -1,11 +1,11 @@
 # Emberly Code — Design Guideline
 
-**Version:** 0.9 
+**Version:** 0.10 
 **Status:** approved
-**Date:** 2026-07-21
+**Date:** 2026-07-30
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.9 (upstream), Technical
-Specification v0.10 (downstream — this document constrains it)
+**Companion documents:** Requirements Document v0.10 (upstream), Technical
+Specification v0.11 (downstream — this document constrains it)
 
 This document defines how Emberly Code looks, feels, and speaks. It is the
 second of three project documents. Where a decision here has technical
@@ -407,6 +407,18 @@ error (§6.1), so model and user both learn the document was not seen.
 - Only PDF is read (Requirements §2.3 declines other document formats); the
 reference line never implies a format the harness does not send.
 
+### 4.12 Scratch writes in the flow
+
+A scratch-write (Requirements T-17) surfaces the same way memory and skill
+activity does (§4.9): a quiet, single dim line, never ceremony — reading like
+`scratch · analysis.py · 1.2 KB written` (illustrative; exact wording is
+free), naming the file and its size. There is no permission prompt to render
+here, because none occurs (T-17); the line
+exists so the user can see what working files the model left behind, not to
+gate the write. It is otherwise ordinary tool activity: it may carry a §4.5
+explanation when the model supplied one, and degraded mode (§7) renders it
+ASCII-only like any other tool line.
+
 ## 5. The Permission Prompt
 
 The most important screen in the product. It is where the safety model
@@ -760,6 +772,17 @@ inert and, like the Tasks/Memory sections (§3.1), never a "None" stub.
 in the harness voice; a session may meet either.
 - Degraded mode (§7): the halt keeps its guarantees — plain harness-voice lines,
 ASCII, the four choices as capitalized deliberate keys.
+
+### 8.8 Reclaiming scratch space
+
+`emberly clean` (Requirements FR-8) follows the same voice as `init` (§8.1):
+prints exactly what it found and removed, and where — no walls of text, no
+installer-wizard ceremony. A target that resolves to nothing says so plainly
+(e.g. *"nothing to clean"*) — never silence. If the Technical Specification's chosen
+scope requires confirming before deletion (open question, Requirements §13),
+that confirmation is a plain question with a plain `y`/`n` answer, matching
+the trust prompt's tone (§8.4) — not a scary dialog for what is, after all,
+disposable working space.
 
 ## 9. Design-Driven Requirements Feedback
 

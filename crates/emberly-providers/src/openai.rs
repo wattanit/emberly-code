@@ -15,7 +15,7 @@ use crate::model::{Effort, ModelInfo, ProviderId, TokenEstimate, TokenUsage};
 use crate::provider::Provider;
 use crate::sse::SseEvent;
 use crate::stream::{CompletionStream, StopReason, StreamEvent};
-use crate::wire::{check_response, sse_completion_stream, SseMapper};
+use crate::wire::{check_response, sse_completion_stream, SseMapper, DEFAULT_STREAM_IDLE_TIMEOUT};
 use crate::ToolCallId;
 
 /// A client for any OpenAI-compatible `/chat/completions` endpoint.
@@ -71,15 +71,15 @@ impl Provider for OpenAiProvider {
             .await
             .map_err(|e| ProviderError::Connect(e.to_string()))?;
         let response = check_response(response).await?;
-        Ok(sse_completion_stream(response, OpenAiMapper::default()))
+        Ok(sse_completion_stream(
+            response,
+            OpenAiMapper::default(),
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+        ))
     }
 
     fn count_tokens(&self, text: &str) -> TokenEstimate {
-        let chars = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
-        TokenEstimate {
-            tokens: chars.div_ceil(4),
-            approximate: true,
-        }
+        crate::model::estimate_tokens(text)
     }
 }
 

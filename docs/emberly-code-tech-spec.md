@@ -1,11 +1,11 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.10 
+**Version:** 0.11 
 **Status:** approved
-**Date:** 2026-07-21
+**Date:** 2026-07-30
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.9 (upstream contract),
-Design Guideline v0.9 (upstream for all UI/UX decisions)
+**Companion documents:** Requirements Document v0.10 (upstream contract),
+Design Guideline v0.10 (upstream for all UI/UX decisions)
 
 This document defines HOW Emberly Code is built. Requirements-level
 identifiers (HC-n, FR-n, P-n, T-n, C-n, S-n, A-n) refer to the Requirements
@@ -384,6 +384,7 @@ proxying JSON-RPC (T-7); nothing else in the engine changes.
 | `memory`     | Writes/updates/removes/recalls durable memory entries (T-13, §8.1). Args are **content fields, never a path** (`op`, `scope`, `name`, `description?`, `type?`, `body?`); the engine derives the filename within the fixed scope directory and rejects `..`/absolute/separator in `name`. Harness-managed persistence (like the transcript/trust store), so it does not widen HC-4 (FR-6) and is not a sandboxed filesystem write; refreshes `MemoryStatus` (§3.1).                                                                                                                                          |
 | `web_search` | Searches the web via the harness-owned backend (T-14, §5.5). Args: query (+ optional count ≤ `search.max_results`). A first-party `reqwest` call to the configured search endpoint; returns `{title, url, snippet}` results marked as **untrusted web content** (Design §4.10). **Permission-gated** (default `ask`, allowlistable — §6.1); it is a harness-process network egress, not a sandboxed child (§5.5).                                                                                                                                                                                           |
 | `skill`      | Invokes a skill by name (T-15, §8.2). Args: skill name. Loads that skill's `SKILL.md` body (and lists its bundled resources) into the tool result for the model; metadata for all skills is already in context (§7). Reads only from the resolved, trust-gated skill folders (§6.7); running a skill's bundled script is a separate ordinary `bash` call under the full permission/sandbox model (§6) — the `skill` tool itself only reads instruction text, so it is not separately permission-gated.                                                                                                      |
+| `scratch_write` | Writes a temporary file into the session's scratch space (T-17, §8.3). Args: `{name, content}` — **content fields, never a path**, exactly the T-13 pattern: the engine derives the real path from `name` within the fixed per-session scratch directory and rejects `..`, absolute paths, and separators in `name`. Creates or replaces the named file. Harness-managed persistence, not an agent filesystem write (does not widen HC-4), so it is not sandboxed and not permission-gated. |
 
 
 ### 5.3 Tool-result reduction at ingestion (Requirements §8.1, FR-2)
@@ -896,6 +897,34 @@ surfaces instructions. A project skill from an untrusted root is neither
 cataloged nor invocable (§6.7).
 - **Config:** `skills.enabled` (default `true`).
 
+### 8.3 Session scratch space (FR-8)
+
+- **Layout.** `.agents/scratch/<session-id>/` — created lazily on the
+session's first `scratch_write` call, not eagerly at session start, so a
+session that never uses it leaves no directory behind. Added to `.gitignore`
+alongside `.agents/sessions/` — never committed, and this is also why
+`glob`/`grep` (§5.2) do not surface scratch content by default: both honor
+`.gitignore`.
+- **The tool is schema-constrained (Requirements FR-8/T-17), the T-13
+pattern.** `scratch_write` takes `{name, content}` — content fields, never a
+path. The engine derives the real path from `name` within the session's
+fixed scratch directory and rejects `..`, absolute paths, and separators in
+`name`, exactly as `memory` (§8.1). Creates or replaces the file. Because the
+model never supplies a destination, the write does not widen HC-4 and is not
+sandboxed or permission-gated (§6.1) — the call and its result are still
+ordinary `tool_call`/`tool_result` transcript events (HC-7), like any other
+tool.
+- **Lifecycle.** No automatic cleanup — a scratch directory persists exactly
+like its session's transcript, so a resumed session finds its own files in
+place. `emberly clean [<session-id>]` (§10, FR-8) is the reclaim path: with
+no argument, it reports the total size across every session's scratch
+directory, asks a plain `y`/`n` confirmation (Design §8.8), then deletes all
+of them; given a session id, it scopes to that one session only. A target
+with nothing to clean says so and exits zero.
+- **Reading scratch content back** uses the existing `read_file` (T-1) once
+the model has the name it used; there is no dedicated read/list tool
+(Requirements §5, T-17) — scope kept to the write path that motivated this.
+
 ## 9. TUI (`emberly-tui`)
 
 - `ratatui` + `crossterm`. Layout per Design §3: main pane, collapsible
@@ -988,7 +1017,8 @@ scattered literals.
 ## 10. Binary & Supervisor (`emberly`)
 
 - CLI: `emberly` (start/attach in cwd project), `emberly init`,
-`emberly resume [id]`, `emberly config show`, `emberly trust [list|revoke <path>]` (FR-1, §6.7), `--plain`, `--model`, `--provider`,
+`emberly resume [id]`, `emberly config show`, `emberly trust [list|revoke <path>]` (FR-1, §6.7), `emberly clean [<session-id>]` (FR-8, §8.3),
+`--plain`, `--model`, `--provider`,
 `--effort`, `--version`.
 - Startup runs the workspace-trust check (§6.7) before the engine starts
 the loop: an untrusted root raises the trust gate and, on decline, exits
@@ -1215,8 +1245,36 @@ either file, reusing the existing config-reload path (C-5) to apply live.
 guided flow, not a raw-TOML editing exercise, with no compromise to the C-1
 tier model, C-3 provenance, or the never-in-transcript secret-handling
 guarantee.*
+M11 — 0.4.3 feature set: session scratch space (FR-8) with the
+`scratch_write` tool (T-17) and the `emberly clean` reclaim command. *Proves
+the 0.4.3 scope: the model has disposable, harness-owned working space that
+costs no permission prompt and never lands in the user's tracked project,
+and the user can reclaim it on demand — with no widening of HC-4 and no new
+dependency.*
 
 ## 16. Open Items
+
+**v0.11 (2026-07-30, 0.4.3 feature set).** Session scratch space, absorbed as
+FR-8/T-17, lands as tool-layer + binary logic with **no new dependencies**
+(§12) — the scratch directory reuses the existing `.agents/` layout
+conventions and the `scratch_write` tool reuses the `memory` tool's
+path-derivation logic (T-13, §8.1). New IDs realized: FR-8 (scratch-space
+lifecycle, §8.3), T-17 (`scratch_write` tool, §5.2). No new transcript event
+type — the tool's call/result are ordinary `tool_call`/`tool_result` events,
+so no `SCHEMA_VERSION` bump. Minor, additive bump; Requirements bumped to
+v0.10 and Design to v0.10 in lockstep (pins refreshed).
+
+Open items introduced by the 0.4.3 scope:
+
+- **`emberly clean` confirmation and non-interactive use (FR-8, §8.3,
+Requirements §13 open question).** Initial behavior is an interactive `y`/`n`
+confirmation only; a non-interactive flag (e.g. `--yes`) for scripted/CI use
+is deferred to a tune-with-use pass if it turns out to be needed.
+- **Scratch space has no size cap or retention policy (FR-8, §8.3).** Unlike
+`truncate.max_bytes` or the memory index cap, nothing currently bounds how
+much a session can accumulate between `emberly clean` runs; confirm in
+practice whether an unbounded scratch directory is an actual problem before
+adding one.
 
 **v0.10 (2026-07-21, 0.4.2 feature set).** Guided provider/model setup,
 absorbed as C-7, lands as TUI + binary logic with **no new dependencies**

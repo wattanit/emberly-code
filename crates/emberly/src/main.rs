@@ -26,6 +26,7 @@ use emberly_core::{
 use emberly_providers::Provider;
 use emberly_tui::{frontend, SessionInfo};
 
+mod clean;
 mod config;
 mod init;
 mod placeholder;
@@ -231,6 +232,7 @@ enum Cli {
     Sessions,
     TrustList,
     TrustRevoke(String),
+    Clean(Option<String>),
     Run(RunOpts),
 }
 
@@ -273,6 +275,17 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
                     other.unwrap_or("(none)")
                 ),
             },
+            // `clean [<session-id>]` — reclaim scratch disk space (FR-8, T-17).
+            // An id may follow, exactly like `resume [id]`.
+            "clean" => {
+                let mut clean_id = None;
+                if let Some(next) = args.peek() {
+                    if !next.starts_with('-') {
+                        clean_id = args.next();
+                    }
+                }
+                return Ok(Cli::Clean(clean_id));
+            }
             // Force degraded/line mode (Design §7); also implied by `NO_COLOR`,
             // `TERM=dumb`, and a non-tty stdout — see `frontend::detect`.
             "--plain" => opts.force_plain = true,
@@ -323,6 +336,11 @@ async fn run() -> anyhow::Result<()> {
         }
         Cli::TrustRevoke(path) => {
             trust::revoke(&path)?;
+            return Ok(());
+        }
+        Cli::Clean(session_id) => {
+            let scratch_root = std::env::current_dir()?.join(".agents").join("scratch");
+            clean::clean(&scratch_root, session_id.as_deref())?;
             return Ok(());
         }
         Cli::Run(opts) => opts,
@@ -714,5 +732,14 @@ mod tests {
         assert!(parse(&["--model"]).is_err(), "missing value");
         assert!(parse(&["bogus"]).is_err(), "unknown argument");
         assert!(parse(&["config", "nope"]).is_err(), "unknown subcommand");
+    }
+
+    #[test]
+    fn clean_takes_an_optional_session_id() {
+        assert_eq!(parse(&["clean"]).unwrap(), Cli::Clean(None));
+        assert_eq!(
+            parse(&["clean", "abc123"]).unwrap(),
+            Cli::Clean(Some("abc123".into()))
+        );
     }
 }

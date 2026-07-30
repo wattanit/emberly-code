@@ -15,6 +15,7 @@ mod read;
 mod read_document;
 mod read_image;
 mod recall;
+mod scratch;
 mod skill;
 mod task_list;
 mod web_search;
@@ -30,6 +31,7 @@ pub use read::ReadFileTool;
 pub use read_document::ReadDocumentTool;
 pub use read_image::ReadImageTool;
 pub use recall::RecallTool;
+pub use scratch::ScratchWriteTool;
 pub use skill::SkillTool;
 pub use task_list::TaskListTool;
 pub use web_search::WebSearchTool;
@@ -52,5 +54,6 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(TaskListTool::new()));
     registry.register(Arc::new(MemoryTool::new()));
     registry.register(Arc::new(SkillTool::new()));
+    registry.register(Arc::new(ScratchWriteTool::new()));
     registry
 }
