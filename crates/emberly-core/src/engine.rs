@@ -337,6 +337,11 @@ enum StreamEnd {
 /// The assistant output accumulated while draining one completion stream: the
 /// answer text and, distinct from it, the reasoning trail (P-10) plus the
 /// opaque signature to replay it on later turns.
+///
+/// If a field is ever added here for a new kind of streamed content, revisit
+/// `push_assistant_message`'s guard (issue #13): it only checks `text` and the
+/// caller's `tool_calls`, so a turn carrying nothing but the new field would
+/// silently commit a message no provider adapter can serialize.
 #[derive(Default)]
 struct TurnOutput {
     text: String,
@@ -2824,6 +2829,15 @@ impl Engine {
                 // a discard (P-10, Design §4.4).
                 reasoning: (!out.reasoning.is_empty()).then(|| out.reasoning.clone()),
             });
+        }
+        // A reasoning-only turn (e.g. canceled before any text or tool call) has
+        // nothing a provider's wire format can carry — every adapter maps
+        // `ContentBlock::Reasoning` alone to a contentless assistant message,
+        // which providers reject, and once committed that rejection repeats on
+        // every retry (issue #13). The reasoning is still visible above, via the
+        // transcript; it is just never replayed to the provider.
+        if text.is_empty() && tool_calls.is_empty() {
+            return;
         }
         let mut content = Vec::new();
         // Reasoning must precede text/tool_use so a provider that requires the
