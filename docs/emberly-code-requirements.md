@@ -1,11 +1,11 @@
 # Emberly Code AI Coding Harness — Requirements Document
 
-**Version:** 0.9    
+**Version:** 0.10    
 **Status:** approved
-**Date:** 2026-07-21    
+**Date:** 2026-07-30    
 **Owner:** Wattanit    
-**Companion documents:** Design Guideline v0.9 (downstream), Technical  
-Specification v0.10 (downstream)
+**Companion documents:** Design Guideline v0.10 (downstream), Technical  
+Specification v0.11 (downstream)
 
 This document defines WHAT the harness must do and WHY. HOW it is built is
 deferred to the Technical Specification. UX, visual, and voice decisions are
@@ -140,6 +140,13 @@ the section cited; this list is the scope overview, not the requirement):
 - Guided provider/model setup: a step-by-step in-app flow to add a new
 provider profile — including its API key — without hand-editing
 `config.toml` or `keys.toml` (§7, C-7).
+
+Added in the 0.4.3 feature set (each item carries an ID and full statement in
+the section cited; this list is the scope overview, not the requirement):
+
+- Session scratch space: a per-session, harness-owned working directory for
+model-authored temporary files, with a CLI command to reclaim its disk space
+(§8.9, FR-8; §5, T-17).
 
 ### 2.2 Explicitly deferred (designed-for, not yet built)
 
@@ -416,6 +423,25 @@ creation and editing are not built-in tools — those are skills (FR-7), never
 core. An agent working against real-world source material must read the formats
 that material actually arrives in; a harness that can see images but not
 documents draws the line at the wrong place.
+- **T-17 — Scratch-write tool.** A built-in tool the model calls to write a
+temporary file into the session's scratch space (§8.9, FR-8). The model
+supplies a relative name and content; the harness alone resolves the real
+path, normalized with no absolute paths and no `../` escape — the same
+constraint T-13's memory tool puts on its own store. Because the model never
+supplies a filesystem destination, this tool is **not permission-gated**
+(§6), on the same rationale as T-13: harness-owned, schema-constrained
+persistence, not an agent-chosen write against the user's project. This
+exemption covers only the write call itself; the call and its result are
+still ordinary transcript events under HC-7, like any other tool call. A
+scratch file is read back with the existing read tool (T-1) once the model
+names it; glob and grep (T-5, T-6) honor `.gitignore` by default, and the
+scratch space is gitignored (§8.9) for the same reason it is never committed
+— so directory search will not surface it, and the model must already know
+the name it used. Without this, a
+temporary script or intermediate output either lands in the user's tracked
+project (cluttering a repository the user did not ask to change) or costs a
+permission prompt on every write; this gives the model disposable working
+space that is neither.
 
 ## 6. Permission and Safety Model
 
@@ -771,6 +797,25 @@ truth, and losing the cache never loses a session. The economy is
 observable: resuming a long session consumes context proportional to its
 working view, not to its full history.
 
+### 8.9 Session scratch space
+
+- **FR-8 — Session scratch space.** Each session gets its own working
+directory, created on first use rather than eagerly, for temporary files the
+model writes through the scratch-write tool (T-17): scripts, intermediate
+outputs, working notes — content that supports a task but is not itself part
+of what the user asked the agent to produce in the project. It lives under
+the harness's own session state, alongside the transcript, is never committed
+to the user's version control, and follows the transcript's lifecycle:
+**not** auto-deleted when the session ends, so a resumed session finds its
+own scratch files still in place. Because this space accumulates indefinitely
+across sessions with no automatic pruning, the user must be able to reclaim
+its disk space on demand through a CLI command (the Technical Specification
+sets the exact verb and scope — current session, a named session, or every
+session's scratch space). Honesty clause: this is disposable working space,
+not a cross-session memory mechanism (that is FR-6); losing scratch content
+to the clean command, or to disk loss, must never lose anything the harness
+depends on to function correctly.
+
 ## 9. Architecture Requirements
 
 (Behavioral requirements only; structure belongs to the Technical Spec.)
@@ -895,6 +940,9 @@ premature landing without recreating an S-5 spin.
 - Guided provider setup's exact wizard-supported field/auth-scheme coverage,
 and whether it can edit an existing profile or only create new ones (C-7).
 Tech Spec sets the initial scope; tune with use.
+- The scratch-space CLI reclaim command's exact verb, scope (current session,
+a named session, or every session), and whether it warns before deleting
+(FR-8, T-17). Tech Spec sets the initial scope; tune with use.
 
 Resolved since v0.1: product/command name (Emberly Code / `emberly`,
 Design Guideline §1.1); default bash allowlist initial contents (Tech
