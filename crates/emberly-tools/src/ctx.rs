@@ -9,6 +9,7 @@ use crate::memory::{DropMemoryGate, MemoryError, MemoryGate, MemoryOutcome, Memo
 use crate::permission::{PermissionGate, PermissionOutcome, PermissionRequest};
 use crate::recall::{DeclineRecallGate, RecallGate, RecallOutcome};
 use crate::sandbox::Sandbox;
+use crate::scratch::{DropScratchGate, ScratchError, ScratchGate, ScratchOutcome, ScratchRequest};
 use crate::skills::{DropSkillGate, SkillError, SkillGate, SkillInvocation};
 use crate::task_list::{DropTaskListGate, TaskItem, TaskListError, TaskListGate};
 
@@ -66,6 +67,7 @@ pub struct ToolCtx {
     task_list: Arc<dyn TaskListGate>,
     memory: Arc<dyn MemoryGate>,
     skill: Arc<dyn SkillGate>,
+    scratch: Arc<dyn ScratchGate>,
     /// Whether the active model accepts image input (P-11). `read_image`
     /// checks this to produce the HC-6 unsupported result before encoding.
     vision: bool,
@@ -100,6 +102,7 @@ impl ToolCtx {
             task_list: Arc::new(DropTaskListGate),
             memory: Arc::new(DropMemoryGate),
             skill: Arc::new(DropSkillGate),
+            scratch: Arc::new(DropScratchGate),
             vision: false,
             image_max_bytes: IMAGE_MAX_BYTES_DEFAULT,
             documents: false,
@@ -144,6 +147,14 @@ impl ToolCtx {
     #[must_use]
     pub fn with_skill_gate(mut self, skill: Arc<dyn SkillGate>) -> Self {
         self.skill = skill;
+        self
+    }
+
+    /// Install the scratch gate (T-17). Kept a builder so existing callers
+    /// and tests, which never write scratch files, need no change.
+    #[must_use]
+    pub fn with_scratch_gate(mut self, scratch: Arc<dyn ScratchGate>) -> Self {
+        self.scratch = scratch;
         self
     }
 
@@ -235,6 +246,13 @@ impl ToolCtx {
     /// (FR-7 honesty clause, Tech Spec §8.2).
     pub async fn invoke_skill(&self, name: String) -> Result<Option<SkillInvocation>, SkillError> {
         self.skill.invoke_skill(name).await
+    }
+
+    /// Write a temporary file into the session's scratch directory (T-17).
+    /// The single path to the scratch gate; harness-managed persistence that
+    /// does not widen HC-4 (FR-8). Not permission-gated.
+    pub async fn scratch_write(&self, req: ScratchRequest) -> Result<ScratchOutcome, ScratchError> {
+        self.scratch.scratch_write(req).await
     }
 
     /// Whether the active model accepts image input (P-11).

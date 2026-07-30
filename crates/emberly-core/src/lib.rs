@@ -25,6 +25,7 @@ pub mod memory;
 pub mod prompts;
 pub mod provider_writer;
 pub mod resume;
+pub mod scratch;
 pub mod skills;
 pub mod spawn;
 pub mod transcript;

@@ -22,6 +22,7 @@ pub mod recall;
 pub mod reduce;
 pub mod registry;
 pub mod sandbox;
+pub mod scratch;
 pub mod search;
 pub mod skills;
 pub mod task_list;
@@ -31,8 +32,8 @@ pub mod truncate;
 pub use ask_user::{AskUserGate, AskUserOutcome};
 pub use builtin::{
     default_registry, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, MemoryTool,
-    ReadDocumentTool, ReadFileTool, ReadImageTool, RecallTool, SkillTool, TaskListTool,
-    WebSearchTool, WriteFileTool, DEFAULT_ENV_ALLOWLIST, DEFAULT_TIMEOUT_SECS,
+    ReadDocumentTool, ReadFileTool, ReadImageTool, RecallTool, ScratchWriteTool, SkillTool,
+    TaskListTool, WebSearchTool, WriteFileTool, DEFAULT_ENV_ALLOWLIST, DEFAULT_TIMEOUT_SECS,
 };
 pub use ctx::{ToolCtx, TruncateConfig};
 pub use memory::{
@@ -43,6 +44,9 @@ pub use recall::{RecallGate, RecallOutcome};
 pub use reduce::{reduce_output, Reduction};
 pub use registry::ToolRegistry;
 pub use sandbox::{BashInvocation, PlainSandbox, Sandbox};
+pub use scratch::{
+    validate_name, ScratchError, ScratchGate, ScratchNameError, ScratchOutcome, ScratchRequest,
+};
 pub use search::{SearchAuth, SearchClient, SearchError, SearchResult};
 pub use skills::{SkillError, SkillGate, SkillInvocation, SkillMeta, SkillOrigin};
 pub use task_list::{TaskItem, TaskListError, TaskListGate, TaskStatus};

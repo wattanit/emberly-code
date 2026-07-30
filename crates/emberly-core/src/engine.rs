@@ -36,6 +36,7 @@ use crate::gate::{
 };
 use crate::id::{AskId, PermissionId, SessionId};
 use crate::memory::MemoryStore;
+use crate::scratch::ScratchStore;
 use crate::skills::{render_catalog, ShadowNotice, SkillCatalog};
 use crate::transcript::{
     CompactTrigger, ConfigProvenance, FileTranscript, NoopSink, TranscriptEvent, TranscriptRecord,
@@ -672,6 +673,12 @@ pub struct Engine {
     /// The skill gate (T-15), installed into every `ToolCtx` so the `skill`
     /// tool can load instruction bodies.
     skill_gate: Arc<SkillGateImpl>,
+    /// The scratch gate (T-17), installed into every `ToolCtx` so the
+    /// `scratch_write` tool can write into this session's disposable working
+    /// directory. Unlike the other gates, this one acts directly rather than
+    /// through a channel to the engine loop — a scratch write has no side
+    /// effect on any other engine-owned state (FR-8, Tech Spec §8.3).
+    scratch_store: Arc<ScratchStore>,
     events_tx: mpsc::Sender<UiEvent>,
     conversation: Vec<Message>,
     /// Parallel to `conversation`: the stable monotonic turn number of each
@@ -828,6 +835,10 @@ impl Engine {
             config.user_skills_dir.as_ref(),
             config.project_skills_dir.clone(),
         );
+        let scratch_store = Arc::new(ScratchStore::new(scratch_dir_for(
+            &config.project_root,
+            config.session_id,
+        )));
         // Capture before `config.sandbox` is moved into the struct below.
         let sandbox_spawn: Arc<dyn Sandbox> = config.sandbox_spawn.unwrap_or_else(|| {
             // Fallback (no explicit spawner): confine from the status, but with
@@ -892,6 +903,7 @@ impl Engine {
             task_list_gate: Arc::new(TaskListGateImpl { asks: task_list_tx }),
             memory_gate: Arc::new(MemoryGateImpl { asks: memory_tx }),
             skill_gate: Arc::new(SkillGateImpl { asks: skill_tx }),
+            scratch_store,
             events_tx,
             conversation: config.initial_conversation,
             turn_map,
@@ -1271,6 +1283,12 @@ impl Engine {
         resuming: bool,
     ) {
         self.session_id = session_id;
+        // Re-point the scratch store at the new session's own directory (FR-8)
+        // — scratch space is never carried across a `/new` or `/resume` switch.
+        self.scratch_store = Arc::new(ScratchStore::new(scratch_dir_for(
+            &self.project_root,
+            session_id,
+        )));
         self.conversation = conversation;
         self.turn_map = state.turn_map;
         self.next_turn = state.next_turn;
@@ -3070,6 +3088,7 @@ impl Engine {
         .with_task_list_gate(self.task_list_gate.clone())
         .with_memory_gate(self.memory_gate.clone())
         .with_skill_gate(self.skill_gate.clone())
+        .with_scratch_gate(self.scratch_store.clone())
         .with_vision(self.provider.model_info().vision)
         .with_image_max_bytes(self.image_max_bytes)
         .with_documents(self.provider.model_info().documents)
@@ -3608,6 +3627,17 @@ fn render_memory_block(user_index: &str, project_index: &str) -> String {
         block.push_str(project_index);
     }
     block
+}
+
+/// The session's scratch directory: `<project_root>/.agents/scratch/<session-id>/`
+/// (FR-8, Tech Spec §8.3). Unlike memory, there is only ever one location —
+/// always inside the project, derived from the session id — so this needs no
+/// config field of its own.
+fn scratch_dir_for(project_root: &std::path::Path, session_id: SessionId) -> PathBuf {
+    project_root
+        .join(".agents")
+        .join("scratch")
+        .join(session_id.to_string())
 }
 
 /// Build the memory store from the engine config (FR-6, Tech Spec §8.1). Returns

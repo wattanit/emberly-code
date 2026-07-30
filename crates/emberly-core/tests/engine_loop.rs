@@ -4536,6 +4536,111 @@ async fn memory_op_never_raises_permission_request() {
     );
 }
 
+// ---- scratch-write round-trip (FR-8, T-17) --------------------------------
+
+#[tokio::test]
+async fn scratch_write_creates_the_file_under_the_session_directory() {
+    let root = temp_project();
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "scratch_write",
+            r#"{"name":"analysis.py","content":"print('hi')"}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = make_config(provider, root.clone(), EngineConfig::no_transcript());
+    let session_id = config.session_id;
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "stash a script".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert_eq!(deltas(&events), "done");
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::ToolFinished { summary, .. } if summary.contains("scratched · analysis.py"))),
+        "the tool-activity line names the scratch file"
+    );
+
+    let written = root
+        .join(".agents")
+        .join("scratch")
+        .join(session_id.to_string())
+        .join("analysis.py");
+    assert_eq!(
+        std::fs::read_to_string(&written).unwrap_or_default(),
+        "print('hi')",
+        "the file lands under this session's own scratch directory"
+    );
+}
+
+#[tokio::test]
+async fn scratch_write_is_never_permission_gated() {
+    let root = temp_project();
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "scratch_write",
+            r#"{"name":"notes.md","content":"working notes"}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = make_config(provider, root, EngineConfig::no_transcript());
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "stash some notes".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::PermissionRequest { .. })),
+        "scratch_write never raises a PermissionRequest"
+    );
+}
+
+#[tokio::test]
+async fn scratch_write_rejects_a_path_escape_without_asking_the_engine() {
+    let root = temp_project();
+    let fake = Arc::new(FakeProvider::new(vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "scratch_write",
+            r#"{"name":"../escape.txt","content":"x"}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = make_config(provider, root.clone(), EngineConfig::no_transcript());
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "try to escape".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ToolFinished { ok: false, .. })),
+        "a path-escape name fails as a structured tool result, not a crash (HC-6)"
+    );
+    assert!(
+        !root.join(".agents").join("scratch").exists(),
+        "a rejected write must not create the scratch tree at all"
+    );
+}
+
 // ---- skill round-trip (FR-7, T-15) ----------------------------------------
 
 /// A config with skills enabled and temp dirs for both scopes.
