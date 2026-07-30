@@ -18,7 +18,7 @@ use crate::model::{Effort, ModelInfo, ProviderId, TokenEstimate};
 use crate::provider::Provider;
 use crate::sse::SseEvent;
 use crate::stream::{CompletionStream, StopReason, StreamEvent};
-use crate::wire::{check_response, sse_completion_stream, SseMapper};
+use crate::wire::{check_response, sse_completion_stream, SseMapper, DEFAULT_STREAM_IDLE_TIMEOUT};
 use crate::ToolCallId;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -89,7 +89,11 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|e| ProviderError::Connect(e.to_string()))?;
         let response = check_response(response).await?;
-        Ok(sse_completion_stream(response, AnthropicMapper::default()))
+        Ok(sse_completion_stream(
+            response,
+            AnthropicMapper::default(),
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+        ))
     }
 
     fn count_tokens(&self, text: &str) -> TokenEstimate {

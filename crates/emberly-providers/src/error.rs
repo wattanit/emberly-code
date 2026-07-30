@@ -45,6 +45,12 @@ pub enum ProviderError {
     /// The in-flight request was canceled by the user (Command::Cancel).
     #[error("request canceled")]
     Canceled,
+
+    /// No SSE data arrived for the given idle window; the connection is
+    /// presumed dead (issue #11 — the overall request timeout alone can't
+    /// tell a stalled connection apart from legitimately slow generation).
+    #[error("stream stalled: no data received for {0:?}")]
+    Timeout(Duration),
 }
 
 impl ProviderError {
@@ -54,7 +60,7 @@ impl ProviderError {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Connect(_) | Self::RateLimited { .. } => true,
+            Self::Connect(_) | Self::RateLimited { .. } | Self::Timeout(_) => true,
             Self::Http { status, .. } => *status >= 500,
             _ => false,
         }
