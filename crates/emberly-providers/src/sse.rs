@@ -7,14 +7,6 @@
 //! decoded once its terminating blank line has arrived, at which point all of
 //! its bytes are present.
 
-/// One dispatched SSE event: an optional `event:` name (Anthropic uses these;
-/// OpenAI does not) and the concatenated `data:` payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SseEvent {
-    pub event: Option<String>,
-    pub data: String,
-}
-
 /// Cap on a single unterminated frame. A frame is only decoded once its
 /// terminating blank line arrives, so until then its bytes accumulate — and a
 /// peer that never sends that blank line would grow the buffer until the process
@@ -27,6 +19,14 @@ pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// The longest frame separator (`\r\n\r\n`), so an incremental scan knows how
 /// many trailing bytes to re-examine in case a separator straddles two chunks.
 const MAX_SEP_LEN: usize = 4;
+
+/// One dispatched SSE event: an optional `event:` name (Anthropic uses these;
+/// OpenAI does not) and the concatenated `data:` payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SseEvent {
+    pub event: Option<String>,
+    pub data: String,
+}
 
 /// Incremental SSE parser. Feed chunks with [`push`](SseParser::push); call
 /// [`finish`](SseParser::finish) at end of stream to flush a trailing frame

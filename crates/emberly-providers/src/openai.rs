@@ -15,7 +15,7 @@ use crate::model::{Effort, ModelInfo, ProviderId, TokenEstimate, TokenUsage};
 use crate::provider::Provider;
 use crate::sse::SseEvent;
 use crate::stream::{CompletionStream, StopReason, StreamEvent};
-use crate::wire::{check_response, sse_completion_stream, SseMapper, DEFAULT_STREAM_IDLE_TIMEOUT};
+use crate::wire::{check_response, sse_completion_stream, SseMapper, StreamTimeouts};
 use crate::ToolCallId;
 
 /// A client for any OpenAI-compatible `/chat/completions` endpoint.
@@ -74,7 +74,7 @@ impl Provider for OpenAiProvider {
         Ok(sse_completion_stream(
             response,
             OpenAiMapper::default(),
-            DEFAULT_STREAM_IDLE_TIMEOUT,
+            StreamTimeouts::default(),
         ))
     }
 
