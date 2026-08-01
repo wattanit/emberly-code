@@ -631,15 +631,12 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         merged.model = Some(m.clone());
     }
 
-    let mut provenance = Vec::new();
-    // Source for each selector: cli > env > project > global > default.
-    let src = |cli_set: bool, env_set: bool, project_has: bool, global_has: bool| {
-        source_of(cli_set, env_set, project_has, global_has)
-    };
-    record(
-        &mut provenance,
+    let mut provenance = Provenance::new(&project, &global);
+    // The two selectors are the only pieces every tier can set: cli > env >
+    // project > global > default.
+    provenance.push(
         "provider",
-        src(
+        source_of(
             cli.provider.is_some(),
             env.provider.is_some(),
             field(&project, |c| c.provider.is_some()),
@@ -647,10 +644,9 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         ),
         merged.provider.is_some(),
     );
-    record(
-        &mut provenance,
+    provenance.push(
         "model",
-        src(
+        source_of(
             cli.model.is_some(),
             env.model.is_some(),
             field(&project, |c| c.model.is_some()),
@@ -668,365 +664,70 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         || (emberly_core::prompts::system().to_string(), "default"),
         |text| (text, "project"),
     );
-    record(
-        &mut provenance,
-        "system_prompt",
-        system_src.to_string(),
-        true,
-    );
+    provenance.push("system_prompt", system_src.to_string(), true);
 
     let (summary_prompt, summary_src) = match load_prompt(&prompts_dir, "compact", family) {
         Some(text) => (Some(text), "project"),
         None => (None, "default"),
     };
-    if summary_src != "default" {
-        record(
-            &mut provenance,
-            "compact_prompt",
-            summary_src.to_string(),
-            true,
-        );
-    }
+    provenance.push("compact_prompt", summary_src.to_string(), true);
 
-    // Tool-call explanations (T-9): on unless a user tier turned it off; record
-    // provenance only on a deviation from the default (speech about deviations).
-    record(
-        &mut provenance,
-        "tool_explanations",
-        source_of(
-            false,
-            false,
-            field(&project, |c| c.ui.tool_explanations.is_some()),
-            field(&global, |c| c.ui.tool_explanations.is_some()),
-        ),
-        merged.ui.tool_explanations.is_some(),
-    );
+    // Every piece below is settable only by the two file tiers, so each is one
+    // `file_field` line, recorded in `config show` order. Nothing here is a
+    // guard: a piece no tier set stays silent (speech about deviations only).
 
-    // Mouse interaction (Design §3.4): on unless a user tier turned it off;
-    // record provenance only on a deviation from the default `true`.
-    record(
-        &mut provenance,
-        "ui.mouse",
-        source_of(
-            false,
-            false,
-            field(&project, |c| c.ui.mouse.is_some()),
-            field(&global, |c| c.ui.mouse.is_some()),
-        ),
-        merged.ui.mouse.is_some(),
-    );
+    // Tool-call explanations (T-9) and mouse interaction (Design §3.4): both on
+    // unless a user tier turned them off.
+    provenance.file_field("tool_explanations", |c| c.ui.tool_explanations.is_some());
+    provenance.file_field("ui.mouse", |c| c.ui.mouse.is_some());
 
-    // Completion gate (S-6): record provenance when a user tier sets any
-    // `[completion]` scalar field, plus a count line when checks are
-    // registered — closing the `[loop]` provenance gap (a pre-existing gap
-    // this phase deliberately does not repeat for `[completion]`).
-    if field(&project, |c: &ConfigFile| c.completion.enabled.is_some())
-        || field(&global, |c: &ConfigFile| c.completion.enabled.is_some())
-    {
-        record(
-            &mut provenance,
-            "completion.enabled",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| c.completion.enabled.is_some()),
-                field(&global, |c: &ConfigFile| c.completion.enabled.is_some()),
-            ),
-            true,
-        );
-    }
-    if field(&project, |c: &ConfigFile| {
+    // Completion gate (S-6): the scalars, plus a count line when checks are
+    // registered — closing the `[loop]` provenance gap (a pre-existing gap this
+    // phase deliberately does not repeat for `[completion]`).
+    provenance.file_field("completion.enabled", |c| c.completion.enabled.is_some());
+    provenance.file_field("completion.max_attempts", |c| {
         c.completion.max_attempts.is_some()
-    }) || field(&global, |c: &ConfigFile| {
-        c.completion.max_attempts.is_some()
-    }) {
-        record(
-            &mut provenance,
-            "completion.max_attempts",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| {
-                    c.completion.max_attempts.is_some()
-                }),
-                field(&global, |c: &ConfigFile| {
-                    c.completion.max_attempts.is_some()
-                }),
-            ),
-            true,
-        );
-    }
+    });
     if !merged.completion.check.is_empty() {
-        record(
-            &mut provenance,
+        provenance.push(
             "completion.check",
             format!("{} registered", merged.completion.check.len()),
             true,
         );
     }
 
-    // Truncation/reduction (FR-2): record provenance when a user tier sets any
-    // `[truncate]` field (speech about deviations from the baked-in defaults).
-    if field(&project, |c| c.truncate.reduce.is_some())
-        || field(&global, |c| c.truncate.reduce.is_some())
-    {
-        record(
-            &mut provenance,
-            "truncate.reduce",
-            source_of(
-                false,
-                false,
-                field(&project, |c| c.truncate.reduce.is_some()),
-                field(&global, |c| c.truncate.reduce.is_some()),
-            ),
-            true,
-        );
-    }
+    // Truncation/reduction (FR-2).
+    provenance.file_field("truncate.reduce", |c| c.truncate.reduce.is_some());
 
-    // Context window + compaction (FR-3): record provenance when a user tier
-    // sets any `[context]` field.
-    if field(&project, |c: &ConfigFile| c.context.window_turns.is_some())
-        || field(&global, |c: &ConfigFile| c.context.window_turns.is_some())
-    {
-        record(
-            &mut provenance,
-            "context.window_turns",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| c.context.window_turns.is_some()),
-                field(&global, |c: &ConfigFile| c.context.window_turns.is_some()),
-            ),
-            true,
-        );
-    }
-    if field(&project, |c: &ConfigFile| {
+    // Context window + compaction (FR-3, FR-4).
+    provenance.file_field("context.window_turns", |c| c.context.window_turns.is_some());
+    provenance.file_field("context.keep_recent_turns", |c| {
         c.context.keep_recent_turns.is_some()
-    }) || field(&global, |c: &ConfigFile| {
-        c.context.keep_recent_turns.is_some()
-    }) {
-        record(
-            &mut provenance,
-            "context.keep_recent_turns",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| {
-                    c.context.keep_recent_turns.is_some()
-                }),
-                field(&global, |c: &ConfigFile| {
-                    c.context.keep_recent_turns.is_some()
-                }),
-            ),
-            true,
-        );
-    }
-    if field(&project, |c: &ConfigFile| c.context.auto_compact.is_some())
-        || field(&global, |c: &ConfigFile| c.context.auto_compact.is_some())
-    {
-        record(
-            &mut provenance,
-            "context.auto_compact",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| c.context.auto_compact.is_some()),
-                field(&global, |c: &ConfigFile| c.context.auto_compact.is_some()),
-            ),
-            true,
-        );
-    }
-    if field(&project, |c: &ConfigFile| {
+    });
+    provenance.file_field("context.auto_compact", |c| c.context.auto_compact.is_some());
+    provenance.file_field("context.auto_compact_threshold", |c| {
         c.context.auto_compact_threshold.is_some()
-    }) || field(&global, |c: &ConfigFile| {
-        c.context.auto_compact_threshold.is_some()
-    }) {
-        record(
-            &mut provenance,
-            "context.auto_compact_threshold",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| {
-                    c.context.auto_compact_threshold.is_some()
-                }),
-                field(&global, |c: &ConfigFile| {
-                    c.context.auto_compact_threshold.is_some()
-                }),
-            ),
-            true,
-        );
-    }
-    if field(&project, |c: &ConfigFile| c.context.pin_task_list.is_some())
-        || field(&global, |c: &ConfigFile| c.context.pin_task_list.is_some())
-    {
-        record(
-            &mut provenance,
-            "context.pin_task_list",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| c.context.pin_task_list.is_some()),
-                field(&global, |c: &ConfigFile| c.context.pin_task_list.is_some()),
-            ),
-            true,
-        );
-    }
+    });
+    provenance.file_field("context.pin_task_list", |c| {
+        c.context.pin_task_list.is_some()
+    });
 
-    // Image size cap (P-11): record provenance when a user tier sets
-    // `[image] max_bytes` (speech about deviations, silent on the default).
-    if field(&project, |c: &ConfigFile| c.image.max_bytes.is_some())
-        || field(&global, |c: &ConfigFile| c.image.max_bytes.is_some())
-    {
-        record(
-            &mut provenance,
-            "image.max_bytes",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| c.image.max_bytes.is_some()),
-                field(&global, |c: &ConfigFile| c.image.max_bytes.is_some()),
-            ),
-            true,
-        );
-    }
+    // Image (P-11) and document (P-12) size caps.
+    provenance.file_field("image.max_bytes", |c| c.image.max_bytes.is_some());
+    provenance.file_field("document.max_bytes", |c| c.document.max_bytes.is_some());
 
-    // Document size cap (P-12): record provenance when a user tier sets
-    // `[document] max_bytes` (speech about deviations, silent on the default).
-    if field(&project, |c: &ConfigFile| c.document.max_bytes.is_some())
-        || field(&global, |c: &ConfigFile| c.document.max_bytes.is_some())
-    {
-        record(
-            &mut provenance,
-            "document.max_bytes",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| c.document.max_bytes.is_some()),
-                field(&global, |c: &ConfigFile| c.document.max_bytes.is_some()),
-            ),
-            true,
-        );
-    }
-
-    // Memory (FR-6): record provenance when a user tier sets any `[memory]`
-    // field.
-    if field(&project, |c: &ConfigFile| c.memory.enabled.is_some())
-        || field(&global, |c: &ConfigFile| c.memory.enabled.is_some())
-    {
-        record(
-            &mut provenance,
-            "memory.enabled",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| c.memory.enabled.is_some()),
-                field(&global, |c: &ConfigFile| c.memory.enabled.is_some()),
-            ),
-            true,
-        );
-    }
-    if field(&project, |c: &ConfigFile| {
+    // Memory (FR-6) and skills (FR-7).
+    provenance.file_field("memory.enabled", |c| c.memory.enabled.is_some());
+    provenance.file_field("memory.max_index_entries", |c| {
         c.memory.max_index_entries.is_some()
-    }) || field(&global, |c: &ConfigFile| {
-        c.memory.max_index_entries.is_some()
-    }) {
-        record(
-            &mut provenance,
-            "memory.max_index_entries",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| {
-                    c.memory.max_index_entries.is_some()
-                }),
-                field(&global, |c: &ConfigFile| {
-                    c.memory.max_index_entries.is_some()
-                }),
-            ),
-            true,
-        );
-    }
+    });
+    provenance.file_field("skills.enabled", |c| c.skills.enabled.is_some());
 
-    // Skills (FR-7): record provenance when a user tier sets `[skills] enabled`.
-    if field(&project, |c: &ConfigFile| c.skills.enabled.is_some())
-        || field(&global, |c: &ConfigFile| c.skills.enabled.is_some())
-    {
-        record(
-            &mut provenance,
-            "skills.enabled",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| c.skills.enabled.is_some()),
-                field(&global, |c: &ConfigFile| c.skills.enabled.is_some()),
-            ),
-            true,
-        );
-    }
-
-    // Search (T-14): record provenance when a user tier sets any `[search]`
-    // field (speech about deviations from the defaults).
-    if field(&project, |c: &ConfigFile| c.search.enabled.is_some())
-        || field(&global, |c: &ConfigFile| c.search.enabled.is_some())
-    {
-        record(
-            &mut provenance,
-            "search.enabled",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| c.search.enabled.is_some()),
-                field(&global, |c: &ConfigFile| c.search.enabled.is_some()),
-            ),
-            true,
-        );
-    }
-    if field(&project, |c: &ConfigFile| c.search.adapter.is_some())
-        || field(&global, |c: &ConfigFile| c.search.adapter.is_some())
-    {
-        record(
-            &mut provenance,
-            "search.adapter",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| c.search.adapter.is_some()),
-                field(&global, |c: &ConfigFile| c.search.adapter.is_some()),
-            ),
-            true,
-        );
-    }
-    if field(&project, |c: &ConfigFile| c.search.endpoint.is_some())
-        || field(&global, |c: &ConfigFile| c.search.endpoint.is_some())
-    {
-        record(
-            &mut provenance,
-            "search.endpoint",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| c.search.endpoint.is_some()),
-                field(&global, |c: &ConfigFile| c.search.endpoint.is_some()),
-            ),
-            true,
-        );
-    }
-    if field(&project, |c: &ConfigFile| c.search.max_results.is_some())
-        || field(&global, |c: &ConfigFile| c.search.max_results.is_some())
-    {
-        record(
-            &mut provenance,
-            "search.max_results",
-            source_of(
-                false,
-                false,
-                field(&project, |c: &ConfigFile| c.search.max_results.is_some()),
-                field(&global, |c: &ConfigFile| c.search.max_results.is_some()),
-            ),
-            true,
-        );
-    }
+    // Search (T-14).
+    provenance.file_field("search.enabled", |c| c.search.enabled.is_some());
+    provenance.file_field("search.adapter", |c| c.search.adapter.is_some());
+    provenance.file_field("search.endpoint", |c| c.search.endpoint.is_some());
+    provenance.file_field("search.max_results", |c| c.search.max_results.is_some());
 
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
@@ -1045,7 +746,7 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
     if let Some((instructions, source, notice)) = load_project_instructions(project_root)? {
         system_prompt.push_str("\n\n# Project instructions\n\n");
         system_prompt.push_str(&instructions);
-        record(&mut provenance, "project_instructions", source, true);
+        provenance.push("project_instructions", source, true);
         if let Some(notice) = notice {
             notices.push(notice);
         }
@@ -1057,7 +758,7 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
         providers: merged.providers,
         system_prompt: Some(system_prompt),
         summary_prompt,
-        provenance,
+        provenance: provenance.entries,
         notices,
         sandbox_require: merged.sandbox.require.unwrap_or(false),
         reasoning: merged.reasoning,
@@ -1220,13 +921,57 @@ fn source_of(cli: bool, env: bool, project: bool, global: bool) -> String {
     .to_string()
 }
 
-/// Record a provenance entry when the value is active and non-default.
-fn record(provenance: &mut Vec<ConfigProvenance>, piece: &str, source: String, active: bool) {
-    if active && source != "default" {
-        provenance.push(ConfigProvenance {
-            piece: piece.to_string(),
-            source,
-        });
+/// Accumulates the provenance list (C-3) as [`load`] resolves the tiers. Entry
+/// order is the order recorded, and `emberly config show` prints it in that
+/// order, so new keys append where they belong rather than wherever is handy.
+///
+/// Most keys are settable only by the two file tiers, and there the shape never
+/// varies: project outranks global, and a key no tier set says nothing. Holding
+/// the tiers here makes each of those one [`file_field`](Self::file_field) call
+/// with the predicate written once — the hand-written form spelled the same
+/// predicate four times per key, which is how a project/global pair drifts.
+/// Keys with wider precedence (the `provider`/`model` selectors, which env and
+/// the CLI also set) record through [`push`](Self::push) directly.
+struct Provenance<'a> {
+    entries: Vec<ConfigProvenance>,
+    project: &'a Option<ConfigFile>,
+    global: &'a Option<ConfigFile>,
+}
+
+impl<'a> Provenance<'a> {
+    fn new(project: &'a Option<ConfigFile>, global: &'a Option<ConfigFile>) -> Self {
+        Self {
+            entries: Vec::new(),
+            project,
+            global,
+        }
+    }
+
+    /// Record `piece` when a file tier set it, naming the winning tier. `has` is
+    /// asked of both tiers.
+    ///
+    /// Needs no caller-side "did any tier set this?" guard: when neither did,
+    /// [`source_of`] returns `default` and [`push`](Self::push) drops the entry —
+    /// exactly the condition such a guard would test.
+    fn file_field(&mut self, piece: &str, has: fn(&ConfigFile) -> bool) {
+        let source = source_of(
+            false,
+            false,
+            field(self.project, has),
+            field(self.global, has),
+        );
+        self.push(piece, source, true);
+    }
+
+    /// Record an entry when the value is active and non-default. Speech about
+    /// deviations only: a piece left at its baked-in default stays silent.
+    fn push(&mut self, piece: &str, source: String, active: bool) {
+        if active && source != "default" {
+            self.entries.push(ConfigProvenance {
+                piece: piece.to_string(),
+                source,
+            });
+        }
     }
 }
 
@@ -1606,6 +1351,96 @@ mod tests {
         let system = resolved.system_prompt.unwrap();
         assert!(system.contains("Emberly Code"));
         assert!(system.contains("be careful"));
+    }
+
+    /// `emberly config show` prints provenance in recorded order (C-3), so both
+    /// the set of recognized pieces and their order are observable behavior. A
+    /// project tier that sets every file-tier key must produce exactly this
+    /// list — the guard that a key is never dropped, duplicated, or reordered.
+    #[test]
+    fn every_file_tier_key_is_recorded_in_show_order() {
+        let dir = tmp();
+        let agents = dir.join(".agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("config.toml"),
+            "provider = \"openai\"\nmodel = \"llama\"\n\
+             [ui]\ntool_explanations = false\nmouse = false\n\
+             [completion]\nenabled = true\nmax_attempts = 2\n\
+             [[completion.check]]\nname = \"fmt\"\ncommand = \"cargo fmt --check\"\n\
+             [truncate]\nreduce = false\n\
+             [context]\nwindow_turns = 4\nkeep_recent_turns = 2\n\
+             auto_compact = false\nauto_compact_threshold = 0.5\npin_task_list = false\n\
+             [image]\nmax_bytes = 1024\n\
+             [document]\nmax_bytes = 2048\n\
+             [memory]\nenabled = false\nmax_index_entries = 10\n\
+             [skills]\nenabled = false\n\
+             [search]\nenabled = false\nadapter = \"x\"\n\
+             endpoint = \"http://localhost:1/s\"\nmax_results = 3\n",
+        )
+        .unwrap();
+
+        let resolved = load(&dir, &CliOverrides::default()).unwrap();
+        let pieces: Vec<&str> = resolved
+            .provenance
+            .iter()
+            .map(|p| p.piece.as_str())
+            .collect();
+        assert_eq!(
+            pieces,
+            [
+                "provider",
+                "model",
+                "tool_explanations",
+                "ui.mouse",
+                "completion.enabled",
+                "completion.max_attempts",
+                "completion.check",
+                "truncate.reduce",
+                "context.window_turns",
+                "context.keep_recent_turns",
+                "context.auto_compact",
+                "context.auto_compact_threshold",
+                "context.pin_task_list",
+                "image.max_bytes",
+                "document.max_bytes",
+                "memory.enabled",
+                "memory.max_index_entries",
+                "skills.enabled",
+                "search.enabled",
+                "search.adapter",
+                "search.endpoint",
+                "search.max_results",
+            ]
+        );
+        // Every one of them came from the project tier, and the check line
+        // reports a count rather than a tier.
+        for entry in &resolved.provenance {
+            if entry.piece == "completion.check" {
+                assert_eq!(entry.source, "1 registered");
+            } else {
+                assert!(
+                    entry.source.starts_with("project"),
+                    "{} came from {}",
+                    entry.piece,
+                    entry.source
+                );
+            }
+        }
+    }
+
+    /// A project tier that sets nothing records nothing but the always-present
+    /// `system_prompt` default — speech about deviations only.
+    #[test]
+    fn untouched_keys_record_no_provenance() {
+        let dir = tmp();
+        std::fs::create_dir_all(dir.join(".agents")).unwrap();
+        let resolved = load(&dir, &CliOverrides::default()).unwrap();
+        assert!(
+            resolved.provenance.is_empty(),
+            "expected silence, got {:?}",
+            resolved.provenance
+        );
     }
 
     #[test]

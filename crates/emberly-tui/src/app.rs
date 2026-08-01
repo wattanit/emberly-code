@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::commands::{self, AppCommand};
+use crate::commands::{self, AppCommand, Slash};
 use crate::editor::LineEditor;
 use crate::hit::{ClickTarget, PermissionChoice};
 use crate::theme::Theme;
@@ -2362,40 +2362,18 @@ impl App {
 
     /// Run a typed `/name` command; unknown names surface a calm notice.
     fn run_slash(&mut self, name: &str) -> Action {
-        let name = name.trim();
-        // `/model <profile> [model]` takes arguments, so it is parsed before the
-        // argument-less command registry (C-6). `modelx` is not a match.
-        if let Some(rest) = name
-            .strip_prefix("model")
-            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-        {
-            return self.run_model_command(rest.trim());
-        }
-        // `/prompt [name]` takes an optional argument (system|compact).
-        if let Some(rest) = name
-            .strip_prefix("prompt")
-            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-        {
-            return self.edit_prompt(rest.trim());
-        }
-        // `/effort [level]` takes an optional argument (low|medium|high|max).
-        if let Some(rest) = name
-            .strip_prefix("effort")
-            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-        {
-            return self.effort_command(rest.trim());
-        }
-        // `/mode [name]` opens the picker with no arg, or sets the mode
-        // directly (Shift-Tab still cycles — the quick-toggle keybinding).
-        if let Some(rest) = name
-            .strip_prefix("mode")
-            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-        {
-            return self.mode_command(rest.trim());
-        }
-        match commands::by_name(name) {
-            Some(cmd) => self.run_command(cmd),
-            None => {
+        match commands::parse_slash(name) {
+            // The four argument-taking commands (C-6/P-9). Each opens its picker
+            // when the argument is absent; `run_command` is the no-argument path
+            // the palette and keybindings take, so it agrees by construction.
+            Slash::Command(spec, args) => match spec.cmd {
+                AppCommand::Model => self.run_model_command(args),
+                AppCommand::Prompt => self.edit_prompt(args),
+                AppCommand::Effort => self.effort_command(args),
+                AppCommand::CycleMode => self.mode_command(args),
+                cmd => self.run_command(cmd),
+            },
+            Slash::Unknown(name) => {
                 self.conversation.push(ConvItem::Notice(format!(
                     "unknown command: /{name} — Ctrl-P lists commands"
                 )));
@@ -3174,6 +3152,24 @@ mod tests {
     }
 
     #[test]
+    fn every_registry_name_is_reachable_as_a_slash_command() {
+        // The rich half of the parity check (line mode has the other): every
+        // name in the registry resolves, so no command is palette-only by
+        // accident. Both frontends parse through `commands::parse_slash`.
+        for spec in commands::COMMANDS {
+            let mut a = app();
+            a.run_slash(spec.name);
+            assert!(
+                !a.conversation
+                    .iter()
+                    .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown command"))),
+                "/{} was not recognized",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
     fn slash_mode_without_args_opens_the_picker() {
         let mut a = app();
         assert_eq!(a.run_slash("mode"), Action::None);
@@ -3642,7 +3638,7 @@ mod tests {
         // palette) is intercepted earlier in `run_slash` to open the picker, so
         // this registry entry now serves only the quick-toggle keybinding.
         assert_eq!(
-            crate::commands::by_name("mode"),
+            crate::commands::by_name("mode").map(|spec| spec.cmd),
             Some(crate::commands::AppCommand::CycleMode)
         );
     }
@@ -4473,7 +4469,10 @@ mod tests {
 
     #[test]
     fn clear_is_an_alias_for_new_session() {
-        assert_eq!(commands::by_name("clear"), Some(AppCommand::NewSession));
+        assert_eq!(
+            commands::by_name("clear").map(|spec| spec.cmd),
+            Some(AppCommand::NewSession)
+        );
     }
 
     #[test]
@@ -4679,7 +4678,7 @@ mod tests {
         // The registry entry exists so /compact flows through `by_name` and
         // the palette fuzzy list (Design §3.3, Tech Spec §9).
         assert_eq!(
-            crate::commands::by_name("compact"),
+            crate::commands::by_name("compact").map(|spec| spec.cmd),
             Some(crate::commands::AppCommand::Compact)
         );
         // `/compact` via the slash parser dispatches Command::Compact.
