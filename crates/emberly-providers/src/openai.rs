@@ -256,16 +256,68 @@ fn map_finish_reason(reason: &str) -> StopReason {
 struct OpenAiMapper {
     /// tool-call stream index → id (later chunks omit the id).
     tool_ids: HashMap<u64, ToolCallId>,
+    /// Whether a terminal `Done` has already been emitted, so the `[DONE]`
+    /// sentinel does not emit a second one after a `finish_reason` chunk.
+    finished: bool,
+}
+
+impl OpenAiMapper {
+    /// Emit the terminal events for a completed choice: close every tool call
+    /// seen, then `Done`. Idempotent — the second caller emits nothing, so a
+    /// `finish_reason` chunk followed by `[DONE]` ends the turn exactly once.
+    fn finish(&mut self, stop_reason: StopReason) -> Vec<Result<StreamEvent, ProviderError>> {
+        if self.finished {
+            return Vec::new();
+        }
+        self.finished = true;
+        let mut out: Vec<_> = self
+            .tool_ids
+            .values()
+            .map(|id| Ok(StreamEvent::ToolCallEnd { id: id.clone() }))
+            .collect();
+        out.push(Ok(StreamEvent::Done { stop_reason }));
+        out
+    }
 }
 
 impl SseMapper for OpenAiMapper {
     fn map(&mut self, event: SseEvent) -> Vec<Result<StreamEvent, ProviderError>> {
+        // `data: [DONE]` is the protocol's end-of-stream marker, and the only
+        // one some OpenAI-compatible servers send — `finish_reason` is often
+        // absent or null on every chunk (P-2/P-8: any such endpoint is a
+        // supported backend). Treating it as terminal is what keeps a complete
+        // answer from being discarded as a dropped connection and the whole
+        // turn re-sent, which on a server that never sends `finish_reason`
+        // means every turn fails after exhausting its retries.
         if event.data.trim() == "[DONE]" {
-            return Vec::new();
+            // A turn that produced tool calls stopped to call them; otherwise it
+            // ended normally. This is what `finish_reason` would have said.
+            let stop_reason = if self.tool_ids.is_empty() {
+                StopReason::EndTurn
+            } else {
+                StopReason::ToolUse
+            };
+            return self.finish(stop_reason);
         }
         let Ok(data): Result<Value, _> = serde_json::from_str(&event.data) else {
             return Vec::new();
         };
+        // An application-level error delivered mid-stream, which is how an
+        // OpenAI-compatible server reports a failure once it has already sent
+        // 200 and its headers (a context-length rejection, an upstream outage).
+        // Unsurfaced, it read as a dropped connection: the harness retried to
+        // exhaustion and then blamed the stream, never showing the server's
+        // reason. The Anthropic mapper always handled its `error` event; this is
+        // the same handling on this wire.
+        if let Some(error) = data.get("error").filter(|e| !e.is_null()) {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| error.as_str())
+                .unwrap_or("provider reported an error mid-stream")
+                .to_string();
+            return vec![Err(ProviderError::Api { message })];
+        }
         let mut out = Vec::new();
 
         // Usage (sent as a final chunk with empty choices when include_usage).
@@ -358,12 +410,7 @@ impl SseMapper for OpenAiMapper {
         }
 
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-            for id in self.tool_ids.values() {
-                out.push(Ok(StreamEvent::ToolCallEnd { id: id.clone() }));
-            }
-            out.push(Ok(StreamEvent::Done {
-                stop_reason: map_finish_reason(reason),
-            }));
+            out.extend(self.finish(map_finish_reason(reason)));
         }
 
         out
@@ -409,6 +456,107 @@ mod tests {
         // Empty effort_levels ⇒ the model has no reasoning control (P-9).
         let body = build_body(&req_with_effort(Some(Effort::High)), &[]);
         assert_eq!(body.get("reasoning_effort"), None);
+    }
+
+    /// Feed a sequence of `data:` payloads through one mapper, keeping errors.
+    fn map_seq(datas: &[&str]) -> Vec<Result<StreamEvent, ProviderError>> {
+        let mut mapper = OpenAiMapper::default();
+        let mut out = Vec::new();
+        for data in datas {
+            out.extend(mapper.map(SseEvent {
+                event: None,
+                data: (*data).to_string(),
+            }));
+        }
+        out
+    }
+
+    #[test]
+    fn done_sentinel_terminates_a_stream_with_no_finish_reason() {
+        // Regression: `finish_reason` was the only path to `Done`, so a server
+        // that sends only `data: [DONE]` (or `finish_reason: null` throughout)
+        // made every completed turn look like a dropped connection. The engine
+        // then discarded the finished answer and re-sent the whole turn, failing
+        // after exhausting its retries on a server that always behaves this way.
+        let out = map_seq(&[
+            r#"{"choices":[{"delta":{"content":"the whole answer"},"index":0}]}"#,
+            r#"{"choices":[{"delta":{},"index":0,"finish_reason":null}]}"#,
+            "[DONE]",
+        ]);
+        let events: Vec<_> = out.into_iter().filter_map(Result::ok).collect();
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::TextDelta {
+                    text: "the whole answer".into()
+                },
+                StreamEvent::Done {
+                    stop_reason: StopReason::EndTurn
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn done_sentinel_after_finish_reason_does_not_end_the_turn_twice() {
+        let out = map_seq(&[
+            r#"{"choices":[{"delta":{"content":"hi"},"index":0,"finish_reason":"stop"}]}"#,
+            "[DONE]",
+        ]);
+        let dones = out
+            .iter()
+            .filter(|e| matches!(e, Ok(StreamEvent::Done { .. })))
+            .count();
+        assert_eq!(dones, 1, "exactly one Done per turn");
+    }
+
+    #[test]
+    fn done_sentinel_reports_tool_use_and_closes_open_calls() {
+        // A tool-call turn ended by `[DONE]` alone must still close its calls
+        // and report why it stopped, or the engine would see a tool_use with no
+        // ToolCallEnd and a stop reason of "ended normally".
+        let out = map_seq(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a",
+               "function":{"name":"read_file","arguments":"{}"}}]},"index":0}]}"#,
+            "[DONE]",
+        ]);
+        let events: Vec<_> = out.into_iter().filter_map(Result::ok).collect();
+        assert!(events.contains(&StreamEvent::ToolCallEnd {
+            id: ToolCallId::new("call_a")
+        }));
+        assert!(events.contains(&StreamEvent::Done {
+            stop_reason: StopReason::ToolUse
+        }));
+    }
+
+    #[test]
+    fn mid_stream_error_payload_surfaces_the_servers_reason() {
+        // Regression: an OpenAI-compatible server that has already sent 200 and
+        // its headers reports a later failure as an SSE `error` object. That was
+        // silently dropped, so a context-length rejection read as a dropped
+        // connection — retried to exhaustion, and the server's actual reason
+        // never shown. The Anthropic mapper always handled its `error` event.
+        let out = map_seq(&[
+            r#"{"choices":[{"delta":{"content":"partial"},"index":0}]}"#,
+            r#"{"error":{"message":"context length exceeded","type":"invalid_request_error"}}"#,
+        ]);
+        match out.last() {
+            Some(Err(ProviderError::Api { message })) => {
+                assert_eq!(message, "context length exceeded");
+            }
+            other => panic!("expected an Api error, got {other:?}"),
+        }
+        // The text that did arrive is still delivered first.
+        assert!(matches!(
+            out.first(),
+            Some(Ok(StreamEvent::TextDelta { .. }))
+        ));
+    }
+
+    #[test]
+    fn mid_stream_error_without_a_message_still_surfaces() {
+        let out = map_seq(&[r#"{"error":{"type":"server_error"}}"#]);
+        assert!(matches!(out.first(), Some(Err(ProviderError::Api { .. })),));
     }
 
     fn map_one(data: &str) -> Vec<StreamEvent> {

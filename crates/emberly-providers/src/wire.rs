@@ -108,6 +108,16 @@ fn sse_stream_from_body<M: SseMapper>(
                     for event in state.parser.push(&bytes) {
                         state.queue.extend(state.mapper.map(event));
                     }
+                    // A frame past the size cap ends the stream, after the
+                    // complete events that preceded it. Terminal, not retryable:
+                    // a peer flooding one frame would only do it again.
+                    if state.parser.overflowed() {
+                        state.queue.push_back(Err(ProviderError::Decode(format!(
+                            "a single SSE frame exceeded {} bytes",
+                            crate::sse::MAX_FRAME_BYTES
+                        ))));
+                        state.finished = true;
+                    }
                 }
                 Ok(Some(Err(error))) => {
                     state

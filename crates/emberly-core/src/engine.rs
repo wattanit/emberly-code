@@ -3369,8 +3369,9 @@ impl Engine {
 
     /// Emit context usage and, when pricing is configured, the running cost
     /// estimate (Requirements §8.4, P-6; Design §3.1). Uses the provider's
-    /// authoritative prompt-token count once available, falling back to a
-    /// chars/4 estimate before the first `Usage`. Also checks the FR-4
+    /// authoritative prompt-token count once available, falling back to the
+    /// provider's own `count_tokens` heuristic before the first `Usage` (issue
+    /// #12 made that script-weighted, not chars/4). Also checks the FR-4
     /// automatic-compaction threshold and queues a compaction when crossed.
     async fn emit_context_usage(&mut self) {
         let info = self.provider.model_info();

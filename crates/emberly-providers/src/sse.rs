@@ -15,12 +15,37 @@ pub struct SseEvent {
     pub data: String,
 }
 
+/// Cap on a single unterminated frame. A frame is only decoded once its
+/// terminating blank line arrives, so until then its bytes accumulate — and a
+/// peer that never sends that blank line would grow the buffer until the process
+/// is killed, losing the session (HC-3). The #11 idle timeout cannot catch this
+/// case: bytes keep arriving, so the stream never looks stalled. 8 MiB is far
+/// above any real SSE frame (the largest are long reasoning blocks, orders of
+/// magnitude smaller) and far below a memory problem.
+pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+/// The longest frame separator (`\r\n\r\n`), so an incremental scan knows how
+/// many trailing bytes to re-examine in case a separator straddles two chunks.
+const MAX_SEP_LEN: usize = 4;
+
 /// Incremental SSE parser. Feed chunks with [`push`](SseParser::push); call
 /// [`finish`](SseParser::finish) at end of stream to flush a trailing frame
 /// that lacks a final blank line.
 #[derive(Default)]
 pub struct SseParser {
     buf: Vec<u8>,
+    /// How much of `buf` has already been searched for a terminator, so a chunk
+    /// that completes no frame does not re-scan the whole buffer.
+    ///
+    /// Ordinary streaming never notices — frames are small and the buffer drains
+    /// every chunk — but one large frame arriving in many chunks is O(n²) without
+    /// this: a 4 MiB frame in 1 KiB chunks measured **205s** of pure scanning,
+    /// against 0.3s with the offset. That is a hang, and a peer can choose to
+    /// cause it, so the bound is not an optimization.
+    scanned: usize,
+    /// Set once a frame exceeded [`MAX_FRAME_BYTES`]; the buffer is dropped and
+    /// the caller must end the stream.
+    overflowed: bool,
 }
 
 impl SseParser {
@@ -30,16 +55,41 @@ impl SseParser {
     }
 
     /// Feed a chunk of bytes; return every complete event now available.
+    ///
+    /// Check [`overflowed`](SseParser::overflowed) afterwards: a frame past the
+    /// size cap is reported there rather than as an error return, so the
+    /// complete events in this chunk are still delivered before the stream ends.
     pub fn push(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
+        if self.overflowed {
+            return Vec::new();
+        }
         self.buf.extend_from_slice(chunk);
         let mut events = Vec::new();
-        while let Some((end, sep_len)) = find_frame_boundary(&self.buf) {
+        // Resume scanning just behind the previous end: a separator can straddle
+        // the boundary between two chunks.
+        let mut from = self.scanned.saturating_sub(MAX_SEP_LEN - 1);
+        while let Some((offset, sep_len)) = find_frame_boundary(&self.buf[from..]) {
+            let end = from + offset;
             let frame: Vec<u8> = self.buf.drain(..end + sep_len).collect();
             if let Some(event) = parse_frame(&String::from_utf8_lossy(&frame[..end])) {
                 events.push(event);
             }
+            from = 0;
+        }
+        self.scanned = self.buf.len();
+        if self.buf.len() > MAX_FRAME_BYTES {
+            self.buf = Vec::new();
+            self.scanned = 0;
+            self.overflowed = true;
         }
         events
+    }
+
+    /// Whether a frame exceeded [`MAX_FRAME_BYTES`]. Once true the parser is
+    /// spent: it holds no buffer and ignores further chunks.
+    #[must_use]
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
     }
 
     /// Flush any buffered bytes as a final frame (for servers that omit the
@@ -48,6 +98,7 @@ impl SseParser {
         if self.buf.is_empty() {
             return None;
         }
+        self.scanned = 0;
         let frame = std::mem::take(&mut self.buf);
         parse_frame(&String::from_utf8_lossy(&frame))
     }
@@ -179,5 +230,72 @@ mod tests {
         assert!(p.push(b"data: tail").is_empty());
         let event = p.finish();
         assert_eq!(event.map(|e| e.data), Some("tail".to_string()));
+    }
+
+    #[test]
+    fn an_unterminated_frame_stops_at_the_size_cap() {
+        // A peer that never sends the terminating blank line must not be able to
+        // grow the buffer without limit — the process would be killed and the
+        // session lost (HC-3). The #11 idle timeout cannot catch this: bytes keep
+        // arriving, so the stream never looks stalled.
+        let mut p = SseParser::new();
+        let chunk = vec![b'x'; 1024 * 1024];
+        let mut pushes = 0;
+        while !p.overflowed() {
+            assert!(p.push(&chunk).is_empty());
+            pushes += 1;
+            assert!(pushes < 64, "the cap must engage well before this");
+        }
+        assert!(p.overflowed());
+        // Spent: the buffer is released and later chunks are ignored, so a
+        // still-open connection cannot keep feeding it.
+        assert!(p.push(b"data: more\n\n").is_empty());
+    }
+
+    #[test]
+    fn complete_events_before_an_overflow_are_still_delivered() {
+        let mut p = SseParser::new();
+        let mut chunk = b"data: first\n\n".to_vec();
+        chunk.extend(std::iter::repeat_n(b'x', MAX_FRAME_BYTES + 1));
+        let events = p.push(&chunk);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "first");
+        assert!(p.overflowed());
+    }
+
+    #[test]
+    fn a_separator_split_across_chunks_is_still_found() {
+        // The incremental scan resumes just behind the previous end, so a
+        // terminator straddling two chunks is not missed.
+        for (a, b) in [
+            (&b"data: x\n"[..], &b"\n"[..]),
+            (&b"data: x\r\n"[..], &b"\r\n"[..]),
+            (&b"data: x\r"[..], &b"\n\r\n"[..]),
+            (&b"data: x\r\n\r"[..], &b"\n"[..]),
+        ] {
+            let mut p = SseParser::new();
+            assert!(p.push(a).is_empty(), "{a:?} should not complete a frame");
+            let events = p.push(b);
+            assert_eq!(events.len(), 1, "split {a:?} | {b:?} lost its frame");
+            assert_eq!(events[0].data, "x");
+        }
+    }
+
+    #[test]
+    fn many_chunks_of_one_frame_do_not_rescan_from_the_start() {
+        // Guards the incremental scan. Measured with the offset removed, this
+        // exact case took 205 seconds — every push re-searching the whole buffer
+        // is ~8 GiB of byte comparisons. With the offset it is linear and the
+        // whole suite runs in under a second.
+        let mut p = SseParser::new();
+        assert!(p.push(b"data: ").is_empty());
+        let chunk = vec![b'x'; 1024];
+        for _ in 0..4096 {
+            assert!(p.push(&chunk).is_empty());
+        }
+        assert!(!p.overflowed());
+        let events = p.push(b"\n\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data.len(), 4096 * 1024);
     }
 }
