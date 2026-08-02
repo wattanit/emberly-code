@@ -3,7 +3,7 @@
 //! lives in [`crate::render`].
 //!
 //! The loop `select!`s over engine [`UiEvent`]s and terminal input events (and,
-//! from group 9, an animation tick) and never lets any one block the others:
+//! an animation tick) and never lets any one block the others:
 //! input handling is independent of streaming, and a redraw never delays a
 //! command. Input is read on a dedicated OS thread because
 //! `crossterm::event::read` is blocking; it forwards events over a channel,
@@ -129,7 +129,7 @@ pub async fn run(
                         // keypress does, so the mouse adds no new authority. Only
                         // an **unmodified** left button is consumed — Shift/Ctrl/
                         // Alt clicks are left to the terminal so its native
-                        // selection still works (Design §3.4; group 5 verifies).
+                        // selection still works (Design §3.4).
                         MouseEventKind::Down(MouseButton::Left) if mouse.modifiers.is_empty() => {
                             let action = app.on_click(mouse.column, mouse.row);
                             if handle_action(
@@ -190,7 +190,7 @@ async fn handle_action(
         Action::Command(cmd) => {
             // A memory mutation (inspector delete/edit-commit) re-emits only
             // MemoryStatus; re-list so the open inspector refreshes its rows
-            // (FR-6, group 2 note).
+            // (FR-6).
             let refresh_memory = matches!(cmd, Command::MemoryMutate { .. });
             let _ = commands_tx.send(cmd).await;
             if refresh_memory {
@@ -281,7 +281,7 @@ async fn run_memory_edit(
                     })
                     .await;
                 // Refresh the open inspector list (mutate re-emits MemoryStatus
-                // only; the frontend re-lists — group 2 note).
+                // only; the frontend re-lists).
                 let _ = commands_tx.send(Command::MemoryList).await;
                 app.notice(format!("updated memory: {}", edit.name));
             }

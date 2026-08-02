@@ -1,7 +1,7 @@
 //! Raw input: keys, scroll, clicks, paste. Dispatches to the focused
 //! surface; each surface's own handler lives with that surface.
 //!
-//! Part of the `App` inherent impl, split out of one 2,300-line block.
+//! Part of the `App` inherent impl.
 
 use super::*;
 
@@ -10,8 +10,7 @@ impl App {
     ///
     /// While a permission prompt is open it owns the keyboard: only the
     /// deliberate allow keys approve, and everything else (including Enter and
-    /// Esc) denies — deny is the safe default (Design §5). The full prompt
-    /// screen and scrolling arrive in group 7; the guarantees hold from now.
+    /// Esc) denies — deny is the safe default (Design §5).
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
         // The command palette is modal while open (Design §3.3).
         if self.palette.is_some() {
@@ -19,7 +18,7 @@ impl App {
         }
         // An open overlay is modal for navigation: scroll or dismiss (Design
         // §4.2). It sits above the permission check so a diff can be reviewed,
-        // but note we never open an overlay while a permission prompt is up.
+        // and no overlay is ever opened while a permission prompt is up.
         if !self.overlays.is_empty() {
             return self.on_overlay_key(key);
         }

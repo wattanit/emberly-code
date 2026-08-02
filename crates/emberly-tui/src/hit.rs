@@ -15,8 +15,8 @@ use ratatui::layout::Rect;
 
 /// A clickable target resolved from a screen position (Design §3.4). Each
 /// variant has a keyboard twin; the click is a shortcut for "focus + Enter" on
-/// it, never a capability the keyboard lacks. New surfaces are added here as the
-/// phase wires them (later groups extend this enum).
+/// it, never a capability the keyboard lacks. A new clickable surface adds a
+/// variant here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClickTarget {
     /// A command-palette row — index into the *filtered* match list (what

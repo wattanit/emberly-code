@@ -1,8 +1,8 @@
 //! The tool→engine gates other than permission: ask_user, recall, and
 //! the task list.
 //!
-//! Part of the `Engine` inherent impl, split out of one 2,700-line
-//! block; the engine is still the single owner of this state.
+//! Part of the `Engine` inherent impl; the engine is the sole owner of the
+//! state these methods touch.
 
 use super::*;
 

@@ -1,4 +1,4 @@
-//! Provider selection and the pure-Rust HTTPS client (Phase 3 groups 6–7).
+//! Provider selection and the pure-Rust HTTPS client.
 //!
 //! The binary is the composition root: it installs the **pure-Rust** RustCrypto
 //! rustls provider (HC-2 — no C toolchain needed to build) and constructs the
@@ -24,7 +24,7 @@ use emberly_tools::{default_registry, SearchAuth, SearchClient, ToolRegistry, We
 /// How long to allow for establishing a connection (DNS, TCP, TLS). Bounds only
 /// the handshake, never a request already in flight, so it cannot cut short a
 /// long streaming completion. Without it the wait falls back to the OS default,
-/// which is minutes and not ours to rely on.
+/// which is minutes long and not a value to depend on.
 ///
 /// There is deliberately no overall request timeout to sit beside this: a
 /// streaming completion legitimately runs for minutes, so liveness is enforced

@@ -23,8 +23,8 @@
 //! run in-process and never reach this module; `bash` reports
 //! `outside_root: false` because it does not parse commands for paths (§6.5), so
 //! it is simply confined and never asks. Widening this is an open owner decision,
-//! held as of 0.4.3 — a grant path was drafted here (`extra_writable`) and
-//! removed unused rather than left as dead structure in the security crate.
+//! held as of 0.4.3; there is deliberately no unused grant hook here waiting to
+//! be wired up.
 //!
 //! In both cases the harness process itself is **never** confined — only
 //! spawned children (Requirements §6.7). [`confined_invocation`] is the single
@@ -180,8 +180,8 @@ mod linux {
     /// Landlock rules are **additive** (deny-by-default; each rule only *adds*
     /// allowed access — a narrower nested rule cannot subtract what an ancestor
     /// granted). So a read-only `.git/` cannot be carved out of a blanket
-    /// read+write root. Instead, for the default (non-git) profile we grant the
-    /// root read+execute and read+write **per top-level entry except `.git/`**,
+    /// read+write root. Instead, the default (non-git) profile grants the root
+    /// read+execute and read+write **per top-level entry except `.git/`**,
     /// which genuinely denies every `.git/` write (HC-5). The cost is that bash
     /// cannot create brand-new *top-level* entries under this profile (existing
     /// entries and everything inside subdirectories are writable; `write_file`
@@ -234,8 +234,8 @@ mod linux {
     /// `/bin/sh -c command`. Never returns on success (the process image is
     /// replaced, carrying the Landlock domain across `execve`). Returns the
     /// failure `io::Error` otherwise — including a **fail-closed** error if the
-    /// ruleset could not be applied (we never run a command we promised to
-    /// confine without the fence).
+    /// ruleset could not be applied — a command promised confinement is never
+    /// run without the fence.
     pub fn exec_confined(spec: &SandboxSpec, command: &str) -> io::Error {
         match restrict(spec) {
             Ok(_) => {}

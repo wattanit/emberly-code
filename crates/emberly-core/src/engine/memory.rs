@@ -1,8 +1,8 @@
 //! The durable memory tool (FR-6, T-13): index refresh, the memory
 //! operations themselves, and the read-back the UI shows.
 //!
-//! Part of the `Engine` inherent impl, split out of one 2,700-line
-//! block; the engine is still the single owner of this state.
+//! Part of the `Engine` inherent impl; the engine is the sole owner of the
+//! state these methods touch.
 
 use super::*;
 

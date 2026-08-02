@@ -68,7 +68,7 @@ pub struct ViewCache {
     /// `None` until the first provider `Usage` event.
     pub context_tokens_authoritative: Option<u64>,
 
-    // --- Staleness guard inputs (captured at write time, group 3) ---
+    // --- Staleness guard inputs (captured at write time) ---
     /// The transcript file's byte length when this cache was written. In the
     /// append-only model the cache is always built through the whole current
     /// file, so this length doubles as the built-through byte offset. On

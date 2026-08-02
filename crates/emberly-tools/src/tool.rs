@@ -20,8 +20,7 @@ pub struct ToolSpec {
     /// Tool name the model calls (e.g. `read_file`).
     pub name: String,
     /// Human/model-facing description. Behavior-critical configuration,
-    /// versionable per model family (C-4) — real descriptions arrive with the
-    /// tools in group 4.
+    /// versionable per model family (C-4).
     pub description: String,
     /// JSON Schema for the tool's arguments.
     pub input_schema: Value,
@@ -65,8 +64,8 @@ pub struct DocumentContent {
 /// `ok == false` is a *structured failure* (file not found, no edit match,
 /// command timeout, permission denied) — the model is expected to read it and
 /// recover. It is never surfaced as a harness error. The full `content` is
-/// returned here; truncation-at-ingestion (group 5) is applied by the engine
-/// when the result is appended to the conversation, not by the tool.
+/// returned here; truncation-at-ingestion is applied by the engine when the
+/// result is appended to the conversation, not by the tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutcome {
     /// Whether the tool succeeded.

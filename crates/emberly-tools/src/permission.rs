@@ -3,9 +3,9 @@
 //! A tool describes what it wants to do ([`PermissionRequest`]) and receives a
 //! yes/no ([`PermissionOutcome`]) — it never sees the rule engine or the UI.
 //! `emberly-core` implements [`PermissionGate`]: it enriches the request with
-//! the matched-rule reason, consults the rule layer (Phase 2; Phase 1 always
-//! asks), drives the UI round trip over the channels, logs the transcript
-//! events, and collapses the user's richer choice into allow/deny.
+//! the matched-rule reason, consults the rule layer, drives the UI round trip
+//! over the channels, logs the transcript events, and collapses the user's
+//! richer choice into allow/deny.
 
 use std::path::PathBuf;
 

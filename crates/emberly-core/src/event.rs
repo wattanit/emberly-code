@@ -118,7 +118,7 @@ pub enum UiEvent {
     ContextUsage { pct: u8, tokens: u64 },
 
     /// Running session cost estimate (Requirements P-6, Design §3.1). Always
-    /// labeled "est." in the UI. Emitted from Phase 3 onward.
+    /// labeled "est." in the UI.
     CostEstimate { usage: TokenUsage, usd: f64 },
 
     /// Cumulative billed tokens this session (input + output). Emitted on every
@@ -126,11 +126,10 @@ pub enum UiEvent {
     /// sidebar can always show a session total (Design §3.1).
     SessionUsage { usage: TokenUsage },
 
-    /// Sandbox status changed or was (re)probed (Requirements §6.7). Emitted
-    /// from Phase 2 onward.
+    /// Sandbox status changed or was (re)probed (Requirements §6.7).
     SandboxStatus { status: SandboxStatus },
 
-    /// The auto-accept mode changed (Requirements §6.4). Emitted from Phase 2.
+    /// The auto-accept mode changed (Requirements §6.4).
     ModeChanged { mode: Mode },
 
     /// The active provider profile / model changed in-session (C-6, Design
@@ -197,8 +196,7 @@ pub enum UiEvent {
     /// that only wants line counts can ignore it.
     FileDiff { path: String, unified: String },
 
-    /// Progress/outcome of a `/compact` operation (Requirements §8.3). Emitted
-    /// from Phase 5 onward.
+    /// Progress/outcome of a `/compact` operation (Requirements §8.3).
     CompactionStatus { message: String },
 
     /// The model updated its task list (T-11, Tech Spec §3.1, Design §4.7). The

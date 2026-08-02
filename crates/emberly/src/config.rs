@@ -1,12 +1,12 @@
-//! Configuration and secrets for the binary (Tech Spec §8; Phase 3 group 6).
+//! Configuration and secrets for the binary (Tech Spec §8).
 //!
 //! Resolution order (lowest → highest): built-in defaults → global
 //! `~/.config/emberly/config.toml` → project `.agents/config.toml` →
 //! `EMBERLY_*` environment overrides. API keys are read from the environment
 //! first, else from `~/.config/emberly/keys.toml`, which must be `0600`
-//! (secrets never live in project config and are never printed). Phase 5 adds
-//! provenance tracking (C-3, [`show`]), project instructions (AGENTS.md/
-//! CLAUDE.md, C-1), and per-model-family prompt resolution (P-7).
+//! (secrets never live in project config and are never printed). This module
+//! also owns provenance tracking (C-3, [`show`]), project instructions
+//! (AGENTS.md/CLAUDE.md, C-1), and per-model-family prompt resolution (P-7).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -99,7 +99,7 @@ pub struct TrustConfig {
 }
 
 /// `[loop]` — the loop-breaking guardrail (S-5, Tech Spec §7). All optional;
-/// the engine applies defaults. Wired to the engine in a later group.
+/// the engine applies defaults for whatever is unset.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct LoopConfig {
     pub enabled: Option<bool>,
@@ -303,7 +303,7 @@ impl AuthFile {
 
 /// Baked-in provider profiles (Requirements C-1) — usable out of the box; a
 /// user only supplies the key. `emberly init` materializes these for editing
-/// (C-2). Z.ai's concrete profile is added in Phase 1 group 4.
+/// (C-2).
 fn builtin_profiles() -> HashMap<String, ProfileFile> {
     let auth = |scheme: &str, key: &str| {
         Some(AuthFile {

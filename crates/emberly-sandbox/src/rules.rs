@@ -29,7 +29,7 @@ use crate::mode::Mode;
 pub enum Decision {
     /// Run without prompting (no UI churn).
     Allow,
-    /// Prompt the user (the Phase 1 always-on behavior, now rule-driven).
+    /// Prompt the user — the outcome when no rule decides.
     Ask,
     /// Refuse, returning the reason to the model as data (HC-6).
     Deny,
@@ -156,9 +156,9 @@ impl Rule {
     /// [`RuleEngine::decide`]. Ordered `(matcher, tool)`: a command matcher
     /// outranks a tool name, so `tool = "*"` with `match = "curl"` beats a
     /// blanket `tool = "bash"` — the rule naming the actual command is the more
-    /// deliberate one. Both axes must be here: comparing matchers alone let a
-    /// later `tool = "*"` silently override an earlier named-tool `deny`,
-    /// because the two tied at zero and the last one won.
+    /// deliberate one. Both axes are needed: on matcher alone a `tool = "*"` rule
+    /// ties at zero with a named-tool rule, so whichever comes last wins and a
+    /// wildcard can silently override a named-tool `deny`.
     fn specificity(&self) -> (usize, usize) {
         (self.matcher.specificity(), self.tool.specificity())
     }
@@ -170,10 +170,10 @@ impl Rule {
     ///
     /// The block is **serialized, not formatted**, and then re-parsed before it
     /// is handed back. A bash matcher is a user's command verbatim, so it
-    /// routinely contains quotes and backslashes (`git commit -m "wip"`);
-    /// interpolating one into `match = "…"` produced a file that no longer
-    /// parsed, and a malformed `permissions.toml` is dropped whole on load —
-    /// taking every project rule, `deny`s included, with it.
+    /// routinely contains quotes and backslashes (`git commit -m "wip"`), and
+    /// interpolating one into `match = "…"` yields a file that does not parse.
+    /// A malformed `permissions.toml` is dropped whole on load, taking every
+    /// project rule with it, `deny`s included.
     #[must_use]
     pub fn to_toml_block(&self) -> Option<String> {
         let entry = RuleEntry {
@@ -191,8 +191,8 @@ impl Rule {
 
         // Verify the round trip. `tool` and `action` must survive exactly; the
         // matcher is not compared because parsing normalizes it (a command
-        // ending in `*` loses the sugar), which is a widening we accept and
-        // show the user, not a corruption.
+        // ending in `*` loses the sugar) — a widening that is shown to the user,
+        // not a corruption.
         let parsed = parse_rules(&block, self.source).ok()?;
         let [reparsed] = parsed.as_slice() else {
             return None;
@@ -881,10 +881,10 @@ mod tests {
     fn a_written_block_always_reads_back() {
         // A bash grant carries the user's command verbatim, so quotes,
         // backslashes and newlines are routine. Interpolating one into
-        // `match = "…"` wrote a permissions.toml that no longer parsed — and a
+        // `match = "…"` yields a permissions.toml that does not parse, and a
         // malformed file is dropped whole on load, taking every project rule
-        // (including `deny`s) with it. Whatever the command, the block we hand
-        // back must survive the round trip.
+        // with it, `deny`s included. Whatever the command, the returned block
+        // must survive the round trip.
         for command in [
             r#"git commit -m "wip""#,
             r#"grep -r "a\"b" ."#,

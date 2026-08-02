@@ -2,7 +2,7 @@
 //! (Tech Spec §4.3, §11). Library crate, so `thiserror` (never `anyhow`).
 //!
 //! Retry classification lives here as [`ProviderError::is_retryable`] /
-//! [`ProviderError::retry_after`], so the Phase 3 retry policy is a
+//! [`ProviderError::retry_after`], so the retry policy is a
 //! consequence of the error type rather than scattered matching.
 
 use std::time::Duration;

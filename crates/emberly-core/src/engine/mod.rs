@@ -115,7 +115,7 @@ pub struct ContextConfig {
     /// marker; they stay in the transcript and the user's scrollback (HC-7).
     pub window_turns: usize,
     /// How many trailing turns `/compact` keeps verbatim (Tech Spec §7). Also
-    /// the tail manual and automatic compaction (Phase 3) both keep. A turn
+    /// the tail that manual and automatic compaction both keep. A turn
     /// boundary, not a raw message count (see [`group_turn_starts`]) — so a
     /// turn with several tool calls is kept or summarized as one unit, never
     /// split mid-`(tool_use, tool_result)`.
@@ -581,9 +581,9 @@ struct PendingUserAsk {
 /// commands plus one per tool→engine gate (Tech Spec §5.1). Bundled because the
 /// set is an invariant, not a coincidence — every level of the turn call chain
 /// needs *all* of it, since a tool blocked on any gate stalls the turn until
-/// the engine answers. Threading them individually meant four signatures with
-/// eight-plus parameters and a `too_many_arguments` allowance on each, and
-/// adding a gate meant editing all four.
+/// the engine answers. Bundling keeps those signatures short and confines a new
+/// gate to this struct and the select loops that read it, instead of to every
+/// signature along the chain.
 ///
 /// Held as `&mut` references rather than by value so the same bundle can be
 /// rebuilt cheaply at each call site while [`Engine::run`] keeps ownership of
@@ -632,9 +632,10 @@ impl Drop for CompletionCheckKillGuard {
     }
 }
 
-/// Who we are talking to and how (P-8, P-9, C-6). Grouped because a model
-/// switch has to move all of it at once, and the "configured default" pair is
-/// only meaningful next to the active selection it is compared against.
+/// Which provider and model the session talks to, and how (P-8, P-9, C-6).
+/// Grouped because a model switch has to move all of it at once, and the
+/// "configured default" pair is only meaningful next to the active selection it
+/// is compared against.
 struct ProviderState {
     client: Arc<dyn Provider>,
     model: String,
@@ -882,10 +883,11 @@ pub struct Engine {
     document_max_bytes: usize,
 }
 
-// The `Engine` impl is split across these modules by topic. Each holds
-// its own `impl Engine` block (an inherent impl only has to live in the
-// same crate) and sees this module's private items, so the split needs
-// no visibility changes and no API change.
+// The `Engine` impl is spread across these modules by topic, each holding its
+// own `impl Engine` block — an inherent impl only has to live in the same crate
+// as the type. Each module sees this one's private items, but not a sibling's,
+// so a method called from another of these modules is marked `pub(super)`.
+// None of this is public API.
 mod asks;
 mod context;
 mod guardrail;
@@ -1109,10 +1111,10 @@ impl Engine {
     /// waiting for a `UserInput`; a turn owns `commands_rx`/`asks_rx` for its
     /// duration (permission answers and cancellation arrive through them).
     // The receivers arrive individually because the caller creates the channels
-    // and keeps the senders; taking them as one struct would just move that
-    // construction across the boundary. So the list stays *here* — but it stops
-    // here: everything below takes [`TurnChannels`], which is also what lets
-    // this function keep ownership and still run its own between-turns select.
+    // and keeps the senders; taking them as one struct would only move that
+    // construction across the boundary. This is the last signature to list them:
+    // everything below takes a [`TurnChannels`] borrow, which also lets this
+    // function retain ownership for its own between-turns select.
     #[allow(clippy::too_many_arguments)]
     pub async fn run(
         mut self,
@@ -1375,7 +1377,7 @@ fn render_for_summary(messages: &[Message]) -> String {
 }
 
 /// Render recalled messages as readable text for the model (T-10). Tool
-/// results are reduced via Phase 1's `reduce_output` so recall costs tokens
+/// results are reduced via `reduce_output` so recall costs tokens
 /// proportional to what is recalled, never the raw output size. Never raw
 /// JSONL — the rendered form is the model-facing view (T-10).
 fn render_recall(messages: &[Message], reduce: bool) -> String {
@@ -1394,7 +1396,7 @@ fn render_recall(messages: &[Message], reduce: bool) -> String {
                     format!("[tool call: {name} {input}]")
                 }
                 ContentBlock::ToolResult { content, .. } => {
-                    // Reduce tool results via Phase 1's salient reduction
+                    // Reduce tool results via the salient reduction
                     // (T-10: never raw JSONL; proportional to recalled
                     // content, not the original raw size).
                     if reduce {

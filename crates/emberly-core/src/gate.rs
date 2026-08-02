@@ -6,14 +6,13 @@
 //! mutex (Tech Spec §2).
 //!
 //! Every gate has the same shape — one mpsc sender, one ask type carrying a
-//! oneshot — so the shape is written once as [`Gate<A>`] and [`ask_engine`],
-//! and each capability contributes only its ask type, its trait impl, and its
-//! fail-closed answer. That last part is why the duplication mattered: each
-//! gate must fail *closed* when the engine is gone or drops the reply, and six
-//! hand-written copies of that rule were six chances to get it wrong (a single
-//! `unwrap` in place of `unwrap_or` is also an HC-3 violation). Now it is one
-//! decision, made in one place, and a new gate cannot forget it — the fallback
-//! is a required argument.
+//! oneshot — so the shape is written once as [`Gate<A>`] and [`ask_engine`];
+//! each capability contributes only its ask type, its trait impl, and its
+//! fail-closed answer. Every gate must fail *closed* when the engine is gone or
+//! drops the reply unanswered, and `ask_engine` takes that fallback as a
+//! required argument, so the rule is applied in one place and a new gate cannot
+//! omit it. Reading the reply with `unwrap` instead of `unwrap_or` would also
+//! violate HC-3.
 
 use async_trait::async_trait;
 use emberly_tools::{
@@ -242,17 +241,16 @@ mod tests {
 
     // ---- the engine takes the ask and never answers ---------------------
 
-    /// The reply oneshot is dropped unanswered. Every gate must still return
-    /// its safe default rather than panicking — this is the branch that makes
-    /// `unwrap_or` load-bearing, and it is now shared by all six gates, so one
-    /// regression here would silently unsafe-default all of them.
+    /// The reply oneshot is dropped unanswered. Every gate must still return its
+    /// safe default rather than panicking. This is the branch that makes
+    /// `ask_engine`'s `unwrap_or` load-bearing, and all six gates share it, so a
+    /// regression there unsafe-defaults every one of them at once.
     #[tokio::test]
     async fn every_gate_fails_closed_when_the_reply_is_dropped() {
         // Each block: the engine receives the ask, then drops it — taking the
-        // reply sender with it — while the gate is still awaiting. Written out
-        // rather than generated, because a gate call borrows its gate and the
-        // six return types have nothing in common; the repetition is the
-        // cheapest honest way to assert all six.
+        // reply sender with it — while the gate is still awaiting. Spelled out
+        // per gate rather than generated: a gate call borrows its gate, and the
+        // six return types share no trait to assert against.
         {
             let (tx, mut rx) = mpsc::channel::<PermissionAsk>(1);
             let gate = Gate::new(tx);

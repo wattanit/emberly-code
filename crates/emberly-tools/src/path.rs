@@ -3,8 +3,8 @@
 //! (so a symlink pointing outside the root is caught), `..`/`.` are collapsed,
 //! and the result is classified as inside or outside the root.
 //!
-//! In Phase 1 (no OS sandbox) this is the tool-layer enforcement of HC-4/HC-5;
-//! Phase 2 adds the kernel-level fence beneath it. Outside-root access is not
+//! This is the tool-layer enforcement of HC-4/HC-5, with the kernel-level fence
+//! of `emberly-sandbox` beneath it. Outside-root access is not
 //! hard-blocked here — it is flagged so the permission gate can require an
 //! explicit per-action approval (HC-4).
 

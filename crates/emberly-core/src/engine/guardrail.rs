@@ -1,8 +1,8 @@
 //! The two things that can stop a turn claiming it is done: the
 //! loop-breaking guardrail (S-5) and the completion gate (S-6).
 //!
-//! Part of the `Engine` inherent impl, split out of one 2,700-line
-//! block; the engine is still the single owner of this state.
+//! Part of the `Engine` inherent impl; the engine is the sole owner of the
+//! state these methods touch.
 
 use super::*;
 
@@ -94,7 +94,7 @@ impl Engine {
                 Some(Command::Cancel) => break LoopResolution::Stop,
                 // A mode toggle applies immediately; keep waiting for a decision.
                 Some(Command::SetMode { mode }) => self.set_mode(mode).await,
-                // Queue a compaction for after we resume (if we do).
+                // Queue a compaction for after the resume, if one happens.
                 Some(Command::Compact) => self.request_compaction(CompactTrigger::Manual),
                 // Strays (permission/ask answers with no pending prompt): ignore.
                 Some(_) => {}
@@ -301,7 +301,7 @@ impl Engine {
                 Some(Command::Cancel) => break GateResolution::Stop,
                 // A mode toggle applies immediately; keep waiting for a decision.
                 Some(Command::SetMode { mode }) => self.set_mode(mode).await,
-                // Queue a compaction for after we resume (if we do).
+                // Queue a compaction for after the resume, if one happens.
                 Some(Command::Compact) => self.request_compaction(CompactTrigger::Manual),
                 // Strays (permission/ask answers with no pending prompt): ignore.
                 Some(_) => {}

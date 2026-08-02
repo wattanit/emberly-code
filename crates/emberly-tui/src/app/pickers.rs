@@ -1,7 +1,7 @@
 //! Selection surfaces: the command palette and the model / effort /
 //! mode / session / choice pickers.
 //!
-//! Part of the `App` inherent impl, split out of one 2,300-line block.
+//! Part of the `App` inherent impl.
 
 use super::*;
 
@@ -101,7 +101,7 @@ impl App {
     }
 
     /// Build the session-picker rows from the transcripts on disk, newest
-    /// first, marking the one we are currently in.
+    /// first, marking the active session.
     pub(super) fn session_rows(&self) -> Vec<SessionRow> {
         resume::list_sessions(&self.sessions_dir)
             .into_iter()

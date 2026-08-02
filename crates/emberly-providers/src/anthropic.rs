@@ -235,9 +235,8 @@ fn block_to_anthropic(block: &ContentBlock) -> Value {
             })
         }
         // Map a document to the Anthropic base64 `document` source shape
-        // (P-12, Tech Spec §4.2). Pulled forward from group 4: `ContentBlock`
-        // is not `#[non_exhaustive]`, so this match must cover `Document` for
-        // the crate to compile at all once the variant exists.
+        // (P-12, Tech Spec §4.2). `ContentBlock` is not `#[non_exhaustive]`, so
+        // this match has to cover `Document` for the crate to compile.
         ContentBlock::Document { media_type, data } => {
             json!({
                 "type": "document",

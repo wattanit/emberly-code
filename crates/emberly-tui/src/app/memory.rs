@@ -1,7 +1,7 @@
 //! The memory inspector (FR-6, T-13): listing entries, reading a body,
 //! and the edit/confirm flow.
 //!
-//! Part of the `App` inherent impl, split out of one 2,300-line block.
+//! Part of the `App` inherent impl.
 
 use super::*;
 

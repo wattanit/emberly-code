@@ -7,7 +7,7 @@
 //!
 //! This function only computes the in-context view. The sidecar file holding
 //! the full output and the `full_output_ref` that points at it are written by
-//! the transcript layer in Phase 5; here [`Truncation`] simply reports whether
+//! the transcript layer; here [`Truncation`] simply reports whether
 //! truncation happened and the original size.
 
 use crate::ctx::TruncateConfig;

@@ -1,7 +1,7 @@
 //! The overlay stack: opening one, pushing it, and reading the active
 //! one.
 //!
-//! Part of the `App` inherent impl, split out of one 2,300-line block.
+//! Part of the `App` inherent impl.
 
 use super::*;
 
@@ -20,7 +20,7 @@ impl App {
         }
     }
 
-    /// Push an arbitrary text overlay (help, untruncated output — group 8).
+    /// Push an arbitrary text overlay (help, untruncated output).
     pub fn open_text_overlay(&mut self, title: impl Into<String>, body: impl Into<String>) {
         self.push_overlay(Overlay {
             title: title.into(),

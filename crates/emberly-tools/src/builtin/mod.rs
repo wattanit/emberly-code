@@ -1,5 +1,5 @@
-//! The built-in tool suite: read, write, edit, bash (Phase 1) plus glob and
-//! grep (T-5, T-6; Phase 2).
+//! The built-in tool suite: read, write, edit, and bash, plus glob and grep
+//! (T-5, T-6).
 
 use std::sync::Arc;
 

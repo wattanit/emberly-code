@@ -70,8 +70,8 @@ impl MemoryStore {
     }
 
     /// Execute a memory request against the store. The authoritative name guard
-    /// (`slug`) runs here as defense in depth (group 1 validates in the tool,
-    /// group 3 re-validates at the engine, this is the belt to those braces).
+    /// (`slug`) runs here as defense in depth: the tool validates the name and
+    /// the engine re-validates it, and this is the check neither can bypass.
     pub fn execute(&self, req: &MemoryRequest) -> MemoryOutcome {
         // Authoritative name guard.
         let slugified = match slug(&req.name) {

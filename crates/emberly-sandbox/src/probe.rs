@@ -7,10 +7,10 @@
 //! Platform backends: **Linux** detects the enforced Landlock ABI
 //! ([`crate::confine::detect_abi`]) and reports `Confined`/`Partial`;
 //! **macOS** confirms Seatbelt works by applying a trivial profile via
-//! `/usr/bin/sandbox-exec` (Phase 5 group 8). Any other OS reports
-//! `Unavailable` honestly. On every platform the probe never restricts the
-//! harness and never crashes — an absent or blocked sandbox is reported, so the
-//! harness runs the honest degraded path.
+//! `/usr/bin/sandbox-exec`. Any other OS reports `Unavailable` honestly. On
+//! every platform the probe never restricts the harness and never crashes — an
+//! absent or blocked sandbox is reported, so the harness runs the honest
+//! degraded path.
 
 use crate::status::SandboxStatus;
 
@@ -66,7 +66,7 @@ mod linux {
     pub(super) fn probe() -> SandboxStatus {
         // Detect the highest ABI the kernel enforces without confining the
         // harness (Requirements §6.7). Core write/`.git` confinement exists from
-        // ABI v1; a kernel ABI below our target only loses newer, non-core knobs
+        // ABI v1; a kernel ABI below the target only loses newer, non-core knobs
         // → `Partial`, never a weakening of the hard lines (Tech Spec §6.5).
         let target = TARGET_ABI as i32;
         match detect_abi() {

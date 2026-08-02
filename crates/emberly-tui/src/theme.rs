@@ -1,9 +1,8 @@
 //! The single theme definition (Design §2). Colours are addressed by **role**
 //! (accent, chrome, success, …), never by literal value at the call site, so
 //! tuning the palette — or, later, loading a different one — is a value change
-//! here, not a refactor across the UI. This is the whole "theming deferred, not
-//! designed out" story: a future theme is a different [`Palette`] behind the
-//! same roles.
+//! here, not a refactor across the UI. Theming is deferred, not designed out: a
+//! future theme is a different [`Palette`] behind the same roles.
 //!
 //! Two disciplines from the guideline are encoded structurally:
 //! - **The ember accent is scarce.** Only the wordmark, focus/active marks, the

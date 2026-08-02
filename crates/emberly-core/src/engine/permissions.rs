@@ -1,8 +1,8 @@
 //! The permission seam (Requirements §6): consulting the rule
 //! engine, prompting, recording the answer, and persisting a grant.
 //!
-//! Part of the `Engine` inherent impl, split out of one 2,700-line
-//! block; the engine is still the single owner of this state.
+//! Part of the `Engine` inherent impl; the engine is the sole owner of the
+//! state these methods touch.
 
 use super::*;
 
