@@ -43,7 +43,7 @@ impl App {
     /// effort control declines with a calm notice.
     pub(super) fn open_effort_picker(&mut self) {
         if self.effort_levels.is_empty() {
-            self.conversation.push(ConvItem::Notice(
+            self.timeline.items.push(ConvItem::Notice(
                 "this model has no reasoning-effort control".into(),
             ));
             return;
@@ -207,13 +207,14 @@ impl App {
             KeyCode::Enter => match chosen {
                 Some(row) if row.current => {
                     self.overlays.pop();
-                    self.conversation
+                    self.timeline
+                        .items
                         .push(ConvItem::Notice("already in this session".into()));
                     Action::None
                 }
-                Some(row) if self.busy => {
+                Some(row) if self.anim.busy => {
                     self.overlays.pop();
-                    self.conversation.push(ConvItem::Notice(
+                    self.timeline.items.push(ConvItem::Notice(
                         "finish or cancel the current turn before switching sessions".into(),
                     ));
                     let _ = row;
@@ -272,14 +273,15 @@ impl App {
                 match kind {
                     ChoiceKind::Model => {
                         if row.label == ADD_PROVIDER_ROW {
-                            self.pending_provider_wizard = Some(ProviderWizard::new());
+                            self.wizard.pending = Some(ProviderWizard::new());
                             Action::None
                         } else if row.current {
-                            self.conversation
+                            self.timeline
+                                .items
                                 .push(ConvItem::Notice(format!("already using {}", row.label)));
                             Action::None
-                        } else if self.busy {
-                            self.conversation.push(ConvItem::Notice(
+                        } else if self.anim.busy {
+                            self.timeline.items.push(ConvItem::Notice(
                                 "finish or cancel the current turn before switching models".into(),
                             ));
                             Action::None
@@ -289,7 +291,7 @@ impl App {
                             // picker otherwise has no per-profile default model
                             // to fall back to — everything else keeps today's
                             // behavior of reusing the previously active model.
-                            let model = self.wizard_created_models.get(&row.label).cloned();
+                            let model = self.wizard.created_models.get(&row.label).cloned();
                             Action::Command(Command::SwitchModel {
                                 profile: row.label,
                                 model,
@@ -326,7 +328,7 @@ impl App {
                                     if auto_ok {
                                         Action::Command(Command::SetMode { mode })
                                     } else {
-                                        self.conversation.push(ConvItem::Notice(
+                                        self.timeline.items.push(ConvItem::Notice(
                                             "auto-accept modes are unavailable without OS confinement"
                                                 .into(),
                                         ));

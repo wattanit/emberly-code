@@ -23,28 +23,28 @@ impl App {
         if !self.overlays.is_empty() {
             return self.on_overlay_key(key);
         }
-        if let Some(id) = self.pending_permission.as_ref().map(|(i, _)| *i) {
+        if let Some(id) = self.prompts.permission.as_ref().map(|(i, _)| *i) {
             return self.on_permission_key(id, key);
         }
         // The question prompt also owns the keyboard while open (Design §5.1),
         // but with opposite semantics: no unsafe default, Esc declines.
-        if self.pending_ask.is_some() {
+        if self.prompts.ask.is_some() {
             return self.on_ask_key(key);
         }
         // The loop-halt surface owns the keyboard too (Design §8.5) — the
         // harness stepping in; the user always decides what happens next.
-        if self.pending_loop_halt.is_some() {
+        if self.prompts.loop_halt.is_some() {
             return self.on_loop_halt_key(key);
         }
         // The completion-gate halt surface owns the keyboard too (S-6, Design
         // §8.7) — the harness stepping in after a bounded number of failed
         // completion attempts.
-        if self.pending_completion_gate.is_some() {
+        if self.prompts.completion_gate.is_some() {
             return self.on_completion_gate_key(key);
         }
         // The guided setup wizard owns the keyboard too (Requirements C-7,
         // Design §4.6) — a focused sequence of single-question screens.
-        if self.pending_provider_wizard.is_some() {
+        if self.wizard.pending.is_some() {
             return self.on_provider_wizard_key(key);
         }
 
@@ -66,7 +66,7 @@ impl App {
                 Action::None
             }
             KeyCode::Char('c') if ctrl => {
-                if self.busy {
+                if self.anim.busy {
                     Action::Command(Command::Cancel)
                 } else if self.editor.is_empty() {
                     Action::Quit
@@ -78,7 +78,7 @@ impl App {
             // Cancel an in-flight turn (Command::Cancel doc, README keybinding
             // table). No modal is open here (those handle their own Esc
             // above), so idle Esc has nothing to dismiss.
-            KeyCode::Esc if self.busy => Action::Command(Command::Cancel),
+            KeyCode::Esc if self.anim.busy => Action::Command(Command::Cancel),
             KeyCode::Char('b') if ctrl => {
                 self.sidebar_visible = !self.sidebar_visible;
                 Action::None
@@ -111,18 +111,18 @@ impl App {
             KeyCode::Enter if shift || alt => self.edit(|e| e.newline()),
             KeyCode::Enter => match self.editor.submit() {
                 Some(text) => {
-                    self.scroll = 0; // jump back to the latest output
-                                     // A leading '/' is a slash command, not a message.
+                    self.timeline.scroll = 0; // jump back to the latest output
+                                              // A leading '/' is a slash command, not a message.
                     if let Some(name) = text.strip_prefix('/') {
                         self.run_slash(name)
                     } else {
                         // Echo the prompt into the timeline so the main pane is
                         // a single top-to-bottom transcript of both sides.
-                        self.conversation.push(ConvItem::User(text.clone()));
+                        self.timeline.items.push(ConvItem::User(text.clone()));
                         // Enter the "working" state (Design §6.3); the spinner
                         // runs from frame 0 until TurnEnded.
-                        self.busy = true;
-                        self.anim_frame = 0;
+                        self.anim.busy = true;
+                        self.anim.frame = 0;
                         Action::Command(Command::UserInput { text })
                     }
                 }
@@ -130,11 +130,11 @@ impl App {
             },
             // Scroll the conversation history.
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_add(SCROLL_STEP);
+                self.timeline.scroll = self.timeline.scroll.saturating_add(SCROLL_STEP);
                 Action::None
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_sub(SCROLL_STEP);
+                self.timeline.scroll = self.timeline.scroll.saturating_sub(SCROLL_STEP);
                 Action::None
             }
             KeyCode::Backspace => self.edit(|e| e.backspace()),
@@ -201,19 +201,19 @@ impl App {
             } else {
                 o.scroll.saturating_add(step)
             };
-        } else if self.pending_permission.is_some() {
-            self.permission_scroll = if up {
-                self.permission_scroll.saturating_sub(step)
+        } else if self.prompts.permission.is_some() {
+            self.prompts.permission_scroll = if up {
+                self.prompts.permission_scroll.saturating_sub(step)
             } else {
-                self.permission_scroll.saturating_add(step)
+                self.prompts.permission_scroll.saturating_add(step)
             };
         } else {
             // Conversation scroll is measured from the bottom: wheel-up moves
             // back into history (larger offset).
-            self.scroll = if up {
-                self.scroll.saturating_add(step)
+            self.timeline.scroll = if up {
+                self.timeline.scroll.saturating_add(step)
             } else {
-                self.scroll.saturating_sub(step)
+                self.timeline.scroll.saturating_sub(step)
             };
         }
     }
@@ -284,7 +284,7 @@ impl App {
                 // elsewhere on the prompt resolves to nothing → inert. It never
                 // approves "whatever is focused," and it never bypasses the
                 // unscrolled-content indicator the key path shows.
-                let Some(id) = self.pending_permission.as_ref().map(|(i, _)| *i) else {
+                let Some(id) = self.prompts.permission.as_ref().map(|(i, _)| *i) else {
                     return Action::None;
                 };
                 let code = match choice {

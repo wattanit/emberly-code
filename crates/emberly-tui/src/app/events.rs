@@ -14,21 +14,21 @@ impl App {
         for record in records {
             match &record.event {
                 TranscriptEvent::UserMessage { text, .. } => {
-                    self.conversation.push(ConvItem::User(text.clone()));
+                    self.timeline.items.push(ConvItem::User(text.clone()));
                 }
                 TranscriptEvent::AssistantMessage { text, reasoning } => {
                     // Replay a recorded reasoning trail (collapsed) unless the
                     // view hides it (P-10, Design §4.4).
                     if let Some(reasoning) = reasoning {
-                        if self.reasoning_view != ReasoningView::Hidden {
-                            self.conversation.push(ConvItem::Reasoning {
+                        if self.timeline.reasoning != ReasoningView::Hidden {
+                            self.timeline.items.push(ConvItem::Reasoning {
                                 text: reasoning.clone(),
-                                expanded: self.reasoning_view == ReasoningView::Expanded,
+                                expanded: self.timeline.reasoning == ReasoningView::Expanded,
                             });
                         }
                     }
                     if !text.is_empty() {
-                        self.conversation.push(ConvItem::Assistant(text.clone()));
+                        self.timeline.items.push(ConvItem::Assistant(text.clone()));
                     }
                 }
                 TranscriptEvent::ToolCall {
@@ -55,7 +55,7 @@ impl App {
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .map(str::to_string);
-                    self.conversation.push(ConvItem::Tool {
+                    self.timeline.items.push(ConvItem::Tool {
                         call_id: call_id.clone(),
                         tool: tool.clone(),
                         summary,
@@ -79,14 +79,15 @@ impl App {
                     }
                 }
                 TranscriptEvent::Compaction { summary, .. } => {
-                    self.conversation
+                    self.timeline
+                        .items
                         .push(ConvItem::Notice(format!("compacted — {summary}")));
                 }
                 _ => {}
             }
         }
         // Resumed content scrolls off the top; start pinned to the latest.
-        self.scroll = 0;
+        self.timeline.scroll = 0;
     }
 
     /// Fold one engine event into the view-model. Pure over `self` — no I/O — so
@@ -94,8 +95,8 @@ impl App {
     pub fn apply_event(&mut self, event: UiEvent) {
         match event {
             UiEvent::AssistantDelta { text } => {
-                if self.streaming {
-                    if let Some(ConvItem::Assistant(buf)) = self.conversation.last_mut() {
+                if self.timeline.streaming {
+                    if let Some(ConvItem::Assistant(buf)) = self.timeline.items.last_mut() {
                         buf.push_str(&text);
                         return;
                     }
@@ -103,36 +104,38 @@ impl App {
                 // The answer is starting: settle the just-streamed reasoning
                 // trail to its collapsed line unless the view pins it open
                 // (Design §4.4).
-                if self.reasoning_view == ReasoningView::Collapsed {
-                    if let Some(ConvItem::Reasoning { expanded, .. }) = self.conversation.last_mut()
+                if self.timeline.reasoning == ReasoningView::Collapsed {
+                    if let Some(ConvItem::Reasoning { expanded, .. }) =
+                        self.timeline.items.last_mut()
                     {
                         *expanded = false;
                     }
                 }
-                self.streaming = true;
-                self.conversation.push(ConvItem::Assistant(text));
+                self.timeline.streaming = true;
+                self.timeline.items.push(ConvItem::Assistant(text));
             }
             UiEvent::ReasoningDelta { text } => {
                 // `hidden` is a view choice: skip the trail but the engine still
                 // records the trace to the transcript (P-10, Design §4.4).
-                if self.reasoning_view == ReasoningView::Hidden {
+                if self.timeline.reasoning == ReasoningView::Hidden {
                     return;
                 }
-                if let Some(ConvItem::Reasoning { text: buf, .. }) = self.conversation.last_mut() {
+                if let Some(ConvItem::Reasoning { text: buf, .. }) = self.timeline.items.last_mut()
+                {
                     buf.push_str(&text);
                 } else {
                     // Stream in place while thinking; expanded until the answer
                     // begins (then settled), or always when the view pins it.
-                    self.conversation.push(ConvItem::Reasoning {
+                    self.timeline.items.push(ConvItem::Reasoning {
                         text,
                         expanded: true,
                     });
                 }
             }
-            UiEvent::AssistantDone => self.streaming = false,
+            UiEvent::AssistantDone => self.timeline.streaming = false,
             UiEvent::TurnEnded => {
-                self.busy = false;
-                self.streaming = false;
+                self.anim.busy = false;
+                self.timeline.streaming = false;
             }
             UiEvent::ToolStarted {
                 call_id,
@@ -140,8 +143,8 @@ impl App {
                 summary,
                 explanation,
             } => {
-                self.streaming = false;
-                self.conversation.push(ConvItem::Tool {
+                self.timeline.streaming = false;
+                self.timeline.items.push(ConvItem::Tool {
                     call_id,
                     tool,
                     summary,
@@ -176,34 +179,34 @@ impl App {
                 }
             }
             UiEvent::PermissionRequest { id, rendering } => {
-                self.pending_permission = Some((id, rendering));
-                self.permission_scroll = 0; // start every prompt at the top
+                self.prompts.permission = Some((id, rendering));
+                self.prompts.permission_scroll = 0; // start every prompt at the top
             }
             UiEvent::AskUserRequest {
                 id,
                 question,
                 options,
             } => {
-                self.streaming = false;
-                self.pending_ask = Some(AskPrompt::new(id, question, options));
+                self.timeline.streaming = false;
+                self.prompts.ask = Some(AskPrompt::new(id, question, options));
             }
             UiEvent::LoopHalted { reason } => {
-                self.streaming = false;
-                self.pending_loop_halt = Some(LoopHaltPrompt::new(reason));
+                self.timeline.streaming = false;
+                self.prompts.loop_halt = Some(LoopHaltPrompt::new(reason));
             }
             UiEvent::CompletionGateHalted { failing, attempts } => {
-                self.streaming = false;
-                self.pending_completion_gate = Some(CompletionGatePrompt::new(failing, attempts));
+                self.timeline.streaming = false;
+                self.prompts.completion_gate = Some(CompletionGatePrompt::new(failing, attempts));
             }
             UiEvent::ContextUsage { pct, tokens } => {
-                self.context_pct = pct;
-                self.context_tokens = tokens;
+                self.usage.context_pct = pct;
+                self.usage.context_tokens = tokens;
             }
             UiEvent::CostEstimate { usd, .. } => {
-                self.cost_usd = usd;
-                self.cost_known = true;
+                self.usage.cost_usd = usd;
+                self.usage.cost_known = true;
             }
-            UiEvent::SessionUsage { usage } => self.session_usage = usage,
+            UiEvent::SessionUsage { usage } => self.usage.tokens = usage,
             UiEvent::SandboxStatus { status } => self.sandbox = Some(status),
             UiEvent::ModeChanged { mode } => self.mode = mode,
             UiEvent::ModelChanged { provider, model } => {
@@ -221,9 +224,10 @@ impl App {
                 // picker's list (C-5).
                 self.profiles = profiles;
             }
-            UiEvent::Notice { message } => self.conversation.push(ConvItem::Notice(message)),
+            UiEvent::Notice { message } => self.timeline.items.push(ConvItem::Notice(message)),
             UiEvent::HarnessError { what, why, next } => {
-                self.conversation
+                self.timeline
+                    .items
                     .push(ConvItem::Notice(format!("error: {what} — {why}. {next}")));
             }
             UiEvent::Retrying {
@@ -232,7 +236,7 @@ impl App {
                 delay_ms,
                 reason,
             } => {
-                self.conversation.push(ConvItem::Notice(format!(
+                self.timeline.items.push(ConvItem::Notice(format!(
                     "retrying ({attempt}/{max_attempts}) in {delay_ms}ms — {reason}"
                 )));
             }
@@ -252,31 +256,31 @@ impl App {
                 };
             }
             UiEvent::FileModified { path, adds, dels } => {
-                self.last_modified = Some(path.clone());
+                self.files.last = Some(path.clone());
                 let is_new = self.upsert_modified(path, adds, dels);
                 // A newly-landed entry gets a brief settle highlight (Design §6.4).
-                if is_new && self.motion {
-                    self.sidebar_settle = SETTLE_FRAMES;
+                if is_new && self.anim.active {
+                    self.anim.sidebar_settle = SETTLE_FRAMES;
                 }
             }
             UiEvent::FileDiff { path, unified } => {
                 // Show it inline when the edit executes (Design §4.2) …
-                self.conversation.push(ConvItem::Diff {
+                self.timeline.items.push(ConvItem::Diff {
                     unified: unified.clone(),
                 });
                 // … and keep the latest per file for the on-demand overlay.
-                self.latest_diffs.insert(path, unified);
+                self.files.diffs.insert(path, unified);
             }
             UiEvent::CompactionStatus { message } => {
-                self.conversation.push(ConvItem::Notice(message));
+                self.timeline.items.push(ConvItem::Notice(message));
             }
             UiEvent::TaskListUpdated { items } => {
                 self.tasks = items.clone();
-                self.conversation.push(ConvItem::TaskList { items });
+                self.timeline.items.push(ConvItem::TaskList { items });
             }
             UiEvent::MemoryStatus { user, project } => {
-                self.memory_user = user;
-                self.memory_project = project;
+                self.memory.user = user;
+                self.memory.project = project;
             }
             UiEvent::CompletionStatus { checks } => {
                 self.completion_status = checks;
@@ -304,7 +308,8 @@ impl App {
     }
 
     fn find_tool_mut(&mut self, call_id: &ToolCallId) -> Option<&mut ConvItem> {
-        self.conversation
+        self.timeline
+            .items
             .iter_mut()
             .rev()
             .find(|item| matches!(item, ConvItem::Tool { call_id: c, .. } if c == call_id))
@@ -312,12 +317,12 @@ impl App {
 
     /// Insert or update a modified-file entry; returns `true` if it was new.
     fn upsert_modified(&mut self, path: String, adds: u32, dels: u32) -> bool {
-        if let Some(existing) = self.modified_files.iter_mut().find(|f| f.path == path) {
+        if let Some(existing) = self.files.modified.iter_mut().find(|f| f.path == path) {
             existing.adds = adds;
             existing.dels = dels;
             false
         } else {
-            self.modified_files.push(ModifiedFile { path, adds, dels });
+            self.files.modified.push(ModifiedFile { path, adds, dels });
             true
         }
     }

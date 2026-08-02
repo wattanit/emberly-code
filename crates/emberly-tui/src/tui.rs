@@ -56,9 +56,9 @@ pub async fn run(
     );
     // Set the trail view before seeding history so resumed reasoning items
     // render with the configured default (Design §4.4).
-    app.reasoning_view = reasoning_view;
+    app.timeline.reasoning = reasoning_view;
     app.seed_history(&history);
-    app.motion = motion_enabled();
+    app.anim.active = motion_enabled();
 
     // Shared with the input reader so an `$EDITOR` handoff can pause it (C-5).
     let input_paused = Arc::new(AtomicBool::new(false));

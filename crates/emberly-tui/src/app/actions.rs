@@ -25,14 +25,14 @@ impl App {
                 if auto_ok {
                     Action::Command(Command::SetMode { mode: requested })
                 } else {
-                    self.conversation.push(ConvItem::Notice(
+                    self.timeline.items.push(ConvItem::Notice(
                         "auto-accept modes are unavailable without OS confinement".into(),
                     ));
                     Action::None
                 }
             }
             None => {
-                self.conversation.push(ConvItem::Notice(format!(
+                self.timeline.items.push(ConvItem::Notice(format!(
                     "unknown mode '{arg}' — try: normal, auto-accept-edits, auto"
                 )));
                 Action::None
@@ -53,7 +53,7 @@ impl App {
                 Action::Command(Command::SetEffort { effort: level })
             }
             Some(level) if self.effort_levels.is_empty() => {
-                self.conversation.push(ConvItem::Notice(format!(
+                self.timeline.items.push(ConvItem::Notice(format!(
                     "this model has no reasoning-effort control (ignoring '{level}')"
                 )));
                 Action::None
@@ -65,13 +65,13 @@ impl App {
                     .map(Effort::as_str)
                     .collect::<Vec<_>>()
                     .join(", ");
-                self.conversation.push(ConvItem::Notice(format!(
+                self.timeline.items.push(ConvItem::Notice(format!(
                     "this model does not offer '{level}' — try: {offered}"
                 )));
                 Action::None
             }
             None => {
-                self.conversation.push(ConvItem::Notice(format!(
+                self.timeline.items.push(ConvItem::Notice(format!(
                     "unknown effort '{arg}' — try low, medium, high, or max"
                 )));
                 Action::None
@@ -82,7 +82,7 @@ impl App {
     /// Toggle the most recent reasoning trail open/closed (the expand
     /// affordance, Design §4.4).
     pub(super) fn toggle_reasoning(&mut self) {
-        for item in self.conversation.iter_mut().rev() {
+        for item in self.timeline.items.iter_mut().rev() {
             if let ConvItem::Reasoning { expanded, .. } = item {
                 *expanded = !*expanded;
                 return;
@@ -106,7 +106,7 @@ impl App {
             Ok((path, existed)) => {
                 // Provenance before the edit (C-3): existing project value vs a
                 // fresh override seeded from the defaults. Edits land here (C-1).
-                self.conversation.push(ConvItem::Notice(if existed {
+                self.timeline.items.push(ConvItem::Notice(if existed {
                     format!("editing your project config — {}", path.display())
                 } else {
                     format!(
@@ -118,7 +118,8 @@ impl App {
                 Action::EditFile(path)
             }
             Err(e) => {
-                self.conversation
+                self.timeline
+                    .items
                     .push(ConvItem::Notice(format!("could not prepare config: {e}")));
                 Action::None
             }
@@ -137,7 +138,7 @@ impl App {
                     .unwrap_or("prompt");
                 // Provenance before the edit (C-3): an existing project override
                 // vs a fresh copy of the baked-in default. Edits land here (C-1).
-                self.conversation.push(ConvItem::Notice(if existed {
+                self.timeline.items.push(ConvItem::Notice(if existed {
                     format!("editing your project '{shown}' prompt — {}", path.display())
                 } else {
                     format!(
@@ -149,7 +150,7 @@ impl App {
                 Action::EditFile(path)
             }
             Err(msg) => {
-                self.conversation.push(ConvItem::Notice(msg));
+                self.timeline.items.push(ConvItem::Notice(msg));
                 Action::None
             }
         }
@@ -166,7 +167,7 @@ impl App {
             }
             EditStatus::Failed(why) => format!("editor failed: {why}"),
         };
-        self.conversation.push(ConvItem::Notice(message));
+        self.timeline.items.push(ConvItem::Notice(message));
     }
 
     /// Run a typed `/name` command; unknown names surface a calm notice.
@@ -183,7 +184,7 @@ impl App {
                 cmd => self.run_command(cmd),
             },
             Slash::Unknown(name) => {
-                self.conversation.push(ConvItem::Notice(format!(
+                self.timeline.items.push(ConvItem::Notice(format!(
                     "unknown command: /{name} — Ctrl-P lists commands"
                 )));
                 Action::None
@@ -201,8 +202,8 @@ impl App {
             self.open_model_picker();
             return Action::None;
         };
-        if self.busy {
-            self.conversation.push(ConvItem::Notice(
+        if self.anim.busy {
+            self.timeline.items.push(ConvItem::Notice(
                 "finish or cancel the current turn before switching models".into(),
             ));
             return Action::None;
@@ -249,8 +250,8 @@ impl App {
             AppCommand::NewSession => {
                 // A switch resets the conversation, so refuse mid-turn — the
                 // frontend gates it here rather than dropping it in the engine.
-                if self.busy {
-                    self.conversation.push(ConvItem::Notice(
+                if self.anim.busy {
+                    self.timeline.items.push(ConvItem::Notice(
                         "finish or cancel the current turn before starting a new session".into(),
                     ));
                     Action::None

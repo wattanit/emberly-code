@@ -12,7 +12,7 @@ impl App {
     /// prompt doesn't use the `overlays` stack at all, matching
     /// `LoopHaltPrompt`/`CompletionGatePrompt`.
     pub(super) fn on_provider_wizard_key(&mut self, key: KeyEvent) -> Action {
-        let Some(step) = self.pending_provider_wizard.as_ref().map(|w| w.step) else {
+        let Some(step) = self.wizard.pending.as_ref().map(|w| w.step) else {
             return Action::None;
         };
         if step == WizardStep::Adapter {
@@ -27,30 +27,31 @@ impl App {
             KeyCode::Enter => self.provider_wizard_advance(),
             KeyCode::Backspace => {
                 let empty = self
-                    .pending_provider_wizard
+                    .wizard
+                    .pending
                     .as_ref()
                     .is_some_and(|w| w.editor.is_empty());
                 if empty {
                     self.provider_wizard_step_back();
-                } else if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                } else if let Some(wizard) = self.wizard.pending.as_mut() {
                     wizard.editor.backspace();
                 }
                 Action::None
             }
             KeyCode::Left => {
-                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                if let Some(wizard) = self.wizard.pending.as_mut() {
                     wizard.editor.left();
                 }
                 Action::None
             }
             KeyCode::Right => {
-                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                if let Some(wizard) = self.wizard.pending.as_mut() {
                     wizard.editor.right();
                 }
                 Action::None
             }
             KeyCode::Char(c) => {
-                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                if let Some(wizard) = self.wizard.pending.as_mut() {
                     wizard.editor.insert_char(c);
                 }
                 Action::None
@@ -66,20 +67,20 @@ impl App {
                 Action::None
             }
             KeyCode::Up => {
-                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                if let Some(wizard) = self.wizard.pending.as_mut() {
                     wizard.adapter_selected = wizard.adapter_selected.saturating_sub(1);
                 }
                 Action::None
             }
             KeyCode::Down => {
-                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                if let Some(wizard) = self.wizard.pending.as_mut() {
                     wizard.adapter_selected =
                         (wizard.adapter_selected + 1).min(WIZARD_ADAPTERS.len() - 1);
                 }
                 Action::None
             }
             KeyCode::Enter => {
-                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                if let Some(wizard) = self.wizard.pending.as_mut() {
                     let adapter = wizard.adapter();
                     wizard.step = WizardStep::Endpoint;
                     wizard.editor = LineEditor::new();
@@ -99,22 +100,18 @@ impl App {
     /// value into a fresh editor — so stepping back and forward again never
     /// loses anything typed. Esc from the first step dismisses the wizard.
     fn provider_wizard_step_back(&mut self) {
-        let Some(prev) = self
-            .pending_provider_wizard
-            .as_ref()
-            .and_then(|w| match w.step {
-                WizardStep::Name => None,
-                WizardStep::Adapter => Some(WizardStep::Name),
-                WizardStep::Endpoint => Some(WizardStep::Adapter),
-                WizardStep::ModelId => Some(WizardStep::Endpoint),
-                WizardStep::ApiKey => Some(WizardStep::ModelId),
-                WizardStep::Summary => Some(WizardStep::ApiKey),
-            })
-        else {
-            self.pending_provider_wizard = None;
+        let Some(prev) = self.wizard.pending.as_ref().and_then(|w| match w.step {
+            WizardStep::Name => None,
+            WizardStep::Adapter => Some(WizardStep::Name),
+            WizardStep::Endpoint => Some(WizardStep::Adapter),
+            WizardStep::ModelId => Some(WizardStep::Endpoint),
+            WizardStep::ApiKey => Some(WizardStep::ModelId),
+            WizardStep::Summary => Some(WizardStep::ApiKey),
+        }) else {
+            self.wizard.pending = None;
             return;
         };
-        if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+        if let Some(wizard) = self.wizard.pending.as_mut() {
             wizard.error = None;
             wizard.step = prev;
             let seed = match prev {
@@ -134,7 +131,7 @@ impl App {
     /// (Tech Spec C-7): only a non-empty name that isn't already a profile,
     /// and a non-empty model id, are checked here.
     fn provider_wizard_advance(&mut self) -> Action {
-        let Some(wizard) = self.pending_provider_wizard.as_mut() else {
+        let Some(wizard) = self.wizard.pending.as_mut() else {
             return Action::None;
         };
         match wizard.step {
@@ -144,12 +141,12 @@ impl App {
                     return Action::None;
                 }
                 if self.profiles.contains(&name) {
-                    if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                    if let Some(wizard) = self.wizard.pending.as_mut() {
                         wizard.error = Some(format!("a profile named '{name}' already exists"));
                     }
                     return Action::None;
                 }
-                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                if let Some(wizard) = self.wizard.pending.as_mut() {
                     wizard.name = name;
                     wizard.error = None;
                     wizard.step = WizardStep::Adapter;
@@ -195,7 +192,7 @@ impl App {
     /// bespoke apply path, no separate "wizard complete" voice (Design §4.6):
     /// the reload's own notice is the whole story.
     fn provider_wizard_write(&mut self) -> Action {
-        let Some(wizard) = self.pending_provider_wizard.as_ref() else {
+        let Some(wizard) = self.wizard.pending.as_ref() else {
             return Action::None;
         };
         let profile = NewProviderProfile {
@@ -205,16 +202,17 @@ impl App {
             model_id: wizard.model_id.clone(),
             api_key: wizard.api_key.clone(),
         };
-        match self.provider_writer.write_profile(profile) {
+        match self.wizard.writer.write_profile(profile) {
             Ok(()) => {
-                if let Some(wizard) = self.pending_provider_wizard.take() {
-                    self.wizard_created_models
+                if let Some(wizard) = self.wizard.pending.take() {
+                    self.wizard
+                        .created_models
                         .insert(wizard.name, wizard.model_id);
                 }
                 Action::Command(Command::ReloadConfig)
             }
             Err(message) => {
-                if let Some(wizard) = self.pending_provider_wizard.as_mut() {
+                if let Some(wizard) = self.wizard.pending.as_mut() {
                     wizard.error = Some(message);
                 }
                 Action::None

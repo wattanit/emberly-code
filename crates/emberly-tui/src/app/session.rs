@@ -7,17 +7,22 @@ use super::*;
 
 impl App {
     pub(super) fn last_assistant_text(&self) -> Option<String> {
-        self.conversation.iter().rev().find_map(|item| match item {
-            ConvItem::Assistant(text) => Some(text.clone()),
-            _ => None,
-        })
+        self.timeline
+            .items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                ConvItem::Assistant(text) => Some(text.clone()),
+                _ => None,
+            })
     }
 
     pub(super) fn files_text(&self) -> String {
-        if self.modified_files.is_empty() {
+        if self.files.modified.is_empty() {
             return "No files changed yet.".to_string();
         }
-        self.modified_files
+        self.files
+            .modified
             .iter()
             .map(|f| format!("{}  +{} -{}", f.path, f.adds, f.dels))
             .collect::<Vec<_>>()
@@ -29,7 +34,8 @@ impl App {
     /// engine's follow-up context-usage event refines the counters.
     pub fn begin_new_session(&mut self, id: SessionId) {
         self.reset_for_switch(id, String::new());
-        self.conversation
+        self.timeline
+            .items
             .push(ConvItem::Notice("started a new session".into()));
     }
 
@@ -43,14 +49,15 @@ impl App {
     ) {
         self.reset_for_switch(id, title);
         self.seed_history(records);
-        self.conversation
+        self.timeline
+            .items
             .push(ConvItem::Notice("resumed session".into()));
     }
 
     /// Push a harness-voice notice into the timeline (used by the frontend for
     /// out-of-band feedback such as a failed session switch).
     pub fn notice(&mut self, message: impl Into<String>) {
-        self.conversation.push(ConvItem::Notice(message.into()));
+        self.timeline.items.push(ConvItem::Notice(message.into()));
     }
 
     /// Shared reset for both switch paths: clear the conversation and per-session
@@ -58,24 +65,24 @@ impl App {
     fn reset_for_switch(&mut self, id: SessionId, title: String) {
         self.session.session_id = id;
         self.session.title = title;
-        self.conversation.clear();
-        self.modified_files.clear();
+        self.timeline.items.clear();
+        self.files.modified.clear();
         self.tasks.clear();
-        self.memory_user = 0;
-        self.memory_project = 0;
+        self.memory.user = 0;
+        self.memory.project = 0;
         self.skills.clear();
         self.completion_status.clear();
-        self.memory_fetch = None;
-        self.pending_memory_edit = None;
-        self.latest_diffs.clear();
-        self.last_modified = None;
-        self.scroll = 0;
-        self.streaming = false;
-        self.context_pct = 0;
-        self.context_tokens = 0;
-        self.session_usage = TokenUsage::default();
-        self.cost_usd = 0.0;
-        self.cost_known = false;
+        self.memory.fetch = None;
+        self.memory.pending_edit = None;
+        self.files.diffs.clear();
+        self.files.last = None;
+        self.timeline.scroll = 0;
+        self.timeline.streaming = false;
+        self.usage.context_pct = 0;
+        self.usage.context_tokens = 0;
+        self.usage.tokens = TokenUsage::default();
+        self.usage.cost_usd = 0.0;
+        self.usage.cost_known = false;
         self.overlays.clear();
     }
 }

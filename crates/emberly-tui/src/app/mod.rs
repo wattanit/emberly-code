@@ -161,7 +161,7 @@ pub enum OverlayContent {
 /// (FR-6, §4.6). Recorded when a [`Command::MemoryView`] is issued; consumed
 /// when the [`UiEvent::MemoryBody`] reply arrives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MemoryFetchIntent {
+pub(crate) enum MemoryFetchIntent {
     View,
     Edit,
 }
@@ -424,8 +424,133 @@ impl ProviderWizard {
     }
 }
 
+/// The conversation timeline and how far up it the user has scrolled.
+/// Grouped because `streaming` describes whether the last item is still
+/// growing, and `scroll` is an offset into these items — reading one without
+/// the others gives a stale picture of the pane.
+pub(crate) struct Timeline {
+    pub(crate) items: Vec<ConvItem>,
+    /// True between the first `AssistantDelta` and `AssistantDone` of a turn.
+    pub(crate) streaming: bool,
+    /// Conversation scrollback offset in rows *from the bottom*: 0 follows the
+    /// latest output; larger values scroll up into history. Clamped to content
+    /// at render time (Design §3.1 — the main pane owns scrollback).
+    pub(crate) scroll: usize,
+    /// How the reasoning trail is displayed (Design §4.4); from the `reasoning`
+    /// config key. `Hidden` suppresses the trail in the view only.
+    pub(crate) reasoning: ReasoningView,
+}
+
+/// What this session has consumed. All five move together on a provider
+/// `Usage`, and all five reset together on a session switch.
+pub(crate) struct UsageState {
+    /// Cumulative billed tokens this session (input + output), for the sidebar
+    /// total. Available regardless of pricing.
+    pub(crate) tokens: TokenUsage,
+    pub(crate) cost_usd: f64,
+    pub(crate) cost_known: bool,
+    pub(crate) context_pct: u8,
+    pub(crate) context_tokens: u64,
+}
+
+/// The prompts that take over the screen while awaiting an answer. At most one
+/// is ever set; keeping them together is what makes that invariant legible
+/// (Design §5, §5.1, §8.5, §8.7).
+pub(crate) struct Prompts {
+    /// The permission prompt currently awaiting an answer, if any. While set,
+    /// the prompt owns the screen and normal input is suspended (Design §5).
+    pub(crate) permission: Option<(PermissionId, PermissionRendering)>,
+    /// Scroll offset (rows from top) into the current permission prompt's
+    /// content, so long commands/diffs can be reviewed in full (Design §5).
+    pub(crate) permission_scroll: usize,
+    /// The `ask_user` question currently awaiting an answer, if any (T-8). While
+    /// set, the question prompt owns the screen and normal input is suspended
+    /// (Design §5.1). Never the permission prompt's safety styling.
+    pub(crate) ask: Option<AskPrompt>,
+    /// A pending loop-halt decision (S-5, Design §8.5) — the harness stepping in.
+    /// While set it owns the screen; harness voice, not the question prompt.
+    pub(crate) loop_halt: Option<LoopHaltPrompt>,
+    /// A pending completion-gate halt decision (S-6, Design §8.7) — the
+    /// harness stepping in after a bounded number of failed completion
+    /// attempts. While set it owns the screen; harness voice.
+    pub(crate) completion_gate: Option<CompletionGatePrompt>,
+}
+
+/// The guided provider/model setup wizard (C-7) and the two things that
+/// outlive one run of it.
+pub(crate) struct WizardState {
+    /// The wizard in progress (Design §4.6). While set it owns the screen.
+    pub(crate) pending: Option<ProviderWizard>,
+    /// Writes a wizard-completed profile to disk, injected by the binary
+    /// composition root so this crate never owns `config.toml`/`keys.toml`
+    /// schema knowledge (A-1).
+    pub(crate) writer: Arc<dyn ProviderProfileWriter>,
+    /// Model ids the wizard registered this session, keyed by profile name: the
+    /// picker has no other per-profile default model to fall back to, so a
+    /// freshly-added profile would otherwise be tried with whatever model was
+    /// previously active.
+    pub(crate) created_models: HashMap<String, String>,
+}
+
+/// The memory panel (FR-6, T-13, Design §4.9): sidebar counts plus the
+/// inspector's in-flight fetch and pending edit.
+pub(crate) struct MemoryPanel {
+    /// Entry counts for the sidebar. Updated from `UiEvent::MemoryStatus`;
+    /// cleared on a new session.
+    pub(crate) user: usize,
+    pub(crate) project: usize,
+    /// The inspector's in-flight body fetch (§4.6): the selected entry and
+    /// whether the user wants to view or edit it. Set when a `MemoryView` is
+    /// issued; consumed when the `MemoryBody` reply arrives.
+    pub(crate) fetch: Option<(MemoryFetchIntent, EntrySummary)>,
+    /// A memory edit whose body has arrived and is ready for the `$EDITOR`
+    /// handoff (§4.6). The frontend loop drains this, runs the editor, and
+    /// commits via `MemoryMutate` (the harness writes, not the TUI).
+    pub(crate) pending_edit: Option<PendingMemoryEdit>,
+}
+
+/// Modified files and their diffs (Design §4.2).
+pub(crate) struct FilesState {
+    pub(crate) modified: Vec<ModifiedFile>,
+    /// Latest unified diff per modified file, for the diff overlay. Keyed by path.
+    pub(crate) diffs: HashMap<String, String>,
+    /// The most recently modified file (target of the Ctrl+O diff overlay until
+    /// sidebar selection lands in group 8).
+    pub(crate) last: Option<String>,
+}
+
+/// Animation and busy state (Design §6.3, §6.4). `tick` advances every counter
+/// here and `is_animating` reads every one of them, so they are one unit.
+pub(crate) struct MotionState {
+    /// True while a turn is in flight (submit → `TurnEnded`): drives the
+    /// "working" spinner (Design §6.3).
+    pub(crate) busy: bool,
+    /// Whether motion is enabled (Design §6.4 off-switch). Off in degraded mode
+    /// (line frontend has no ticker) and via config/env.
+    pub(crate) active: bool,
+    /// Animation frame counter, advanced by the ticker only while animating.
+    /// Time-source-free: elapsed ≈ `frame / ANIM_FPS`.
+    pub(crate) frame: usize,
+    /// Frames remaining in an overlay's ease-in expansion (Design §6.4).
+    pub(crate) overlay_ease: u8,
+    /// Frames remaining in the newest modified-file's settle highlight.
+    pub(crate) sidebar_settle: u8,
+}
+
 /// The complete view-model the renderer reads.
+///
+/// State is grouped into sub-structs by surface rather than held flat. 29 of
+/// the fields belonged to seven clusters whose members are always read and
+/// written together — one tick, one session switch, one provider `Usage` — and
+/// flat, it was possible to update one and forget its siblings.
 pub struct App {
+    pub(crate) timeline: Timeline,
+    pub(crate) usage: UsageState,
+    pub(crate) prompts: Prompts,
+    pub(crate) wizard: WizardState,
+    pub(crate) memory: MemoryPanel,
+    pub(crate) files: FilesState,
+    pub(crate) anim: MotionState,
     pub(crate) session: SessionInfo,
     /// Where session transcripts live, so the picker can list them and a
     /// resume can read one (`/session`, `/resume`).
@@ -437,12 +562,6 @@ pub struct App {
     /// has none yet — same content `emberly init` materializes (C-5, single
     /// source in the binary).
     config_template: String,
-    pub(crate) conversation: Vec<ConvItem>,
-    /// True between the first `AssistantDelta` and `AssistantDone` of a turn.
-    streaming: bool,
-    /// How the reasoning trail is displayed (Design §4.4); from the `reasoning`
-    /// config key. `Hidden` suppresses the trail in the view only.
-    pub(crate) reasoning_view: ReasoningView,
     /// The active reasoning-effort level, for the sidebar (P-9). `None` when the
     /// model has no effort control (the line is hidden). Set by `EffortChanged`.
     pub(crate) effort: Option<Effort>,
@@ -452,24 +571,12 @@ pub struct App {
     /// The grapheme-aware input editor (multi-line, history, Thai-correct
     /// cursor motion). See [`crate::editor`].
     pub(crate) editor: LineEditor,
-    pub(crate) context_pct: u8,
-    context_tokens: u64,
-    /// Cumulative billed tokens this session (input + output), for the sidebar
-    /// total. Available regardless of pricing.
-    pub(crate) session_usage: TokenUsage,
-    pub(crate) cost_usd: f64,
-    pub(crate) cost_known: bool,
     /// `None` until the engine reports confinement status (Phase 2).
     pub(crate) sandbox: Option<SandboxStatus>,
     pub(crate) mode: emberly_core::Mode,
-    pub(crate) modified_files: Vec<ModifiedFile>,
     /// The model-maintained task list (T-11, Design §4.7). Updated from
     /// `UiEvent::TaskListUpdated`; cleared on a new session.
     pub(crate) tasks: Vec<TaskItem>,
-    /// Memory entry counts for the sidebar (T-13, FR-6, Design §4.9). Updated
-    /// from `UiEvent::MemoryStatus`; cleared on a new session.
-    pub(crate) memory_user: usize,
-    pub(crate) memory_project: usize,
     /// The skill catalog for the sidebar (T-15, FR-7, Design §4.9). Updated
     /// from `UiEvent::SkillsAvailable`; cleared on a new session.
     pub(crate) skills: Vec<SkillMeta>,
@@ -479,54 +586,7 @@ pub struct App {
     /// stub) until the gate has run at least once, and cleared on a new
     /// session.
     pub(crate) completion_status: Vec<CheckResult>,
-    /// The inspector's in-flight body fetch (FR-6, §4.6): the selected entry
-    /// and whether the user wants to view or edit it. Set when a `MemoryView`
-    /// is issued; consumed when the `MemoryBody` reply arrives.
-    memory_fetch: Option<(MemoryFetchIntent, EntrySummary)>,
-    /// A memory edit whose body has arrived and is ready for the `$EDITOR`
-    /// handoff (FR-6, §4.6). The frontend loop drains this, runs the editor, and
-    /// commits via `MemoryMutate` (the harness writes, not the TUI).
-    pending_memory_edit: Option<PendingMemoryEdit>,
-    /// The permission prompt currently awaiting an answer, if any. While set,
-    /// the prompt owns the screen and normal input is suspended (Design §5).
-    pub(crate) pending_permission: Option<(PermissionId, PermissionRendering)>,
-    /// Scroll offset (rows from top) into the current permission prompt's
-    /// content, so long commands/diffs can be reviewed in full (Design §5).
-    pub(crate) permission_scroll: usize,
-    /// The `ask_user` question currently awaiting an answer, if any (T-8). While
-    /// set, the question prompt owns the screen and normal input is suspended
-    /// (Design §5.1). Never the permission prompt's safety styling.
-    pub(crate) pending_ask: Option<AskPrompt>,
-    /// A pending loop-halt decision (S-5, Design §8.5) — the harness stepping in.
-    /// While set it owns the screen; harness voice, not the question prompt.
-    pub(crate) pending_loop_halt: Option<LoopHaltPrompt>,
-    /// A pending completion-gate halt decision (S-6, Design §8.7) — the
-    /// harness stepping in after a bounded number of failed completion
-    /// attempts. While set it owns the screen; harness voice.
-    pub(crate) pending_completion_gate: Option<CompletionGatePrompt>,
-    /// The guided provider/model setup wizard, in progress (Requirements
-    /// C-7, Design §4.6). While set it owns the screen.
-    pub(crate) pending_provider_wizard: Option<ProviderWizard>,
-    /// Writes a wizard-completed profile to disk (C-7), injected by the
-    /// binary composition root so this crate never owns `config.toml`/
-    /// `keys.toml` schema knowledge (A-1).
-    provider_writer: Arc<dyn ProviderProfileWriter>,
-    /// Model ids the wizard registered this session, keyed by profile name
-    /// (Requirements C-7): the picker has no other per-profile default model
-    /// to fall back to, so a freshly-added profile would otherwise be tried
-    /// with whatever model was previously active.
-    wizard_created_models: HashMap<String, String>,
     pub(crate) sidebar_visible: bool,
-    /// Conversation scrollback offset in rows *from the bottom*: 0 follows the
-    /// latest output; larger values scroll up into history. Clamped to content
-    /// at render time (Design §3.1 — the main pane owns scrollback).
-    pub(crate) scroll: usize,
-    /// Latest unified diff per modified file, for the diff overlay (Design
-    /// §4.2). Keyed by path.
-    latest_diffs: HashMap<String, String>,
-    /// The most recently modified file (target of the Ctrl+O diff overlay until
-    /// sidebar selection lands in group 8).
-    last_modified: Option<String>,
     /// The overlay stack; the last entry is on top and receives input.
     pub(crate) overlays: Vec<Overlay>,
     /// The command palette, when open (Ctrl+P). Modal while present.
@@ -535,19 +595,6 @@ pub struct App {
     /// `render::frame` and stored here by the `tui` loop after each draw, so a
     /// click resolves against the geometry actually on screen.
     pub(crate) hit_map: crate::hit::HitMap,
-    /// True while a turn is in flight (submit → `TurnEnded`): drives the
-    /// "working" spinner (Design §6.3).
-    busy: bool,
-    /// Whether motion is enabled (Design §6.4 off-switch). Off in degraded mode
-    /// (line frontend has no ticker) and via config/env.
-    pub(crate) motion: bool,
-    /// Animation frame counter, advanced by the ticker only while animating.
-    /// Time-source-free: elapsed ≈ `anim_frame / ANIM_FPS`.
-    anim_frame: usize,
-    /// Frames remaining in an overlay's ease-in expansion (Design §6.4).
-    overlay_ease: u8,
-    /// Frames remaining in the newest modified-file's settle highlight.
-    sidebar_settle: u8,
     /// The active theme (Design §2). One source the renderer reads; swapping it
     /// (mode/light-fallback later) is a value change, not a refactor.
     pub(crate) theme: Theme,
@@ -581,58 +628,70 @@ impl App {
         provider_writer: Arc<dyn ProviderProfileWriter>,
     ) -> Self {
         Self {
+            timeline: Timeline {
+                items: Vec::new(),
+                streaming: false,
+                scroll: 0,
+                reasoning: ReasoningView::default(),
+            },
+            usage: UsageState {
+                tokens: TokenUsage::default(),
+                cost_usd: 0.0,
+                cost_known: false,
+                context_pct: 0,
+                context_tokens: 0,
+            },
+            prompts: Prompts {
+                permission: None,
+                permission_scroll: 0,
+                ask: None,
+                loop_halt: None,
+                completion_gate: None,
+            },
+            wizard: WizardState {
+                pending: None,
+                writer: provider_writer,
+                created_models: HashMap::new(),
+            },
+            memory: MemoryPanel {
+                user: 0,
+                project: 0,
+                fetch: None,
+                pending_edit: None,
+            },
+            files: FilesState {
+                modified: Vec::new(),
+                diffs: HashMap::new(),
+                last: None,
+            },
+            anim: MotionState {
+                busy: false,
+                active: true,
+                frame: 0,
+                overlay_ease: 0,
+                sidebar_settle: 0,
+            },
             session,
             sessions_dir,
             profiles,
             config_template,
-            conversation: Vec::new(),
-            streaming: false,
-            reasoning_view: ReasoningView::default(),
             effort: None,
             effort_levels: Vec::new(),
             editor: LineEditor::new(),
-            context_pct: 0,
-            context_tokens: 0,
-            session_usage: TokenUsage::default(),
-            cost_usd: 0.0,
-            cost_known: false,
             sandbox: None,
             mode: emberly_core::Mode::default(),
-            modified_files: Vec::new(),
             tasks: Vec::new(),
-            memory_user: 0,
-            memory_project: 0,
             skills: Vec::new(),
             completion_status: Vec::new(),
-            memory_fetch: None,
-            pending_memory_edit: None,
-            pending_permission: None,
-            pending_ask: None,
-            pending_loop_halt: None,
-            pending_completion_gate: None,
-            pending_provider_wizard: None,
-            provider_writer,
-            wizard_created_models: HashMap::new(),
-            permission_scroll: 0,
             sidebar_visible: true,
-            scroll: 0,
-            latest_diffs: HashMap::new(),
-            last_modified: None,
             overlays: Vec::new(),
             palette: None,
             hit_map: crate::hit::HitMap::new(),
-            busy: false,
-            motion: true,
-            anim_frame: 0,
-            overlay_ease: 0,
-            sidebar_settle: 0,
             theme: Theme::rich(),
         }
     }
 }
 
-/// The `/help` body: every command with its keybinding and description, from
-/// the single registry (Design §3.3).
 /// The display label for a mode row in the picker. Auto tiers are annotated
 /// `(needs OS confinement)` when the sandbox is not active, so the picker is
 /// honest about why they can't be chosen (Requirements §6.4, §6.7).
@@ -679,6 +738,8 @@ fn skill_origin_label(origin: SkillOrigin) -> &'static str {
     }
 }
 
+/// The `/help` body: every command with its keybinding and description, from
+/// the single registry (Design §3.3).
 fn help_text() -> String {
     let mut out = String::from("Commands — run via Ctrl-P, /name, or a keybinding.\n\n");
     for spec in commands::COMMANDS {

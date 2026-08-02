@@ -61,7 +61,7 @@ impl App {
     /// `$EDITOR` handoff the frontend loop performs. A reply that no longer
     /// matches the recorded target (a stale/late arrival) is ignored.
     pub(super) fn apply_memory_body(&mut self, scope: MemoryScope, name: &str, body: String) {
-        let Some((intent, target)) = self.memory_fetch.take() else {
+        let Some((intent, target)) = self.memory.fetch.take() else {
             return;
         };
         if target.scope != scope || target.name != name {
@@ -78,7 +78,7 @@ impl App {
                 self.open_text_overlay(title, shown);
             }
             MemoryFetchIntent::Edit => {
-                self.pending_memory_edit = Some(PendingMemoryEdit {
+                self.memory.pending_edit = Some(PendingMemoryEdit {
                     scope,
                     name: target.name.clone(),
                     description: Some(target.description.clone()).filter(|d| !d.is_empty()),
@@ -112,7 +112,7 @@ impl App {
                     scope: target.scope,
                     name: target.name.clone(),
                 };
-                self.memory_fetch = Some((intent, target));
+                self.memory.fetch = Some((intent, target));
                 Action::Command(cmd)
             }
             None => Action::None,
@@ -142,7 +142,7 @@ impl App {
     /// Drain a staged memory edit for the frontend loop's `$EDITOR` handoff
     /// (FR-6, §4.6).
     pub fn take_pending_memory_edit(&mut self) -> Option<PendingMemoryEdit> {
-        self.pending_memory_edit.take()
+        self.memory.pending_edit.take()
     }
 
     /// Keys for the memory inspector (FR-6, Design §4.9): ↑/↓ move, Enter views

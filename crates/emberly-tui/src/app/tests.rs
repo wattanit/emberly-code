@@ -115,7 +115,7 @@ fn provider_wizard_happy_path_writes_and_fires_reload() {
     // rows: [anthropic, "+ add new provider…"] — move to the trailing row.
     let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Down));
     let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Enter));
-    assert!(a.pending_provider_wizard.is_some());
+    assert!(a.wizard.pending.is_some());
 
     type_str(&mut a, "deepseek");
     let _ = a.on_key(KeyEvent::from(KeyCode::Enter)); // Name -> Adapter
@@ -129,9 +129,9 @@ fn provider_wizard_happy_path_writes_and_fires_reload() {
     let action = a.on_key(KeyEvent::from(KeyCode::Enter)); // write
 
     assert!(matches!(action, Action::Command(Command::ReloadConfig)));
-    assert!(a.pending_provider_wizard.is_none());
+    assert!(a.wizard.pending.is_none());
     assert_eq!(
-        a.wizard_created_models.get("deepseek").map(String::as_str),
+        a.wizard.created_models.get("deepseek").map(String::as_str),
         Some("deepseek-chat")
     );
 }
@@ -149,7 +149,7 @@ fn provider_wizard_rejects_empty_name_and_stays_on_step() {
     let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Enter));
     let action = a.on_key(KeyEvent::from(KeyCode::Enter));
     assert_eq!(action, Action::None);
-    let Some(wizard) = a.pending_provider_wizard.as_ref() else {
+    let Some(wizard) = a.wizard.pending.as_ref() else {
         panic!("wizard should still be open");
     };
     assert_eq!(wizard.step, WizardStep::Name);
@@ -168,12 +168,12 @@ fn provider_wizard_esc_steps_back_without_losing_the_value() {
     let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Enter));
     type_str(&mut a, "zai2");
     let _ = a.on_key(KeyEvent::from(KeyCode::Enter)); // Name -> Adapter
-    let Some(wizard) = a.pending_provider_wizard.as_ref() else {
+    let Some(wizard) = a.wizard.pending.as_ref() else {
         panic!("wizard should still be open");
     };
     assert_eq!(wizard.step, WizardStep::Adapter);
     let _ = a.on_key(KeyEvent::from(KeyCode::Esc)); // Adapter -> Name
-    let Some(wizard) = a.pending_provider_wizard.as_ref() else {
+    let Some(wizard) = a.wizard.pending.as_ref() else {
         panic!("wizard should still be open");
     };
     assert_eq!(wizard.step, WizardStep::Name);
@@ -195,7 +195,7 @@ fn provider_wizard_rejects_a_name_already_in_use() {
     type_str(&mut a, "anthropic");
     let action = a.on_key(KeyEvent::from(KeyCode::Enter));
     assert_eq!(action, Action::None);
-    let Some(wizard) = a.pending_provider_wizard.as_ref() else {
+    let Some(wizard) = a.wizard.pending.as_ref() else {
         panic!("wizard should still be open");
     };
     assert_eq!(wizard.step, WizardStep::Name);
@@ -208,7 +208,8 @@ fn slash_modelx_is_not_the_model_command() {
     let mut a = app();
     assert_eq!(a.run_slash("modelx"), Action::None);
     assert!(a
-        .conversation
+        .timeline
+        .items
         .iter()
         .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown command"))));
 }
@@ -222,7 +223,8 @@ fn every_registry_name_is_reachable_as_a_slash_command() {
         let mut a = app();
         a.run_slash(spec.name);
         assert!(
-            !a.conversation
+            !a.timeline
+                .items
                 .iter()
                 .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown command"))),
             "/{} was not recognized",
@@ -295,7 +297,7 @@ fn mode_picker_refuses_auto_without_confinement() {
     let _ = a.on_choice_picker_key(KeyEvent::from(KeyCode::Down));
     let action = a.on_choice_picker_key(KeyEvent::from(KeyCode::Enter));
     assert_eq!(action, Action::None);
-    assert!(a.conversation.iter().any(|i| matches!(
+    assert!(a.timeline.items.iter().any(|i| matches!(
         i,
         ConvItem::Notice(n) if n.contains("unavailable without OS confinement")
     )));
@@ -320,7 +322,8 @@ fn slash_mode_arg_sets_directly_and_validates() {
     // Unknown mode → a notice, not a command.
     assert_eq!(a.run_slash("mode bogus"), Action::None);
     assert!(a
-        .conversation
+        .timeline
+        .items
         .iter()
         .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown mode"))));
 }
@@ -329,7 +332,7 @@ fn slash_mode_arg_sets_directly_and_validates() {
 fn slash_mode_arg_refuses_auto_without_confinement() {
     let mut a = app(); // sandbox: None
     assert_eq!(a.run_slash("mode auto-accept-edits"), Action::None);
-    assert!(a.conversation.iter().any(|i| matches!(
+    assert!(a.timeline.items.iter().any(|i| matches!(
         i,
         ConvItem::Notice(n) if n.contains("unavailable without OS confinement")
     )));
@@ -388,7 +391,8 @@ fn slash_prompt_seeds_from_default_and_rejects_unknown() {
     // An unknown prompt name is a notice, not an edit.
     assert_eq!(a.run_slash("prompt bogus"), Action::None);
     assert!(a
-        .conversation
+        .timeline
+        .items
         .iter()
         .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("unknown prompt"))));
 }
@@ -410,13 +414,13 @@ fn edit_provenance_distinguishes_new_override_from_existing() {
     // First edit: no project config yet → seeded, told it overrides defaults.
     a.run_slash("config");
     assert!(matches!(
-        a.conversation.last(),
+        a.timeline.items.last(),
         Some(ConvItem::Notice(n)) if n.contains("no project config yet")
     ));
     // Second edit: the file exists → editing an existing project value.
     a.run_slash("config");
     assert!(matches!(
-        a.conversation.last(),
+        a.timeline.items.last(),
         Some(ConvItem::Notice(n)) if n.contains("editing your project config")
     ));
 }
@@ -429,7 +433,8 @@ fn note_edit_reports_no_editor() {
         crate::edit::EditStatus::NoEditor,
     );
     assert!(a
-        .conversation
+        .timeline
+        .items
         .iter()
         .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("no editor configured"))));
 }
@@ -451,8 +456,8 @@ fn assistant_deltas_accumulate_into_one_item() {
     a.apply_event(UiEvent::AssistantDelta { text: "Hel".into() });
     a.apply_event(UiEvent::AssistantDelta { text: "lo".into() });
     a.apply_event(UiEvent::AssistantDone);
-    assert_eq!(a.conversation, vec![ConvItem::Assistant("Hello".into())]);
-    assert!(!a.streaming);
+    assert_eq!(a.timeline.items, vec![ConvItem::Assistant("Hello".into())]);
+    assert!(!a.timeline.streaming);
 }
 
 #[test]
@@ -472,7 +477,7 @@ fn tool_finished_marks_the_matching_start() {
         preview: "hello\nworld".into(),
         untrusted: false,
     });
-    match &a.conversation[0] {
+    match &a.timeline.items[0] {
         ConvItem::Tool {
             done,
             summary,
@@ -499,7 +504,7 @@ fn tool_started_carries_the_explanation_onto_the_item() {
         summary: "run: sed …".into(),
         explanation: Some("raise the log level".into()),
     });
-    match &a.conversation[0] {
+    match &a.timeline.items[0] {
         ConvItem::Tool { explanation, .. } => {
             assert_eq!(explanation.as_deref(), Some("raise the log level"));
         }
@@ -520,8 +525,11 @@ fn file_diff_shows_inline_and_opens_overlay() {
         unified: "--- a/a.rs\n+++ b/a.rs\n+x".into(),
     });
     // Inline diff item recorded.
-    assert!(matches!(a.conversation.last(), Some(ConvItem::Diff { .. })));
-    assert_eq!(a.last_modified.as_deref(), Some("a.rs"));
+    assert!(matches!(
+        a.timeline.items.last(),
+        Some(ConvItem::Diff { .. })
+    ));
+    assert_eq!(a.files.last.as_deref(), Some("a.rs"));
     // Ctrl+O opens the overlay for the most-recent file.
     a.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(a.overlays.len(), 1);
@@ -537,7 +545,7 @@ fn busy_spinner_spans_the_turn_and_respects_gates() {
     // Submitting a message enters the busy/working state.
     a.on_key(KeyEvent::from(KeyCode::Char('h')));
     a.on_key(KeyEvent::from(KeyCode::Enter));
-    assert!(a.busy);
+    assert!(a.anim.busy);
     assert!(a.is_animating(), "spinner runs while working");
     // No elapsed time before the threshold; the glyph cycles on tick.
     assert_eq!(a.spinner_elapsed(), None);
@@ -562,7 +570,7 @@ fn busy_spinner_spans_the_turn_and_respects_gates() {
     a.on_key(KeyEvent::from(KeyCode::Enter)); // deny
     assert!(a.is_animating());
     a.apply_event(UiEvent::TurnEnded);
-    assert!(!a.busy);
+    assert!(!a.anim.busy);
     assert!(!a.is_animating());
 }
 
@@ -574,11 +582,11 @@ fn esc_cancels_an_in_flight_turn() {
         a.on_key(KeyEvent::from(KeyCode::Esc)),
         Action::None
     ));
-    assert!(!a.busy);
+    assert!(!a.anim.busy);
 
     a.on_key(KeyEvent::from(KeyCode::Char('h')));
     a.on_key(KeyEvent::from(KeyCode::Enter));
-    assert!(a.busy);
+    assert!(a.anim.busy);
     let action = a.on_key(KeyEvent::from(KeyCode::Esc));
     assert!(matches!(action, Action::Command(Command::Cancel)));
 }
@@ -594,7 +602,7 @@ fn ctrl_c_cancels_an_in_flight_turn_but_quits_when_idle() {
 
     a.on_key(KeyEvent::from(KeyCode::Char('h')));
     a.on_key(KeyEvent::from(KeyCode::Enter));
-    assert!(a.busy);
+    assert!(a.anim.busy);
     let action = a.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(matches!(action, Action::Command(Command::Cancel)));
 }
@@ -602,8 +610,8 @@ fn ctrl_c_cancels_an_in_flight_turn_but_quits_when_idle() {
 #[test]
 fn motion_off_disables_animation() {
     let mut a = app();
-    a.motion = false;
-    a.busy = true;
+    a.anim.active = false;
+    a.anim.busy = true;
     assert!(!a.is_animating(), "motion=false is the off switch");
 }
 
@@ -650,7 +658,7 @@ fn sidebar_settle_highlights_only_new_entries() {
 #[test]
 fn motion_off_skips_transient_effects() {
     let mut a = app();
-    a.motion = false;
+    a.anim.active = false;
     a.open_text_overlay("t", "body");
     assert!(!a.is_animating());
     assert!(
@@ -727,21 +735,24 @@ fn session_usage_is_stored() {
             output: 340,
         },
     });
-    assert_eq!(a.session_usage.input, 1200);
-    assert_eq!(a.session_usage.output, 340);
+    assert_eq!(a.usage.tokens.input, 1200);
+    assert_eq!(a.usage.tokens.output, 340);
 }
 
 #[test]
 fn wheel_scrolls_conversation_and_routes_to_overlay() {
     let mut a = app();
     a.on_scroll(true); // wheel up → into history
-    assert!(a.scroll > 0);
+    assert!(a.timeline.scroll > 0);
     a.on_scroll(false);
-    assert_eq!(a.scroll, 0);
+    assert_eq!(a.timeline.scroll, 0);
     // With an overlay open, the wheel scrolls the overlay, not the history.
     a.open_text_overlay("t", "x");
     a.on_scroll(false);
-    assert_eq!(a.scroll, 0, "conversation untouched while overlay is up");
+    assert_eq!(
+        a.timeline.scroll, 0,
+        "conversation untouched while overlay is up"
+    );
     assert!(a.active_overlay().is_some_and(|o| o.scroll > 0));
 }
 
@@ -760,7 +771,7 @@ fn wheel_routes_to_the_open_palette() {
     a.on_scroll(true);
     assert_eq!(a.palette.as_ref().map(|p| p.selected), Some(0));
     // The wheel never leaks to the conversation while the palette is up.
-    assert_eq!(a.scroll, 0);
+    assert_eq!(a.timeline.scroll, 0);
 }
 
 #[test]
@@ -846,13 +857,13 @@ fn click_reasoning_toggle_matches_ctrl_r() {
     // A click expands the trail — exactly Ctrl+R.
     assert_eq!(a.on_click(0, 0), Action::None);
     assert!(matches!(
-        a.conversation.first(),
+        a.timeline.items.first(),
         Some(ConvItem::Reasoning { expanded: true, .. })
     ));
     // A second click collapses it (parity with a second Ctrl+R).
     a.on_click(0, 0);
     assert!(matches!(
-        a.conversation.first(),
+        a.timeline.items.first(),
         Some(ConvItem::Reasoning {
             expanded: false,
             ..
@@ -1006,7 +1017,7 @@ fn a_click_off_the_permission_affordances_never_decides() {
     let mut a = pending_permission_app();
     assert_eq!(a.on_click(5, 5), Action::None);
     assert!(
-        a.pending_permission.is_some(),
+        a.prompts.permission.is_some(),
         "a click off the affordances must not decide"
     );
     // A Deny click is safe; still no *approval* ever appears without the
@@ -1056,9 +1067,9 @@ fn modified_files_upsert_by_path() {
         adds: 3,
         dels: 2,
     });
-    assert_eq!(a.modified_files.len(), 1);
-    assert_eq!(a.modified_files[0].adds, 3);
-    assert_eq!(a.modified_files[0].dels, 2);
+    assert_eq!(a.files.modified.len(), 1);
+    assert_eq!(a.files.modified[0].adds, 3);
+    assert_eq!(a.files.modified[0].dels, 2);
 }
 
 #[test]
@@ -1083,7 +1094,7 @@ fn permission_defaults_to_deny_on_enter() {
             decision: PermissionDecision::Deny,
         })
     );
-    assert!(a.pending_permission.is_none());
+    assert!(a.prompts.permission.is_none());
 }
 
 // ---- ask_user question prompt (T-8, Design §5.1) ---------------------
@@ -1103,7 +1114,7 @@ fn ask_enter_never_auto_answers() {
     // Nothing typed, no option chosen: Enter must not answer (Design §5.1).
     let action = a.on_key(KeyEvent::from(KeyCode::Enter));
     assert_eq!(action, Action::None);
-    assert!(a.pending_ask.is_some(), "the question is still waiting");
+    assert!(a.prompts.ask.is_some(), "the question is still waiting");
 }
 
 #[test]
@@ -1118,7 +1129,7 @@ fn ask_esc_declines() {
             answer: AskAnswer::Declined,
         })
     );
-    assert!(a.pending_ask.is_none());
+    assert!(a.prompts.ask.is_none());
 }
 
 #[test]
@@ -1176,8 +1187,8 @@ fn ask_free_text_works_without_options() {
 #[test]
 fn ask_prompt_stills_motion() {
     let mut a = app();
-    a.busy = true;
-    a.motion = true;
+    a.anim.busy = true;
+    a.anim.active = true;
     assert!(a.is_working(), "working before the question");
     ask(&mut a, &["dev"]);
     assert!(
@@ -1206,7 +1217,7 @@ fn loop_halt_keep_going_resumes() {
             resolution: LoopResolution::Resume
         })
     );
-    assert!(a.pending_loop_halt.is_none());
+    assert!(a.prompts.loop_halt.is_none());
 }
 
 #[test]
@@ -1229,7 +1240,7 @@ fn loop_halt_say_something_then_steer() {
     let mut a = app();
     halt(&mut a);
     a.on_key(KeyEvent::from(KeyCode::Char('t')));
-    assert!(a.pending_loop_halt.as_ref().is_some_and(|h| h.steering));
+    assert!(a.prompts.loop_halt.as_ref().is_some_and(|h| h.steering));
     for c in "read a.txt".chars() {
         a.on_key(KeyEvent::from(KeyCode::Char(c)));
     }
@@ -1249,7 +1260,7 @@ fn loop_halt_steer_esc_returns_to_menu() {
     a.on_key(KeyEvent::from(KeyCode::Char('t')));
     a.on_key(KeyEvent::from(KeyCode::Char('x')));
     a.on_key(KeyEvent::from(KeyCode::Esc)); // back to menu, not a decision
-    assert!(a.pending_loop_halt.as_ref().is_some_and(|h| !h.steering));
+    assert!(a.prompts.loop_halt.as_ref().is_some_and(|h| !h.steering));
     let action = a.on_key(KeyEvent::from(KeyCode::Char('g')));
     assert_eq!(
         action,
@@ -1262,8 +1273,8 @@ fn loop_halt_steer_esc_returns_to_menu() {
 #[test]
 fn loop_halt_stills_motion() {
     let mut a = app();
-    a.busy = true;
-    a.motion = true;
+    a.anim.busy = true;
+    a.anim.active = true;
     halt(&mut a);
     assert!(!a.is_working(), "the halt screen is perfectly still");
     assert!(!a.is_animating());
@@ -1293,7 +1304,7 @@ fn completion_gate_keep_going_resumes() {
             resolution: GateResolution::Resume
         })
     );
-    assert!(a.pending_completion_gate.is_none());
+    assert!(a.prompts.completion_gate.is_none());
 }
 
 #[test]
@@ -1324,7 +1335,7 @@ fn completion_gate_finish_anyway_is_a_distinct_choice() {
             resolution: GateResolution::Finish
         })
     );
-    assert!(a.pending_completion_gate.is_none());
+    assert!(a.prompts.completion_gate.is_none());
 }
 
 #[test]
@@ -1333,7 +1344,8 @@ fn completion_gate_say_something_then_steer() {
     gate_halt(&mut a);
     a.on_key(KeyEvent::from(KeyCode::Char('t')));
     assert!(a
-        .pending_completion_gate
+        .prompts
+        .completion_gate
         .as_ref()
         .is_some_and(|h| h.steering));
     for c in "fix the failing test".chars() {
@@ -1356,7 +1368,8 @@ fn completion_gate_steer_esc_returns_to_menu() {
     a.on_key(KeyEvent::from(KeyCode::Char('x')));
     a.on_key(KeyEvent::from(KeyCode::Esc)); // back to menu, not a decision
     assert!(a
-        .pending_completion_gate
+        .prompts
+        .completion_gate
         .as_ref()
         .is_some_and(|h| !h.steering));
     let action = a.on_key(KeyEvent::from(KeyCode::Char('g')));
@@ -1371,8 +1384,8 @@ fn completion_gate_steer_esc_returns_to_menu() {
 #[test]
 fn completion_gate_stills_motion() {
     let mut a = app();
-    a.busy = true;
-    a.motion = true;
+    a.anim.busy = true;
+    a.anim.active = true;
     gate_halt(&mut a);
     assert!(!a.is_working(), "the halt screen is perfectly still");
     assert!(!a.is_animating());
@@ -1412,16 +1425,16 @@ fn permission_scroll_keys_review_without_deciding() {
     });
     // Scrolling and Space page-down must NOT decide.
     a.on_key(KeyEvent::from(KeyCode::Down));
-    assert!(a.permission_scroll > 0);
-    assert!(a.pending_permission.is_some(), "scroll must not decide");
+    assert!(a.prompts.permission_scroll > 0);
+    assert!(a.prompts.permission.is_some(), "scroll must not decide");
     a.on_key(KeyEvent::from(KeyCode::Char(' ')));
-    assert!(a.pending_permission.is_some());
+    assert!(a.prompts.permission.is_some());
     // A stray letter is ignored — no accidental decision either way.
     a.on_key(KeyEvent::from(KeyCode::Char('k')));
-    assert!(a.pending_permission.is_some());
+    assert!(a.prompts.permission.is_some());
     // Home returns to the top.
     a.on_key(KeyEvent::from(KeyCode::Home));
-    assert_eq!(a.permission_scroll, 0);
+    assert_eq!(a.prompts.permission_scroll, 0);
 }
 
 #[test]
@@ -1441,12 +1454,15 @@ fn wheel_scrolls_a_permission_prompt_without_deciding() {
     // The wheel reviews the prompt body (permission_scroll), never the
     // conversation, and never decides (Design §5, §3.4).
     a.on_scroll(false);
-    assert!(a.permission_scroll > 0);
-    assert_eq!(a.scroll, 0, "conversation untouched while a prompt is up");
-    assert!(a.pending_permission.is_some(), "the wheel never decides");
+    assert!(a.prompts.permission_scroll > 0);
+    assert_eq!(
+        a.timeline.scroll, 0,
+        "conversation untouched while a prompt is up"
+    );
+    assert!(a.prompts.permission.is_some(), "the wheel never decides");
     a.on_scroll(true);
-    assert_eq!(a.permission_scroll, 0);
-    assert!(a.pending_permission.is_some());
+    assert_eq!(a.prompts.permission_scroll, 0);
+    assert!(a.prompts.permission.is_some());
 }
 
 #[test]
@@ -1486,7 +1502,7 @@ fn enter_submits_user_input() {
     assert!(a.editor.is_empty());
     // The prompt is echoed into the timeline so the pane is a full
     // top-to-bottom transcript of both sides.
-    assert_eq!(a.conversation.last(), Some(&ConvItem::User("hi".into())));
+    assert_eq!(a.timeline.items.last(), Some(&ConvItem::User("hi".into())));
 }
 
 #[test]
@@ -1498,7 +1514,8 @@ fn slash_command_is_not_echoed_as_a_message() {
     a.on_key(KeyEvent::from(KeyCode::Enter));
     // A slash command runs (opens the help overlay); it is not a message.
     assert!(!a
-        .conversation
+        .timeline
+        .items
         .iter()
         .any(|i| matches!(i, ConvItem::User(_))));
 }
@@ -1524,9 +1541,9 @@ fn row(id: SessionId, current: bool) -> SessionRow {
 fn new_command_returns_action_when_idle_and_is_refused_while_busy() {
     let mut a = app();
     assert_eq!(a.run_command(AppCommand::NewSession), Action::NewSession);
-    a.busy = true;
+    a.anim.busy = true;
     assert_eq!(a.run_command(AppCommand::NewSession), Action::None);
-    assert!(matches!(a.conversation.last(), Some(ConvItem::Notice(_))));
+    assert!(matches!(a.timeline.items.last(), Some(ConvItem::Notice(_))));
 }
 
 #[test]
@@ -1570,20 +1587,20 @@ fn picker_enter_on_another_session_resumes_it() {
 #[test]
 fn picker_enter_while_busy_defers_instead_of_switching() {
     let mut a = app();
-    a.busy = true;
+    a.anim.busy = true;
     picker(&mut a, vec![row(SessionId::new(), false)]);
     assert_eq!(
         a.on_session_picker_key(KeyEvent::from(KeyCode::Enter)),
         Action::None
     );
-    assert!(matches!(a.conversation.last(), Some(ConvItem::Notice(_))));
+    assert!(matches!(a.timeline.items.last(), Some(ConvItem::Notice(_))));
 }
 
 #[test]
 fn begin_new_session_resets_the_timeline_and_identity() {
     let mut a = app();
-    a.conversation.push(ConvItem::User("old".into()));
-    a.modified_files.push(ModifiedFile {
+    a.timeline.items.push(ConvItem::User("old".into()));
+    a.files.modified.push(ModifiedFile {
         path: "x".into(),
         adds: 1,
         dels: 0,
@@ -1592,9 +1609,10 @@ fn begin_new_session_resets_the_timeline_and_identity() {
     a.begin_new_session(id);
     assert_eq!(a.session.session_id, id);
     assert!(a.session.title.is_empty());
-    assert!(a.modified_files.is_empty());
+    assert!(a.files.modified.is_empty());
     assert!(!a
-        .conversation
+        .timeline
+        .items
         .iter()
         .any(|i| matches!(i, ConvItem::User(t) if t == "old")));
 }
@@ -1602,13 +1620,14 @@ fn begin_new_session_resets_the_timeline_and_identity() {
 #[test]
 fn begin_resumed_session_adopts_title_and_clears_prior_timeline() {
     let mut a = app();
-    a.conversation.push(ConvItem::User("old".into()));
+    a.timeline.items.push(ConvItem::User("old".into()));
     let id = SessionId::new();
     a.begin_resumed_session(id, "resumed".into(), &[]);
     assert_eq!(a.session.session_id, id);
     assert_eq!(a.session.title, "resumed");
     assert!(!a
-        .conversation
+        .timeline
+        .items
         .iter()
         .any(|i| matches!(i, ConvItem::User(t) if t == "old")));
 }
@@ -1624,7 +1643,7 @@ fn reasoning_delta_builds_a_trail_that_settles_on_the_answer() {
     });
     // While thinking, the trail streams expanded.
     assert!(matches!(
-        a.conversation.last(),
+        a.timeline.items.last(),
         Some(ConvItem::Reasoning { text, expanded: true }) if text == "think more"
     ));
     // The answer begins → the trail settles to collapsed (default view).
@@ -1632,19 +1651,19 @@ fn reasoning_delta_builds_a_trail_that_settles_on_the_answer() {
         text: "answer".into(),
     });
     assert!(matches!(
-        a.conversation.first(),
+        a.timeline.items.first(),
         Some(ConvItem::Reasoning {
             expanded: false,
             ..
         })
     ));
-    assert!(matches!(a.conversation.last(), Some(ConvItem::Assistant(t)) if t == "answer"));
+    assert!(matches!(a.timeline.items.last(), Some(ConvItem::Assistant(t)) if t == "answer"));
 }
 
 #[test]
 fn hidden_view_drops_the_trail_but_keeps_the_answer() {
     let mut a = app();
-    a.reasoning_view = ReasoningView::Hidden;
+    a.timeline.reasoning = ReasoningView::Hidden;
     a.apply_event(UiEvent::ReasoningDelta {
         text: "secret".into(),
     });
@@ -1652,20 +1671,21 @@ fn hidden_view_drops_the_trail_but_keeps_the_answer() {
         text: "answer".into(),
     });
     assert!(!a
-        .conversation
+        .timeline
+        .items
         .iter()
         .any(|i| matches!(i, ConvItem::Reasoning { .. })));
-    assert!(matches!(a.conversation.last(), Some(ConvItem::Assistant(t)) if t == "answer"));
+    assert!(matches!(a.timeline.items.last(), Some(ConvItem::Assistant(t)) if t == "answer"));
 }
 
 #[test]
 fn expanded_view_keeps_the_trail_open_after_the_answer() {
     let mut a = app();
-    a.reasoning_view = ReasoningView::Expanded;
+    a.timeline.reasoning = ReasoningView::Expanded;
     a.apply_event(UiEvent::ReasoningDelta { text: "why".into() });
     a.apply_event(UiEvent::AssistantDelta { text: "a".into() });
     assert!(matches!(
-        a.conversation.first(),
+        a.timeline.items.first(),
         Some(ConvItem::Reasoning { expanded: true, .. })
     ));
 }
@@ -1677,7 +1697,7 @@ fn ctrl_r_toggles_the_reasoning_trail() {
     a.apply_event(UiEvent::AssistantDelta { text: "a".into() }); // settle → collapsed
     a.toggle_reasoning();
     assert!(matches!(
-        a.conversation.first(),
+        a.timeline.items.first(),
         Some(ConvItem::Reasoning { expanded: true, .. })
     ));
 }
@@ -1688,7 +1708,8 @@ fn effort_picker_offers_levels_and_declines_when_none() {
     // No effort control ⇒ a calm notice, no overlay.
     assert_eq!(a.run_slash("effort"), Action::None);
     assert!(a
-        .conversation
+        .timeline
+        .items
         .iter()
         .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("no reasoning-effort"))));
     assert!(a.overlays.is_empty());
@@ -1719,7 +1740,8 @@ fn effort_arg_sets_a_supported_level_and_rejects_others() {
     // A level the model doesn't offer is a notice, not a command.
     assert_eq!(a.run_slash("effort medium"), Action::None);
     assert!(a
-        .conversation
+        .timeline
+        .items
         .iter()
         .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("does not offer"))));
 }

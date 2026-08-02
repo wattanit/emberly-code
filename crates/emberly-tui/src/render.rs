@@ -65,15 +65,15 @@ pub fn frame(f: &mut Frame, app: &App, hit: &mut HitMap) {
     // A pending permission prompt or question prompt takes over the whole main
     // area — no input box is shown, so nothing can be typed into a decision
     // (Design §5, §5.1). The permission prompt wins if somehow both are set.
-    if app.pending_permission.is_some() {
+    if app.prompts.permission.is_some() {
         render_permission(f, app, main, hit);
-    } else if app.pending_ask.is_some() {
+    } else if app.prompts.ask.is_some() {
         render_ask(f, app, main);
-    } else if app.pending_loop_halt.is_some() {
+    } else if app.prompts.loop_halt.is_some() {
         render_loop_halt(f, app, main);
-    } else if app.pending_completion_gate.is_some() {
+    } else if app.prompts.completion_gate.is_some() {
         render_completion_gate(f, app, main);
-    } else if app.pending_provider_wizard.is_some() {
+    } else if app.wizard.pending.is_some() {
         render_provider_wizard(f, app, main);
     } else {
         // Conversation over the input box.
@@ -90,11 +90,11 @@ pub fn frame(f: &mut Frame, app: &App, hit: &mut HitMap) {
         // The sidebar's click regions are live only on the base layer — not
         // while a permission/ask/loop prompt owns input (Design §3.4/§5). An
         // overlay or palette clears the map afterward, covering those.
-        let base_active = app.pending_permission.is_none()
-            && app.pending_ask.is_none()
-            && app.pending_loop_halt.is_none()
-            && app.pending_completion_gate.is_none()
-            && app.pending_provider_wizard.is_none();
+        let base_active = app.prompts.permission.is_none()
+            && app.prompts.ask.is_none()
+            && app.prompts.loop_halt.is_none()
+            && app.prompts.completion_gate.is_none()
+            && app.wizard.pending.is_none();
         render_sidebar(f, app, area, hit, base_active);
     }
     render_status(f, app, status, sidebar_shown);
@@ -625,7 +625,7 @@ fn render_conversation(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
     let lines = conversation_lines(app, width, &mut reasoning_line);
     let total = lines.len();
     let max_scroll = total.saturating_sub(height);
-    let scroll = app.scroll.min(max_scroll);
+    let scroll = app.timeline.scroll.min(max_scroll);
     let end = total - scroll;
     let start = end.saturating_sub(height);
     let visible: Vec<Line> = lines[start..end].to_vec();
@@ -672,7 +672,7 @@ fn conversation_lines(
     let mut out: Vec<Line<'static>> = Vec::new();
     let w = width.max(1);
 
-    for item in &app.conversation {
+    for item in &app.timeline.items {
         match item {
             ConvItem::User(text) => {
                 push_wrapped(
@@ -961,12 +961,12 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
             theme.chrome(),
         ),
         Span::styled(
-            format!("{}%", app.context_pct),
-            context_style(theme, app.context_pct),
+            format!("{}%", app.usage.context_pct),
+            context_style(theme, app.usage.context_pct),
         ),
     ]));
     // Cumulative session tokens (in + out), always available (Design §3.1).
-    let usage = &app.session_usage;
+    let usage = &app.usage.tokens;
     lines.push(Line::from(vec![
         Span::styled(
             format!("{} ", strings::status::TOKENS_LABEL),
@@ -984,10 +984,10 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
             theme.chrome(),
         ),
     ]));
-    if app.cost_known {
+    if app.usage.cost_known {
         lines.push(Line::from(vec![
             Span::styled("cost ", theme.chrome()),
-            Span::styled(format!("${:.4} ", app.cost_usd), theme.primary()),
+            Span::styled(format!("${:.4} ", app.usage.cost_usd), theme.primary()),
             Span::styled(strings::status::COST_ESTIMATE_SUFFIX, theme.chrome()),
         ]));
     }
@@ -1007,12 +1007,12 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
         strings::status::MODIFIED_FILES_TITLE,
         theme.chrome(),
     )));
-    if app.modified_files.is_empty() {
+    if app.files.modified.is_empty() {
         lines.push(Line::from(Span::styled("  —", theme.chrome())));
     } else {
         // Clickable → open the diff (Ctrl+O twin); range set after the rows.
-        let last = app.modified_files.len() - 1;
-        for (i, file) in app.modified_files.iter().enumerate() {
+        let last = app.files.modified.len() - 1;
+        for (i, file) in app.files.modified.iter().enumerate() {
             let counts = format!(" +{} -{}", file.adds, file.dels);
             let path_w = w.saturating_sub(text::width(&counts));
             // The newest entry briefly settles in on the accent (Design §6.4).
@@ -1051,12 +1051,12 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
 
     // Memory counts (T-13, FR-6, Design §4.9): per-scope entry counts, not
     // bodies. An empty store shows no section (Design §3.1).
-    if app.memory_user > 0 || app.memory_project > 0 {
+    if app.memory.user > 0 || app.memory.project > 0 {
         lines.push(Line::from(""));
         let start = lines.len();
         lines.push(Line::from(Span::styled("Memory", theme.chrome())));
         lines.push(Line::from(Span::styled(
-            format!("user {} · project {}", app.memory_user, app.memory_project),
+            format!("user {} · project {}", app.memory.user, app.memory.project),
             theme.primary(),
         )));
         memory_range = Some((start, lines.len())); // clickable → open /memory
@@ -1250,17 +1250,17 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
     let theme = &app.theme;
-    let hints = if app.pending_permission.is_some() {
+    let hints = if app.prompts.permission.is_some() {
         strings::hints::PERMISSION
-    } else if app.pending_ask.is_some() {
+    } else if app.prompts.ask.is_some() {
         strings::ask_user::HINT
-    } else if let Some(halt) = &app.pending_loop_halt {
+    } else if let Some(halt) = &app.prompts.loop_halt {
         if halt.steering {
             strings::loop_halt::STEER_HINT
         } else {
             strings::loop_halt::HINT
         }
-    } else if let Some(halt) = &app.pending_completion_gate {
+    } else if let Some(halt) = &app.prompts.completion_gate {
         if halt.steering {
             strings::completion_gate::STEER_HINT
         } else {
@@ -1275,7 +1275,11 @@ fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
     let ctx = if sidebar_shown {
         String::new()
     } else {
-        format!("{} {}%  ", strings::status::CONTEXT_ABBR, app.context_pct)
+        format!(
+            "{} {}%  ",
+            strings::status::CONTEXT_ABBR,
+            app.usage.context_pct
+        )
     };
 
     let mut spans: Vec<Span> = Vec::new();
@@ -1323,7 +1327,7 @@ fn render_permission(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
     // Clear anything behind it (no click-through to the conversation/sidebar),
     // then register **only** the footer affordances below.
     hit.clear();
-    let Some((_, r)) = &app.pending_permission else {
+    let Some((_, r)) = &app.prompts.permission else {
         return;
     };
 
@@ -1398,7 +1402,7 @@ fn render_permission(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
 
     let total = body.len();
     let max_scroll = total.saturating_sub(body_rows);
-    let scroll = app.permission_scroll.min(max_scroll);
+    let scroll = app.prompts.permission_scroll.min(max_scroll);
     let end = (scroll + body_rows).min(total);
     let visible: Vec<Line> = body.get(scroll..end).unwrap_or(&[]).to_vec();
     let hidden_below = max_scroll - scroll;
@@ -1466,7 +1470,7 @@ fn render_permission(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
 /// `App::on_ask_key`.
 fn render_ask(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
-    let Some(p) = &app.pending_ask else {
+    let Some(p) = &app.prompts.ask else {
         return;
     };
 
@@ -1556,7 +1560,7 @@ fn render_ask(f: &mut Frame, app: &App, area: Rect) {
 fn render_loop_halt(f: &mut Frame, app: &App, area: Rect) {
     use strings::loop_halt as s;
     let theme = &app.theme;
-    let Some(halt) = &app.pending_loop_halt else {
+    let Some(halt) = &app.prompts.loop_halt else {
         return;
     };
 
@@ -1636,7 +1640,7 @@ fn render_loop_halt(f: &mut Frame, app: &App, area: Rect) {
 fn render_completion_gate(f: &mut Frame, app: &App, area: Rect) {
     use strings::completion_gate as s;
     let theme = &app.theme;
-    let Some(halt) = &app.pending_completion_gate else {
+    let Some(halt) = &app.prompts.completion_gate else {
         return;
     };
 
@@ -1723,7 +1727,7 @@ fn render_completion_gate(f: &mut Frame, app: &App, area: Rect) {
 fn render_provider_wizard(f: &mut Frame, app: &App, area: Rect) {
     use strings::provider_wizard as s;
     let theme = &app.theme;
-    let Some(wizard) = app.pending_provider_wizard.as_ref() else {
+    let Some(wizard) = app.wizard.pending.as_ref() else {
         return;
     };
 
@@ -2137,13 +2141,13 @@ mod tests {
             String::new(),
             test_provider_writer(),
         );
-        app.modified_files.push(crate::app::ModifiedFile {
+        app.files.modified.push(crate::app::ModifiedFile {
             path: "src/x.rs".into(),
             adds: 3,
             dels: 1,
         });
-        app.memory_user = 2;
-        app.memory_project = 1;
+        app.memory.user = 2;
+        app.memory.project = 1;
         app.skills.push(SkillMeta {
             name: "review".into(),
             description: "d".into(),
@@ -2166,7 +2170,7 @@ mod tests {
             String::new(),
             test_provider_writer(),
         );
-        app.memory_user = 1;
+        app.memory.user = 1;
         pending(&mut app, false, "rm -rf build"); // a permission prompt owns input
         let hit = hit_map_of(&app, 120, 40);
         assert!(

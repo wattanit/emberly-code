@@ -13,23 +13,25 @@ impl App {
     pub(super) fn on_permission_key(&mut self, id: PermissionId, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Up => {
-                self.permission_scroll = self.permission_scroll.saturating_sub(1);
+                self.prompts.permission_scroll = self.prompts.permission_scroll.saturating_sub(1);
                 Action::None
             }
             KeyCode::Down => {
-                self.permission_scroll = self.permission_scroll.saturating_add(1);
+                self.prompts.permission_scroll = self.prompts.permission_scroll.saturating_add(1);
                 Action::None
             }
             KeyCode::PageUp => {
-                self.permission_scroll = self.permission_scroll.saturating_sub(SCROLL_STEP);
+                self.prompts.permission_scroll =
+                    self.prompts.permission_scroll.saturating_sub(SCROLL_STEP);
                 Action::None
             }
             KeyCode::PageDown | KeyCode::Char(' ') => {
-                self.permission_scroll = self.permission_scroll.saturating_add(SCROLL_STEP);
+                self.prompts.permission_scroll =
+                    self.prompts.permission_scroll.saturating_add(SCROLL_STEP);
                 Action::None
             }
             KeyCode::Home => {
-                self.permission_scroll = 0;
+                self.prompts.permission_scroll = 0;
                 Action::None
             }
             KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -50,8 +52,8 @@ impl App {
     }
 
     fn decide(&mut self, id: PermissionId, decision: PermissionDecision) -> Action {
-        self.pending_permission = None;
-        self.permission_scroll = 0;
+        self.prompts.permission = None;
+        self.prompts.permission_scroll = 0;
         Action::Command(Command::PermissionAnswer { id, decision })
     }
 
@@ -61,7 +63,7 @@ impl App {
     /// auto-answers. Esc declines (a real answer). No key silently decides.
     pub(super) fn on_ask_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let Some(prompt) = self.pending_ask.as_mut() else {
+        let Some(prompt) = self.prompts.ask.as_mut() else {
             return Action::None;
         };
         match key.code {
@@ -110,7 +112,7 @@ impl App {
     }
 
     fn answer_ask(&mut self, answer: AskAnswer) -> Action {
-        let Some(prompt) = self.pending_ask.take() else {
+        let Some(prompt) = self.prompts.ask.take() else {
             return Action::None;
         };
         Action::Command(Command::AskUserAnswer {
@@ -125,7 +127,7 @@ impl App {
     /// stops (the conservative choice — the loop halted to avoid wasted spend).
     pub(super) fn on_loop_halt_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let Some(prompt) = self.pending_loop_halt.as_mut() else {
+        let Some(prompt) = self.prompts.loop_halt.as_mut() else {
             return Action::None;
         };
         if prompt.steering {
@@ -172,7 +174,7 @@ impl App {
     }
 
     fn resolve_loop(&mut self, resolution: LoopResolution) -> Action {
-        self.pending_loop_halt = None;
+        self.prompts.loop_halt = None;
         Action::Command(Command::ResolveLoop { resolution })
     }
 
@@ -183,7 +185,7 @@ impl App {
     /// stops (the conservative choice, mirroring the loop-halt surface).
     pub(super) fn on_completion_gate_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let Some(prompt) = self.pending_completion_gate.as_mut() else {
+        let Some(prompt) = self.prompts.completion_gate.as_mut() else {
             return Action::None;
         };
         if prompt.steering {
@@ -237,7 +239,7 @@ impl App {
     }
 
     fn resolve_completion_gate(&mut self, resolution: GateResolution) -> Action {
-        self.pending_completion_gate = None;
+        self.prompts.completion_gate = None;
         Action::Command(Command::ResolveCompletionGate { resolution })
     }
 }
