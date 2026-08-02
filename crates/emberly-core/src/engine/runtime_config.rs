@@ -12,22 +12,22 @@ impl Engine {
     /// build (unknown profile, missing key) is a harness-world error and the
     /// current model stays active.
     pub(super) async fn switch_model(&mut self, profile: String, model: Option<String>) {
-        let Some(factory) = self.provider_factory.clone() else {
+        let Some(factory) = self.provider.factory.clone() else {
             self.emit(UiEvent::Notice {
                 message: "switching models is not available in this session".into(),
             })
             .await;
             return;
         };
-        let model = model.unwrap_or_else(|| self.model.clone());
+        let model = model.unwrap_or_else(|| self.provider.model.clone());
         match factory.build(&profile, &model) {
             Ok(choice) => {
-                if choice.profile == self.provider_label && choice.model == self.model {
+                if choice.profile == self.provider.label && choice.model == self.provider.model {
                     return; // no-op: already active
                 }
-                self.provider = choice.provider;
-                self.provider_label = choice.profile.clone();
-                self.model = choice.model.clone();
+                self.provider.client = choice.provider;
+                self.provider.label = choice.profile.clone();
+                self.provider.model = choice.model.clone();
                 self.write_transcript(TranscriptEvent::ModelSwitch {
                     provider: choice.profile.clone(),
                     model: choice.model.clone(),
@@ -45,14 +45,17 @@ impl Engine {
                 // available levels and default differ per model (P-9). Always
                 // re-emit so the sidebar/picker track the new model's levels
                 // even when the default happens to match.
-                self.effort = self.provider.model_info().default_effort;
+                self.provider.effort = self.provider.client.model_info().default_effort;
                 self.emit_effort().await;
             }
             Err(why) => {
                 self.emit(UiEvent::HarnessError {
                     what: format!("could not switch to '{profile}'"),
                     why,
-                    next: format!("staying on {} / {}", self.provider_label, self.model),
+                    next: format!(
+                        "staying on {} / {}",
+                        self.provider.label, self.provider.model
+                    ),
                 })
                 .await;
             }
@@ -67,7 +70,7 @@ impl Engine {
         // The engine is the authority on what a model supports (P-9): decline
         // (calmly, never an error) when the model has no control or the level
         // isn't offered, so no frontend can announce a change that won't happen.
-        let levels = self.provider.model_info().effort_levels;
+        let levels = self.provider.client.model_info().effort_levels;
         if levels.is_empty() {
             self.emit(UiEvent::Notice {
                 message: "this model has no reasoning-effort control".into(),
@@ -82,10 +85,10 @@ impl Engine {
             .await;
             return;
         }
-        if self.effort == Some(effort) {
+        if self.provider.effort == Some(effort) {
             return; // no-op: already active
         }
-        self.effort = Some(effort);
+        self.provider.effort = Some(effort);
         self.write_transcript(TranscriptEvent::EffortChange { effort });
         self.emit_effort().await;
         self.emit(UiEvent::Notice {
@@ -98,8 +101,8 @@ impl Engine {
     /// the sidebar and the effort picker stay in sync with the model.
     pub(super) async fn emit_effort(&self) {
         self.emit(UiEvent::EffortChanged {
-            effort: self.effort,
-            available: self.provider.model_info().effort_levels,
+            effort: self.provider.effort,
+            available: self.provider.client.model_info().effort_levels,
         })
         .await;
     }
@@ -132,16 +135,17 @@ impl Engine {
         };
 
         let mut changed = Vec::new();
-        if reloaded.system != self.system {
-            self.system = reloaded.system;
+        if reloaded.system != self.provider.system {
+            self.provider.system = reloaded.system;
             changed.push("system prompt");
         }
-        if reloaded.summary_prompt != self.summary_prompt {
-            self.summary_prompt = reloaded.summary_prompt;
+        if reloaded.summary_prompt != self.context.summary_prompt {
+            self.context.summary_prompt = reloaded.summary_prompt;
             changed.push("compact prompt");
         }
         let old_profiles = self
-            .provider_factory
+            .provider
+            .factory
             .as_ref()
             .map(|factory| factory.profiles())
             .unwrap_or_default();
@@ -159,7 +163,7 @@ impl Engine {
         if profile_names_changed || reloaded.provider_config_changed {
             changed.push("provider profiles");
         }
-        self.provider_factory = Some(reloaded.provider_factory);
+        self.provider.factory = Some(reloaded.provider_factory);
 
         // The config-configured default `provider =` / `model =` selection
         // can change independently of the profile set above (e.g. the user
@@ -167,15 +171,16 @@ impl Engine {
         // auto-switches the active session (C-6) — surfaced as a concrete
         // `/model` command instead.
         let mut model_hint = None;
-        if reloaded.configured_provider != self.configured_provider
-            || reloaded.configured_model != self.configured_model
+        if reloaded.configured_provider != self.provider.configured_provider
+            || reloaded.configured_model != self.provider.configured_model
         {
-            self.configured_provider = reloaded.configured_provider;
-            self.configured_model = reloaded.configured_model;
+            self.provider.configured_provider = reloaded.configured_provider;
+            self.provider.configured_model = reloaded.configured_model;
             changed.push("provider selection");
-            if let (Some(provider), Some(model)) =
-                (&self.configured_provider, &self.configured_model)
-            {
+            if let (Some(provider), Some(model)) = (
+                &self.provider.configured_provider,
+                &self.provider.configured_model,
+            ) {
                 model_hint = Some(format!("run /model {provider} {model} to switch"));
             }
         }
@@ -184,24 +189,24 @@ impl Engine {
             self.tool_explanations = reloaded.tool_explanations;
             changed.push("tool explanations");
         }
-        if reloaded.loop_config != self.loop_config {
-            self.loop_config = reloaded.loop_config;
+        if reloaded.loop_config != self.guardrail.config {
+            self.guardrail.config = reloaded.loop_config;
             changed.push("loop guardrail");
         }
-        if reloaded.completion_config != self.completion_config {
-            self.completion_config = reloaded.completion_config;
+        if reloaded.completion_config != self.completion.config {
+            self.completion.config = reloaded.completion_config;
             changed.push("completion gate");
         }
-        if reloaded.completion_checks != self.completion_checks {
-            self.completion_checks = reloaded.completion_checks;
+        if reloaded.completion_checks != self.completion.checks {
+            self.completion.checks = reloaded.completion_checks;
             changed.push("completion checks");
         }
         if reloaded.truncate != self.truncate {
             self.truncate = reloaded.truncate;
             changed.push("truncation");
         }
-        if reloaded.context != self.context {
-            self.context = reloaded.context;
+        if reloaded.context != self.context.config {
+            self.context.config = reloaded.context;
             changed.push("context window");
         }
         if reloaded.image_max_bytes != self.image_max_bytes {
@@ -212,22 +217,22 @@ impl Engine {
             self.document_max_bytes = reloaded.document_max_bytes;
             changed.push("document size limit");
         }
-        if reloaded.memory != self.memory_config {
-            self.memory_config = reloaded.memory;
-            self.memory_store = build_memory_store(
-                self.memory_config.enabled,
-                self.user_memory_dir.as_ref(),
-                self.project_memory_dir.clone(),
+        if reloaded.memory != self.memory.config {
+            self.memory.config = reloaded.memory;
+            self.memory.store = build_memory_store(
+                self.memory.config.enabled,
+                self.memory.user_dir.as_ref(),
+                self.memory.project_dir.clone(),
             );
             self.refresh_memory_indexes();
             changed.push("memory");
         }
-        if reloaded.skills != self.skills_config {
-            self.skills_config = reloaded.skills;
-            self.skill_catalog = build_skill_catalog(
-                self.skills_config.enabled,
-                self.user_skills_dir.as_ref(),
-                self.project_skills_dir.clone(),
+        if reloaded.skills != self.skills.config {
+            self.skills.config = reloaded.skills;
+            self.skills.catalog = build_skill_catalog(
+                self.skills.config.enabled,
+                self.skills.user_dir.as_ref(),
+                self.skills.project_dir.clone(),
             );
             self.refresh_skill_catalog();
             changed.push("skills");
@@ -240,12 +245,12 @@ impl Engine {
         if new_tool_names != old_tool_names {
             changed.push("tools");
         }
-        if reloaded.rule_specs != self.rule_specs {
-            self.rules.reload_config_rules(
+        if reloaded.rule_specs != self.safety.rule_specs {
+            self.safety.rules.reload_config_rules(
                 reloaded.rule_specs.clone(),
-                self.sandbox.bash_allowlist_active(),
+                self.safety.sandbox.bash_allowlist_active(),
             );
-            self.rule_specs = reloaded.rule_specs;
+            self.safety.rule_specs = reloaded.rule_specs;
             changed.push("permission rules");
         }
 

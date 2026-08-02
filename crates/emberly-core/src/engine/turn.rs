@@ -130,7 +130,7 @@ impl Engine {
         loop {
             attempts += 1;
             let request = self.build_request();
-            match self.provider.stream_completion(request).await {
+            match self.provider.client.stream_completion(request).await {
                 Ok(stream) => return Ok(stream),
                 Err(error) => {
                     if !error.is_retryable() || !self.retry.may_retry(attempts) {
@@ -241,11 +241,11 @@ impl Engine {
             StreamEvent::Usage { usage } => {
                 // Accumulate billed tokens and cost (each request's input is
                 // billed), and record the prompt size as the current context.
-                self.session_usage.input = self.session_usage.input.saturating_add(usage.input);
-                self.session_usage.output = self.session_usage.output.saturating_add(usage.output);
-                self.context_tokens_authoritative = Some(usage.input);
-                if let Some(pricing) = self.provider.model_info().pricing {
-                    self.session_cost_usd += pricing.estimate_usd(usage);
+                self.session.usage.input = self.session.usage.input.saturating_add(usage.input);
+                self.session.usage.output = self.session.usage.output.saturating_add(usage.output);
+                self.context.tokens_authoritative = Some(usage.input);
+                if let Some(pricing) = self.provider.client.model_info().pricing {
+                    self.session.cost_usd += pricing.estimate_usd(usage);
                 }
             }
             StreamEvent::Done { stop_reason: _ } => {
@@ -277,7 +277,7 @@ impl Engine {
         skill_rx: &mut mpsc::Receiver<SkillAsk>,
     ) -> ToolCallResult {
         // Start a fresh loop-signature observation for this turn (S-5).
-        self.turn_obs = TurnObservation::default();
+        self.guardrail.turn_obs = TurnObservation::default();
         let mut iter = tool_calls.into_iter();
         while let Some(call) = iter.next() {
             match self
@@ -326,8 +326,9 @@ impl Engine {
 
         // Record the (tool, normalized-args) for the loop signature (S-5),
         // including unknown-tool attempts (a loop can re-tread those too).
-        if self.loop_config.enabled {
-            self.turn_obs
+        if self.guardrail.config.enabled {
+            self.guardrail
+                .turn_obs
                 .calls
                 .push((call.name.clone(), normalize_args(&args)));
         }
@@ -410,8 +411,11 @@ impl Engine {
     ) {
         // Accumulate this result into the turn's loop signature (S-5): identical
         // repeated results are a no-progress signal.
-        if self.loop_config.enabled {
-            self.turn_obs.result_content.push_str(&outcome.content);
+        if self.guardrail.config.enabled {
+            self.guardrail
+                .turn_obs
+                .result_content
+                .push_str(&outcome.content);
         }
         // Salient reduction (FR-2) runs before the size backstop (§5.3), gated
         // on `truncate.reduce`. Both are deterministic, no-model-call transforms.
@@ -431,7 +435,7 @@ impl Engine {
         // withheld content (Requirements §8.1/§8.5, HC-7).
         let withheld = reduced.reduced || truncation.truncated;
         let full_output_ref = if withheld {
-            self.transcript.sidecar(&call.id, &outcome.content)
+            self.session.transcript.sidecar(&call.id, &outcome.content)
         } else {
             None
         };
@@ -493,8 +497,8 @@ impl Engine {
 
         if let Some(change) = outcome.file_change {
             // A newly-modified file is the strongest progress signal (S-5).
-            if self.loop_config.enabled {
-                self.turn_obs.files.push(change.path.clone());
+            if self.guardrail.config.enabled {
+                self.guardrail.turn_obs.files.push(change.path.clone());
             }
             self.emit(UiEvent::FileModified {
                 path: change.path.clone(),
@@ -626,19 +630,19 @@ impl Engine {
             })
             .collect();
         CompletionRequest {
-            model: self.model.clone(),
+            model: self.provider.model.clone(),
             // T-9: append the explanation instruction only when the feature is
             // on, so with it off the model is never asked and no tokens are
-            // spent. Kept out of the stored `self.system` so a config reload
+            // spent. Kept out of the stored `self.provider.system` so a config reload
             // (which replaces it) stays orthogonal to this toggle.
             system: self.effective_system(),
             messages: self.windowed_messages(),
             tools,
-            max_output_tokens: Some(self.provider.model_info().max_output_tokens),
+            max_output_tokens: Some(self.provider.client.model_info().max_output_tokens),
             temperature: None,
             // The session's active reasoning effort (P-9). The adapter maps it
             // to the provider's control or drops it when unsupported.
-            effort: self.effort,
+            effort: self.provider.effort,
         }
     }
 
@@ -649,15 +653,15 @@ impl Engine {
     fn effective_system(&self) -> Option<String> {
         let base = if self.tool_explanations {
             let instruction = crate::prompts::tool_explanation();
-            match &self.system {
+            match &self.provider.system {
                 Some(b) => Some(format!("{b}\n\n{instruction}")),
                 None => Some(instruction.to_string()),
             }
         } else {
-            self.system.clone()
+            self.provider.system.clone()
         };
 
-        let base = if self.context.pin_task_list && !self.task_list.is_empty() {
+        let base = if self.context.config.pin_task_list && !self.task_list.is_empty() {
             let block = render_task_list_block(&self.task_list);
             match &base {
                 Some(b) => Some(format!("{b}\n\n{block}")),
@@ -671,8 +675,8 @@ impl Engine {
         // index is standing context; entry bodies load via the `recall` op
         // (progressive disclosure). Project memory is absent on an untrusted
         // root (Design §4.9).
-        let base = if self.memory_config.enabled {
-            let block = render_memory_block(&self.memory_user_index, &self.memory_project_index);
+        let base = if self.memory.config.enabled {
+            let block = render_memory_block(&self.memory.user_index, &self.memory.project_index);
             if !block.is_empty() {
                 match &base {
                     Some(b) => Some(format!("{b}\n\n{block}")),
@@ -688,10 +692,10 @@ impl Engine {
         // Pin the skill catalog (FR-7, Tech Spec §7/§8.2). Only metadata is
         // standing context; bodies load via the `skill` tool (progressive
         // disclosure). Project skills are absent on an untrusted root.
-        if self.skills_config.enabled && !self.skill_catalog_text.is_empty() {
+        if self.skills.config.enabled && !self.skills.catalog_text.is_empty() {
             match &base {
-                Some(b) => Some(format!("{b}\n\n{}", self.skill_catalog_text)),
-                None => Some(self.skill_catalog_text.clone()),
+                Some(b) => Some(format!("{b}\n\n{}", self.skills.catalog_text)),
+                None => Some(self.skills.catalog_text.clone()),
             }
         } else {
             base
@@ -702,18 +706,18 @@ impl Engine {
         ToolCtx::new(
             self.project_root.clone(),
             self.truncate,
-            self.gate.clone(),
-            self.sandbox_spawn.clone(),
+            self.gates.permission.clone(),
+            self.safety.spawn.clone(),
         )
-        .with_ask_gate(self.ask_gate.clone())
-        .with_recall_gate(self.recall_gate.clone())
-        .with_task_list_gate(self.task_list_gate.clone())
-        .with_memory_gate(self.memory_gate.clone())
-        .with_skill_gate(self.skill_gate.clone())
-        .with_scratch_gate(self.scratch_store.clone())
-        .with_vision(self.provider.model_info().vision)
+        .with_ask_gate(self.gates.ask.clone())
+        .with_recall_gate(self.gates.recall.clone())
+        .with_task_list_gate(self.gates.task_list.clone())
+        .with_memory_gate(self.gates.memory.clone())
+        .with_skill_gate(self.gates.skill.clone())
+        .with_scratch_gate(self.gates.scratch.clone())
+        .with_vision(self.provider.client.model_info().vision)
         .with_image_max_bytes(self.image_max_bytes)
-        .with_documents(self.provider.model_info().documents)
+        .with_documents(self.provider.client.model_info().documents)
         .with_document_max_bytes(self.document_max_bytes)
     }
 }

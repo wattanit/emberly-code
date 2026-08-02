@@ -12,10 +12,10 @@ impl Engine {
     /// the loop is re-treading without progress, else `None`. Consumes the
     /// turn's observation.
     pub(super) fn evaluate_loop(&mut self) -> Option<String> {
-        if !self.loop_config.enabled {
+        if !self.guardrail.config.enabled {
             return None;
         }
-        let obs = std::mem::take(&mut self.turn_obs);
+        let obs = std::mem::take(&mut self.guardrail.turn_obs);
         // A turn with no tool calls can't loop; treat it as progress-neutral.
         if obs.calls.is_empty() {
             return None;
@@ -31,32 +31,35 @@ impl Engine {
         let result_hash = stable_hash(&obs.result_content);
 
         // Progress = a newly-modified file OR a not-seen-before result.
-        let new_file = obs.files.iter().any(|f| !self.loop_seen_files.contains(f));
-        let new_result = !self.loop_seen_results.contains(&result_hash);
+        let new_file = obs
+            .files
+            .iter()
+            .any(|f| !self.guardrail.seen_files.contains(f));
+        let new_result = !self.guardrail.seen_results.contains(&result_hash);
         for f in obs.files {
-            self.loop_seen_files.insert(f);
+            self.guardrail.seen_files.insert(f);
         }
-        self.loop_seen_results.insert(result_hash);
+        self.guardrail.seen_results.insert(result_hash);
 
         if new_file || new_result {
             self.reset_loop_window();
-            self.loop_last_sig = Some(tool_sig);
+            self.guardrail.last_sig = Some(tool_sig);
             return None;
         }
 
         // No progress this turn.
-        self.loop_no_progress_streak += 1;
-        if self.loop_last_sig == Some(tool_sig) {
-            self.loop_same_sig_streak += 1;
+        self.guardrail.no_progress_streak += 1;
+        if self.guardrail.last_sig == Some(tool_sig) {
+            self.guardrail.same_sig_streak += 1;
         } else {
-            self.loop_same_sig_streak = 1;
+            self.guardrail.same_sig_streak = 1;
         }
-        self.loop_last_sig = Some(tool_sig);
+        self.guardrail.last_sig = Some(tool_sig);
 
-        let cfg = self.loop_config;
-        if self.loop_same_sig_streak >= cfg.repeat_window {
+        let cfg = self.guardrail.config;
+        if self.guardrail.same_sig_streak >= cfg.repeat_window {
             Some("the last few steps repeated without progress".into())
-        } else if self.loop_no_progress_streak >= cfg.max_no_progress_turns {
+        } else if self.guardrail.no_progress_streak >= cfg.max_no_progress_turns {
             Some("several steps in a row made no progress".into())
         } else {
             None
@@ -66,9 +69,9 @@ impl Engine {
     /// Reset the no-progress counters (S-5). Called on genuine progress and when
     /// the user chooses to resume, so "keep going" doesn't instantly re-trip.
     pub(super) fn reset_loop_window(&mut self) {
-        self.loop_same_sig_streak = 0;
-        self.loop_no_progress_streak = 0;
-        self.loop_last_sig = None;
+        self.guardrail.same_sig_streak = 0;
+        self.guardrail.no_progress_streak = 0;
+        self.guardrail.last_sig = None;
     }
 
     /// Surface the halt (harness voice) and park until the user decides
@@ -115,7 +118,8 @@ impl Engine {
     /// trusted config is the authorization).
     async fn run_completion_check(&self, check: &CompletionCheck) -> CheckResult {
         let invocation = self
-            .sandbox_spawn
+            .safety
+            .spawn
             .bash_invocation(&check.command, &self.project_root);
         let mut command = tokio::process::Command::new(&invocation.program);
         command.args(&invocation.args);
@@ -209,10 +213,10 @@ impl Engine {
         &mut self,
         commands_rx: &mut mpsc::Receiver<Command>,
     ) -> CompletionGateOutcome {
-        if self.completion_checks.is_empty() {
+        if self.completion.checks.is_empty() {
             return CompletionGateOutcome::Terminate;
         }
-        let checks = self.completion_checks.clone();
+        let checks = self.completion.checks.clone();
         let mut all = Vec::with_capacity(checks.len());
         let mut failing = Vec::new();
         for check in &checks {
@@ -232,17 +236,17 @@ impl Engine {
         // is unreachable otherwise), so an inert gate never shows the line.
         self.emit(UiEvent::CompletionStatus { checks: all }).await;
         if failing.is_empty() {
-            self.completion_attempts = 0;
+            self.completion.attempts = 0;
             return CompletionGateOutcome::Terminate;
         }
-        self.completion_attempts += 1;
+        self.completion.attempts += 1;
         // Agent-world content (Design §8.7): the failing checks return to the
         // model as ordinary tool-result-shaped content — the harness does not
         // editorialize; the model reacts and fixes like any tool failure.
         self.push_conversation_message(Message::user_text(render_gate_failure(&failing)));
         self.emit_context_usage().await;
 
-        if self.completion_attempts < self.completion_config.max_attempts {
+        if self.completion.attempts < self.completion.config.max_attempts {
             return CompletionGateOutcome::ReOpen;
         }
 
@@ -250,15 +254,15 @@ impl Engine {
         // control to the user (resume / steer / stop / finish), exactly as
         // S-5 does at its own bound. Never spin on.
         match self
-            .await_completion_resolution(commands_rx, failing, self.completion_attempts)
+            .await_completion_resolution(commands_rx, failing, self.completion.attempts)
             .await
         {
             GateResolution::Resume => {
-                self.completion_attempts = 0;
+                self.completion.attempts = 0;
                 CompletionGateOutcome::ReOpen
             }
             GateResolution::Steer(text) => {
-                self.completion_attempts = 0;
+                self.completion.attempts = 0;
                 self.record_user_message(&text);
                 self.push_conversation_message(Message::user_text(text));
                 self.emit_context_usage().await;

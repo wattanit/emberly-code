@@ -14,8 +14,8 @@ impl Engine {
     /// old one is ended, so a creation failure leaves the current session intact
     /// (transcript failures are never fatal — HC-7).
     pub(super) async fn start_new_session(&mut self, session_id: SessionId) {
-        let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
-        let sink = match FileTranscript::create(&self.sessions_dir, session_id) {
+        let path = self.session.dir.join(format!("{session_id}.jsonl"));
+        let sink = match FileTranscript::create(&self.session.dir, session_id) {
             Ok(file) => file,
             Err(error) => {
                 self.emit(UiEvent::HarnessError {
@@ -28,14 +28,14 @@ impl Engine {
             }
         };
         self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
-        self.transcript = Box::new(sink);
+        self.session.transcript = Box::new(sink);
         self.adopt_session(session_id, path, Vec::new(), AdoptedState::fresh(), false);
         self.write_transcript(TranscriptEvent::SessionStart {
             session_id,
-            provider: self.provider_label.clone(),
-            model: self.model.clone(),
+            provider: self.provider.label.clone(),
+            model: self.provider.model.clone(),
             project_root: self.project_root.display().to_string(),
-            sandbox: self.sandbox.clone(),
+            sandbox: self.safety.sandbox.clone(),
             config_provenance: self.config_provenance.clone(),
             prompts_version: crate::prompts::VERSION,
         });
@@ -49,7 +49,7 @@ impl Engine {
     /// Tries the derived view cache first (FR-5 fast path); falls back to a
     /// full transcript replay when the cache is absent or stale.
     pub(super) async fn resume_session(&mut self, session_id: SessionId) {
-        let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
+        let path = self.session.dir.join(format!("{session_id}.jsonl"));
         let loaded = match crate::resume::read_records(&path) {
             Ok(loaded) => loaded,
             Err(error) => {
@@ -75,7 +75,7 @@ impl Engine {
             }
         };
         self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
-        self.transcript = Box::new(sink);
+        self.session.transcript = Box::new(sink);
 
         // FR-5: try the cache first. A valid cache restores the full derived
         // state directly — no per-line re-tokenization. The fast path is silent
@@ -117,27 +117,27 @@ impl Engine {
         state: AdoptedState,
         resuming: bool,
     ) {
-        self.session_id = session_id;
+        self.session.id = session_id;
         // Re-point the scratch store at the new session's own directory (FR-8)
         // — scratch space is never carried across a `/new` or `/resume` switch.
-        self.scratch_store = Arc::new(ScratchStore::new(scratch_dir_for(
+        self.gates.scratch = Arc::new(ScratchStore::new(scratch_dir_for(
             &self.project_root,
             session_id,
         )));
-        self.conversation = conversation;
-        self.turn_map = state.turn_map;
-        self.next_turn = state.next_turn;
-        self.compacted = state.compacted;
-        self.original_task_recorded = state.original_task_recorded;
-        self.resuming = resuming;
-        self.replayed = false;
-        self.pending_compaction = None;
-        self.auto_compact_armed = true;
-        self.session_usage = state.session_usage;
-        self.session_cost_usd = state.session_cost_usd;
-        self.context_tokens_authoritative = state.context_tokens_authoritative;
+        self.history.messages = conversation;
+        self.history.turn_map = state.turn_map;
+        self.history.next_turn = state.next_turn;
+        self.context.compacted = state.compacted;
+        self.session.original_task_recorded = state.original_task_recorded;
+        self.session.resuming = resuming;
+        self.session.replayed = false;
+        self.context.pending = None;
+        self.context.auto_armed = true;
+        self.session.usage = state.session_usage;
+        self.session.cost_usd = state.session_cost_usd;
+        self.context.tokens_authoritative = state.context_tokens_authoritative;
         self.next_permission_id = 0;
-        self.completion_attempts = 0;
+        self.completion.attempts = 0;
         self.task_list.clear();
         // Reload memory indexes for the new session (user-global unchanged,
         // project re-pointed to the new root). The store reads from disk, so a
@@ -148,7 +148,8 @@ impl Engine {
         // stale, Design §4.9).
         self.refresh_memory_indexes();
         let (user_count, project_count) = self
-            .memory_store
+            .memory
+            .store
             .as_ref()
             .map_or((0, 0), |s| s.status_counts());
         let _ = self.events_tx.try_send(UiEvent::MemoryStatus {
@@ -161,9 +162,9 @@ impl Engine {
         // session switch (Tech Spec §8.2, §3.1).
         self.refresh_skill_catalog();
         let _ = self.events_tx.try_send(UiEvent::SkillsAvailable {
-            skills: self.skill_metas.clone(),
+            skills: self.skills.metas.clone(),
         });
-        if let Ok(mut guard) = self.active_session_path.write() {
+        if let Ok(mut guard) = self.session.active_path.write() {
             *guard = path;
         }
     }
@@ -172,13 +173,13 @@ impl Engine {
     /// `original_task` and deriving the session title from it (Tech Spec §7,
     /// §16).
     pub(super) fn record_user_message(&mut self, text: &str) {
-        let original_task = !self.original_task_recorded;
+        let original_task = !self.session.original_task_recorded;
         self.write_transcript(TranscriptEvent::UserMessage {
             text: text.to_string(),
             original_task,
         });
         if original_task {
-            self.original_task_recorded = true;
+            self.session.original_task_recorded = true;
             self.write_transcript(TranscriptEvent::SessionTitle {
                 title: clip_title(text),
             });
@@ -192,12 +193,12 @@ impl Engine {
     /// turns (e.g. out of bounds or turns retired by compaction).
     #[must_use]
     pub fn recall_turns(&self, from: usize, to: usize) -> Vec<Message> {
-        if from > to || self.turn_map.is_empty() {
+        if from > to || self.history.turn_map.is_empty() {
             return Vec::new();
         }
         let mut result = Vec::new();
-        for (i, msg) in self.conversation.iter().enumerate() {
-            let turn = self.turn_map[i];
+        for (i, msg) in self.history.messages.iter().enumerate() {
+            let turn = self.history.turn_map[i];
             if turn >= from && turn <= to {
                 result.push(msg.clone());
             }
@@ -209,7 +210,7 @@ impl Engine {
     /// swallows I/O errors. Stamped with the current time at the write edge.
     pub(super) fn write_transcript(&mut self, event: TranscriptEvent) {
         let record = TranscriptRecord::new(OffsetDateTime::now_utc(), event);
-        self.transcript.record(&record);
+        self.session.transcript.record(&record);
     }
 
     /// Write the derived conversation-state cache best-effort (FR-5, Tech Spec
@@ -219,7 +220,7 @@ impl Engine {
     /// swallowed (HC-3 — never a panic); the cache is never relied upon.
     pub(super) fn write_view_cache(&self) {
         let transcript_path = {
-            let guard = match self.active_session_path.read() {
+            let guard = match self.session.active_path.read() {
                 Ok(g) => g,
                 Err(_) => return,
             };
@@ -231,15 +232,15 @@ impl Engine {
         };
         let cache = ViewCache {
             version: VIEW_CACHE_VERSION,
-            session_id: self.session_id,
-            conversation: self.conversation.clone(),
-            turn_map: self.turn_map.clone(),
-            next_turn: self.next_turn,
-            compacted: self.compacted,
-            original_task_recorded: self.original_task_recorded,
-            session_usage: self.session_usage,
-            session_cost_usd: self.session_cost_usd,
-            context_tokens_authoritative: self.context_tokens_authoritative,
+            session_id: self.session.id,
+            conversation: self.history.messages.clone(),
+            turn_map: self.history.turn_map.clone(),
+            next_turn: self.history.next_turn,
+            compacted: self.context.compacted,
+            original_task_recorded: self.session.original_task_recorded,
+            session_usage: self.session.usage,
+            session_cost_usd: self.session.cost_usd,
+            context_tokens_authoritative: self.context.tokens_authoritative,
             transcript_byte_len: byte_len,
         };
         let cache_path = view_cache_path(&transcript_path);

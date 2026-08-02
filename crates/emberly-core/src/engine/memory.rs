@@ -9,12 +9,12 @@ use super::*;
 impl Engine {
     /// Reload the memory index strings from the store into the cached fields.
     pub(super) fn refresh_memory_indexes(&mut self) {
-        if let Some(store) = &self.memory_store {
-            self.memory_user_index = store.user_index();
-            self.memory_project_index = store.project_index();
+        if let Some(store) = &self.memory.store {
+            self.memory.user_index = store.user_index();
+            self.memory.project_index = store.project_index();
         } else {
-            self.memory_user_index.clear();
-            self.memory_project_index.clear();
+            self.memory.user_index.clear();
+            self.memory.project_index.clear();
         }
     }
 
@@ -30,8 +30,8 @@ impl Engine {
     ) -> emberly_tools::MemoryOutcome {
         // Compute the result first so the immutable borrow of the store ends
         // before the mutable refresh + emit.
-        let computed = if self.memory_config.enabled {
-            self.memory_store.as_ref().map(|store| store.execute(req))
+        let computed = if self.memory.config.enabled {
+            self.memory.store.as_ref().map(|store| store.execute(req))
         } else {
             None
         };
@@ -39,7 +39,8 @@ impl Engine {
             Some(result) => {
                 self.refresh_memory_indexes();
                 let (user_count, project_count) = self
-                    .memory_store
+                    .memory
+                    .store
                     .as_ref()
                     .map_or((0, 0), |s| s.status_counts());
                 self.emit(UiEvent::MemoryStatus {
@@ -50,12 +51,12 @@ impl Engine {
                 // Soft-cap warn (Tech Spec §16): warn once when the combined
                 // index exceeds `max_index_entries`. Do not truncate.
                 let total = user_count + project_count;
-                if !self.memory_warn_emitted && total > self.memory_config.max_index_entries {
-                    self.memory_warn_emitted = true;
+                if !self.memory.warn_emitted && total > self.memory.config.max_index_entries {
+                    self.memory.warn_emitted = true;
                     self.emit(UiEvent::Notice {
                         message: format!(
                             "memory index has {total} entries (soft cap {}) — consider trimming or consolidating",
-                            self.memory_config.max_index_entries
+                            self.memory.config.max_index_entries
                         ),
                     })
                     .await;
@@ -82,8 +83,8 @@ impl Engine {
     /// an unavailable scope), which makes the project section silently absent
     /// (FR-1).
     pub(super) async fn emit_memory_entries(&self) {
-        let (user, project) = match &self.memory_store {
-            Some(store) if self.memory_config.enabled => (
+        let (user, project) = match &self.memory.store {
+            Some(store) if self.memory.config.enabled => (
                 store.list_entries(emberly_tools::MemoryScope::User),
                 store.list_entries(emberly_tools::MemoryScope::Project),
             ),
@@ -98,8 +99,8 @@ impl Engine {
     /// dir, so its body reads back empty). The body is fetched on demand and
     /// never pinned (progressive disclosure).
     pub(super) async fn emit_memory_body(&self, scope: emberly_tools::MemoryScope, name: String) {
-        let body = if self.memory_config.enabled {
-            self.memory_store.as_ref().and_then(|store| {
+        let body = if self.memory.config.enabled {
+            self.memory.store.as_ref().and_then(|store| {
                 match store.execute(&emberly_tools::MemoryRequest {
                     op: emberly_tools::MemoryOp::Recall,
                     scope,

@@ -10,10 +10,10 @@ impl Engine {
     /// Queue a compaction for the next clean boundary (Tech Spec §7). Manual
     /// outranks Auto — a user `/compact` is never downgraded to `auto` (FR-4).
     pub(super) fn request_compaction(&mut self, trigger: CompactTrigger) {
-        if matches!(self.pending_compaction, Some(CompactTrigger::Manual)) {
+        if matches!(self.context.pending, Some(CompactTrigger::Manual)) {
             return;
         }
-        self.pending_compaction = Some(trigger);
+        self.context.pending = Some(trigger);
     }
 
     /// Compaction at a clean boundary (Tech Spec §7). Replaces the middle
@@ -31,11 +31,11 @@ impl Engine {
         // tool calls is never split between the summary and the kept tail
         // (a `Role::Tool` message left without its preceding `Role::Assistant`
         // tool_calls message is an invalid request to every provider).
-        let pinned = usize::from(!self.conversation.is_empty());
-        let len = self.conversation.len();
+        let pinned = usize::from(!self.history.messages.is_empty());
+        let len = self.history.messages.len();
         let from = pinned;
-        let turns = group_turn_starts(&self.conversation[from..]);
-        let keep = self.context.keep_recent_turns.min(turns.len());
+        let turns = group_turn_starts(&self.history.messages[from..]);
+        let keep = self.context.config.keep_recent_turns.min(turns.len());
         let elided = turns.len().saturating_sub(keep);
         let to = if elided == 0 {
             from
@@ -57,7 +57,7 @@ impl Engine {
         })
         .await;
 
-        let summary = match self.summarize(&self.conversation[from..to]).await {
+        let summary = match self.summarize(&self.history.messages[from..to]).await {
             Ok(text) if !text.is_empty() => text,
             // Failure fallback (Tech Spec §7): drop the middle behind a
             // placeholder with a visible warning — a full context never yields a
@@ -81,17 +81,17 @@ impl Engine {
         // original numbers (FR-3: compaction retires numbers, never shifts them).
         let mut rebuilt = Vec::with_capacity(2 + keep);
         let mut rebuilt_turns = Vec::with_capacity(2 + keep);
-        rebuilt.extend(self.conversation[..from].iter().cloned());
-        rebuilt_turns.extend(self.turn_map[..from].iter().copied());
-        let summary_turn = self.next_turn;
+        rebuilt.extend(self.history.messages[..from].iter().cloned());
+        rebuilt_turns.extend(self.history.turn_map[..from].iter().copied());
+        let summary_turn = self.history.next_turn;
         rebuilt.push(Message::user_text(summary.clone()));
         rebuilt_turns.push(summary_turn);
-        self.next_turn += 1;
-        rebuilt.extend(self.conversation[to..].iter().cloned());
-        rebuilt_turns.extend(self.turn_map[to..].iter().copied());
-        self.conversation = rebuilt;
-        self.turn_map = rebuilt_turns;
-        self.compacted = true;
+        self.history.next_turn += 1;
+        rebuilt.extend(self.history.messages[to..].iter().cloned());
+        rebuilt_turns.extend(self.history.turn_map[to..].iter().copied());
+        self.history.messages = rebuilt;
+        self.history.turn_map = rebuilt_turns;
+        self.context.compacted = true;
 
         self.write_transcript(TranscriptEvent::Compaction {
             summary,
@@ -119,21 +119,22 @@ impl Engine {
     /// tool calls are not offered.
     async fn summarize(&self, messages: &[Message]) -> Result<String, ProviderError> {
         let prompt = self
+            .context
             .summary_prompt
             .as_deref()
             .unwrap_or_else(|| crate::prompts::compact());
         let request = CompletionRequest {
-            model: self.model.clone(),
+            model: self.provider.model.clone(),
             system: Some(prompt.to_string()),
             messages: vec![Message::user_text(render_for_summary(messages))],
             tools: Vec::new(),
-            max_output_tokens: Some(self.provider.model_info().max_output_tokens),
+            max_output_tokens: Some(self.provider.client.model_info().max_output_tokens),
             temperature: None,
             // Summarization is a fixed internal task; it does not carry the
             // session's reasoning effort.
             effort: None,
         };
-        let mut stream = self.provider.stream_completion(request).await?;
+        let mut stream = self.provider.client.stream_completion(request).await?;
         let mut text = String::new();
         while let Some(item) = stream.next().await {
             if let StreamEvent::TextDelta { text: delta } = item? {
@@ -147,55 +148,55 @@ impl Engine {
     /// numbering). `Role::User` messages start a new turn; assistant/tool
     /// messages inherit the current turn number.
     pub(super) fn push_conversation_message(&mut self, msg: Message) {
-        let turn = if self.conversation.is_empty() || msg.role == Role::User {
-            let t = self.next_turn;
-            self.next_turn += 1;
+        let turn = if self.history.messages.is_empty() || msg.role == Role::User {
+            let t = self.history.next_turn;
+            self.history.next_turn += 1;
             t
         } else {
-            *self.turn_map.last().unwrap_or(&0)
+            *self.history.turn_map.last().unwrap_or(&0)
         };
-        self.conversation.push(msg);
-        self.turn_map.push(turn);
+        self.history.messages.push(msg);
+        self.history.turn_map.push(turn);
     }
 
     /// The number of messages at the front of the conversation that are always
     /// sent and never windowed away (FR-3, Tech Spec §7): the original task
     /// (position 0) plus the compaction summary (position 1) when one is active.
     fn pinned_count(&self) -> usize {
-        if self.conversation.is_empty() {
+        if self.history.messages.is_empty() {
             return 0;
         }
         // The original task is always pinned at position 0.
         let mut n = 1;
         // After compaction (live or resumed), the summary at position 1 is
         // also pinned (Tech Spec §7: windowing never drops the summary).
-        if self.compacted {
+        if self.context.compacted {
             n += 1;
         }
-        n.min(self.conversation.len())
+        n.min(self.history.messages.len())
     }
 
     /// The windowed view of the conversation for sending to the provider
     /// (FR-3, Tech Spec §7). A **pure view** — never mutates
-    /// `self.conversation` (HC-7). Keeps the pinned prefix and the last
+    /// `self.history.messages` (HC-7). Keeps the pinned prefix and the last
     /// `context.window_turns` turns; replaces older turns with one synthetic
     /// elision marker. Turns are grouped at clean boundaries: every
     /// `ContentBlock::ToolUse` keeps its matching `Message::tool_result`, so
     /// the sent list stays provider-valid.
     pub(super) fn windowed_messages(&self) -> Vec<Message> {
         let pinned = self.pinned_count();
-        let total = self.conversation.len();
+        let total = self.history.messages.len();
         if total <= pinned {
-            return self.conversation.clone();
+            return self.history.messages.clone();
         }
 
-        let turns = group_turn_starts(&self.conversation[pinned..]);
-        let elided = turns.len().saturating_sub(self.context.window_turns);
+        let turns = group_turn_starts(&self.history.messages[pinned..]);
+        let elided = turns.len().saturating_sub(self.context.config.window_turns);
         if elided == 0 {
-            return self.conversation.clone();
+            return self.history.messages.clone();
         }
 
-        // Index into self.conversation where the first kept turn begins.
+        // Index into self.history.messages where the first kept turn begins.
         let keep_from = if elided < turns.len() {
             pinned + turns[elided]
         } else {
@@ -212,16 +213,16 @@ impl Engine {
         } else {
             total - 1
         };
-        let first_turn = self.turn_map[first_turn_msg];
-        let last_turn = self.turn_map[last_turn_msg];
+        let first_turn = self.history.turn_map[first_turn_msg];
+        let last_turn = self.history.turn_map[last_turn_msg];
 
         let mut result = Vec::with_capacity(pinned + 1 + total.saturating_sub(keep_from));
-        result.extend(self.conversation[..pinned].iter().cloned());
+        result.extend(self.history.messages[..pinned].iter().cloned());
         result.push(Message::user_text(format!(
             "[turns {first_turn}–{last_turn} elided from context \
              — still in the session transcript; use recall to retrieve them]"
         )));
-        result.extend(self.conversation[keep_from..].iter().cloned());
+        result.extend(self.history.messages[keep_from..].iter().cloned());
         result
     }
 
@@ -232,13 +233,14 @@ impl Engine {
     /// #12 made that script-weighted, not chars/4). Also checks the FR-4
     /// automatic-compaction threshold and queues a compaction when crossed.
     pub(super) async fn emit_context_usage(&mut self) {
-        let info = self.provider.model_info();
+        let info = self.provider.client.model_info();
         let reserve = OUTPUT_RESERVE.min(u64::from(info.max_output_tokens));
         let budget = u64::from(info.context_window)
             .saturating_sub(reserve)
             .max(1);
         let tokens = self
-            .context_tokens_authoritative
+            .context
+            .tokens_authoritative
             .unwrap_or_else(|| self.context_tokens());
         let pct = ((tokens.saturating_mul(100)) / budget).min(100);
         self.emit(UiEvent::ContextUsage {
@@ -252,41 +254,41 @@ impl Engine {
         // stays disarmed until usage drops below the threshold, then re-crosses
         // it. The compaction itself drops usage well below the line, so
         // re-arming is natural.
-        if self.context.auto_compact {
+        if self.context.config.auto_compact {
             let pct_f = f64::from(u8::try_from(pct).unwrap_or(100));
-            if pct_f >= self.context.auto_compact_threshold * 100.0 {
-                if self.auto_compact_armed {
+            if pct_f >= self.context.config.auto_compact_threshold * 100.0 {
+                if self.context.auto_armed {
                     self.request_compaction(CompactTrigger::Auto);
-                    self.auto_compact_armed = false;
+                    self.context.auto_armed = false;
                 }
             } else {
                 // Usage below threshold: re-arm the latch.
-                self.auto_compact_armed = true;
+                self.context.auto_armed = true;
             }
         }
 
         // Cumulative session tokens — always available (independent of pricing).
         self.emit(UiEvent::SessionUsage {
-            usage: self.session_usage,
+            usage: self.session.usage,
         })
         .await;
 
         // Cost is only knowable with a pricing table (always labeled "est.").
         if info.pricing.is_some() {
             self.emit(UiEvent::CostEstimate {
-                usage: self.session_usage,
-                usd: self.session_cost_usd,
+                usage: self.session.usage,
+                usd: self.session.cost_usd,
             })
             .await;
         }
     }
 
     fn context_tokens(&self) -> u64 {
-        let count = |s: &str| self.provider.count_tokens(s).tokens;
-        let mut total = self.system.as_deref().map(count).unwrap_or(0); // Count the windowed sent view (FR-3, Design §8.6), not the full
-                                                                        // in-memory conversation — so usage reflects what the provider
-                                                                        // actually receives. The elision marker is included because it rides
-                                                                        // in the sent messages.
+        let count = |s: &str| self.provider.client.count_tokens(s).tokens;
+        let mut total = self.provider.system.as_deref().map(count).unwrap_or(0); // Count the windowed sent view (FR-3, Design §8.6), not the full
+                                                                                 // in-memory conversation — so usage reflects what the provider
+                                                                                 // actually receives. The elision marker is included because it rides
+                                                                                 // in the sent messages.
         let messages = self.windowed_messages();
         for message in &messages {
             for block in &message.content {

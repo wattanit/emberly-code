@@ -56,12 +56,12 @@ impl Engine {
     /// leaves the mode unchanged and explains why (the type system, not this
     /// method, guarantees an auto mode is never entered while degraded).
     pub(super) async fn set_mode(&mut self, requested: Mode) {
-        match Mode::resolve(requested, &self.sandbox) {
+        match Mode::resolve(requested, &self.safety.sandbox) {
             Ok(mode) => {
-                if mode == self.mode {
+                if mode == self.safety.mode {
                     return;
                 }
-                self.mode = mode;
+                self.safety.mode = mode;
                 self.write_transcript(TranscriptEvent::ModeChange { mode });
                 self.emit(UiEvent::ModeChanged { mode }).await;
             }
@@ -70,7 +70,7 @@ impl Engine {
                     message: format!(
                         "auto-accept modes need OS confinement — {} (staying in {})",
                         unavailable.reason,
-                        mode_label(self.mode),
+                        mode_label(self.safety.mode),
                     ),
                 })
                 .await;
@@ -81,7 +81,7 @@ impl Engine {
     /// Add an in-memory session grant from an approved request (Requirements
     /// §6.6): a bash command prefix, or a per-tool allow for file writes/edits.
     fn grant_for_session(&mut self, request: &PermissionRequest) {
-        self.rules.add_session_grant(grant_rule(request));
+        self.safety.rules.add_session_grant(grant_rule(request));
     }
 
     /// Persist an approved request as a project rule in `.agents/permissions.toml`
@@ -131,7 +131,10 @@ impl Engine {
         pending: &mut Vec<PendingAsk>,
     ) {
         let request = ask.request;
-        let outcome = self.rules.evaluate(&make_query(&request), self.mode);
+        let outcome = self
+            .safety
+            .rules
+            .evaluate(&make_query(&request), self.safety.mode);
         let id = self.take_permission_id();
         let rendering = build_rendering(&request, outcome.reason.clone());
 

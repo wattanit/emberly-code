@@ -614,74 +614,34 @@ impl Drop for CompletionCheckKillGuard {
     }
 }
 
-/// The agent engine.
-pub struct Engine {
-    provider: Arc<dyn Provider>,
-    tools: ToolRegistry,
-    project_root: PathBuf,
+/// Who we are talking to and how (P-8, P-9, C-6). Grouped because a model
+/// switch has to move all of it at once, and the "configured default" pair is
+/// only meaningful next to the active selection it is compared against.
+struct ProviderState {
+    client: Arc<dyn Provider>,
     model: String,
     /// The active reasoning-effort level for subsequent turns (C-6/P-9). Seeded
     /// from the model's `default_effort`, changed by `SetEffort`, re-seeded on a
     /// model switch. `None` sends no effort (the provider's own default).
     effort: Option<Effort>,
     system: Option<String>,
-    /// Whether tool-call explanations are enabled (T-9); see [`EngineConfig`].
-    tool_explanations: bool,
-    /// Newly-granted workspace trust to record at session start (FR-1).
-    trust_granted: bool,
-    /// Loop-breaking guardrail state (S-5, Tech Spec §7).
-    loop_config: LoopConfig,
-    /// Adaptive context-window + compaction config (FR-3, Tech Spec §7/§8).
-    context: ContextConfig,
-    /// What the in-flight tool-call turn did (reset per turn).
-    turn_obs: TurnObservation,
-    /// Cumulative modified-file paths across the session (progress if a turn
-    /// adds a new one).
-    loop_seen_files: HashSet<String>,
-    /// Cumulative distinct tool-result hashes (progress if a turn adds a new
-    /// one).
-    loop_seen_results: HashSet<u64>,
-    /// Tool signature of the previous no-progress turn.
-    loop_last_sig: Option<u64>,
-    /// Consecutive no-progress turns with the *same* tool signature.
-    loop_same_sig_streak: usize,
-    /// Consecutive no-progress turns (any signature).
-    loop_no_progress_streak: usize,
-    /// Completion-gate tunables (S-6, Tech Spec §7).
-    completion_config: CompletionConfig,
-    /// Registered completion checks the gate evaluates on a completion attempt
-    /// (S-6). Populated from config at startup; empty means the gate is inert.
-    completion_checks: Vec<CompletionCheck>,
-    /// Consecutive failed completion attempts this session (S-6). Reset on a
-    /// new session and when the gate passes or is resolved to try again.
-    completion_attempts: usize,
-    truncate: TruncateConfig,
-    retry: RetryPolicy,
-    gate: Arc<ChannelGate>,
-    /// The ask-user gate (T-8), installed into every `ToolCtx` so the
-    /// `ask_user` tool can block on a frontend round trip.
-    ask_gate: Arc<AskGate>,
-    /// The recall gate (T-10), installed into every `ToolCtx` so the `recall`
-    /// tool can retrieve elided turns from the in-memory conversation.
-    recall_gate: Arc<RecallGateImpl>,
-    /// The task-list gate (T-11), installed into every `ToolCtx` so the `todo`
-    /// tool can replace the full task list in engine state.
-    task_list_gate: Arc<TaskListGateImpl>,
-    /// The memory gate (T-13), installed into every `ToolCtx` so the `memory`
-    /// tool can read and write durable memory entries.
-    memory_gate: Arc<MemoryGateImpl>,
-    /// The skill gate (T-15), installed into every `ToolCtx` so the `skill`
-    /// tool can load instruction bodies.
-    skill_gate: Arc<SkillGateImpl>,
-    /// The scratch gate (T-17), installed into every `ToolCtx` so the
-    /// `scratch_write` tool can write into this session's disposable working
-    /// directory. Unlike the other gates, this one acts directly rather than
-    /// through a channel to the engine loop — a scratch write has no side
-    /// effect on any other engine-owned state (FR-8, Tech Spec §8.3).
-    scratch_store: Arc<ScratchStore>,
-    events_tx: mpsc::Sender<UiEvent>,
-    conversation: Vec<Message>,
-    /// Parallel to `conversation`: the stable monotonic turn number of each
+    label: String,
+    /// The config-configured default `provider =` / `model =` selection, as
+    /// of the last time it was observed (startup or the last `/config`
+    /// reload) — lets a reload detect "the configured default moved" even
+    /// though the active session provider is never auto-switched.
+    configured_provider: Option<String>,
+    configured_model: Option<String>,
+    /// Builds a provider on an in-session model switch (C-6); `None` disables it.
+    factory: Option<Arc<dyn ProviderFactory>>,
+}
+
+/// The conversation and its turn numbering. Grouped because `turn_map` is
+/// index-parallel to `messages` — an invariant that only holds if they are
+/// updated together, which is easier to see when they cannot be reached apart.
+struct HistoryState {
+    messages: Vec<Message>,
+    /// Parallel to `messages`: the stable monotonic turn number of each
     /// message (FR-3, Tech Spec §7/§16). `Role::User` messages start a new
     /// turn (incrementing `next_turn`); assistant/tool messages inherit the
     /// current turn. Compaction retires numbers but never shifts surviving
@@ -689,71 +649,207 @@ pub struct Engine {
     turn_map: Vec<usize>,
     /// The next turn number to assign (monotonic; never decremented).
     next_turn: usize,
-    /// Cumulative billed tokens this session (summed per request — each
-    /// request's input is billed, so this is the cost basis, not the context
-    /// size).
-    session_usage: TokenUsage,
-    /// Running session cost estimate in USD (only when pricing is configured).
-    session_cost_usd: f64,
+}
+
+/// Context economy: the window/compaction config plus the live state deciding
+/// when compaction fires (FR-3, FR-4, Tech Spec §7/§8).
+struct ContextState {
+    /// Adaptive context-window + compaction config (FR-3, Tech Spec §7/§8).
+    config: ContextConfig,
     /// Most recent authoritative prompt-token count = current context size.
     /// `None` until the first provider `Usage`; then it drives the context %.
-    context_tokens_authoritative: Option<u64>,
-    next_permission_id: u64,
-    /// Monotonic id source for `ask_user` questions (T-8).
-    next_ask_id: u64,
+    tokens_authoritative: Option<u64>,
+    /// True once a compaction has run (live or resumed), so the summary at
+    /// `history.messages[1]` is pinned in the sent context (FR-3 windowing).
+    compacted: bool,
+    /// Set when `/compact` or the auto-trigger requests a compaction;
+    /// performed at the next clean boundary (Tech Spec §7). `Manual` outranks
+    /// `Auto` — a user `/compact` is never downgraded (FR-4).
+    pending: Option<CompactTrigger>,
+    /// Hysteresis latch for the auto-trigger (FR-4, Tech Spec §7): after an
+    /// auto-compaction fires the latch disarms and stays disarmed until usage
+    /// has fallen below the threshold and re-crossed it (no thrash).
+    auto_armed: bool,
+    /// Optional `/compact` prompt override (P-7).
+    summary_prompt: Option<String>,
+}
+
+/// Loop-breaking guardrail state (S-5, Tech Spec §7). All of it is one
+/// sliding-window judgement about whether the agent is making progress.
+struct GuardrailState {
+    config: LoopConfig,
+    /// What the in-flight tool-call turn did (reset per turn).
+    turn_obs: TurnObservation,
+    /// Cumulative modified-file paths across the session (progress if a turn
+    /// adds a new one).
+    seen_files: HashSet<String>,
+    /// Cumulative distinct tool-result hashes (progress if a turn adds a new
+    /// one).
+    seen_results: HashSet<u64>,
+    /// Tool signature of the previous no-progress turn.
+    last_sig: Option<u64>,
+    /// Consecutive no-progress turns with the *same* tool signature.
+    same_sig_streak: usize,
+    /// Consecutive no-progress turns (any signature).
+    no_progress_streak: usize,
+}
+
+/// Completion-gate state (S-6, Tech Spec §7).
+struct CompletionState {
+    /// Completion-gate tunables.
+    config: CompletionConfig,
+    /// Registered completion checks the gate evaluates on a completion attempt.
+    /// Populated from config at startup; empty means the gate is inert.
+    checks: Vec<CompletionCheck>,
+    /// Consecutive failed completion attempts this session. Reset on a new
+    /// session and when the gate passes or is resolved to try again.
+    attempts: usize,
+}
+
+/// The tool→engine gates, each installed into every `ToolCtx` so a tool can
+/// reach engine-owned state without owning any of it (Tech Spec §5.1).
+struct Gates {
+    /// The permission gate (Requirements §6).
+    permission: Arc<ChannelGate>,
+    /// The ask-user gate (T-8), so the `ask_user` tool can block on a frontend
+    /// round trip.
+    ask: Arc<AskGate>,
+    /// The recall gate (T-10), so the `recall` tool can retrieve elided turns
+    /// from the in-memory conversation.
+    recall: Arc<RecallGateImpl>,
+    /// The task-list gate (T-11), so the `todo` tool can replace the full task
+    /// list in engine state.
+    task_list: Arc<TaskListGateImpl>,
+    /// The memory gate (T-13), so the `memory` tool can read and write durable
+    /// memory entries.
+    memory: Arc<MemoryGateImpl>,
+    /// The skill gate (T-15), so the `skill` tool can load instruction bodies.
+    skill: Arc<SkillGateImpl>,
+    /// The scratch gate (T-17), so the `scratch_write` tool can write into
+    /// this session's disposable working directory. Unlike the other gates,
+    /// this one acts directly rather than through a channel to the engine loop
+    /// — a scratch write has no side effect on any other engine-owned state
+    /// (FR-8, Tech Spec §8.3).
+    scratch: Arc<ScratchStore>,
+}
+
+/// Which session this is, where it is recorded, and the per-session totals
+/// (HC-7). A session switch replaces all of it together.
+struct SessionState {
     /// Durable transcript sink (HC-7). Written per event; a `NoopSink` when no
     /// session file is configured.
     transcript: Box<dyn TranscriptSink>,
-    session_id: SessionId,
+    id: SessionId,
     /// Where to create a new/resumed transcript on an in-session switch.
-    sessions_dir: PathBuf,
+    dir: PathBuf,
     /// Shared with the host so the panic/exit path tracks the current session.
-    active_session_path: Arc<RwLock<PathBuf>>,
-    provider_label: String,
-    /// The config-configured default `provider =` / `model =` selection, as
-    /// of the last time it was observed (startup or the last `/config`
-    /// reload) — lets a reload detect "the configured default moved" even
-    /// though the active session provider is never auto-switched.
-    configured_provider: Option<String>,
-    configured_model: Option<String>,
-    sandbox: SandboxStatus,
-    /// The permission rule engine consulted by the gate (Requirements §6).
-    rules: RuleEngine,
-    /// The raw config-sourced rules `rules` was built from — retained so a
-    /// `/config` reload (C-5) can detect a change and rebuild just that
-    /// portion via [`RuleEngine::reload_config_rules`].
-    rule_specs: Vec<Rule>,
-    /// The current auto-accept mode (Requirements §6.4). Starts [`Mode::Normal`];
-    /// changed only through [`Engine::set_mode`], which gates auto tiers on the
-    /// sandbox status.
-    mode: Mode,
-    /// How bash spawns children: confined via the self-exec shim when the OS
-    /// sandbox is active, directly when degraded. Built from `sandbox`.
-    sandbox_spawn: Arc<dyn Sandbox>,
-    config_provenance: Vec<ConfigProvenance>,
+    active_path: Arc<RwLock<PathBuf>>,
+    /// Cumulative billed tokens this session (summed per request — each
+    /// request's input is billed, so this is the cost basis, not the context
+    /// size).
+    usage: TokenUsage,
+    /// Running session cost estimate in USD (only when pricing is configured).
+    cost_usd: f64,
     /// Whether the first (pinned, `original_task`) user message has been
     /// recorded — also gates the one-time `session_title`.
     original_task_recorded: bool,
     /// True when this run resumed an existing transcript (skips `session_start`).
     resuming: bool,
-    /// True once a compaction has run (live or resumed), so the summary at
-    /// `conversation[1]` is pinned in the sent context (FR-3 windowing).
-    compacted: bool,
     /// True when the resume fell back to transcript replay (FR-5 slow path).
     /// Drives the one dimmed Notice on engine start (Design §8.6).
     replayed: bool,
-    /// Set when `/compact` or the auto-trigger requests a compaction;
-    /// performed at the next clean boundary (Tech Spec §7). `Manual` outranks
-    /// `Auto` — a user `/compact` is never downgraded (FR-4).
-    pending_compaction: Option<CompactTrigger>,
-    /// Hysteresis latch for the auto-trigger (FR-4, Tech Spec §7): after an
-    /// auto-compaction fires the latch disarms and stays disarmed until usage
-    /// has fallen below the threshold and re-crossed it (no thrash).
-    auto_compact_armed: bool,
-    /// Optional `/compact` prompt override (P-7).
-    summary_prompt: Option<String>,
-    /// Builds a provider on an in-session model switch (C-6); `None` disables it.
-    provider_factory: Option<Arc<dyn ProviderFactory>>,
+}
+
+/// The safety layers (Requirements §6): what the OS enforces, what the rules
+/// decide, and the mode that may only ever relax an ask.
+struct SafetyState {
+    sandbox: SandboxStatus,
+    /// The permission rule engine consulted by the gate.
+    rules: RuleEngine,
+    /// The raw config-sourced rules `rules` was built from — retained so a
+    /// `/config` reload (C-5) can detect a change and rebuild just that
+    /// portion via [`RuleEngine::reload_config_rules`].
+    rule_specs: Vec<Rule>,
+    /// The current auto-accept mode (§6.4). Starts [`Mode::Normal`]; changed
+    /// only through [`Engine::set_mode`], which gates auto tiers on `sandbox`.
+    mode: Mode,
+    /// How bash spawns children: confined via the self-exec shim when the OS
+    /// sandbox is active, directly when degraded. Built from `sandbox`.
+    spawn: Arc<dyn Sandbox>,
+}
+
+/// Durable memory (FR-6, T-13, Tech Spec §8.1).
+struct MemoryState {
+    config: MemoryConfig,
+    /// The durable memory store. `None` when memory is disabled or no home
+    /// directory exists.
+    store: Option<MemoryStore>,
+    /// Retained from [`EngineConfig`] so a `/config` reload (C-5) can rebuild
+    /// `store` without needing a full `EngineConfig`.
+    user_dir: Option<PathBuf>,
+    /// Retained from [`EngineConfig`] for the same reason as `user_dir`.
+    project_dir: Option<PathBuf>,
+    /// Cached user-global memory index text for pinning (Tech Spec §7).
+    user_index: String,
+    /// Cached project memory index text for pinning (empty when untrusted).
+    project_index: String,
+    /// Whether the max_index_entries soft-cap warning has been emitted this
+    /// session (Tech Spec §16 — warn once, do not truncate).
+    warn_emitted: bool,
+}
+
+/// The skill system (FR-7, T-15, Tech Spec §8.2).
+struct SkillState {
+    config: SkillsConfig,
+    /// The skill catalog. `None` when skills are disabled or no home directory
+    /// exists.
+    catalog: Option<SkillCatalog>,
+    /// Retained from [`EngineConfig`] so a `/config` reload (C-5) can rebuild
+    /// `catalog` without needing a full `EngineConfig`.
+    user_dir: Option<PathBuf>,
+    /// Retained from [`EngineConfig`] for the same reason as `user_dir`.
+    project_dir: Option<PathBuf>,
+    /// The built skill metadata for pinning + `SkillsAvailable`.
+    metas: Vec<emberly_tools::SkillMeta>,
+    /// Cached catalog text for pinning (Tech Spec §7).
+    catalog_text: String,
+    /// Shadow notices for `emberly config show` (Tech Spec §8.2).
+    shadows: Vec<ShadowNotice>,
+}
+
+/// The agent engine.
+///
+/// The state above is grouped into sub-structs by concern rather than held as
+/// one flat list. This is not cosmetic: 62 of the fields belonged to ten
+/// clusters that are always read and written together (a model switch, a
+/// session switch, one compaction decision), and flattening them made it
+/// possible to update one and forget its siblings. The engine is still the
+/// single owner of all of it — the grouping changes reachability, not
+/// ownership (A-1).
+pub struct Engine {
+    provider: ProviderState,
+    history: HistoryState,
+    context: ContextState,
+    guardrail: GuardrailState,
+    completion: CompletionState,
+    gates: Gates,
+    session: SessionState,
+    safety: SafetyState,
+    memory: MemoryState,
+    skills: SkillState,
+    tools: ToolRegistry,
+    project_root: PathBuf,
+    /// Whether tool-call explanations are enabled (T-9); see [`EngineConfig`].
+    tool_explanations: bool,
+    /// Newly-granted workspace trust to record at session start (FR-1).
+    trust_granted: bool,
+    truncate: TruncateConfig,
+    retry: RetryPolicy,
+    events_tx: mpsc::Sender<UiEvent>,
+    next_permission_id: u64,
+    /// Monotonic id source for `ask_user` questions (T-8).
+    next_ask_id: u64,
+    config_provenance: Vec<ConfigProvenance>,
     /// Re-reads config on an in-app edit (C-5); `None` disables live reload.
     config_reloader: Option<Arc<dyn ConfigReloader>>,
     /// The model-maintained task list (T-11). Pure engine state — the engine
@@ -766,39 +862,6 @@ pub struct Engine {
     /// Maximum document file size in bytes (Tech Spec §5.2). Threaded to the
     /// `read_document` tool via `ToolCtx`.
     document_max_bytes: usize,
-    /// Memory config (FR-6, Tech Spec §8.1).
-    memory_config: MemoryConfig,
-    /// The durable memory store (FR-6, T-13). `None` when memory is disabled
-    /// or no home directory exists.
-    memory_store: Option<MemoryStore>,
-    /// Retained from [`EngineConfig`] so a `/config` reload (C-5) can rebuild
-    /// `memory_store` without needing a full `EngineConfig`.
-    user_memory_dir: Option<PathBuf>,
-    /// Retained from [`EngineConfig`] for the same reason as `user_memory_dir`.
-    project_memory_dir: Option<PathBuf>,
-    /// Cached user-global memory index text for pinning (Tech Spec §7).
-    memory_user_index: String,
-    /// Cached project memory index text for pinning (empty when untrusted).
-    memory_project_index: String,
-    /// Whether the max_index_entries soft-cap warning has been emitted this
-    /// session (Tech Spec §16 — warn once, do not truncate).
-    memory_warn_emitted: bool,
-    /// Skills config (FR-7, Tech Spec §8.2).
-    skills_config: SkillsConfig,
-    /// The skill catalog (FR-7, T-15). `None` when skills are disabled or no
-    /// home directory exists.
-    skill_catalog: Option<SkillCatalog>,
-    /// Retained from [`EngineConfig`] so a `/config` reload (C-5) can rebuild
-    /// `skill_catalog` without needing a full `EngineConfig`.
-    user_skills_dir: Option<PathBuf>,
-    /// Retained from [`EngineConfig`] for the same reason as `user_skills_dir`.
-    project_skills_dir: Option<PathBuf>,
-    /// The built skill metadata for pinning + `SkillsAvailable`.
-    skill_metas: Vec<emberly_tools::SkillMeta>,
-    /// Cached catalog text for pinning (Tech Spec §7).
-    skill_catalog_text: String,
-    /// Shadow notices for `emberly config show` (Tech Spec §8.2).
-    skill_shadows: Vec<ShadowNotice>,
 }
 
 // The `Engine` impl is split across these modules by topic. Each holds
@@ -890,88 +953,109 @@ impl Engine {
             .as_ref()
             .map_or(config.resuming, |c| c.original_task_recorded);
         let mut engine = Self {
-            provider: config.provider,
+            provider: ProviderState {
+                client: config.provider,
+                model: config.model,
+                effort: seed_effort,
+                system: config.system,
+                label: config.provider_label,
+                configured_provider: config.configured_provider,
+                configured_model: config.configured_model,
+                factory: config.provider_factory,
+            },
+            history: HistoryState {
+                messages: config.initial_conversation,
+                turn_map,
+                next_turn,
+            },
+            context: ContextState {
+                config: config.context,
+                tokens_authoritative: context_tokens_authoritative,
+                compacted: config.compacted,
+                pending: None,
+                auto_armed: true,
+                summary_prompt: config.summary_prompt,
+            },
+            guardrail: GuardrailState {
+                config: config.loop_config,
+                turn_obs: TurnObservation::default(),
+                seen_files: HashSet::new(),
+                seen_results: HashSet::new(),
+                last_sig: None,
+                same_sig_streak: 0,
+                no_progress_streak: 0,
+            },
+            completion: CompletionState {
+                config: config.completion_config,
+                checks: config.completion_checks,
+                attempts: 0,
+            },
+            gates: Gates {
+                permission: Arc::new(ChannelGate { asks: asks_tx }),
+                ask: Arc::new(AskGate { asks: user_asks_tx }),
+                recall: Arc::new(RecallGateImpl { asks: recall_tx }),
+                task_list: Arc::new(TaskListGateImpl { asks: task_list_tx }),
+                memory: Arc::new(MemoryGateImpl { asks: memory_tx }),
+                skill: Arc::new(SkillGateImpl { asks: skill_tx }),
+                scratch: scratch_store,
+            },
+            session: SessionState {
+                transcript: config.transcript,
+                id: config.session_id,
+                dir: config.sessions_dir,
+                active_path: config.active_session_path,
+                usage: session_usage,
+                cost_usd: session_cost_usd,
+                // On resume the original task already lives in the restored history.
+                original_task_recorded,
+                resuming: config.resuming,
+                replayed: config.replayed,
+            },
+            safety: SafetyState {
+                sandbox: config.sandbox,
+                rules: config.rules,
+                rule_specs: config.rule_specs,
+                mode: Mode::Normal,
+                spawn: sandbox_spawn,
+            },
+            memory: MemoryState {
+                config: config.memory.clone(),
+                store: memory_store,
+                user_dir: config.user_memory_dir,
+                project_dir: config.project_memory_dir,
+                user_index: String::new(),
+                project_index: String::new(),
+                warn_emitted: false,
+            },
+            skills: SkillState {
+                config: config.skills.clone(),
+                catalog: skill_catalog,
+                user_dir: config.user_skills_dir,
+                project_dir: config.project_skills_dir,
+                metas: Vec::new(),
+                catalog_text: String::new(),
+                shadows: Vec::new(),
+            },
             tools: config.tools,
             project_root: config.project_root,
-            model: config.model,
-            effort: seed_effort,
-            system: config.system,
             tool_explanations: config.tool_explanations,
             trust_granted: config.trust_granted,
-            loop_config: config.loop_config,
-            context: config.context,
-            turn_obs: TurnObservation::default(),
-            loop_seen_files: HashSet::new(),
-            loop_seen_results: HashSet::new(),
-            loop_last_sig: None,
-            loop_same_sig_streak: 0,
-            loop_no_progress_streak: 0,
-            completion_config: config.completion_config,
-            completion_checks: config.completion_checks,
-            completion_attempts: 0,
             truncate: config.truncate,
             retry: config.retry,
-            gate: Arc::new(ChannelGate { asks: asks_tx }),
-            ask_gate: Arc::new(AskGate { asks: user_asks_tx }),
-            recall_gate: Arc::new(RecallGateImpl { asks: recall_tx }),
-            task_list_gate: Arc::new(TaskListGateImpl { asks: task_list_tx }),
-            memory_gate: Arc::new(MemoryGateImpl { asks: memory_tx }),
-            skill_gate: Arc::new(SkillGateImpl { asks: skill_tx }),
-            scratch_store,
             events_tx,
-            conversation: config.initial_conversation,
-            turn_map,
-            next_turn,
-            session_usage,
-            session_cost_usd,
-            context_tokens_authoritative,
             next_permission_id: 0,
             next_ask_id: 0,
-            transcript: config.transcript,
-            session_id: config.session_id,
-            sessions_dir: config.sessions_dir,
-            active_session_path: config.active_session_path,
-            provider_label: config.provider_label,
-            configured_provider: config.configured_provider,
-            configured_model: config.configured_model,
-            sandbox: config.sandbox,
-            rules: config.rules,
-            rule_specs: config.rule_specs,
-            mode: Mode::Normal,
-            sandbox_spawn,
             config_provenance: config.config_provenance,
-            // On resume the original task already lives in the restored history.
-            original_task_recorded,
-            resuming: config.resuming,
-            compacted: config.compacted,
-            replayed: config.replayed,
-            pending_compaction: None,
-            auto_compact_armed: true,
-            summary_prompt: config.summary_prompt,
-            provider_factory: config.provider_factory,
             config_reloader: config.config_reloader,
             task_list: Vec::new(),
             image_max_bytes: config.image_max_bytes,
             document_max_bytes: config.document_max_bytes,
-            memory_config: config.memory.clone(),
-            memory_store,
-            user_memory_dir: config.user_memory_dir,
-            project_memory_dir: config.project_memory_dir,
-            memory_user_index: String::new(),
-            memory_project_index: String::new(),
-            memory_warn_emitted: false,
-            skills_config: config.skills.clone(),
-            skill_catalog,
-            user_skills_dir: config.user_skills_dir,
-            project_skills_dir: config.project_skills_dir,
-            skill_metas: Vec::new(),
-            skill_catalog_text: String::new(),
-            skill_shadows: Vec::new(),
         };
         // Load memory indexes at session start (Tech Spec §8.1).
         engine.refresh_memory_indexes();
         let (user_count, project_count) = engine
-            .memory_store
+            .memory
+            .store
             .as_ref()
             .map_or((0, 0), |s| s.status_counts());
         let _ = engine.events_tx.try_send(UiEvent::MemoryStatus {
@@ -982,7 +1066,7 @@ impl Engine {
         // (Tech Spec §8.2, §3.1).
         engine.refresh_skill_catalog();
         let _ = engine.events_tx.try_send(UiEvent::SkillsAvailable {
-            skills: engine.skill_metas.clone(),
+            skills: engine.skills.metas.clone(),
         });
         (
             engine,
@@ -1000,7 +1084,7 @@ impl Engine {
     /// (`[[completion.check]]`); this seam also lets a future frontend or tool
     /// register a check programmatically.
     pub fn register_completion_check(&mut self, check: CompletionCheck) {
-        self.completion_checks.push(check);
+        self.completion.checks.push(check);
     }
 
     /// Run the engine until the command channel closes. Idle between turns,
@@ -1020,13 +1104,13 @@ impl Engine {
         mut memory_rx: mpsc::Receiver<MemoryAsk>,
         mut skill_rx: mpsc::Receiver<SkillAsk>,
     ) {
-        if self.resuming {
+        if self.session.resuming {
             // Continuing an existing transcript: no fresh session_start, but
             // surface the restored context size right away (Design §8.4).
             // When the resume fell back to transcript replay (no valid cache),
             // say so in one dimmed line — speech about the slow path only
             // (Design §8.6). The fast path is silent.
-            if self.replayed {
+            if self.session.replayed {
                 self.emit(UiEvent::Notice {
                     message: "Rebuilding the session from its transcript…".into(),
                 })
@@ -1035,11 +1119,11 @@ impl Engine {
             self.emit_context_usage().await;
         } else {
             self.write_transcript(TranscriptEvent::SessionStart {
-                session_id: self.session_id,
-                provider: self.provider_label.clone(),
-                model: self.model.clone(),
+                session_id: self.session.id,
+                provider: self.provider.label.clone(),
+                model: self.provider.model.clone(),
                 project_root: self.project_root.display().to_string(),
-                sandbox: self.sandbox.clone(),
+                sandbox: self.safety.sandbox.clone(),
                 config_provenance: self.config_provenance.clone(),
                 prompts_version: crate::prompts::VERSION,
             });
@@ -1057,12 +1141,12 @@ impl Engine {
         // at session start, and — when confinement is unavailable — explain the
         // degraded path once, in plain language (Design §8.2).
         self.emit(UiEvent::SandboxStatus {
-            status: self.sandbox.clone(),
+            status: self.safety.sandbox.clone(),
         })
         .await;
-        if !self.sandbox.is_confined() {
+        if !self.safety.sandbox.is_confined() {
             self.emit(UiEvent::Notice {
-                message: degraded_notice(&self.sandbox),
+                message: degraded_notice(&self.safety.sandbox),
             })
             .await;
         }
@@ -1084,7 +1168,7 @@ impl Engine {
                     // burn a turn number or claim the "original task" slot;
                     // the real first message still gets both once a
                     // provider is added.
-                    if self.provider.id() == ProviderId::new("placeholder") {
+                    if self.provider.client.id() == ProviderId::new("placeholder") {
                         self.emit(UiEvent::Notice {
                             message: "no provider configured — run /model to add one before \
                                       sending a message"
@@ -1113,7 +1197,7 @@ impl Engine {
                     // A `/compact` sent mid-turn or an auto-trigger request
                     // runs now, at the clean boundary (every tool_use has its
                     // tool_result — Tech Spec §7).
-                    if let Some(trigger) = self.pending_compaction.take() {
+                    if let Some(trigger) = self.context.pending.take() {
                         self.compact(trigger).await;
                     }
                     self.write_view_cache();

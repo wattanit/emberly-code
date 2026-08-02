@@ -12,15 +12,15 @@ impl Engine {
     /// root re-scans project skills. When skills are disabled or no user dir
     /// exists, the catalog is cleared.
     pub(super) fn refresh_skill_catalog(&mut self) {
-        if let Some(catalog) = &self.skill_catalog {
+        if let Some(catalog) = &self.skills.catalog {
             let (metas, shadows) = catalog.discover();
-            self.skill_catalog_text = render_catalog(&metas);
-            self.skill_metas = metas;
-            self.skill_shadows = shadows;
+            self.skills.catalog_text = render_catalog(&metas);
+            self.skills.metas = metas;
+            self.skills.shadows = shadows;
         } else {
-            self.skill_catalog_text.clear();
-            self.skill_metas.clear();
-            self.skill_shadows.clear();
+            self.skills.catalog_text.clear();
+            self.skills.metas.clear();
+            self.skills.shadows.clear();
         }
     }
 
@@ -31,8 +31,9 @@ impl Engine {
     /// absent skill emits a `Notice` rather than a `SkillBody`, so the inspector
     /// never opens an empty overlay.
     pub(super) async fn inspect_skill(&self, name: String) {
-        let invocation = if self.skills_config.enabled {
-            self.skill_catalog
+        let invocation = if self.skills.config.enabled {
+            self.skills
+                .catalog
                 .as_ref()
                 .and_then(|cat| cat.invoke(&name))
         } else {
@@ -63,8 +64,9 @@ impl Engine {
     /// (never a panic). **Read-only — emits nothing** (the catalog does not
     /// change on invoke; contrast `on_memory_op` which refreshes `MemoryStatus`).
     pub(super) async fn on_skill_invoke(&mut self, ask: SkillAsk) {
-        let result = if self.skills_config.enabled {
-            self.skill_catalog
+        let result = if self.skills.config.enabled {
+            self.skills
+                .catalog
                 .as_ref()
                 .and_then(|cat| cat.invoke(&ask.name))
         } else {
