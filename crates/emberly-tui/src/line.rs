@@ -14,12 +14,13 @@ use std::path::{Path, PathBuf};
 use emberly_core::{
     AskAnswer, AskId, CheckResult, Command, EntrySummary, FrontendPorts, GateResolution,
     LoopResolution, MemoryOp, MemoryScope, Mode, PermissionDecision, PermissionId,
-    PermissionRendering, SandboxStatus, SkillMeta, SkillOrigin, UiEvent,
+    PermissionRendering, SandboxStatus, SessionId, SkillMeta, SkillOrigin, UiEvent,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::app::ReasoningView;
+use crate::commands::{self, AppCommand, Slash};
 
 /// Renders [`UiEvent`]s as append-only lines. Holds no color or cursor state
 /// (degraded mode, Design §7); the only state is the reasoning-block toggle so
@@ -567,22 +568,234 @@ enum Pending {
     },
 }
 
+/// The line-mode driver's session state that `/commands` read. The engine owns
+/// every store behind these; the frontend only caches what it needs to resolve a
+/// command without a round trip (a skill name, a memory entry's scope).
+struct LineState {
+    /// `.agents/`, where `/config` and `/prompt` resolve their targets (C-5).
+    agents_dir: PathBuf,
+    config_template: String,
+    /// The current tier, so `/mode` proposes the next one.
+    mode: Mode,
+    skills: Vec<SkillMeta>,
+    mem_user: Vec<EntrySummary>,
+    mem_project: Vec<EntrySummary>,
+}
+
+/// What the driver should do with a typed `/command`.
+enum LineAction {
+    /// Fully handled — the output is already written.
+    Done,
+    /// Send this to the engine.
+    Send(Command),
+    /// Take the next input line as the answer to this prompt.
+    Await(Pending),
+    /// End the session (`/quit`) — the same clean path as stdin EOF: stop
+    /// sending, keep draining events until the engine closes its side.
+    Quit,
+}
+
+/// Resolve a typed `/command` line — the leading slash already stripped —
+/// against the shared registry (Design §7).
+///
+/// Pure but for `out`, so every branch is testable without a terminal. Three
+/// outcomes the hand-rolled predecessor could not express: a name the registry
+/// does not know is reported as a typo (never sent to the model as a prompt), a
+/// command the registry marks rich-only says so, and `/help` lists exactly what
+/// line mode can run.
+fn on_slash(input: &str, state: &LineState, out: &mut impl Write) -> io::Result<LineAction> {
+    let (spec, args) = match commands::parse_slash(input) {
+        Slash::Command(spec, args) => (spec, args),
+        Slash::Unknown(name) => {
+            writeln!(out, "unknown command: /{name} — /help lists commands")?;
+            return Ok(LineAction::Done);
+        }
+    };
+    if !spec.runs_plain() {
+        writeln!(
+            out,
+            "/{} needs the full interface — not available in plain mode",
+            spec.name
+        )?;
+        return Ok(LineAction::Done);
+    }
+    Ok(match spec.cmd {
+        AppCommand::Help => {
+            render_help(out)?;
+            LineAction::Done
+        }
+        AppCommand::Cancel => LineAction::Send(Command::Cancel),
+        AppCommand::Compact => LineAction::Send(Command::Compact),
+        AppCommand::Reload => LineAction::Send(Command::ReloadConfig),
+        AppCommand::Quit => LineAction::Quit,
+        // A fresh session in place: the engine adopts the minted id and echoes
+        // a SessionMeta, which is all the append-only view needs (no reset).
+        AppCommand::NewSession => LineAction::Send(Command::NewSession {
+            session_id: SessionId::new(),
+        }),
+        // The engine gates the auto tiers on confinement and answers with a
+        // ModeChanged or an explanatory Notice, so we only propose the next.
+        AppCommand::CycleMode => LineAction::Send(Command::SetMode {
+            mode: next_mode(state.mode),
+        }),
+        // Plain mode has no picker, so `/model` and `/effort` need an argument
+        // (C-6/P-9); the engine validates it.
+        AppCommand::Model => {
+            let mut parts = args.split_whitespace();
+            match parts.next() {
+                Some(profile) => LineAction::Send(Command::SwitchModel {
+                    profile: profile.to_string(),
+                    model: parts.next().map(str::to_string),
+                }),
+                None => {
+                    writeln!(out, "usage: /model <profile> [model]")?;
+                    LineAction::Done
+                }
+            }
+        }
+        AppCommand::Effort => match emberly_core::Effort::parse(args) {
+            Some(effort) => LineAction::Send(Command::SetEffort { effort }),
+            None => {
+                writeln!(out, "usage: /effort <low|medium|high|max>")?;
+                LineAction::Done
+            }
+        },
+        // Plain mode never launches $EDITOR — its stdin is the line reader — so
+        // `/config` and `/prompt` seed the file, name it, and leave the edit to
+        // the user, who then runs /reload (C-5, Design §7).
+        AppCommand::Config => {
+            match crate::edit::config_target(&state.agents_dir, &state.config_template) {
+                Ok((path, existed)) => writeln!(
+                    out,
+                    "{} {} — edit it, then /reload to apply",
+                    if existed { "editing" } else { "created" },
+                    path.display()
+                )?,
+                Err(e) => writeln!(out, "could not prepare config: {e}")?,
+            }
+            LineAction::Done
+        }
+        AppCommand::Prompt => {
+            match crate::edit::prompt_target(&state.agents_dir, args) {
+                Ok((path, existed)) => writeln!(
+                    out,
+                    "{} {} — edit it, then /reload to apply",
+                    if existed { "editing" } else { "created" },
+                    path.display()
+                )?,
+                Err(msg) => writeln!(out, "{msg}")?,
+            }
+            LineAction::Done
+        }
+        // Full inspection inline (FR-6, Design §4.9 — not rich-only): list, view
+        // a body, or a confirmed delete. Editing is the one part that stays a
+        // rich affordance, because it would need $EDITOR.
+        AppCommand::Memory => {
+            if args.is_empty() {
+                return Ok(LineAction::Send(Command::MemoryList));
+            }
+            let (op, name) = match args.strip_prefix("delete") {
+                Some(rest) => (MemoryVerb::Delete, rest.trim()),
+                None => (MemoryVerb::View, args),
+            };
+            if name.is_empty() {
+                writeln!(out, "usage: /memory delete <name>")?;
+                return Ok(LineAction::Done);
+            }
+            let Some(scope) = resolve_memory_scope(name, &state.mem_user, &state.mem_project)
+            else {
+                writeln!(out, "no memory entry named '{name}' — run /memory to list")?;
+                return Ok(LineAction::Done);
+            };
+            match op {
+                // Destructive, so it never happens on a single command — parity
+                // with the rich overlay's y/N step.
+                MemoryVerb::Delete => {
+                    writeln!(
+                        out,
+                        "delete {name} ({})?  [y] confirm, anything else cancels",
+                        scope_label(scope)
+                    )?;
+                    LineAction::Await(Pending::MemoryDelete {
+                        scope,
+                        name: name.to_string(),
+                    })
+                }
+                MemoryVerb::View => LineAction::Send(Command::MemoryView {
+                    scope,
+                    name: name.to_string(),
+                }),
+            }
+        }
+        // The catalog is standing state, so listing needs no round trip; a named
+        // skill's body is fetched read-only (FR-7 — inspectable before it runs).
+        AppCommand::Skills => {
+            if args.is_empty() {
+                render_skill_list(&state.skills, out)?;
+                LineAction::Done
+            } else {
+                LineAction::Send(Command::InspectSkill {
+                    name: args.to_string(),
+                })
+            }
+        }
+        // Rich-only commands are refused by the `plain` check above; naming them
+        // here keeps this match exhaustive, so a new command cannot be added
+        // without deciding what line mode does with it.
+        AppCommand::View
+        | AppCommand::Diff
+        | AppCommand::Files
+        | AppCommand::Session
+        | AppCommand::ToggleSidebar => LineAction::Done,
+    })
+}
+
+/// Which `/memory <name>` form was typed.
+enum MemoryVerb {
+    View,
+    Delete,
+}
+
+/// `/help` in line mode: the shared registry, each command described as line
+/// mode actually behaves and the rich-only ones left out entirely (Design §7 —
+/// degraded mode states what it has, not what it lacks).
+fn render_help(out: &mut impl Write) -> io::Result<()> {
+    writeln!(out, "Commands — type /name at the prompt.")?;
+    for spec in commands::COMMANDS {
+        if let Some(desc) = spec.plain_desc() {
+            writeln!(out, "  /{:<8} {desc}", spec.name)?;
+        }
+    }
+    writeln!(
+        out,
+        "\n  /memory [<name> | delete <name>] and /skills [<name>] inspect one entry"
+    )?;
+    writeln!(out, "\nAnything else you type is sent to the model.")
+}
+
 /// Run the line-mode frontend: render events to stdout, forward stdin lines to
 /// the engine as commands. Returns when either channel closes.
 ///
 /// While a permission prompt is open, the next input line is its answer; a
-/// `/cancel` line cancels the current turn; anything else is a user message.
+/// `/command` line is resolved against the shared registry ([`on_slash`]);
+/// anything else is a user message.
 pub async fn run(
     ports: FrontendPorts,
     sessions_dir: PathBuf,
     config_template: String,
     reasoning_view: ReasoningView,
 ) -> io::Result<()> {
-    // `.agents/` is the parent of the sessions dir; `/config` and `/prompt`
-    // resolve their targets under it (C-5).
-    let agents_dir = sessions_dir
-        .parent()
-        .map_or(sessions_dir.clone(), Path::to_path_buf);
+    // `.agents/` is the parent of the sessions dir (C-5).
+    let mut state = LineState {
+        agents_dir: sessions_dir
+            .parent()
+            .map_or(sessions_dir.clone(), Path::to_path_buf),
+        config_template,
+        mode: Mode::default(),
+        skills: Vec::new(),
+        mem_user: Vec::new(),
+        mem_project: Vec::new(),
+    };
     let mut renderer = LineRenderer::new(reasoning_view);
     let mut stdout = io::stdout();
     let mut events_rx = ports.events_rx;
@@ -601,16 +814,6 @@ pub async fn run(
     });
 
     let mut pending: Option<Pending> = None;
-    // Track the current tier so `/mode` can cycle it (the engine gates the auto
-    // tiers on confinement and echoes a ModeChanged / Notice back).
-    let mut mode = Mode::default();
-    // Standing inspector state (FR-6/FR-7): the skill catalog (from
-    // `SkillsAvailable`, so `/skills` prints without a round-trip) and the last
-    // memory listing (so `/memory <name>` and `/memory delete <name>` resolve a
-    // name to its scope). The engine owns the store; the frontend never reads it.
-    let mut skills: Vec<SkillMeta> = Vec::new();
-    let mut mem_user: Vec<EntrySummary> = Vec::new();
-    let mut mem_project: Vec<EntrySummary> = Vec::new();
     let mut stdin_open = true;
     loop {
         tokio::select! {
@@ -618,8 +821,10 @@ pub async fn run(
                 Some(event) => {
                     renderer.render(&event, &mut stdout)?;
                     stdout.flush()?;
+                    // The engine echoes the resolved tier back, so `/mode` always
+                    // proposes the next one from what actually took effect.
                     if let UiEvent::ModeChanged { mode: changed } = &event {
-                        mode = *changed;
+                        state.mode = *changed;
                     }
                     match event {
                         UiEvent::PermissionRequest { id, .. } => {
@@ -638,20 +843,27 @@ pub async fn run(
                         // is rendered on demand by `/skills` (not printed here);
                         // the memory list was already printed by `render` above,
                         // and is retained so name-based commands can resolve it.
-                        UiEvent::SkillsAvailable { skills: s } => {
-                            skills = s;
+                        UiEvent::SkillsAvailable { skills } => {
+                            state.skills = skills;
                         }
                         UiEvent::MemoryEntries { user, project } => {
-                            mem_user = user;
-                            mem_project = project;
+                            state.mem_user = user;
+                            state.mem_project = project;
                         }
                         _ => {}
                     }
                 }
                 None => break, // engine finished and closed its events
             },
-            line = lines_rx.recv(), if stdin_open => match (line, commands_tx.as_ref()) {
-                (Some(line), Some(tx)) => {
+            line = lines_rx.recv(), if stdin_open => {
+                // `/quit` and stdin EOF share one exit: stop sending so the
+                // engine finishes its turn and closes its events, and keep
+                // draining until it does (no forced cancel — an in-flight reply
+                // should still be shown). Recorded in a flag rather than acted
+                // on inline, because dropping the sender mid-borrow would not
+                // compile.
+                let mut stop_sending = commands_tx.is_none() || line.is_none();
+                if let (Some(line), Some(tx)) = (line, commands_tx.as_ref()) {
                     if let Some(p) = pending.take() {
                         match p {
                             Pending::Permission(id) => {
@@ -682,128 +894,24 @@ pub async fn run(
                                 }
                             }
                         }
-                    } else if line.trim() == "/cancel" {
-                        let _ = tx.send(Command::Cancel).await;
-                    } else if line.trim() == "/mode" {
-                        let _ = tx.send(Command::SetMode { mode: next_mode(mode) }).await;
-                    } else if let Some(args) = line
-                        .trim()
-                        .strip_prefix("/model")
-                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
-                    {
-                        // Degraded mode has no picker, so `/model` needs a
-                        // profile argument (C-6); the engine validates it.
-                        let mut parts = args.split_whitespace();
-                        if let Some(profile) = parts.next() {
-                            let model = parts.next().map(str::to_string);
-                            let _ = tx.send(Command::SwitchModel { profile: profile.to_string(), model }).await;
-                        } else {
-                            println!("usage: /model <profile> [model]");
-                        }
-                    } else if line.trim() == "/reload" {
-                        let _ = tx.send(Command::ReloadConfig).await;
-                    } else if line.trim() == "/compact" {
-                        // Manual compaction (Requirements §8.3, Tech Spec §7) —
-                        // parity with the rich TUI's `/compact`; the
-                        // `CompactionStatus` render arm above reports the result.
-                        let _ = tx.send(Command::Compact).await;
-                    } else if line.trim() == "/config" {
-                        // Line mode does not launch $EDITOR (stdin is the line
-                        // reader / often a pipe): seed + point at the file, then
-                        // the user edits it and runs /reload (C-5, degraded §7).
-                        match crate::edit::config_target(&agents_dir, &config_template) {
-                            Ok((path, existed)) => println!(
-                                "{} {} — edit it, then /reload to apply",
-                                if existed { "editing" } else { "created" },
-                                path.display()
-                            ),
-                            Err(e) => println!("could not prepare config: {e}"),
-                        }
-                    } else if let Some(rest) = line
-                        .trim()
-                        .strip_prefix("/prompt")
-                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
-                    {
-                        match crate::edit::prompt_target(&agents_dir, rest.trim()) {
-                            Ok((path, existed)) => println!(
-                                "{} {} — edit it, then /reload to apply",
-                                if existed { "editing" } else { "created" },
-                                path.display()
-                            ),
-                            Err(msg) => println!("{msg}"),
-                        }
-                    } else if let Some(rest) = line
-                        .trim()
-                        .strip_prefix("/effort")
-                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
-                    {
-                        // Degraded mode has no picker, so `/effort` needs a level
-                        // argument (P-9); the engine drops it if the model has no
-                        // control.
-                        match emberly_core::Effort::parse(rest.trim()) {
-                            Some(effort) => {
-                                let _ = tx.send(Command::SetEffort { effort }).await;
+                    } else if let Some(input) = line.trim().strip_prefix('/') {
+                        // A leading slash is a command, never a prompt — even
+                        // when the registry does not know the name.
+                        let action = on_slash(input, &state, &mut stdout)?;
+                        stdout.flush()?;
+                        match action {
+                            LineAction::Done => {}
+                            LineAction::Send(cmd) => {
+                                let _ = tx.send(cmd).await;
                             }
-                            None => println!("usage: /effort <low|medium|high|max>"),
-                        }
-                    } else if let Some(rest) = line
-                        .trim()
-                        .strip_prefix("/memory")
-                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
-                    {
-                        // Full inspection inline (FR-6, §4.9 — not rich-only):
-                        // list, view a body, or a confirmed delete. Edit is a
-                        // rich-TUI affordance (the plain frontend deliberately
-                        // never launches $EDITOR — its stdin is the line reader,
-                        // like /config/prompt), so it is not offered here.
-                        let rest = rest.trim();
-                        if rest.is_empty() {
-                            let _ = tx.send(Command::MemoryList).await;
-                        } else if let Some(name) = rest.strip_prefix("delete ").map(str::trim) {
-                            match resolve_memory_scope(name, &mem_user, &mem_project) {
-                                Some(scope) => {
-                                    println!(
-                                        "delete {name} ({})?  [y] confirm, anything else cancels",
-                                        scope_label(scope)
-                                    );
-                                    pending = Some(Pending::MemoryDelete { scope, name: name.to_string() });
-                                }
-                                None => println!("no memory entry named '{name}' — run /memory to list"),
-                            }
-                        } else if rest == "delete" {
-                            println!("usage: /memory delete <name>");
-                        } else {
-                            match resolve_memory_scope(rest, &mem_user, &mem_project) {
-                                Some(scope) => {
-                                    let _ = tx.send(Command::MemoryView { scope, name: rest.to_string() }).await;
-                                }
-                                None => println!("no memory entry named '{rest}' — run /memory to list"),
-                            }
-                        }
-                    } else if let Some(rest) = line
-                        .trim()
-                        .strip_prefix("/skills")
-                        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
-                    {
-                        // The catalog is standing state, so listing needs no
-                        // round-trip; a named skill's body is fetched read-only
-                        // (FR-7 — inspectable before it ever runs).
-                        let rest = rest.trim();
-                        if rest.is_empty() {
-                            let _ = render_skill_list(&skills, &mut stdout);
-                            let _ = stdout.flush();
-                        } else {
-                            let _ = tx.send(Command::InspectSkill { name: rest.to_string() }).await;
+                            LineAction::Await(p) => pending = Some(p),
+                            LineAction::Quit => stop_sending = true,
                         }
                     } else if !line.trim().is_empty() {
                         let _ = tx.send(Command::UserInput { text: line }).await;
                     }
                 }
-                _ => {
-                    // stdin closed: drop the command sender so the engine
-                    // finishes the current turn and closes its events. We keep
-                    // draining events until it does (no forced cancel — an
-                    // in-flight reply should still be shown).
+                if stop_sending {
                     commands_tx = None;
                     stdin_open = false;
                 }
@@ -817,6 +925,180 @@ pub async fn run(
 mod tests {
     use super::*;
     use emberly_core::{PermissionRendering, ToolCallId};
+
+    /// A `LineState` rooted in a fresh temp dir, so the `/config` and `/prompt`
+    /// branches can seed real files without touching the developer's tree.
+    fn state() -> LineState {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "emberly-line-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        LineState {
+            agents_dir: dir,
+            config_template: "# template\n".into(),
+            mode: Mode::default(),
+            skills: Vec::new(),
+            mem_user: Vec::new(),
+            mem_project: Vec::new(),
+        }
+    }
+
+    /// Run one `/command` (slash already stripped) and return what it printed
+    /// plus the action it chose.
+    fn slash(input: &str) -> (String, LineAction) {
+        slash_in(&state(), input)
+    }
+
+    fn slash_in(state: &LineState, input: &str) -> (String, LineAction) {
+        let mut buf: Vec<u8> = Vec::new();
+        let action = on_slash(input, state, &mut buf).expect("writing to a Vec cannot fail");
+        (String::from_utf8(buf).unwrap_or_default(), action)
+    }
+
+    #[test]
+    fn unknown_command_is_reported_not_sent_to_the_model() {
+        // The regression this closes: the hand-rolled parser fell through to
+        // `UserInput`, so a typo'd command became a prompt (and a turn).
+        let (out, action) = slash("modl anthropic");
+        assert!(out.contains("unknown command: /modl"), "{out}");
+        assert!(out.contains("/help"), "{out}");
+        assert!(matches!(action, LineAction::Done));
+    }
+
+    #[test]
+    fn a_name_must_end_at_whitespace() {
+        // `/modelx` is a typo, not `/model` with a mangled argument.
+        let (out, _) = slash("modelx");
+        assert!(out.contains("unknown command: /modelx"), "{out}");
+    }
+
+    #[test]
+    fn rich_only_commands_say_so_rather_than_being_ignored() {
+        for name in ["diff", "files", "view", "sidebar", "session"] {
+            let (out, action) = slash(name);
+            assert!(
+                out.contains("not available in plain mode"),
+                "/{name} printed {out:?}"
+            );
+            assert!(matches!(action, LineAction::Done));
+        }
+    }
+
+    #[test]
+    fn every_plain_command_is_handled() {
+        // The registry's `plain` flag and this frontend's match must agree: a
+        // command marked runnable must not fall into the refusal path, and must
+        // either act or explain itself. This is the parity check whose absence
+        // let line mode quietly omit commands.
+        for spec in commands::COMMANDS.iter().filter(|spec| spec.runs_plain()) {
+            let (out, action) = slash(spec.name);
+            assert!(
+                !out.contains("not available in plain mode"),
+                "/{} is marked plain but was refused",
+                spec.name
+            );
+            let acted = !matches!(action, LineAction::Done) || !out.trim().is_empty();
+            assert!(acted, "/{} neither acted nor printed anything", spec.name);
+        }
+    }
+
+    #[test]
+    fn help_lists_the_plain_command_set_only() {
+        let (out, _) = slash("help");
+        assert!(out.contains("/compact"), "{out}");
+        assert!(out.contains("/quit"), "{out}");
+        // Rich-only commands are absent — degraded mode states what it has.
+        assert!(!out.contains("/sidebar"), "{out}");
+        assert!(!out.contains("/diff"), "{out}");
+    }
+
+    #[test]
+    fn quit_ends_the_session_like_stdin_eof() {
+        assert!(matches!(slash("quit").1, LineAction::Quit));
+    }
+
+    #[test]
+    fn new_session_mints_an_id() {
+        assert!(matches!(
+            slash("new").1,
+            LineAction::Send(Command::NewSession { .. })
+        ));
+        // `/clear` is the registry's alias for it.
+        assert!(matches!(
+            slash("clear").1,
+            LineAction::Send(Command::NewSession { .. })
+        ));
+    }
+
+    #[test]
+    fn argument_taking_commands_need_their_argument_here() {
+        // Plain mode has no picker, so a bare `/model` or `/effort` is a usage
+        // line rather than silence (C-6/P-9, Design §7).
+        let (out, action) = slash("model");
+        assert!(out.contains("usage: /model"), "{out}");
+        assert!(matches!(action, LineAction::Done));
+        let (out, action) = slash("effort");
+        assert!(out.contains("usage: /effort"), "{out}");
+        assert!(matches!(action, LineAction::Done));
+
+        match slash("model zai glm-4.6").1 {
+            LineAction::Send(Command::SwitchModel { profile, model }) => {
+                assert_eq!(profile, "zai");
+                assert_eq!(model.as_deref(), Some("glm-4.6"));
+            }
+            _ => panic!("expected a SwitchModel"),
+        }
+        match slash("effort high").1 {
+            LineAction::Send(Command::SetEffort { effort }) => {
+                assert_eq!(effort, emberly_core::Effort::High);
+            }
+            _ => panic!("expected a SetEffort"),
+        }
+    }
+
+    #[test]
+    fn mode_proposes_the_next_tier_from_the_current_one() {
+        let mut state = state();
+        state.mode = Mode::Normal;
+        match slash_in(&state, "mode").1 {
+            LineAction::Send(Command::SetMode { mode }) => {
+                assert_eq!(mode, Mode::AutoAcceptEdits);
+            }
+            _ => panic!("expected a SetMode"),
+        }
+    }
+
+    #[test]
+    fn memory_resolves_a_name_and_confirms_a_delete() {
+        let mut state = state();
+        state.mem_user = vec![mem_sum("prefs", "d", MemoryScope::User)];
+        // Bare `/memory` lists.
+        assert!(matches!(
+            slash_in(&state, "memory").1,
+            LineAction::Send(Command::MemoryList)
+        ));
+        // A known name views it; an unknown one says so.
+        assert!(matches!(
+            slash_in(&state, "memory prefs").1,
+            LineAction::Send(Command::MemoryView { .. })
+        ));
+        let (out, action) = slash_in(&state, "memory nope");
+        assert!(out.contains("no memory entry named 'nope'"), "{out}");
+        assert!(matches!(action, LineAction::Done));
+        // Delete is never a single command — it opens a confirm.
+        let (out, action) = slash_in(&state, "memory delete prefs");
+        assert!(out.contains("[y] confirm"), "{out}");
+        assert!(matches!(
+            action,
+            LineAction::Await(Pending::MemoryDelete { .. })
+        ));
+        let (out, _) = slash_in(&state, "memory delete");
+        assert!(out.contains("usage: /memory delete"), "{out}");
+    }
 
     fn render_to_string(event: &UiEvent) -> String {
         render_with(ReasoningView::Collapsed, &[event])

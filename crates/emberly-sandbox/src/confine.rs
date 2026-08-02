@@ -10,13 +10,21 @@
 //!   (safe; Landlock is inherited across `execve`). No `unsafe`, no `pre_exec`
 //!   (HC-1). The ruleset (best-effort ABI): project root read+write; `.git/`
 //!   under it read+execute only unless the invocation is genuine git (§6.4);
-//!   system paths read+execute; approved outside-root paths read+write for that
-//!   one invocation (HC-4); everything else no access.
+//!   system paths read+execute; everything else no access.
 //! - **macOS (Seatbelt).** Children run under `/usr/bin/sandbox-exec -p <profile>`
 //!   — Apple's supported road to the kernel sandbox with no C FFI (HC-1). The
 //!   SBPL profile enforces the same *write* lines: reads broad, writes confined
-//!   to the project root, `.git/` carved back out (HC-5) unless genuine git,
-//!   plus the approved outside-root paths (HC-4). See [`macos::seatbelt_profile`].
+//!   to the project root, `.git/` carved back out (HC-5) unless genuine git.
+//!   See [`macos::seatbelt_profile`].
+//!
+//! A confined child gets **no outside-root write grant at all**, and there is no
+//! mechanism to add one per invocation. The tools that may step outside the root
+//! on an explicit, once-only approval (`read_file`, `write_file`, `edit_file`, …)
+//! run in-process and never reach this module; `bash` reports
+//! `outside_root: false` because it does not parse commands for paths (§6.5), so
+//! it is simply confined and never asks. Widening this is an open owner decision,
+//! held as of 0.4.3 — a grant path was drafted here (`extra_writable`) and
+//! removed unused rather than left as dead structure in the security crate.
 //!
 //! In both cases the harness process itself is **never** confined — only
 //! spawned children (Requirements §6.7). [`confined_invocation`] is the single
@@ -41,20 +49,15 @@ pub struct SandboxSpec {
     /// When true, `.git/` under the root is writable (genuine git only, §6.4);
     /// otherwise it is read-only (HC-5, safe-closed default).
     pub git_writable: bool,
-    /// Outside-root paths the user approved for this one invocation (HC-4):
-    /// read + write.
-    pub extra_writable: Vec<PathBuf>,
 }
 
 impl SandboxSpec {
-    /// A default spec confining to `root` with `.git/` read-only and no
-    /// approved outside-root paths.
+    /// A default spec confining to `root` with `.git/` read-only.
     #[must_use]
     pub fn confined_to(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
             git_writable: false,
-            extra_writable: Vec::new(),
         }
     }
 
@@ -200,9 +203,6 @@ mod linux {
             DEVICE_PATHS.iter().map(PathBuf::from),
             all,
         ))?;
-        // Approved outside-root paths (HC-4): read + write, this invocation only.
-        created = created.add_rules(path_beneath_rules(&spec.extra_writable, all))?;
-
         if spec.git_writable {
             // Genuine git (§6.4): the whole root, including `.git/`, is writable.
             created = created.add_rules(path_beneath_rules([&spec.root], all))?;
@@ -312,7 +312,6 @@ mod macos {
     /// Build the Seatbelt profile (SBPL) enforcing the §6.2 policy shape:
     /// **reads broad, writes confined to the project root**, with `.git/` carved
     /// back out (HC-5) unless this invocation is genuine git (§6.4), plus the
-    /// approved outside-root paths for this one invocation (HC-4) and the
     /// character devices commands need.
     ///
     /// SBPL is **last-match-wins**, so order encodes specificity: `(allow
@@ -322,6 +321,12 @@ mod macos {
     /// workaround), Seatbelt can genuinely *subtract* `.git/` from a writable
     /// root — so the macOS profile is both simpler and lets bash create new
     /// top-level entries under the root.
+    ///
+    /// Because the last match wins, the `.git` deny is emitted **last**: any
+    /// write-allow added after it would silently re-open `.git/` for a path it
+    /// happens to cover (an approved directory *containing* the project root
+    /// would have done exactly that), and HC-5 must not be defeasible as a side
+    /// effect of an unrelated grant. Keep it at the end.
     ///
     /// Scope note: the hard lines enforced here are the **write** lines (no write
     /// outside root, no `.git/` write). Reads stay broad — read-confinement is a
@@ -339,23 +344,17 @@ mod macos {
             "(allow file-write* (subpath \"{}\"))\n",
             quote(&root)
         ));
+        // Character devices commands commonly write (/dev/null, /dev/tty, …).
+        // Raw disk devices under /dev are root-owned, so this cannot escalate.
+        p.push_str("(allow file-write* (subpath \"/dev\"))\n");
         if !spec.git_writable {
-            // Genuine subtraction: `.git/` stays read-only inside a writable root.
+            // Genuine subtraction: `.git/` stays read-only inside a writable
+            // root. Last, so no later allow can re-open it (see above).
             p.push_str(&format!(
                 "(deny file-write* (subpath \"{}\"))\n",
                 quote(&root.join(".git"))
             ));
         }
-        // Approved outside-root paths, this invocation only (HC-4).
-        for extra in &spec.extra_writable {
-            p.push_str(&format!(
-                "(allow file-write* (subpath \"{}\"))\n",
-                quote(&real(extra))
-            ));
-        }
-        // Character devices commands commonly write (/dev/null, /dev/tty, …).
-        // Raw disk devices under /dev are root-owned, so this cannot escalate.
-        p.push_str("(allow file-write* (subpath \"/dev\"))\n");
         p
     }
 
@@ -436,13 +435,19 @@ mod macos {
         }
 
         #[test]
-        fn approved_outside_paths_are_granted() {
-            let spec = SandboxSpec {
-                extra_writable: vec![PathBuf::from("/private/tmp/allowed")],
-                ..SandboxSpec::confined_to("/private/tmp/proj")
+        fn the_git_deny_is_the_last_write_rule() {
+            // SBPL is last-match-wins, so a write-allow emitted after the `.git`
+            // deny re-opens `.git/` for any path it covers. HC-5 must not be
+            // defeasible that way, whatever gets added to this profile later.
+            let profile = seatbelt_profile(&SandboxSpec::confined_to("/private/tmp/proj"));
+            let Some(deny) = profile.find("/.git\"") else {
+                panic!("default profile must deny .git writes: {profile}");
             };
-            let profile = seatbelt_profile(&spec);
-            assert!(profile.contains("(allow file-write* (subpath \"/private/tmp/allowed\"))"));
+            let after = &profile[deny..];
+            assert!(
+                !after.contains("(allow file-write*"),
+                "no write-allow may follow the .git deny: {profile}"
+            );
         }
     }
 }

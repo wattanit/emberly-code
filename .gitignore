@@ -2,17 +2,20 @@
 /target
 **/*.rs.bk
 
-# Emberly session data / project config materialized by `emberly init`
-.agents/sessions/
-.agents/sessions-*/
-# Disposable per-session scratch space (FR-8, T-17) — never committed, and
-# this entry is also why glob/grep don't surface scratch content by default
-# (both honor .gitignore, Tech Spec §8.3).
-.agents/scratch/
-# Local dogfooding config (personal provider/model choice). `emberly init`
-# treats config.toml as shareable, but this repo's own .agents/config.toml is a
-# developer-local artifact and must never be committed.
-.agents/config.toml
+# Everything `emberly init` and a running session materialize in this repo:
+# transcripts, per-session scratch space (FR-8, T-17), project memory, and the
+# local config.toml carrying a personal provider/model choice. All of it is
+# developer-local dogfooding output, so the whole directory is ignored rather
+# than enumerated — a new session artifact should not silently appear in
+# `git status`.
+#
+# This is also why glob/grep do not surface scratch content by default: both
+# honor .gitignore (Tech Spec §8.3).
+#
+# Note this is emberly-code's own choice. `emberly init` treats
+# .agents/config.toml as shareable, and another project may well want to commit
+# it; nothing here changes that.
+.agents/
 
 # Local secrets — never committed (Tech Spec §8)
 keys.toml

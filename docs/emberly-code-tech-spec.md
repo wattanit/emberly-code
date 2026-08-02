@@ -1,8 +1,8 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.11 
+**Version:** 0.12 
 **Status:** approved
-**Date:** 2026-07-30
+**Date:** 2026-08-02
 **Owner:** Wattanit
 **Companion documents:** Requirements Document v0.10 (upstream contract),
 Design Guideline v0.10 (upstream for all UI/UX decisions)
@@ -525,9 +525,18 @@ what was actually granted):
   command resolves to the genuine git binary (§6.4), which gets a
   ruleset including `.git/` write (HC-5).
   - System paths (`/usr`, `/lib`, `/etc`, toolchain dirs): read + exec.
-  - Everything else: no access. Paths outside root that the user
-  explicitly approved per-action (HC-4 ask) are added to that single
-  invocation's ruleset only.
+  - Everything else: no access. A confined child gets **no outside-root
+  write grant** — there is no per-invocation escape hatch, and nothing
+  could populate one: `bash` cannot know which paths a command will
+  touch (§6.5 rules out parsing commands for paths), so it declares
+  none. The tools that may step outside the root on an explicit,
+  once-only approval (HC-4 ask) — `read_file`, `write_file`,
+  `edit_file`, `read_document`, `read_image` — run in-process and never
+  enter a sandbox profile. This is stricter than HC-4 requires and
+  compatible with it: HC-4 forbids acting without permission, not being
+  unable to act with it. A per-invocation grant was specified through
+  v0.11 and is withdrawn here unbuilt; widening confined children to
+  outside-root writes is an owner decision, held.
 - The harness process itself is never confined — only children. A weird
 host configuration therefore cannot destabilize Emberly itself; it
 can only weaken the fence around spawned commands.

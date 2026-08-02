@@ -2629,7 +2629,19 @@ impl Engine {
     /// crash (HC-7).
     async fn persist_project_grant(&mut self, request: &PermissionRequest) {
         let path = self.project_root.join(".agents").join("permissions.toml");
-        let block = grant_rule(request).to_toml_block();
+        let Some(block) = grant_rule(request).to_toml_block() else {
+            // The rule cannot be written as a block that reads back. Appending
+            // it anyway would leave a permissions.toml that fails to parse, and
+            // a malformed file is ignored whole on load — every project rule
+            // gone, `deny`s included. Degrade instead.
+            self.emit(UiEvent::Notice {
+                message: "couldn't express that as a permissions.toml rule; \
+                          allowed for this session only"
+                    .to_string(),
+            })
+            .await;
+            return;
+        };
         match append_rule_block(&path, &block) {
             Ok(()) => {
                 self.emit(UiEvent::Notice {
@@ -3369,8 +3381,9 @@ impl Engine {
 
     /// Emit context usage and, when pricing is configured, the running cost
     /// estimate (Requirements §8.4, P-6; Design §3.1). Uses the provider's
-    /// authoritative prompt-token count once available, falling back to a
-    /// chars/4 estimate before the first `Usage`. Also checks the FR-4
+    /// authoritative prompt-token count once available, falling back to the
+    /// provider's own `count_tokens` heuristic before the first `Usage` (issue
+    /// #12 made that script-weighted, not chars/4). Also checks the FR-4
     /// automatic-compaction threshold and queues a compaction when crossed.
     async fn emit_context_usage(&mut self) {
         let info = self.provider.model_info();

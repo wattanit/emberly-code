@@ -48,7 +48,6 @@ impl Sandbox for HostSandbox {
             let spec = SandboxSpec {
                 root: root.to_path_buf(),
                 git_writable,
-                extra_writable: Vec::new(),
             };
             if let Some((program, args, extra_env)) = confined_invocation(command, &spec) {
                 return BashInvocation {

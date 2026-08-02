@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
 use emberly_providers::{
@@ -19,6 +20,17 @@ use emberly_providers::{
 
 use crate::config::{self, AuthFile, CliOverrides, ProfileFile, Resolved};
 use emberly_tools::{default_registry, SearchAuth, SearchClient, ToolRegistry, WebSearchTool};
+
+/// How long to allow for establishing a connection (DNS, TCP, TLS). Bounds only
+/// the handshake, never a request already in flight, so it cannot cut short a
+/// long streaming completion. Without it the wait falls back to the OS default,
+/// which is minutes and not ours to rely on.
+///
+/// There is deliberately no overall request timeout to sit beside this: a
+/// streaming completion legitimately runs for minutes, so liveness is enforced
+/// where it can tell a slow generation from a dead connection — the per-chunk
+/// windows in `emberly-providers::wire`.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A chosen live provider plus display/label info.
 pub struct Selection {
@@ -317,12 +329,18 @@ fn resolve_auth(auth: Option<&AuthFile>, profile: &str) -> anyhow::Result<Auth> 
 }
 
 /// Build an HTTPS-capable client backed by the pure-Rust crypto provider.
+///
+/// Deliberately sets no overall request timeout: a streaming completion
+/// legitimately runs for minutes, so liveness is enforced where it can tell a
+/// slow generation from a dead connection — the per-chunk idle timeout in
+/// `emberly-providers::wire` — not by a clock on the whole request.
 fn build_https_client() -> anyhow::Result<reqwest::Client> {
     // Install the RustCrypto provider as the process default (idempotent — a
     // second call returns Err, which we ignore). reqwest's rustls integration,
     // built with the `*-no-provider` feature, uses this default.
     let _ = rustls_rustcrypto::provider().install_default();
     reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .context("failed to build the HTTPS client")
 }
