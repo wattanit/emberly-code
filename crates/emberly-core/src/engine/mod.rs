@@ -30,10 +30,7 @@ use tokio::sync::mpsc;
 use crate::command::Command;
 use crate::event::UiEvent;
 use crate::factory::{ConfigReloader, ProviderFactory};
-use crate::gate::{
-    AskGate, AskUserAsk, ChannelGate, MemoryAsk, MemoryGateImpl, PermissionAsk, RecallAsk,
-    RecallGateImpl, SkillAsk, SkillGateImpl, TaskListAsk, TaskListGateImpl,
-};
+use crate::gate::{AskUserAsk, Gate, MemoryAsk, PermissionAsk, RecallAsk, SkillAsk, TaskListAsk};
 use crate::id::{AskId, PermissionId, SessionId};
 use crate::memory::MemoryStore;
 use crate::scratch::ScratchStore;
@@ -731,21 +728,21 @@ struct CompletionState {
 /// reach engine-owned state without owning any of it (Tech Spec §5.1).
 struct Gates {
     /// The permission gate (Requirements §6).
-    permission: Arc<ChannelGate>,
+    permission: Arc<Gate<PermissionAsk>>,
     /// The ask-user gate (T-8), so the `ask_user` tool can block on a frontend
     /// round trip.
-    ask: Arc<AskGate>,
+    ask: Arc<Gate<AskUserAsk>>,
     /// The recall gate (T-10), so the `recall` tool can retrieve elided turns
     /// from the in-memory conversation.
-    recall: Arc<RecallGateImpl>,
+    recall: Arc<Gate<RecallAsk>>,
     /// The task-list gate (T-11), so the `todo` tool can replace the full task
     /// list in engine state.
-    task_list: Arc<TaskListGateImpl>,
+    task_list: Arc<Gate<TaskListAsk>>,
     /// The memory gate (T-13), so the `memory` tool can read and write durable
     /// memory entries.
-    memory: Arc<MemoryGateImpl>,
+    memory: Arc<Gate<MemoryAsk>>,
     /// The skill gate (T-15), so the `skill` tool can load instruction bodies.
-    skill: Arc<SkillGateImpl>,
+    skill: Arc<Gate<SkillAsk>>,
     /// The scratch gate (T-17), so the `scratch_write` tool can write into
     /// this session's disposable working directory. Unlike the other gates,
     /// this one acts directly rather than through a channel to the engine loop
@@ -1012,12 +1009,12 @@ impl Engine {
                 attempts: 0,
             },
             gates: Gates {
-                permission: Arc::new(ChannelGate { asks: asks_tx }),
-                ask: Arc::new(AskGate { asks: user_asks_tx }),
-                recall: Arc::new(RecallGateImpl { asks: recall_tx }),
-                task_list: Arc::new(TaskListGateImpl { asks: task_list_tx }),
-                memory: Arc::new(MemoryGateImpl { asks: memory_tx }),
-                skill: Arc::new(SkillGateImpl { asks: skill_tx }),
+                permission: Arc::new(Gate::new(asks_tx)),
+                ask: Arc::new(Gate::new(user_asks_tx)),
+                recall: Arc::new(Gate::new(recall_tx)),
+                task_list: Arc::new(Gate::new(task_list_tx)),
+                memory: Arc::new(Gate::new(memory_tx)),
+                skill: Arc::new(Gate::new(skill_tx)),
                 scratch: scratch_store,
             },
             session: SessionState {
