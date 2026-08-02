@@ -23,7 +23,7 @@
 //! run in-process and never reach this module; `bash` reports
 //! `outside_root: false` because it does not parse commands for paths (§6.5), so
 //! it is simply confined and never asks. Widening this is an open owner decision,
-//! held as of 0.4.3; there is deliberately no unused grant hook here waiting to
+//! held as of 0.4.4; there is deliberately no unused grant hook here waiting to
 //! be wired up.
 //!
 //! In both cases the harness process itself is **never** confined — only

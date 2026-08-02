@@ -1,6 +1,6 @@
 # Emberly Code
 
-> **Currently on v0.4.3** — feature-complete for the milestone, install from source.
+> **Currently on v0.4.4** — feature-complete for the milestone, install from source.
 
 **An AI coding agent for your terminal — provider-agnostic, fully auditable, and
 built in pure Rust.**
@@ -393,10 +393,10 @@ minimal terminals.
 
 ### Project status
 
-Feature-complete for the **v0.4.3** milestone (M11), installable from source.
+Feature-complete for the **v0.4.4** milestone, installable from source.
 The interactive TUI, live providers, session persistence, the permission rule
 engine, auto-accept modes, and OS confinement (Linux Landlock, macOS Seatbelt)
-all work today, alongside the full 0.2–0.4.3 stack described below. **Not yet
+all work today, alongside the full 0.2–0.4.4 stack described below. **Not yet
 shipped:** prebuilt binaries and Windows support (no Landlock/Seatbelt
 equivalent).
 
@@ -414,6 +414,7 @@ as it grows. _(Affectionate, not official.)_
 | **v0.4.1** | M9 | 🌲🔥 _Wildfire_ | A completion gate that holds the loop to registered pass/fail checks before it may declare a task done, and document (PDF) input — the same pattern as image input, applied to documents. |
 | **v0.4.2** | M10 | 🌲🔥 _Wildfire_ | Guided provider/model setup — a step-by-step wizard, reachable from the model picker, that writes a new provider profile and its key without hand-editing config. Plus a round of post-ship hardening: compaction, cancellation, permission previews, and parallel tool-call handling. |
 | **v0.4.3** | M11 | 🌲🔥 _Wildfire_ | Three externally-reported bug fixes (a stalled SSE stream could hang forever; an interrupted turn could commit a message no provider adapter accepts; the token estimate badly undercounted Thai/CJK text), plus session scratch space — a disposable per-session working directory (`scratch_write`, `emberly clean`). |
+| **v0.4.4** | — | 🌲🔥 _Wildfire_ | Correctness and internals, no new features. Three defects in the permission rule engine (a saved `always allow` could write a `permissions.toml` that no longer parsed, silently dropping every project rule including `deny`s; a `tool = "*"` rule could override a named-tool `deny`; `match = "*"` matched nothing instead of everything), three in the provider streaming seam, and a slow first token no longer trips the idle timeout (#15). Internally: the `Engine` and `App` god objects split by topic and their flat field lists grouped, one generic gate with a single fail-closed rule, and the unused outside-root grant path removed from the sandbox (Tech Spec v0.12). |
 
 Prior as-built plans live under `docs/version-0-1/`, `docs/version-0-2/`,
 `docs/version-0-3/`, `docs/version-0-4/`, `docs/version-0-4-1/`, and
@@ -467,7 +468,7 @@ Release targets (v1): `x86_64-unknown-linux-musl`,
 
 - [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.10)
 - [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.10)
-- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.11)
+- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.12)
 - [`docs/version-0-4-3/IMPLEMENTATION_PLAN.md`](docs/version-0-4-3/IMPLEMENTATION_PLAN.md) — phased build plan (+ per-phase `PHASE*_TODO.md`)
 
 ## License
