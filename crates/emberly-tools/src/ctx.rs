@@ -14,8 +14,8 @@ use crate::skills::{DropSkillGate, SkillError, SkillGate, SkillInvocation};
 use crate::task_list::{DropTaskListGate, TaskItem, TaskListError, TaskListGate};
 
 /// Truncation-at-ingestion configuration (Requirements §8.1, Tech Spec §5.3).
-/// Carried in [`ToolCtx`]; the truncation function that consumes it lands in
-/// group 5. Defaults are placeholders to tune with real use (Tech Spec §16).
+/// Carried in [`ToolCtx`] and consumed by [`crate::truncate`]. Defaults are
+/// initial values to tune with real use (Tech Spec §16).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TruncateConfig {
     /// Truncate when output exceeds this many lines.

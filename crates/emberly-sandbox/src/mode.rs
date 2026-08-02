@@ -4,8 +4,8 @@
 //! The auto tiers are only *reachable* while OS confinement is active. That
 //! invariant is enforced here, next to [`SandboxStatus`](crate::SandboxStatus):
 //! the only way to move to an auto mode is [`Mode::resolve`], which takes the
-//! sandbox status and refuses to escalate when it is degraded. Relocated from
-//! `emberly-core` in Phase 2 and re-exported from core.
+//! sandbox status and refuses to escalate when it is degraded. Re-exported from
+//! `emberly-core`.
 
 use serde::{Deserialize, Serialize};
 

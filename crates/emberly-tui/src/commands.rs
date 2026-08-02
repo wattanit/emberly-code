@@ -10,10 +10,10 @@
 //!
 //! Both frontends resolve a typed `/name` through [`parse_slash`], so which
 //! names exist and where a name ends and its arguments begin is decided here
-//! and nowhere else. Line mode previously hand-rolled its own parser, which
-//! omitted commands and sent an unrecognized `/name` to the model as a prompt;
-//! the [`Plain`] field replaces that silent omission with a declared, testable
-//! answer per command (Design §7 degradation).
+//! and nowhere else. Each command also declares a [`Plain`] behaviour, so line
+//! mode has a defined, testable answer for every name — rather than omitting
+//! the ones it cannot render and passing the unrecognized `/name` to the model
+//! as a prompt (Design §7 degradation).
 
 /// A command's identity — the action the app performs when it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

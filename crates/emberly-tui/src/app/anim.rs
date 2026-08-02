@@ -1,7 +1,7 @@
 //! Animation and busy state: what is in flight, what is still easing,
 //! and which spinner frame to show (Design §6.3).
 //!
-//! Part of the `App` inherent impl, split out of one 2,300-line block.
+//! Part of the `App` inherent impl.
 
 use super::*;
 

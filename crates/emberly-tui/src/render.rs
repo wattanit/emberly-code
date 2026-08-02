@@ -1079,8 +1079,8 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
             } else {
                 format!("{} — {} ({})", skill.name, skill.description, origin)
             };
-            // `fit` so the row stays one screen line (the sidebar no longer
-            // wraps — see below); the full text is in the `/skills` inspector.
+            // `fit` so the row stays one screen line (the sidebar does not
+            // wrap); the full text is in the `/skills` inspector.
             lines.push(Line::from(Span::styled(fit(&desc, w), theme.primary())));
         }
         skills_range = Some((start, lines.len())); // clickable → open /skills

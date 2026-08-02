@@ -29,7 +29,7 @@ struct WebSearchArgs {
 
 /// The `web_search` tool (T-14). Holds the resolved [`SearchClient`], built by
 /// the binary composition root. Registered only when `search.enabled = true`
-/// and an endpoint is configured (Tech Spec §5.5, group 4).
+/// and an endpoint is configured (Tech Spec §5.5).
 pub struct WebSearchTool {
     client: SearchClient,
 }

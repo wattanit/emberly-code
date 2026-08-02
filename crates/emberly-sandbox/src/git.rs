@@ -4,10 +4,10 @@
 //! confinement profile (HC-5). Everything else — a `./git` in the repo, a
 //! PATH-shadowing git inside the project, an `sh -c "git …"` wrapper, or a git
 //! call chained/redirected/substituted with other commands — runs under the
-//! read-only-`.git` profile (safe-closed). We do **not** parse shell semantics
-//! (Requirements §6.5); we recognize only a *simple* `git …` command and refuse
-//! anything with shell metacharacters that could smuggle another writer in
-//! while `.git/` is open.
+//! read-only-`.git` profile (safe-closed). Shell semantics are **not** parsed
+//! (Requirements §6.5): only a *simple* `git …` command is recognized, and
+//! anything carrying shell metacharacters that could smuggle another writer in
+//! while `.git/` is open is refused.
 
 use std::path::{Path, PathBuf};
 

@@ -4,9 +4,9 @@
 //! the in-context conversation is a derived view over it and never rewrites a
 //! line.
 //!
-//! Phase 1 defined the schema (types serializable from day one, A-3); Phase 5
-//! adds the [`TranscriptSink`] writer ([`FileTranscript`], per-event fsync) and
-//! sidecar files. Resume/replay over these records is Phase 5 group 3.
+//! The record types are serializable in their own right (A-3), independent of
+//! the writer: [`TranscriptSink`] and its [`FileTranscript`] implementation
+//! (per-event fsync) append them, and resume/replay reads them back.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

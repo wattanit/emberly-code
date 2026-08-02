@@ -1,7 +1,7 @@
 //! Session switching and the small text projections the frontend
 //! derives from conversation state.
 //!
-//! Part of the `App` inherent impl, split out of one 2,300-line block.
+//! Part of the `App` inherent impl.
 
 use super::*;
 

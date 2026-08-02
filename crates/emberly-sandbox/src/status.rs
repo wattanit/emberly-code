@@ -2,10 +2,9 @@
 //! as always-visible engine state (Requirements §6.7, Tech Spec §6.5). Emitted
 //! as a `UiEvent` and written into the transcript `session_start` record.
 //!
-//! Relocated here from `emberly-core` in Phase 2: the probe *produces* this
-//! type, so it lives with the sandbox and core re-exports it (mirroring the
-//! `ToolCallId`/`TokenUsage` pattern). The startup probe lives in
-//! [`crate::probe`].
+//! The probe *produces* this type, so it lives with the sandbox and core
+//! re-exports it (mirroring the `ToolCallId`/`TokenUsage` pattern). The startup
+//! probe lives in [`crate::probe`].
 
 use serde::{Deserialize, Serialize};
 

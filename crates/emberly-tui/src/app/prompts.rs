@@ -1,7 +1,7 @@
 //! The four blocking prompts — permission (§6), ask_user (T-8), loop
 //! halt (S-5) and completion gate (S-6) — and the answers sent back.
 //!
-//! Part of the `App` inherent impl, split out of one 2,300-line block.
+//! Part of the `App` inherent impl.
 
 use super::*;
 

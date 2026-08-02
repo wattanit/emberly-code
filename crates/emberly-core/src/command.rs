@@ -46,8 +46,8 @@ pub enum Command {
     /// [`UiEvent::CompletionGateHalted`](crate::event::UiEvent::CompletionGateHalted).
     ResolveCompletionGate { resolution: GateResolution },
 
-    /// Change the auto-accept mode (Requirements §6.4). Handled from Phase 2;
-    /// the engine validates the transition against the sandbox status.
+    /// Change the auto-accept mode (Requirements §6.4). The engine validates the
+    /// transition against the sandbox status.
     SetMode { mode: Mode },
 
     /// Switch the active provider profile — and optionally the model — for
@@ -71,8 +71,8 @@ pub enum Command {
     /// named, not applied.
     ReloadConfig,
 
-    /// Request manual compaction (Requirements §8.3). Handled from Phase 5;
-    /// queued until a clean message boundary if invoked mid-run.
+    /// Request manual compaction (Requirements §8.3). Queued until a clean
+    /// message boundary if invoked mid-run.
     Compact,
 
     /// Cancel the in-flight turn (Esc / Ctrl+C). Handled at the next await

@@ -174,7 +174,7 @@ fn inline(line: &str, theme: &Theme) -> Vec<(String, Style)> {
             continue;
         }
         // Copy one whole UTF-8 char (indices land on char boundaries because
-        // the markers we match are ASCII).
+        // the matched markers are ASCII).
         let ch_len = utf8_len(bytes[i]);
         cur.push_str(&line[i..i + ch_len]);
         i += ch_len;

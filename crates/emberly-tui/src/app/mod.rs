@@ -2,11 +2,11 @@
 //! state; the frontend keeps a *projection* of it, updated by [`UiEvent`]s and
 //! read by the renderer each frame. Keeping this a plain data structure with a
 //! pure [`App::apply_event`] reducer is what lets the sidebar/status logic be
-//! unit-tested without a terminal (§14; group 11).
+//! unit-tested without a terminal (§14).
 //!
-//! Group 1 establishes the state and the event/key plumbing with a minimal
-//! render; the real layout (group 4), markdown (group 5), diffs (group 6),
-//! permission prompt (group 7), and palette (group 8) fill it in.
+//! This module holds the state and the event/key plumbing. Rendering it is
+//! [`crate::render`]'s job: layout, the markdown pass, diffs, the permission
+//! prompt, and the palette all read this projection and never mutate it.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -56,8 +56,8 @@ pub const EASE_FRAMES: u8 = 2;
 /// Frames a freshly-landed modified-file entry stays highlighted as it settles.
 pub const SETTLE_FRAMES: u8 = 5;
 
-/// One rendered item in the conversation flow. Group 5 enriches assistant text
-/// with the markdown pass; group 6 adds diffs.
+/// One rendered item in the conversation flow. Assistant text is enriched by the
+/// markdown pass at render time; file changes carry a diff.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConvItem {
     /// A prompt the user submitted.
@@ -103,7 +103,7 @@ pub enum ConvItem {
 
 /// A dismissable, scrollable pane overlay (Design §4.2). Modal for navigation:
 /// while an overlay is open, keys scroll or dismiss it. The permission prompt
-/// (group 7) and help (group 8) build on the same mechanism.
+/// and help build on the same mechanism.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Overlay {
     pub title: String,
@@ -514,8 +514,8 @@ pub(crate) struct FilesState {
     pub(crate) modified: Vec<ModifiedFile>,
     /// Latest unified diff per modified file, for the diff overlay. Keyed by path.
     pub(crate) diffs: HashMap<String, String>,
-    /// The most recently modified file (target of the Ctrl+O diff overlay until
-    /// sidebar selection lands in group 8).
+    /// The most recently modified file — the target of the Ctrl+O diff overlay,
+    /// since the sidebar has no per-file selection.
     pub(crate) last: Option<String>,
 }
 
@@ -600,9 +600,10 @@ pub struct App {
     pub(crate) theme: Theme,
 }
 
-// The `App` impl is split across these modules by surface. Each holds its
-// own `impl App` block and sees this module's private items, so the split
-// needs no visibility widening beyond methods called across it.
+// The `App` impl is spread across these modules by surface, each holding its
+// own `impl App` block. Each module sees this one's private items, but not a
+// sibling's, so a method called from another of these modules is marked
+// `pub(super)`.
 mod actions;
 mod anim;
 mod events;

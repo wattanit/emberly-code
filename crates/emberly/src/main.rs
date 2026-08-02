@@ -48,7 +48,7 @@ fn current_session_path() -> Option<PathBuf> {
 }
 
 fn main() {
-    // Self-exec Landlock shim (Phase 2 group 3): if we were re-executed as the
+    // Self-exec Landlock shim: if this process was re-executed as the
     // confined-exec subcommand, restrict this process and exec the command —
     // BEFORE any async runtime or worker threads exist, because Landlock's
     // `restrict_self` is per-thread and the restricting thread must be the one
@@ -83,9 +83,9 @@ async fn async_main() {
 }
 
 /// If argv is the confined-exec shim invocation, apply the Landlock ruleset and
-/// `exec` the command — never returning on success (Phase 2 group 3). Fails
-/// closed: any setup problem exits non-zero rather than running unconfined. A
-/// no-op for a normal launch and on non-Linux.
+/// `exec` the command — never returning on success. Fails closed: any setup
+/// problem exits non-zero rather than running unconfined. A no-op for a normal
+/// launch and on non-Linux.
 #[cfg(target_os = "linux")]
 fn maybe_run_sandbox_shim() {
     let mut args = std::env::args().skip(1);
@@ -110,10 +110,10 @@ fn maybe_run_sandbox_shim() {
 fn maybe_run_sandbox_shim() {}
 
 /// Install the top-level panic hook (HC-3, S-2). The rich TUI's guard wraps this
-/// to restore the terminal first (Phase 4); here we record the crash to the
-/// transcript — the engine's live sink is unreachable from a panic hook, so we
-/// append one `abnormal_exit` line directly (safe: every prior event was
-/// fsynced) — then surface it calmly and point at resume.
+/// to restore the terminal first; this hook records the crash to the transcript
+/// — the engine's live sink is unreachable from a panic hook, so it appends one
+/// `abnormal_exit` line directly (safe: every prior event was fsynced) — then
+/// surfaces it calmly and points at resume.
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

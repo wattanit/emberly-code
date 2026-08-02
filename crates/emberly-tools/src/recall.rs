@@ -5,7 +5,7 @@
 //! engine round trip — no filesystem, no network — so it bypasses the sandbox
 //! yet still flows through the `Tool` trait. `emberly-core` implements
 //! [`RecallGate`]: it reads the in-memory conversation, slices the requested
-//! turn range, reduces tool results via Phase 1's `reduce_output`, and hands
+//! turn range, reduces tool results via `reduce_output`, and hands
 //! back the rendered text — never raw JSONL (T-10).
 
 use async_trait::async_trait;

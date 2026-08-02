@@ -1,7 +1,7 @@
 //! Slash commands and [`AppCommand`] dispatch — what the user asked
 //! for, turned into engine `Command`s or local state changes.
 //!
-//! Part of the `App` inherent impl, split out of one 2,300-line block.
+//! Part of the `App` inherent impl.
 
 use super::*;
 

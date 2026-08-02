@@ -1,4 +1,4 @@
-//! Tests for the `App` view model, moved verbatim when app.rs was split.
+//! Tests for the `App` view model.
 
 use super::*;
 use emberly_core::ToolCallId;

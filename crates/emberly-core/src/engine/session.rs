@@ -2,8 +2,8 @@
 //! adopting its state, and the transcript / view-cache writes that record it
 //! (HC-7).
 //!
-//! Part of the `Engine` inherent impl, split out of one 2,700-line
-//! block; the engine is still the single owner of this state.
+//! Part of the `Engine` inherent impl; the engine is the sole owner of the
+//! state these methods touch.
 
 use super::*;
 

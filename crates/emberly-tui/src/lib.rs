@@ -7,7 +7,7 @@
 //!
 //! The line-mode frontend ([`line`]) is the degraded-mode / headless seed; the
 //! rich `ratatui` frontend ([`tui`]) is the second implementation over the same
-//! channel boundary (Phase 4). [`frontend::detect`] chooses between them.
+//! channel boundary. [`frontend::detect`] chooses between them.
 #![forbid(unsafe_code)]
 
 pub mod app;

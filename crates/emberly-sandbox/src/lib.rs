@@ -7,7 +7,7 @@
 //! separately auditable (Tech Spec §1). It holds the rule engine, the startup
 //! probe + [`SandboxStatus`], the confinement-gated [`Mode`], and the child
 //! confinement backends ([`confine`]): the Landlock self-exec shim on Linux
-//! (Phase 2) and the `sandbox-exec` Seatbelt profile on macOS (Phase 5).
+//! and the `sandbox-exec` Seatbelt profile on macOS.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 

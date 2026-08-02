@@ -16,8 +16,8 @@ pub use emberly_sandbox::{Mode, SandboxStatus};
 /// reaching back into the engine (Design §5: "saying yes always requires
 /// having seen what you are saying yes to").
 ///
-/// The engine builds this; both the line-mode frontend (Phase 1) and the full
-/// TUI (Phase 4) render it. It carries content, never a decision.
+/// The engine builds this; both the line-mode frontend and the rich TUI render
+/// it. It carries content, never a decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionRendering {
     /// Tool being invoked (e.g. `bash`, `write_file`).

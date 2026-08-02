@@ -5,7 +5,7 @@
 //! carrying the meaning so it survives with colour stripped (Design §7).
 //!
 //! Reused by the inline edit view, the diff overlay, and the edit permission
-//! prompt (group 7).
+//! prompt.
 
 use ratatui::text::{Line, Span};
 
