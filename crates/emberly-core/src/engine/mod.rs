@@ -580,6 +580,27 @@ struct PendingUserAsk {
     reply: tokio::sync::oneshot::Sender<AskUserOutcome>,
 }
 
+/// The receiving end of every channel a turn has to service: the frontend's
+/// commands plus one per tool→engine gate (Tech Spec §5.1). Bundled because the
+/// set is an invariant, not a coincidence — every level of the turn call chain
+/// needs *all* of it, since a tool blocked on any gate stalls the turn until
+/// the engine answers. Threading them individually meant four signatures with
+/// eight-plus parameters and a `too_many_arguments` allowance on each, and
+/// adding a gate meant editing all four.
+///
+/// Held as `&mut` references rather than by value so the same bundle can be
+/// rebuilt cheaply at each call site while [`Engine::run`] keeps ownership of
+/// the receivers for its own between-turns select loop.
+struct TurnChannels<'a> {
+    commands: &'a mut mpsc::Receiver<Command>,
+    asks: &'a mut mpsc::Receiver<PermissionAsk>,
+    user_asks: &'a mut mpsc::Receiver<AskUserAsk>,
+    recall: &'a mut mpsc::Receiver<RecallAsk>,
+    task: &'a mut mpsc::Receiver<TaskListAsk>,
+    memory: &'a mut mpsc::Receiver<MemoryAsk>,
+    skill: &'a mut mpsc::Receiver<SkillAsk>,
+}
+
 /// SIGKILLs a completion check's entire process group on drop (S-6, mirrors
 /// the `bash` tool's group-kill guard, S-4): fires on a timeout or when the
 /// engine drops the check future, reaping any grandchildren an `sh -c` spawns
@@ -1090,9 +1111,11 @@ impl Engine {
     /// Run the engine until the command channel closes. Idle between turns,
     /// waiting for a `UserInput`; a turn owns `commands_rx`/`asks_rx` for its
     /// duration (permission answers and cancellation arrive through them).
-    // Each receiver is an independent per-turn channel (permission, ask-user,
-    // recall, task-list, memory, skill); bundling them into a struct would only
-    // relocate the list. Same rationale as the frontend `run` (Design §7).
+    // The receivers arrive individually because the caller creates the channels
+    // and keeps the senders; taking them as one struct would just move that
+    // construction across the boundary. So the list stays *here* — but it stops
+    // here: everything below takes [`TurnChannels`], which is also what lets
+    // this function keep ownership and still run its own between-turns select.
     #[allow(clippy::too_many_arguments)]
     pub async fn run(
         mut self,
@@ -1181,15 +1204,15 @@ impl Engine {
                     self.record_user_message(&text);
                     self.push_conversation_message(Message::user_text(text));
                     self.emit_context_usage().await;
-                    self.run_turn(
-                        &mut commands_rx,
-                        &mut asks_rx,
-                        &mut user_asks_rx,
-                        &mut recall_rx,
-                        &mut task_rx,
-                        &mut memory_rx,
-                        &mut skill_rx,
-                    )
+                    self.run_turn(&mut TurnChannels {
+                        commands: &mut commands_rx,
+                        asks: &mut asks_rx,
+                        user_asks: &mut user_asks_rx,
+                        recall: &mut recall_rx,
+                        task: &mut task_rx,
+                        memory: &mut memory_rx,
+                        skill: &mut skill_rx,
+                    })
                     .await;
                     // The engine is idle again; let the frontend stop its
                     // "working" affordance (Design §6.3).

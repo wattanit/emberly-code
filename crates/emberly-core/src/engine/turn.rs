@@ -9,19 +9,7 @@ use super::*;
 impl Engine {
     /// Drive completions until the model stops without requesting tools, an
     /// error/drop occurs, or the user cancels.
-    // Threads the same per-turn channel receivers as `run`; bundling them would
-    // only move the argument list. See `run` above.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn run_turn(
-        &mut self,
-        commands_rx: &mut mpsc::Receiver<Command>,
-        asks_rx: &mut mpsc::Receiver<PermissionAsk>,
-        user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
-        recall_rx: &mut mpsc::Receiver<RecallAsk>,
-        task_rx: &mut mpsc::Receiver<TaskListAsk>,
-        memory_rx: &mut mpsc::Receiver<MemoryAsk>,
-        skill_rx: &mut mpsc::Receiver<SkillAsk>,
-    ) {
+    pub(super) async fn run_turn(&mut self, chans: &mut TurnChannels<'_>) {
         let mut drop_attempts = 0u32;
         loop {
             let stream = match self.open_stream_with_retry().await {
@@ -32,7 +20,7 @@ impl Engine {
                 }
             };
 
-            let (end, out) = self.consume_stream(stream, commands_rx).await;
+            let (end, out) = self.consume_stream(stream, chans.commands).await;
             match end {
                 StreamEnd::Done { tool_calls } => {
                     self.push_assistant_message(&out, &tool_calls);
@@ -43,32 +31,19 @@ impl Engine {
                         // registered the gate is inert (zero behavior
                         // change); with checks, a failure re-opens the loop
                         // instead of letting the turn end here.
-                        match self.evaluate_completion_gate(commands_rx).await {
+                        match self.evaluate_completion_gate(chans.commands).await {
                             CompletionGateOutcome::Terminate => return,
                             CompletionGateOutcome::ReOpen => continue,
                         }
                     }
-                    if self
-                        .run_tool_calls(
-                            tool_calls,
-                            commands_rx,
-                            asks_rx,
-                            user_asks_rx,
-                            recall_rx,
-                            task_rx,
-                            memory_rx,
-                            skill_rx,
-                        )
-                        .await
-                        .is_canceled()
-                    {
+                    if self.run_tool_calls(tool_calls, chans).await.is_canceled() {
                         return;
                     }
                     // S-5: before issuing the next provider call, check whether
                     // the loop is re-treading without progress. On a trip, hand
                     // control to the user (resume / stop / steer) — never spin on.
                     if let Some(reason) = self.evaluate_loop() {
-                        match self.await_loop_resolution(commands_rx, reason).await {
+                        match self.await_loop_resolution(chans.commands, reason).await {
                             LoopResolution::Resume => self.reset_loop_window(),
                             LoopResolution::Stop => return,
                             LoopResolution::Steer(text) => {
@@ -264,35 +239,16 @@ impl Engine {
     /// Execute tool calls sequentially, appending each result to the
     /// conversation. Stops early on cancellation, backfilling canceled results
     /// so the conversation stays well-formed (every tool_use has a result).
-    #[allow(clippy::too_many_arguments)]
     async fn run_tool_calls(
         &mut self,
         tool_calls: Vec<PendingToolCall>,
-        commands_rx: &mut mpsc::Receiver<Command>,
-        asks_rx: &mut mpsc::Receiver<PermissionAsk>,
-        user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
-        recall_rx: &mut mpsc::Receiver<RecallAsk>,
-        task_rx: &mut mpsc::Receiver<TaskListAsk>,
-        memory_rx: &mut mpsc::Receiver<MemoryAsk>,
-        skill_rx: &mut mpsc::Receiver<SkillAsk>,
+        chans: &mut TurnChannels<'_>,
     ) -> ToolCallResult {
         // Start a fresh loop-signature observation for this turn (S-5).
         self.guardrail.turn_obs = TurnObservation::default();
         let mut iter = tool_calls.into_iter();
         while let Some(call) = iter.next() {
-            match self
-                .run_one_tool_call(
-                    &call,
-                    commands_rx,
-                    asks_rx,
-                    user_asks_rx,
-                    recall_rx,
-                    task_rx,
-                    memory_rx,
-                    skill_rx,
-                )
-                .await
-            {
+            match self.run_one_tool_call(&call, chans).await {
                 ToolCallResult::Completed(outcome) => {
                     self.ingest_tool_result(&call, *outcome).await
                 }
@@ -310,17 +266,10 @@ impl Engine {
 
     /// Run one tool call, driving its execution concurrently with permission
     /// asks and cancellation.
-    #[allow(clippy::too_many_arguments)]
     async fn run_one_tool_call(
         &mut self,
         call: &PendingToolCall,
-        commands_rx: &mut mpsc::Receiver<Command>,
-        asks_rx: &mut mpsc::Receiver<PermissionAsk>,
-        user_asks_rx: &mut mpsc::Receiver<AskUserAsk>,
-        recall_rx: &mut mpsc::Receiver<RecallAsk>,
-        task_rx: &mut mpsc::Receiver<TaskListAsk>,
-        memory_rx: &mut mpsc::Receiver<MemoryAsk>,
-        skill_rx: &mut mpsc::Receiver<SkillAsk>,
+        chans: &mut TurnChannels<'_>,
     ) -> ToolCallResult {
         let args = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
 
@@ -364,13 +313,13 @@ impl Engine {
         loop {
             tokio::select! {
                 outcome = &mut exec => return ToolCallResult::Completed(Box::new(outcome)),
-                Some(ask) = asks_rx.recv() => self.on_permission_ask(ask, &mut pending).await,
-                Some(ask) = user_asks_rx.recv() => self.on_user_ask(ask, &mut pending_user).await,
-                Some(recall) = recall_rx.recv() => self.on_recall(recall).await,
-                Some(task) = task_rx.recv() => self.on_task_list_set(task).await,
-                Some(mem) = memory_rx.recv() => self.on_memory_op(mem).await,
-                Some(skill) = skill_rx.recv() => self.on_skill_invoke(skill).await,
-                command = commands_rx.recv(), if commands_open => match command {
+                Some(ask) = chans.asks.recv() => self.on_permission_ask(ask, &mut pending).await,
+                Some(ask) = chans.user_asks.recv() => self.on_user_ask(ask, &mut pending_user).await,
+                Some(recall) = chans.recall.recv() => self.on_recall(recall).await,
+                Some(task) = chans.task.recv() => self.on_task_list_set(task).await,
+                Some(mem) = chans.memory.recv() => self.on_memory_op(mem).await,
+                Some(skill) = chans.skill.recv() => self.on_skill_invoke(skill).await,
+                command = chans.commands.recv(), if commands_open => match command {
                     Some(Command::PermissionAnswer { id, decision }) => {
                         self.answer_permission(id, decision, &mut pending).await;
                     }
