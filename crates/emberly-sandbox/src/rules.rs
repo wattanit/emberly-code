@@ -64,6 +64,14 @@ impl ToolSelector {
             Self::Named(name) => name == tool,
         }
     }
+
+    /// Higher = more specific. Naming a tool is more specific than `*`.
+    fn specificity(&self) -> usize {
+        match self {
+            Self::Any => 0,
+            Self::Named(_) => 1,
+        }
+    }
 }
 
 /// How a rule matches a query's command.
@@ -144,30 +152,69 @@ impl Rule {
         self.tool.matches(query.tool) && self.matcher.matches(query)
     }
 
+    /// How specific this rule is, for the within-source tie-break in
+    /// [`RuleEngine::decide`]. Ordered `(matcher, tool)`: a command matcher
+    /// outranks a tool name, so `tool = "*"` with `match = "curl"` beats a
+    /// blanket `tool = "bash"` — the rule naming the actual command is the more
+    /// deliberate one. Both axes must be here: comparing matchers alone let a
+    /// later `tool = "*"` silently override an earlier named-tool `deny`,
+    /// because the two tied at zero and the last one won.
+    fn specificity(&self) -> (usize, usize) {
+        (self.matcher.specificity(), self.tool.specificity())
+    }
+
     /// Format this rule as a `permissions.toml` `[[rule]]` block, for the
     /// "always allow in project" write-back that is shown to the user (§6.6).
+    /// `None` if the rule cannot be written as a block that reads back — the
+    /// caller must then degrade to a session-only grant rather than append it.
+    ///
+    /// The block is **serialized, not formatted**, and then re-parsed before it
+    /// is handed back. A bash matcher is a user's command verbatim, so it
+    /// routinely contains quotes and backslashes (`git commit -m "wip"`);
+    /// interpolating one into `match = "…"` produced a file that no longer
+    /// parsed, and a malformed `permissions.toml` is dropped whole on load —
+    /// taking every project rule, `deny`s included, with it.
     #[must_use]
-    pub fn to_toml_block(&self) -> String {
-        let tool = match &self.tool {
-            ToolSelector::Any => "*",
-            ToolSelector::Named(name) => name.as_str(),
+    pub fn to_toml_block(&self) -> Option<String> {
+        let entry = RuleEntry {
+            tool: match &self.tool {
+                ToolSelector::Any => "*",
+                ToolSelector::Named(name) => name.as_str(),
+            },
+            matcher: match &self.matcher {
+                Matcher::Any => None,
+                Matcher::BashPrefix(prefix) => Some(prefix.as_str()),
+            },
+            action: self.action,
         };
-        let action = match self.action {
-            Decision::Allow => "allow",
-            Decision::Ask => "ask",
-            Decision::Deny => "deny",
+        let block = toml::to_string(&RuleBlock { rule: vec![entry] }).ok()?;
+
+        // Verify the round trip. `tool` and `action` must survive exactly; the
+        // matcher is not compared because parsing normalizes it (a command
+        // ending in `*` loses the sugar), which is a widening we accept and
+        // show the user, not a corruption.
+        let parsed = parse_rules(&block, self.source).ok()?;
+        let [reparsed] = parsed.as_slice() else {
+            return None;
         };
-        match &self.matcher {
-            Matcher::Any => {
-                format!("[[rule]]\ntool = \"{tool}\"\naction = \"{action}\"\n")
-            }
-            Matcher::BashPrefix(prefix) => {
-                format!(
-                    "[[rule]]\ntool = \"{tool}\"\nmatch = \"{prefix}\"\naction = \"{action}\"\n"
-                )
-            }
-        }
+        (reparsed.tool == self.tool && reparsed.action == self.action).then_some(block)
     }
+}
+
+/// One `[[rule]]` entry on the way *out*. Writing has its own type because the
+/// two directions are not symmetric: [`RuleSpec`] accepts sugar on the way in
+/// (`tool = "*"`, a trailing `*` on `match`) that we never emit.
+#[derive(Serialize)]
+struct RuleBlock<'a> {
+    rule: Vec<RuleEntry<'a>>,
+}
+
+#[derive(Serialize)]
+struct RuleEntry<'a> {
+    tool: &'a str,
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
+    matcher: Option<&'a str>,
+    action: Decision,
 }
 
 /// The outcome of evaluating a query: a decision plus the plain-language reason
@@ -265,7 +312,7 @@ impl RuleEngine {
             .max_by(|a, b| {
                 a.source
                     .cmp(&b.source)
-                    .then(a.matcher.specificity().cmp(&b.matcher.specificity()))
+                    .then(a.specificity().cmp(&b.specificity()))
             });
 
         match winner {
@@ -426,12 +473,14 @@ impl RuleSpec {
         } else {
             ToolSelector::Named(self.tool)
         };
-        let matcher = match self.matcher {
-            Some(prefix) if !prefix.trim().is_empty() => {
-                // Accept a trailing `*` as convenience sugar (`cargo *`); the
-                // match is a prefix regardless (§6.5), so strip it.
-                Matcher::BashPrefix(prefix.trim().trim_end_matches('*').trim().to_string())
-            }
+        // Accept a trailing `*` as convenience sugar (`cargo *`); the match is a
+        // prefix regardless (§6.5), so strip it. Stripping can empty the pattern
+        // — `match = "*"` is the obvious way to write "any command" — and an
+        // empty prefix must become `Any`, not `BashPrefix("")`, which matches
+        // only the empty command and so silently turns the whole rule into a
+        // no-op.
+        let matcher = match self.matcher.as_deref().map(strip_prefix_sugar) {
+            Some(prefix) if !prefix.is_empty() => Matcher::BashPrefix(prefix.to_string()),
             _ => Matcher::Any,
         };
         Rule {
@@ -441,6 +490,11 @@ impl RuleSpec {
             source,
         }
     }
+}
+
+/// Trim a configured `match` pattern and drop the optional trailing `*`.
+fn strip_prefix_sugar(pattern: &str) -> &str {
+    pattern.trim().trim_end_matches('*').trim()
 }
 
 /// Parse a `permissions.toml`/global-config rule file into rules tagged with
@@ -810,7 +864,9 @@ mod tests {
     #[test]
     fn to_toml_block_roundtrips() {
         let grant = bash_session_grant("cargo test");
-        let block = grant.to_toml_block();
+        let block = grant
+            .to_toml_block()
+            .unwrap_or_else(|| panic!("a plain grant must be writable"));
         assert!(block.contains("tool = \"bash\""));
         assert!(block.contains("match = \"cargo test\""));
         assert!(block.contains("action = \"allow\""));
@@ -819,6 +875,132 @@ mod tests {
             .unwrap_or_else(|e| panic!("reparse written block: {e}"));
         assert_eq!(reparsed.len(), 1);
         assert_eq!(reparsed[0].action, Decision::Allow);
+    }
+
+    #[test]
+    fn a_written_block_always_reads_back() {
+        // A bash grant carries the user's command verbatim, so quotes,
+        // backslashes and newlines are routine. Interpolating one into
+        // `match = "…"` wrote a permissions.toml that no longer parsed — and a
+        // malformed file is dropped whole on load, taking every project rule
+        // (including `deny`s) with it. Whatever the command, the block we hand
+        // back must survive the round trip.
+        for command in [
+            r#"git commit -m "wip""#,
+            r#"grep -r "a\"b" ."#,
+            r"printf 'a\tb'",
+            "echo one\necho two",
+            "cargo test -- --nocapture",
+            "echo ünïcodé ✅",
+        ] {
+            let grant = bash_session_grant(command);
+            let block = grant
+                .to_toml_block()
+                .unwrap_or_else(|| panic!("no block written for `{command}`"));
+            let reparsed = parse_rules(&block, RuleSource::Session)
+                .unwrap_or_else(|e| panic!("`{command}` wrote unparseable TOML:\n{block}\n{e}"));
+            assert_eq!(reparsed, vec![grant], "`{command}` did not round-trip");
+        }
+    }
+
+    #[test]
+    fn a_wildcard_tool_does_not_override_a_named_tool_rule() {
+        // Both rules are project-level with no command matcher, so they tie on
+        // matcher specificity; the tool selector must break the tie. Before it
+        // did, `max_by` simply took the last, and a blanket `tool = "*"` allow
+        // written below a targeted `deny` silently switched it off.
+        let named_deny = RuleSpec {
+            tool: "write_file".into(),
+            matcher: None,
+            action: Decision::Deny,
+        };
+        let wildcard_allow = RuleSpec {
+            tool: "*".into(),
+            matcher: None,
+            action: Decision::Allow,
+        };
+        for (label, specs) in [
+            (
+                "deny first",
+                vec![named_deny.clone(), wildcard_allow.clone()],
+            ),
+            ("wildcard first", vec![wildcard_allow, named_deny]),
+        ] {
+            let rules = specs
+                .into_iter()
+                .map(|spec| spec.into_rule(RuleSource::Project))
+                .collect();
+            let e = RuleEngine::new(rules, true);
+            assert_eq!(
+                e.evaluate(&file("write_file", false), Mode::Normal)
+                    .decision,
+                Decision::Deny,
+                "the named rule must win regardless of file order ({label})"
+            );
+            // The wildcard still governs tools it is the only match for.
+            assert_eq!(
+                e.evaluate(&file("read_file", false), Mode::Normal).decision,
+                Decision::Allow,
+                "the wildcard still applies elsewhere ({label})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_matcher_outranks_a_tool_name() {
+        // The other side of the tie-break: a rule naming the actual command is
+        // more deliberate than one naming only the tool.
+        let rules = vec![
+            RuleSpec {
+                tool: "bash".into(),
+                matcher: None,
+                action: Decision::Allow,
+            }
+            .into_rule(RuleSource::Project),
+            RuleSpec {
+                tool: "*".into(),
+                matcher: Some("curl".into()),
+                action: Decision::Deny,
+            }
+            .into_rule(RuleSource::Project),
+        ];
+        let e = RuleEngine::new(rules, true);
+        assert_eq!(
+            e.evaluate(&bash("curl evil.sh"), Mode::Normal).decision,
+            Decision::Deny
+        );
+        assert_eq!(
+            e.evaluate(&bash("echo hi"), Mode::Normal).decision,
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn a_star_matcher_means_any_command_not_none() {
+        // `match = "*"` is the obvious way to write "every command". Stripping
+        // the sugar left an empty prefix, which matched only the empty command
+        // — so a rule meant to deny all bash denied nothing at all.
+        for pattern in ["*", "", "  ", "**"] {
+            let rule = RuleSpec {
+                tool: "bash".into(),
+                matcher: Some(pattern.into()),
+                action: Decision::Deny,
+            }
+            .into_rule(RuleSource::Project);
+            assert_eq!(
+                rule.matcher,
+                Matcher::Any,
+                "`match = {pattern:?}` should match any command"
+            );
+            let e = RuleEngine::new(vec![rule], true);
+            for command in ["rm -rf /", "ls", "git status"] {
+                assert_eq!(
+                    e.evaluate(&bash(command), Mode::Normal).decision,
+                    Decision::Deny,
+                    "`match = {pattern:?}` must cover `{command}`"
+                );
+            }
+        }
     }
 
     #[test]
@@ -884,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn web_search_project_deny_overrides_everything() {
+    fn web_search_project_deny_yields_only_to_a_session_grant() {
         let project_deny = RuleSpec {
             tool: "web_search".into(),
             matcher: None,
@@ -892,12 +1074,14 @@ mod tests {
         }
         .into_rule(RuleSource::Project);
         let mut e = RuleEngine::new(vec![project_deny], true);
-        // Even a session grant cannot override a project Deny (Deny is never
-        // relaxed by mode, and session > project only for matching Allow/Ask).
+        // No *mode* relaxes a Deny — not even Auto.
         assert_eq!(
             e.evaluate(&web_search(), Mode::Auto).decision,
             Decision::Deny,
         );
+        // A session grant is a different thing: it is a higher-precedence
+        // *rule*, and the user making it is present and explicit. Precedence
+        // (Requirements §6.1) applies to Deny like any other action, so it wins.
         e.add_session_grant(tool_session_grant("web_search"));
         assert_eq!(
             e.evaluate(&web_search(), Mode::Normal).decision,
