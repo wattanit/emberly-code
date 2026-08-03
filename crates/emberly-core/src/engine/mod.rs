@@ -777,6 +777,14 @@ struct SessionState {
     /// True when the resume fell back to transcript replay (FR-5 slow path).
     /// Drives the one dimmed Notice on engine start (Design §8.6).
     replayed: bool,
+    /// True when the transcript has been appended to since the last view-cache
+    /// write, so the sidecar no longer matches the log the staleness guard
+    /// compares it against (Tech Spec §3.2a). Set by every `write_transcript`,
+    /// cleared by `write_view_cache`; the idle loop flushes on it so an
+    /// out-of-turn write (a model switch, an effort change) can never strand
+    /// the cache and force a replay that loses the session's accounting
+    /// (issue #18).
+    cache_dirty: bool,
 }
 
 /// The safety layers (Requirements §6): what the OS enforces, what the rules
@@ -1030,6 +1038,9 @@ impl Engine {
                 original_task_recorded,
                 resuming: config.resuming,
                 replayed: config.replayed,
+                // Nothing has been appended yet this run; a `session_start`
+                // (or the first turn) marks it dirty.
+                cache_dirty: false,
             },
             safety: SafetyState {
                 sandbox: config.sandbox,
@@ -1222,7 +1233,6 @@ impl Engine {
                     if let Some(trigger) = self.context.pending.take() {
                         self.compact(trigger).await;
                     }
-                    self.write_view_cache();
                 }
                 // No turn is running while idle; these are strays or no-ops here.
                 Command::Cancel
@@ -1231,10 +1241,7 @@ impl Engine {
                 | Command::ResolveLoop { .. }
                 | Command::ResolveCompletionGate { .. } => {}
                 // Idle is already a clean boundary — compact immediately.
-                Command::Compact => {
-                    self.compact(CompactTrigger::Manual).await;
-                    self.write_view_cache();
-                }
+                Command::Compact => self.compact(CompactTrigger::Manual).await,
                 // Session switches are only issued at idle (the frontend gates
                 // them while a turn runs), so a clean boundary is guaranteed.
                 Command::NewSession { session_id } => self.start_new_session(session_id).await,
@@ -1278,10 +1285,18 @@ impl Engine {
                         })
                         .await;
                     }
-                    self.write_view_cache();
                 }
                 Command::MemoryView { scope, name } => self.emit_memory_body(scope, name).await,
                 Command::InspectSkill { name } => self.inspect_skill(name).await,
+            }
+            // The idle boundary is where the derived cache is reconciled with
+            // the log (FR-5, Tech Spec §3.2a): one flush covers a completed
+            // turn, a compaction, and the out-of-turn writes that have no view
+            // of their own to settle — a model switch, an effort change, a mode
+            // change. Gated on the flag so commands that touched no transcript
+            // line (an inspector read) cost nothing (issue #18).
+            if self.session.cache_dirty {
+                self.write_view_cache();
             }
         }
 

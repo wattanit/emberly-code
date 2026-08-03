@@ -3420,13 +3420,29 @@ fn start_in_sessions_dir(
     sessions_dir: PathBuf,
     session_id: SessionId,
 ) -> Harness {
+    start_in_sessions_dir_with_provider(
+        Arc::new(FakeProvider::new(scripts)),
+        root,
+        sessions_dir,
+        session_id,
+    )
+}
+
+/// [`start_in_sessions_dir`] with a caller-built provider — for the tests that
+/// need model metadata (pricing) the default fake does not carry.
+fn start_in_sessions_dir_with_provider(
+    provider: Arc<dyn Provider>,
+    root: PathBuf,
+    sessions_dir: PathBuf,
+    session_id: SessionId,
+) -> Harness {
     let _ = std::fs::create_dir_all(&sessions_dir);
     let path = sessions_dir.join(format!("{session_id}.jsonl"));
     let sink = match FileTranscript::open(&path) {
         Ok(s) => s,
         Err(e) => panic!("open transcript {}: {e}", path.display()),
     };
-    let mut config = make_config(Arc::new(FakeProvider::new(scripts)), root, Box::new(sink));
+    let mut config = make_config(provider, root, Box::new(sink));
     config.session_id = session_id;
     config.sessions_dir = sessions_dir.clone();
     config.active_session_path = std::sync::Arc::new(std::sync::RwLock::new(path));
@@ -3763,6 +3779,226 @@ async fn in_session_resume_restores_conversation() {
         user_texts.iter().any(|t| t.contains("remember this")),
         "restored conversation includes the prior user message: {user_texts:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #18 — a session switch must not strand the view cache (FR-5)
+// ---------------------------------------------------------------------------
+
+/// An assistant text turn that also reports billed usage, so the session
+/// accounting the view cache carries is non-zero.
+fn text_with_usage(text: &str, input: u64, output: u64) -> ScriptedResponse {
+    let mut response = ScriptedResponse::text(text);
+    response.events.push(StreamEvent::Usage {
+        usage: TokenUsage { input, output },
+    });
+    response
+}
+
+/// A fake provider with a pricing table, so cost is knowable (and therefore
+/// restorable) as well as tokens.
+fn priced_fake(scripts: Vec<ScriptedResponse>) -> Arc<dyn Provider> {
+    let info = ModelInfo {
+        model: "fake-1".into(),
+        context_window: 200_000,
+        max_output_tokens: 8_192,
+        pricing: Some(Pricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+        }),
+        effort_levels: Effort::ALL.to_vec(),
+        default_effort: Some(Effort::Medium),
+        vision: false,
+        documents: false,
+    };
+    Arc::new(FakeProvider::new(scripts).with_model_info(info))
+}
+
+/// The reported session usage from the last `SessionUsage` in `events`.
+fn last_session_usage(events: &[UiEvent]) -> Option<TokenUsage> {
+    events.iter().rev().find_map(|e| match e {
+        UiEvent::SessionUsage { usage } => Some(*usage),
+        _ => None,
+    })
+}
+
+/// The reported cost from the last `CostEstimate` in `events`.
+fn last_cost_usd(events: &[UiEvent]) -> Option<f64> {
+    events.iter().rev().find_map(|e| match e {
+        UiEvent::CostEstimate { usd, .. } => Some(*usd),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn returning_to_a_session_restores_its_usage_and_cost() {
+    // Issue #18: `session_end` grew the departing transcript past the length its
+    // cache recorded, so coming back failed the staleness guard, replayed, and
+    // reported a session with real history as "0 in / 0 out" at $0.00.
+    let root = temp_project();
+    let sessions_dir = root.join("sessions");
+    let sid_a = SessionId::new();
+    let sid_b = SessionId::new();
+
+    let mut h = start_in_sessions_dir_with_provider(
+        priced_fake(vec![text_with_usage("r1", 400, 500)]),
+        root,
+        sessions_dir,
+        sid_a,
+    );
+    let _ = h.collect(None).await; // drain startup
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let events = h.collect(None).await;
+    assert_eq!(
+        last_session_usage(&events),
+        Some(TokenUsage {
+            input: 400,
+            output: 500
+        }),
+        "the turn accumulated usage"
+    );
+
+    // Switch away, then back — the reproduction.
+    h.send(Command::NewSession { session_id: sid_b }).await;
+    let events = h.collect(None).await;
+    assert_eq!(
+        last_session_usage(&events),
+        Some(TokenUsage::default()),
+        "a fresh session starts at zero"
+    );
+
+    h.send(Command::ResumeSession { session_id: sid_a }).await;
+    let events = h.collect(None).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message } if message.contains("Rebuilding"))),
+        "the departing write refreshed the cache, so the return is the fast path"
+    );
+    assert_eq!(
+        last_session_usage(&events),
+        Some(TokenUsage {
+            input: 400,
+            output: 500
+        }),
+        "returning to a session restores its token accounting"
+    );
+    match last_cost_usd(&events) {
+        Some(usd) => assert!(
+            (usd - 0.0087).abs() < 1e-9,
+            "cost restored with the usage, got {usd}"
+        ),
+        None => panic!("expected a CostEstimate after the resume"),
+    }
+}
+
+#[tokio::test]
+async fn a_session_left_behind_by_resume_keeps_a_valid_cache() {
+    // The same hole on the other switch path: `resume_session` also writes
+    // `session_end` to the session it is leaving (issue #18). Leave B by
+    // resuming A, then come back to B.
+    let root = temp_project();
+    let sessions_dir = root.join("sessions");
+    let sid_a = SessionId::new();
+    let sid_b = SessionId::new();
+
+    let mut h = start_in_sessions_dir_with_provider(
+        priced_fake(vec![
+            text_with_usage("in a", 400, 500),
+            text_with_usage("in b", 10, 20),
+        ]),
+        root,
+        sessions_dir,
+        sid_a,
+    );
+    let _ = h.collect(None).await; // drain startup
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+
+    h.send(Command::NewSession { session_id: sid_b }).await;
+    let _ = h.collect(None).await;
+    h.send(Command::UserInput {
+        text: "hi again".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert_eq!(
+        last_session_usage(&events),
+        Some(TokenUsage {
+            input: 10,
+            output: 20
+        }),
+        "session B accumulated its own usage"
+    );
+
+    // Leave B via a resume, then return to it.
+    h.send(Command::ResumeSession { session_id: sid_a }).await;
+    let events = h.collect(None).await;
+    assert_eq!(
+        last_session_usage(&events),
+        Some(TokenUsage {
+            input: 400,
+            output: 500
+        }),
+        "A is restored, not zeroed"
+    );
+
+    h.send(Command::ResumeSession { session_id: sid_b }).await;
+    let events = h.collect(None).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message } if message.contains("Rebuilding"))),
+        "B was left behind with a refreshed cache, so returning is the fast path"
+    );
+    assert_eq!(
+        last_session_usage(&events),
+        Some(TokenUsage {
+            input: 10,
+            output: 20
+        }),
+        "B's own accounting survives the round trip"
+    );
+}
+
+#[tokio::test]
+async fn an_out_of_turn_transcript_write_leaves_the_cache_valid() {
+    // Issue #18's related path: an idle write with no view of its own to settle
+    // (`effort_change` here, `model_switch` likewise) grew the transcript and
+    // left the cache permanently unloadable. The idle boundary now reconciles it.
+    let root = temp_project();
+    let sessions_dir = root.join("sessions");
+    let sid = SessionId::new();
+
+    let mut h = start_in_sessions_dir(
+        vec![text_with_usage("r1", 400, 500)],
+        root,
+        sessions_dir.clone(),
+        sid,
+    );
+    let _ = h.collect(None).await; // drain startup
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+
+    // The default fake model runs at Medium, so this is a real change.
+    h.send(Command::SetEffort {
+        effort: Effort::High,
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let transcript_path = sessions_dir.join(format!("{sid}.jsonl"));
+    match emberly_core::resume::try_load_view_cache(&transcript_path) {
+        Some(cache) => assert_eq!(
+            cache.session_usage,
+            TokenUsage {
+                input: 400,
+                output: 500
+            },
+            "the refreshed cache still carries the session's accounting"
+        ),
+        None => panic!("an out-of-turn transcript write left the cache stale"),
+    }
 }
 
 // ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓

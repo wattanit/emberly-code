@@ -27,7 +27,7 @@ impl Engine {
                 return;
             }
         };
-        self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+        self.end_departing_session();
         self.session.transcript = Box::new(sink);
         self.adopt_session(session_id, path, Vec::new(), AdoptedState::fresh(), false);
         self.write_transcript(TranscriptEvent::SessionStart {
@@ -74,7 +74,7 @@ impl Engine {
                 return;
             }
         };
-        self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+        self.end_departing_session();
         self.session.transcript = Box::new(sink);
 
         // FR-5: try the cache first. A valid cache restores the full derived
@@ -101,6 +101,21 @@ impl Engine {
             );
         }
         self.emit_context_usage().await;
+    }
+
+    /// Close out the session being switched away from: record its `session_end`
+    /// and refresh its view cache, in that order, while its path and derived
+    /// state are still the live ones. Must run before the sink swap.
+    ///
+    /// The refresh is the whole point: `session_end` grows the transcript past
+    /// the byte length the cache recorded, so without it the guard
+    /// (`try_load_view_cache`) rejects the cache forever and coming back to this
+    /// session replays — which rebuilds the conversation but has no way to
+    /// re-derive token accounting, reporting a session with real history as
+    /// "0 in / 0 out" (issue #18).
+    fn end_departing_session(&mut self) {
+        self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+        self.write_view_cache();
     }
 
     /// Reset session-scoped state to a freshly adopted session and publish the
@@ -211,14 +226,27 @@ impl Engine {
     pub(super) fn write_transcript(&mut self, event: TranscriptEvent) {
         let record = TranscriptRecord::new(OffsetDateTime::now_utc(), event);
         self.session.transcript.record(&record);
+        // The log just grew past what the sidecar recorded, so the cache would
+        // now fail its own staleness guard (Tech Spec §3.2a). Flagged here, at
+        // the one place transcript bytes are ever added, rather than at each
+        // caller — a write that forgot to refresh the cache is what made
+        // resume drop the session's token accounting (issue #18).
+        self.session.cache_dirty = true;
     }
 
     /// Write the derived conversation-state cache best-effort (FR-5, Tech Spec
     /// §3.2a). Called after the view settles — a turn completes, a compaction
-    /// runs. Losing this file loses nothing: the replay fallback is always
-    /// correct (HC-7 subordination). Any I/O or serialization error is
-    /// swallowed (HC-3 — never a panic); the cache is never relied upon.
-    pub(super) fn write_view_cache(&self) {
+    /// runs, a session is left behind — and at the idle boundary whenever the
+    /// transcript has grown since the last write. Losing this file loses
+    /// nothing: the replay fallback is always correct (HC-7 subordination). Any
+    /// I/O or serialization error is swallowed (HC-3 — never a panic); the cache
+    /// is never relied upon.
+    pub(super) fn write_view_cache(&mut self) {
+        // Cleared up front: the cache is now as reconciled with the transcript
+        // as this call can make it. An early return below means there is no
+        // transcript to match (a `NoopSink` in tests), and a failed write leaves
+        // a cache the staleness guard rejects — retrying fixes neither.
+        self.session.cache_dirty = false;
         let transcript_path = {
             let guard = match self.session.active_path.read() {
                 Ok(g) => g,
