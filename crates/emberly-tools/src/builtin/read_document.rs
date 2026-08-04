@@ -63,7 +63,7 @@ impl Tool for ReadDocumentTool {
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: ReadDocumentArgs = match serde_json::from_value(args) {
             Ok(a) => a,
-            Err(e) => return ToolOutcome::failure(format!("invalid arguments: {e}"), "bad args"),
+            Err(e) => return ToolOutcome::invalid_args(&self.spec().name, &e),
         };
 
         // Document gate (HC-6): before encoding, tell the model it cannot read

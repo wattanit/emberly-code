@@ -59,7 +59,7 @@ impl Tool for GlobTool {
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: GlobArgs = match serde_json::from_value(args) {
             Ok(a) => a,
-            Err(e) => return ToolOutcome::failure(format!("invalid arguments: {e}"), "bad args"),
+            Err(e) => return ToolOutcome::invalid_args(&self.spec().name, &e),
         };
 
         let matcher = match Glob::new(&args.pattern) {

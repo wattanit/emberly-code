@@ -69,7 +69,7 @@ impl Tool for SkillTool {
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: SkillArgs = match serde_json::from_value(args) {
             Ok(a) => a,
-            Err(e) => return ToolOutcome::failure(format!("invalid arguments: {e}"), "bad args"),
+            Err(e) => return ToolOutcome::invalid_args(&self.spec().name, &e),
         };
 
         // Defense in depth: sanitize the name via slug before reaching the

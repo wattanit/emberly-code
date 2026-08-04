@@ -164,6 +164,23 @@ impl ToolOutcome {
             "denied by user",
         )
     }
+
+    /// A tool call whose arguments failed to deserialize against its schema
+    /// (HC-6). Some backends send a call with missing, empty, or nonsense
+    /// arguments; naming *whose* mistake it was and telling the model to
+    /// call again — rather than a bare "invalid type: null" — gives it what
+    /// it needs to correct itself on the next attempt instead of repeating
+    /// the same bad call or stalling silently.
+    #[must_use]
+    pub fn invalid_args(tool_name: &str, error: &serde_json::Error) -> Self {
+        Self::failure(
+            format!(
+                "Your last `{tool_name}` call had invalid arguments and did not run: {error}. \
+                 Call `{tool_name}` again with arguments matching its schema."
+            ),
+            "bad args",
+        )
+    }
 }
 
 /// A callable tool. Implementations are `Send + Sync` so the engine can hold
@@ -186,4 +203,25 @@ pub trait Tool: Send + Sync {
     /// as `Err` (HC-6). Actions requiring permission must go through
     /// [`ToolCtx::authorize`] — tools cannot bypass the gate.
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_args_names_the_tool_and_tells_the_model_to_retry() {
+        // A bare "invalid type: null" leaves the model no clue that its own
+        // last call is what's wrong; this must name the tool and instruct a
+        // retry so the model corrects its arguments instead of repeating the
+        // same bad call or stalling silently.
+        let error = match serde_json::from_str::<serde_json::Value>("not json") {
+            Err(e) => e,
+            Ok(_) => panic!("\"not json\" is not valid JSON"),
+        };
+        let outcome = ToolOutcome::invalid_args("read_file", &error);
+        assert!(!outcome.ok);
+        assert!(outcome.content.contains("read_file"));
+        assert!(outcome.content.contains("Call `read_file` again"));
+    }
 }

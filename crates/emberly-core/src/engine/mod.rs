@@ -435,19 +435,26 @@ fn inject_explanation_property(schema: &mut serde_json::Value) {
     });
 }
 
-/// Parse a streamed tool call's accumulated argument buffer. Some
-/// OpenAI-compatible backends (e.g. local/cloud Ollama models) end a call
-/// without ever streaming any argument text, leaving the buffer empty —
-/// `serde_json::from_str("")` fails, so this treats an empty buffer as `{}`
-/// rather than falling back to `Value::Null`, which a required-field tool
-/// schema rejects with a "expected struct, found null" error and which, once
-/// replayed to the provider as the literal string `"null"`, is a malformed
-/// tool call in the conversation history.
+/// Parse a streamed tool call's accumulated argument buffer. Every tool's
+/// input schema is `"type": "object"`, so `null` is never a legitimate whole
+/// argument value — whatever produced it (an empty buffer that never
+/// streamed any argument text, a backend that lazily emits the literal text
+/// `null` in place of real arguments, or unparseable garbage), it collapses
+/// to `{}` here rather than surfacing as `Value::Null`. That keeps a
+/// required-field tool's error readable ("missing field", not "expected
+/// struct, found null") and keeps `null` from ever being replayed to the
+/// provider as a malformed tool call in the conversation history.
 fn parse_tool_args(raw: &str) -> serde_json::Value {
-    if raw.trim().is_empty() {
-        return serde_json::Value::Object(serde_json::Map::new());
+    let value = if raw.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(raw).unwrap_or(serde_json::Value::Null)
+    };
+    if value.is_null() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        value
     }
-    serde_json::from_str(raw).unwrap_or(serde_json::Value::Null)
 }
 
 /// Extract the model's tool-call explanation from the call arguments (T-9).
@@ -1678,8 +1685,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_args_garbage_falls_back_to_null() {
-        assert_eq!(parse_tool_args("not json"), serde_json::Value::Null);
+    fn parse_tool_args_literal_null_text_is_an_empty_object_too() {
+        // Confirmed live against qwen3.5:cloud (Ollama-hosted): rather than
+        // omitting arguments or sending "", this backend streams the literal
+        // 4-byte text `null` — valid JSON, so it parses straight to
+        // `Value::Null` without ever hitting the empty-buffer branch above.
+        assert_eq!(parse_tool_args("null"), json!({}));
+    }
+
+    #[test]
+    fn parse_tool_args_garbage_also_collapses_to_an_empty_object() {
+        assert_eq!(parse_tool_args("not json"), json!({}));
     }
 
     #[test]

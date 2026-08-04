@@ -59,7 +59,7 @@ impl Tool for ReadImageTool {
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: ReadImageArgs = match serde_json::from_value(args) {
             Ok(a) => a,
-            Err(e) => return ToolOutcome::failure(format!("invalid arguments: {e}"), "bad args"),
+            Err(e) => return ToolOutcome::invalid_args(&self.spec().name, &e),
         };
 
         // Vision gate (HC-6): before encoding, tell the model it cannot see on

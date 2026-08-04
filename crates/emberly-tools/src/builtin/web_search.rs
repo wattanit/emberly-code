@@ -79,7 +79,7 @@ impl Tool for WebSearchTool {
     async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: WebSearchArgs = match serde_json::from_value(args) {
             Ok(a) => a,
-            Err(e) => return ToolOutcome::failure(format!("invalid arguments: {e}"), "bad args"),
+            Err(e) => return ToolOutcome::invalid_args(&self.spec().name, &e),
         };
 
         // Authorize first (Tech Spec §6.1). `outside_root` MUST be `false` — a
