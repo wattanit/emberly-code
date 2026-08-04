@@ -435,6 +435,21 @@ fn inject_explanation_property(schema: &mut serde_json::Value) {
     });
 }
 
+/// Parse a streamed tool call's accumulated argument buffer. Some
+/// OpenAI-compatible backends (e.g. local/cloud Ollama models) end a call
+/// without ever streaming any argument text, leaving the buffer empty —
+/// `serde_json::from_str("")` fails, so this treats an empty buffer as `{}`
+/// rather than falling back to `Value::Null`, which a required-field tool
+/// schema rejects with a "expected struct, found null" error and which, once
+/// replayed to the provider as the literal string `"null"`, is a malformed
+/// tool call in the conversation history.
+fn parse_tool_args(raw: &str) -> serde_json::Value {
+    if raw.trim().is_empty() {
+        return serde_json::Value::Object(serde_json::Map::new());
+    }
+    serde_json::from_str(raw).unwrap_or(serde_json::Value::Null)
+}
+
 /// Extract the model's tool-call explanation from the call arguments (T-9).
 /// Returns `None` when absent or blank so the UI shows no empty caption.
 fn explanation_from_args(args: &serde_json::Value) -> Option<String> {
@@ -1324,7 +1339,13 @@ impl Engine {
         let _ = self.events_tx.send(event).await;
     }
 
-    async fn emit_provider_error(&self, error: &ProviderError) {
+    async fn emit_provider_error(&mut self, error: &ProviderError) {
+        self.write_transcript(TranscriptEvent::ProviderError {
+            what: "the model request failed".into(),
+            why: error.to_string(),
+            retry_attempt: None,
+            retry_max: None,
+        });
         self.emit(UiEvent::HarnessError {
             what: "the model request failed".into(),
             why: error.to_string(),
@@ -1636,8 +1657,30 @@ fn append_rule_block(path: &std::path::Path, block: &str) -> std::io::Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::{explanation_from_args, inject_explanation_property, normalize_args};
+    use super::{explanation_from_args, inject_explanation_property, normalize_args, parse_tool_args};
     use serde_json::json;
+
+    #[test]
+    fn parse_tool_args_empty_buffer_is_an_empty_object_not_null() {
+        // A backend that ends a tool call without ever streaming argument text
+        // (e.g. some local/cloud OpenAI-compatible models) leaves the buffer
+        // empty. `{}` lets a no-args tool run and, for a tool with required
+        // fields, fails with "missing field" rather than "expected struct,
+        // found null" — and it round-trips back to the provider as `"{}"`
+        // instead of the malformed literal string `"null"`.
+        assert_eq!(parse_tool_args(""), json!({}));
+        assert_eq!(parse_tool_args("   "), json!({}));
+    }
+
+    #[test]
+    fn parse_tool_args_valid_json_parses_normally() {
+        assert_eq!(parse_tool_args(r#"{"path":"a.txt"}"#), json!({ "path": "a.txt" }));
+    }
+
+    #[test]
+    fn parse_tool_args_garbage_falls_back_to_null() {
+        assert_eq!(parse_tool_args("not json"), serde_json::Value::Null);
+    }
 
     #[test]
     fn normalize_args_strips_explanation_so_a_caption_is_not_progress() {

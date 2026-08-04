@@ -86,6 +86,12 @@ impl Engine {
                         continue;
                     }
                     self.emit(UiEvent::AssistantDone).await;
+                    self.write_transcript(TranscriptEvent::ProviderError {
+                        what: "the model response kept ending unexpectedly".into(),
+                        why: "the provider stream closed before completing, repeatedly".into(),
+                        retry_attempt: None,
+                        retry_max: None,
+                    });
                     self.emit(UiEvent::HarnessError {
                         what: "the model response kept ending unexpectedly".into(),
                         why: "the provider stream closed before completing, repeatedly".into(),
@@ -122,7 +128,13 @@ impl Engine {
         }
     }
 
-    async fn emit_retrying(&self, attempt: u32, delay: std::time::Duration, reason: &str) {
+    async fn emit_retrying(&mut self, attempt: u32, delay: std::time::Duration, reason: &str) {
+        self.write_transcript(TranscriptEvent::ProviderError {
+            what: "retrying the model request".into(),
+            why: reason.to_string(),
+            retry_attempt: Some(attempt),
+            retry_max: Some(self.retry.max_attempts),
+        });
         self.emit(UiEvent::Retrying {
             attempt,
             max_attempts: self.retry.max_attempts,
@@ -271,7 +283,7 @@ impl Engine {
         call: &PendingToolCall,
         chans: &mut TurnChannels<'_>,
     ) -> ToolCallResult {
-        let args = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
+        let args = parse_tool_args(&call.args);
 
         // Record the (tool, normalized-args) for the loop signature (S-5),
         // including unknown-tool attempts (a loop can re-tread those too).
@@ -540,7 +552,7 @@ impl Engine {
             });
         }
         for call in tool_calls {
-            let input = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
+            let input = parse_tool_args(&call.args);
             self.write_transcript(TranscriptEvent::ToolCall {
                 call_id: call.id.clone(),
                 tool: call.name.clone(),

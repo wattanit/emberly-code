@@ -217,6 +217,23 @@ pub enum TranscriptEvent {
     /// The session title was set or renamed (Requirements §8.2).
     SessionTitle { title: String },
 
+    /// A provider/model request failed mid-turn (Tech Spec §4.3, HC-7): a
+    /// retry in flight or the terminal give-up. Previously this class of
+    /// failure only reached the live UI (`UiEvent::Retrying` /
+    /// `HarnessError`), so a session that stalled on repeated provider errors
+    /// left no trace in its own transcript. `retry_attempt`/`retry_max` are
+    /// set while backing off; both `None` marks the terminal failure that
+    /// ended the turn. Additive — older readers warn-skip it, no
+    /// `SCHEMA_VERSION` bump.
+    ProviderError {
+        what: String,
+        why: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_attempt: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_max: Option<u32>,
+    },
+
     /// The model updated its task list (T-11, Tech Spec §3.2, HC-7). The full
     /// list is recorded on every update (replace, not merge). Additive — older
     /// readers warn-skip it, so no `SCHEMA_VERSION` bump (like `AskUser`/

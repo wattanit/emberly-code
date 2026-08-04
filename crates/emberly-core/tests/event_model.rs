@@ -188,6 +188,18 @@ fn transcript_event_variants_roundtrip() -> serde_json::Result<()> {
             trigger: Default::default(),
         },
         TranscriptEvent::SessionTitle { title: "t".into() },
+        TranscriptEvent::ProviderError {
+            what: "retrying the model request".into(),
+            why: "HTTP 500".into(),
+            retry_attempt: Some(1),
+            retry_max: Some(3),
+        },
+        TranscriptEvent::ProviderError {
+            what: "the model request failed".into(),
+            why: "HTTP 500".into(),
+            retry_attempt: None,
+            retry_max: None,
+        },
         TranscriptEvent::SessionEnd { reason: None },
         TranscriptEvent::AbnormalExit {
             reason: "panic in tui".into(),
