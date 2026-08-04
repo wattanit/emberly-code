@@ -314,7 +314,11 @@ async fn run() -> anyhow::Result<()> {
     let started = Instant::now();
     let opts = match parse_args(std::env::args().skip(1))? {
         Cli::Version => {
-            println!("emberly {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "emberly v{} - Build {}",
+                env!("CARGO_PKG_VERSION"),
+                env!("EMBERLY_BUILD_TIMESTAMP")
+            );
             return Ok(());
         }
         Cli::Init => {
