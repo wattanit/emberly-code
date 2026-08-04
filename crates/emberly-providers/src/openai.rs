@@ -26,6 +26,7 @@ pub struct OpenAiProvider {
     /// (or an Ollama/vLLM base). `/chat/completions` is appended.
     base_url: String,
     model_info: ModelInfo,
+    timeouts: StreamTimeouts,
 }
 
 impl OpenAiProvider {
@@ -35,12 +36,14 @@ impl OpenAiProvider {
         auth: Auth,
         base_url: impl Into<String>,
         model_info: ModelInfo,
+        timeouts: StreamTimeouts,
     ) -> Self {
         Self {
             client,
             auth,
             base_url: base_url.into(),
             model_info,
+            timeouts,
         }
     }
 }
@@ -74,7 +77,7 @@ impl Provider for OpenAiProvider {
         Ok(sse_completion_stream(
             response,
             OpenAiMapper::default(),
-            StreamTimeouts::default(),
+            self.timeouts,
         ))
     }
 

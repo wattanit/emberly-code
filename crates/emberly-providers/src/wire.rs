@@ -16,8 +16,9 @@ use crate::stream::{CompletionStream, StreamEvent};
 
 // ---------------------------------------------------------------------------
 // Tunables. Every bound this module enforces is named here, so the numbers can
-// be reviewed together rather than hunted through the code. Hardcoded for now;
-// exposing the stream windows as config is an open owner decision (#15).
+// be reviewed together rather than hunted through the code. These are the
+// defaults `StreamTimeouts::default()` falls back to; `[stream]` in
+// config.toml overrides them per the composition root (#15).
 // ---------------------------------------------------------------------------
 
 /// How long to wait for the **first** chunk of a completion stream.
@@ -127,12 +128,22 @@ pub(crate) trait SseMapper: Send + 'static {
 /// request timeout can tell a slow generation from a dead connection.
 ///
 /// The defaults, and why they differ by so much, are at the top of this file.
+/// Configurable (`[stream]` in `config.toml`) because how long is reasonable
+/// depends on the inference engine on the other end — a local/cloud model's
+/// prefill and token-generation speed is nothing the client controls (#15).
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct StreamTimeouts {
+pub struct StreamTimeouts {
     /// Waiting for the first chunk — see [`DEFAULT_FIRST_CHUNK_TIMEOUT`].
-    pub(crate) first_chunk: Duration,
+    pub first_chunk: Duration,
     /// Waiting for a later chunk — see [`DEFAULT_STREAM_IDLE_TIMEOUT`].
-    pub(crate) idle: Duration,
+    pub idle: Duration,
+}
+
+impl StreamTimeouts {
+    #[must_use]
+    pub fn new(first_chunk: Duration, idle: Duration) -> Self {
+        Self { first_chunk, idle }
+    }
 }
 
 impl Default for StreamTimeouts {

@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
 use emberly_providers::{
-    AnthropicProvider, Auth, Effort, ModelInfo, OpenAiProvider, Pricing, Provider,
+    AnthropicProvider, Auth, Effort, ModelInfo, OpenAiProvider, Pricing, Provider, StreamTimeouts,
 };
 
 use crate::config::{self, AuthFile, CliOverrides, ProfileFile, Resolved};
@@ -50,7 +50,12 @@ pub fn build(resolved: &Resolved) -> anyhow::Result<Option<Selection>> {
     let model = resolved.model.clone().context(
         "a model must be configured when a provider is set (EMBERLY_MODEL, --model, or config.toml)",
     )?;
-    let provider = build_profile(&resolved.providers, &profile_name, &model)?;
+    let provider = build_profile(
+        &resolved.providers,
+        &profile_name,
+        &model,
+        resolved.stream_timeouts,
+    )?;
     Ok(Some(Selection {
         provider,
         label: format!("{profile_name}/{model}"),
@@ -82,6 +87,7 @@ fn build_profile(
     providers: &HashMap<String, ProfileFile>,
     profile_name: &str,
     model: &str,
+    stream_timeouts: StreamTimeouts,
 ) -> anyhow::Result<Arc<dyn Provider>> {
     let profile = providers.get(profile_name).ok_or_else(|| {
         let mut known: Vec<&String> = providers.keys().collect();
@@ -128,9 +134,13 @@ fn build_profile(
                 auth,
                 base.clone(),
                 model_info,
+                stream_timeouts,
             )),
             None => Arc::new(AnthropicProvider::with_default_url(
-                client, auth, model_info,
+                client,
+                auth,
+                model_info,
+                stream_timeouts,
             )),
         },
         "openai" => {
@@ -138,7 +148,13 @@ fn build_profile(
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-            Arc::new(OpenAiProvider::new(client, auth, base, model_info))
+            Arc::new(OpenAiProvider::new(
+                client,
+                auth,
+                base,
+                model_info,
+                stream_timeouts,
+            ))
         }
         other => bail!(
             "unknown adapter '{other}' in profile '{profile_name}' \
@@ -153,6 +169,7 @@ fn build_profile(
 /// depending on config/wiring. Holds the merged profile map (cheap to clone).
 pub struct ConfiguredProviders {
     providers: HashMap<String, ProfileFile>,
+    stream_timeouts: StreamTimeouts,
 }
 
 impl ConfiguredProviders {
@@ -160,13 +177,15 @@ impl ConfiguredProviders {
     pub fn new(resolved: &Resolved) -> Self {
         Self {
             providers: resolved.providers.clone(),
+            stream_timeouts: resolved.stream_timeouts,
         }
     }
 }
 
 impl emberly_core::ProviderFactory for ConfiguredProviders {
     fn build(&self, profile: &str, model: &str) -> Result<emberly_core::ProviderChoice, String> {
-        let provider = build_profile(&self.providers, profile, model).map_err(|e| e.to_string())?;
+        let provider = build_profile(&self.providers, profile, model, self.stream_timeouts)
+            .map_err(|e| e.to_string())?;
         Ok(emberly_core::ProviderChoice {
             provider,
             profile: profile.to_string(),
@@ -423,11 +442,11 @@ mod tests {
             profile("openai", Some("http://localhost:0/v1")),
         );
 
-        let anth = build_profile(&providers, "a", "m1").expect("anthropic builds");
+        let anth = build_profile(&providers, "a", "m1", StreamTimeouts::default()).expect("anthropic builds");
         assert_eq!(anth.id().to_string(), "anthropic");
         assert_eq!(anth.model_info().model, "m1");
 
-        let oai = build_profile(&providers, "o", "m2").expect("openai builds");
+        let oai = build_profile(&providers, "o", "m2", StreamTimeouts::default()).expect("openai builds");
         assert_eq!(oai.id().to_string(), "openai-compat");
         assert_eq!(oai.model_info().model, "m2");
     }
@@ -443,15 +462,15 @@ mod tests {
         }
 
         let empty = HashMap::new();
-        assert!(err(build_profile(&empty, "nope", "m")).contains("unknown provider profile"));
+        assert!(err(build_profile(&empty, "nope", "m", StreamTimeouts::default())).contains("unknown provider profile"));
 
         let mut weird = HashMap::new();
         weird.insert("x".to_string(), profile("weird", None));
-        assert!(err(build_profile(&weird, "x", "m")).contains("unknown adapter"));
+        assert!(err(build_profile(&weird, "x", "m", StreamTimeouts::default())).contains("unknown adapter"));
 
         let mut no_adapter = HashMap::new();
         no_adapter.insert("y".to_string(), ProfileFile::default());
-        assert!(err(build_profile(&no_adapter, "y", "m")).contains("no `adapter`"));
+        assert!(err(build_profile(&no_adapter, "y", "m", StreamTimeouts::default())).contains("no `adapter`"));
     }
 
     #[test]
@@ -471,7 +490,7 @@ mod tests {
         );
         let mut providers = HashMap::new();
         providers.insert("p".to_string(), prof);
-        let info = build_profile(&providers, "p", "m")
+        let info = build_profile(&providers, "p", "m", StreamTimeouts::default())
             .expect("builds")
             .model_info();
         assert_eq!(info.context_window, 123_456);
@@ -497,7 +516,7 @@ mod tests {
         );
         let mut providers = HashMap::new();
         providers.insert("p".to_string(), prof);
-        let info = build_profile(&providers, "p", "m")
+        let info = build_profile(&providers, "p", "m", StreamTimeouts::default())
             .expect("builds")
             .model_info();
         assert!(info.documents);
@@ -516,7 +535,7 @@ mod tests {
         );
         let mut providers = HashMap::new();
         providers.insert("p".to_string(), prof);
-        let info = build_profile(&providers, "p", "m")
+        let info = build_profile(&providers, "p", "m", StreamTimeouts::default())
             .expect("builds")
             .model_info();
         assert_eq!(info.default_effort, Some(Effort::High));
@@ -530,7 +549,7 @@ mod tests {
         prof.models.insert("m".to_string(), ModelFile::default());
         let mut providers = HashMap::new();
         providers.insert("p".to_string(), prof);
-        let info = build_profile(&providers, "p", "m")
+        let info = build_profile(&providers, "p", "m", StreamTimeouts::default())
             .expect("builds")
             .model_info();
         assert_eq!(info.default_effort, None);
@@ -550,7 +569,7 @@ mod tests {
         );
         let mut providers = HashMap::new();
         providers.insert("p".to_string(), prof);
-        let info = build_profile(&providers, "p", "m")
+        let info = build_profile(&providers, "p", "m", StreamTimeouts::default())
             .expect("builds")
             .model_info();
         assert_eq!(info.effort_levels, vec![Effort::Low, Effort::High]);

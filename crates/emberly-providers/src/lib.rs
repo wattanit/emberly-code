@@ -34,3 +34,4 @@ pub use openai::OpenAiProvider;
 pub use provider::Provider;
 pub use retry::RetryPolicy;
 pub use stream::{CompletionStream, StopReason, StreamEvent};
+pub use wire::StreamTimeouts;

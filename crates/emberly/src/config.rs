@@ -68,6 +68,9 @@ pub struct ConfigFile {
     /// `[search]` web-search backend (T-14, Tech Spec §5.5).
     #[serde(default)]
     pub search: SearchConfigFile,
+    /// `[stream]` completion-stream liveness windows (issue #15).
+    #[serde(default)]
+    pub stream: StreamConfigFile,
 }
 
 /// `[ui]` — presentation toggles that shape what the interface shows without
@@ -198,6 +201,22 @@ pub struct SearchConfigFile {
     pub auth: Option<AuthFile>,
     /// Maximum results sent to the model (default 5, Tech Spec §5.5).
     pub max_results: Option<usize>,
+}
+
+/// `[stream]` — the two liveness windows a completion stream enforces per SSE
+/// chunk (issue #15): how long to wait for the first chunk (covers a
+/// provider's queueing and prompt-prefill time) and for each chunk after that
+/// (covers a dead connection, not a slow model). How long is reasonable
+/// depends entirely on the inference engine on the other end — a
+/// local/cloud-hosted model's performance is nothing the client controls —
+/// so both are configurable rather than fixed. All optional; the client
+/// applies its built-in defaults (300s / 90s) when unset.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct StreamConfigFile {
+    /// Seconds to wait for the first chunk of a completion stream.
+    pub first_chunk_secs: Option<u64>,
+    /// Seconds a stream may go without a chunk once it has started.
+    pub idle_secs: Option<u64>,
 }
 
 /// `[truncate]` — tool-result reduction and size backstop at ingestion
@@ -486,6 +505,13 @@ impl ConfigFile {
                 None => self.search.auth = Some(higher_auth),
             }
         }
+        // `[stream]` (issue #15) merges field-by-field.
+        if higher.stream.first_chunk_secs.is_some() {
+            self.stream.first_chunk_secs = higher.stream.first_chunk_secs;
+        }
+        if higher.stream.idle_secs.is_some() {
+            self.stream.idle_secs = higher.stream.idle_secs;
+        }
         // `[trust]` is deliberately NOT merged — it is read only from the global
         // tier (FR-1); see `global_trust_dirs` and the project-[trust] notice.
     }
@@ -549,6 +575,9 @@ pub struct Resolved {
     /// Resolved search config (T-14, Tech Spec §5.5). The binary conditionally
     /// registers the `web_search` tool when `enabled` and an endpoint is set.
     pub search: SearchConfig,
+    /// Resolved completion-stream liveness windows (issue #15), baked into
+    /// each provider client at construction.
+    pub stream_timeouts: emberly_providers::StreamTimeouts,
 }
 
 /// Resolved web-search configuration (T-14, Tech Spec §5.5). Carried in
@@ -729,6 +758,12 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
     provenance.file_field("search.endpoint", |c| c.search.endpoint.is_some());
     provenance.file_field("search.max_results", |c| c.search.max_results.is_some());
 
+    // Completion-stream liveness windows (issue #15).
+    provenance.file_field("stream.first_chunk_secs", |c| {
+        c.stream.first_chunk_secs.is_some()
+    });
+    provenance.file_field("stream.idle_secs", |c| c.stream.idle_secs.is_some());
+
     // Project instructions (C-1): AGENTS.md native; CLAUDE.md as a fallback;
     // both present → AGENTS.md wins with a notice.
     let mut notices = Vec::new();
@@ -856,6 +891,19 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             endpoint: merged.search.endpoint,
             auth: merged.search.auth,
             max_results: merged.search.max_results.unwrap_or(5),
+        },
+        stream_timeouts: {
+            let d = emberly_providers::StreamTimeouts::default();
+            emberly_providers::StreamTimeouts::new(
+                merged
+                    .stream
+                    .first_chunk_secs
+                    .map_or(d.first_chunk, std::time::Duration::from_secs),
+                merged
+                    .stream
+                    .idle_secs
+                    .map_or(d.idle, std::time::Duration::from_secs),
+            )
         },
     })
 }
@@ -1376,7 +1424,8 @@ mod tests {
              [memory]\nenabled = false\nmax_index_entries = 10\n\
              [skills]\nenabled = false\n\
              [search]\nenabled = false\nadapter = \"x\"\n\
-             endpoint = \"http://localhost:1/s\"\nmax_results = 3\n",
+             endpoint = \"http://localhost:1/s\"\nmax_results = 3\n\
+             [stream]\nfirst_chunk_secs = 600\nidle_secs = 180\n",
         )
         .unwrap();
 
@@ -1411,6 +1460,8 @@ mod tests {
                 "search.adapter",
                 "search.endpoint",
                 "search.max_results",
+                "stream.first_chunk_secs",
+                "stream.idle_secs",
             ]
         );
         // Every one of them came from the project tier, and the check line
@@ -1427,6 +1478,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn stream_timeouts_resolve_from_config_or_fall_back_to_defaults() {
+        let dir = tmp();
+        let agents = dir.join(".agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("config.toml"),
+            "[stream]\nfirst_chunk_secs = 600\nidle_secs = 180\n",
+        )
+        .unwrap();
+        let resolved = load(&dir, &CliOverrides::default()).unwrap();
+        assert_eq!(
+            resolved.stream_timeouts.first_chunk,
+            std::time::Duration::from_secs(600)
+        );
+        assert_eq!(
+            resolved.stream_timeouts.idle,
+            std::time::Duration::from_secs(180)
+        );
+
+        // Untouched → the client's own built-in defaults (300s / 90s).
+        let defaults = load(&tmp(), &CliOverrides::default()).unwrap();
+        let d = emberly_providers::StreamTimeouts::default();
+        assert_eq!(defaults.stream_timeouts.first_chunk, d.first_chunk);
+        assert_eq!(defaults.stream_timeouts.idle, d.idle);
     }
 
     /// A project tier that sets nothing records nothing but the always-present

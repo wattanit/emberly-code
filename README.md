@@ -194,6 +194,7 @@ is picked up automatically as standing context.
 | `[memory] enabled` | `true` | Persistent cross-session memory (+ `max_index_entries`) |
 | `[skills] enabled` | `true` | The skill system |
 | `[search] enabled` | `true` | Register the `web_search` tool (needs `adapter`/`endpoint`/`auth` to work; `max_results` caps results) |
+| `[stream] first_chunk_secs` | `300` | Seconds to wait for a completion stream's first chunk (+ `idle_secs`, default `90`, for the gap between later chunks) — raise both for a slow local/cloud inference backend |
 | `[sandbox] require` | `false` | Refuse to start without active OS confinement |
 
 **Environment variables:** `EMBERLY_PROVIDER`, `EMBERLY_MODEL`. For display,

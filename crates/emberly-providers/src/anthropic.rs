@@ -31,6 +31,7 @@ pub struct AnthropicProvider {
     auth: Auth,
     base_url: String,
     model_info: ModelInfo,
+    timeouts: StreamTimeouts,
 }
 
 impl AnthropicProvider {
@@ -42,19 +43,26 @@ impl AnthropicProvider {
         auth: Auth,
         base_url: impl Into<String>,
         model_info: ModelInfo,
+        timeouts: StreamTimeouts,
     ) -> Self {
         Self {
             client,
             auth,
             base_url: base_url.into(),
             model_info,
+            timeouts,
         }
     }
 
     /// Convenience constructor using the public API base URL.
     #[must_use]
-    pub fn with_default_url(client: reqwest::Client, auth: Auth, model_info: ModelInfo) -> Self {
-        Self::new(client, auth, DEFAULT_BASE_URL, model_info)
+    pub fn with_default_url(
+        client: reqwest::Client,
+        auth: Auth,
+        model_info: ModelInfo,
+        timeouts: StreamTimeouts,
+    ) -> Self {
+        Self::new(client, auth, DEFAULT_BASE_URL, model_info, timeouts)
     }
 }
 
@@ -92,7 +100,7 @@ impl Provider for AnthropicProvider {
         Ok(sse_completion_stream(
             response,
             AnthropicMapper::default(),
-            StreamTimeouts::default(),
+            self.timeouts,
         ))
     }
 

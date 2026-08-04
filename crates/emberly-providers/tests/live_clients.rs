@@ -7,7 +7,7 @@
 
 use emberly_providers::{
     AnthropicProvider, Auth, CompletionRequest, Message, ModelInfo, OpenAiProvider, Provider,
-    ProviderError, StopReason, StreamEvent, ToolSchema,
+    ProviderError, StopReason, StreamEvent, StreamTimeouts, ToolSchema,
 };
 use futures::StreamExt;
 use serde_json::json;
@@ -106,6 +106,7 @@ async fn anthropic_streams_text_and_usage() {
         Auth::XApiKey("test-key".into()),
         server.uri(),
         model_info(),
+        StreamTimeouts::default(),
     );
     let events = drain(provider.stream_completion(sample_request()).await).await;
 
@@ -155,6 +156,7 @@ async fn anthropic_streams_tool_call() {
         Auth::XApiKey("k".into()),
         server.uri(),
         model_info(),
+        StreamTimeouts::default(),
     );
     let mut req = sample_request();
     req.tools = vec![ToolSchema {
@@ -197,6 +199,7 @@ async fn anthropic_maps_auth_error() {
         Auth::XApiKey("bad".into()),
         server.uri(),
         model_info(),
+        StreamTimeouts::default(),
     );
     match provider.stream_completion(sample_request()).await {
         Err(ProviderError::Auth) => {}
@@ -233,6 +236,7 @@ async fn openai_streams_text_and_usage() {
         Auth::Bearer("test-key".into()),
         format!("{}/v1", server.uri()),
         model_info(),
+        StreamTimeouts::default(),
     );
     let events = drain(provider.stream_completion(sample_request()).await).await;
 
@@ -266,6 +270,7 @@ async fn openai_uses_max_completion_tokens_not_max_tokens() {
         Auth::Bearer("k".into()),
         format!("{}/v1", server.uri()),
         model_info(),
+        StreamTimeouts::default(),
     );
     let mut req = sample_request();
     req.max_output_tokens = Some(256);
@@ -298,6 +303,7 @@ async fn openai_streams_tool_call_across_chunks() {
         Auth::Bearer("k".into()),
         format!("{}/v1", server.uri()),
         model_info(),
+        StreamTimeouts::default(),
     );
     let events = drain(provider.stream_completion(sample_request()).await).await;
 
