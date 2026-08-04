@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "emberly"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "emberly-core"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "base64",
@@ -591,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "emberly-providers"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "bytes",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "emberly-sandbox"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "landlock",
  "serde",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "emberly-tools"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "base64",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "emberly-tui"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "crossterm",
  "emberly-core",

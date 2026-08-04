@@ -1,6 +1,6 @@
 # Emberly Code
 
-> **Currently on v0.4.4** — feature-complete for the milestone, install from source.
+> **Currently on v0.4.5** — feature-complete for the milestone, install from source.
 
 **An AI coding agent for your terminal — provider-agnostic, fully auditable, and
 built in pure Rust.**
@@ -395,10 +395,10 @@ minimal terminals.
 
 ### Project status
 
-Feature-complete for the **v0.4.4** milestone, installable from source.
+Feature-complete for the **v0.4.5** milestone, installable from source.
 The interactive TUI, live providers, session persistence, the permission rule
 engine, auto-accept modes, and OS confinement (Linux Landlock, macOS Seatbelt)
-all work today, alongside the full 0.2–0.4.4 stack described below. **Not yet
+all work today, alongside the full 0.2–0.4.5 stack described below. **Not yet
 shipped:** prebuilt binaries and Windows support (no Landlock/Seatbelt
 equivalent).
 
@@ -417,6 +417,7 @@ as it grows. _(Affectionate, not official.)_
 | **v0.4.2** | M10 | 🌲🔥 _Wildfire_ | Guided provider/model setup — a step-by-step wizard, reachable from the model picker, that writes a new provider profile and its key without hand-editing config. Plus a round of post-ship hardening: compaction, cancellation, permission previews, and parallel tool-call handling. |
 | **v0.4.3** | M11 | 🌲🔥 _Wildfire_ | Three externally-reported bug fixes (a stalled SSE stream could hang forever; an interrupted turn could commit a message no provider adapter accepts; the token estimate badly undercounted Thai/CJK text), plus session scratch space — a disposable per-session working directory (`scratch_write`, `emberly clean`). |
 | **v0.4.4** | — | 🌲🔥 _Wildfire_ | Correctness and internals, no new features. Three defects in the permission rule engine (a saved `always allow` could write a `permissions.toml` that no longer parsed, silently dropping every project rule including `deny`s; a `tool = "*"` rule could override a named-tool `deny`; `match = "*"` matched nothing instead of everything), three in the provider streaming seam, and a slow first token no longer trips the idle timeout (#15). Internally: the `Engine` and `App` god objects split by topic and their flat field lists grouped, one generic gate with a single fail-closed rule, and the unused outside-root grant path removed from the sandbox (Tech Spec v0.12). |
+| **v0.4.5** | — | 🌲🔥 _Wildfire_ | Another correctness pass. A session switch left the derived view cache stale, so returning to a session reported "0 in / 0 out" at $0.00 despite full history (#18). A tool call whose backend streamed no usable arguments (empty, the literal text `null`, or garbage) surfaced as a bare `invalid type: null` and could stall a session with no explanation — arguments now default to `{}`, and the model is told plainly which call was bad and to retry. Provider request failures and retries are now written to the session transcript instead of only flashing in the UI. Added: `--version` reports a build timestamp; the completion stream's first-chunk/idle timeouts are configurable (`[stream]`, closing the #15 config deferral) for slower local/cloud inference backends; `Ctrl-L` forces a full repaint as an interim escape hatch for display corruption reported on independent terminals (Ghostty, Termius, Termux), cause unconfirmed. |
 
 Prior as-built plans live under `docs/version-0-1/`, `docs/version-0-2/`,
 `docs/version-0-3/`, `docs/version-0-4/`, `docs/version-0-4-1/`, and
