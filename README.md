@@ -240,6 +240,7 @@ agent's task list, and changed files.
 | `↑` `↓` `PgUp` `PgDn` / mouse wheel | Scroll the conversation or an overlay |
 | `Ctrl-R` | Toggle the reasoning trail open/closed |
 | `Ctrl-P` | Open the command palette |
+| `Ctrl-L` | Force a full repaint (clears display corruption without resizing) |
 | Mouse click | Select an interactive row / affordance (never approves a permission) |
 
 **Commands** — open the palette with **`Ctrl-P`**, or type any `/name`:

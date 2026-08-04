@@ -100,6 +100,10 @@ impl App {
                 self.toggle_reasoning();
                 Action::None
             }
+            // Force a full repaint (README keybinding table) — a manual
+            // escape hatch for display corruption, so a resize is never the
+            // only way to clear it.
+            KeyCode::Char('l') if ctrl => Action::ForceRedraw,
             // Emacs-style line editing.
             KeyCode::Char('a') if ctrl => self.edit(|e| e.home()),
             KeyCode::Char('e') if ctrl => self.edit(|e| e.end()),

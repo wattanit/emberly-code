@@ -225,6 +225,9 @@ async fn handle_action(
                 let _ = commands_tx.send(Command::ReloadConfig).await;
             }
         }
+        Action::ForceRedraw => {
+            guard.terminal().clear()?;
+        }
         Action::None => {}
     }
     Ok(false)

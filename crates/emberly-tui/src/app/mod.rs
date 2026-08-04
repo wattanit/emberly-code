@@ -289,6 +289,11 @@ pub enum Action {
     /// Open this file in `$EDITOR` (C-5). The frontend suspends the TUI, runs
     /// the editor, restores, and reports the outcome.
     EditFile(PathBuf),
+    /// Clear the terminal and force a full repaint (Ctrl-L). An escape hatch
+    /// for display corruption the diffed renderer can't self-heal from —
+    /// reported across independent terminals (Ghostty, Termius, Termux),
+    /// cause unconfirmed — without waiting on a resize to trigger one.
+    ForceRedraw,
 }
 
 /// A pending `ask_user` question and the state of the user's reply-in-progress

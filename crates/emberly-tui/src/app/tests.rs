@@ -1703,6 +1703,13 @@ fn ctrl_r_toggles_the_reasoning_trail() {
 }
 
 #[test]
+fn ctrl_l_forces_a_redraw() {
+    let mut a = app();
+    let action = a.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+    assert_eq!(action, Action::ForceRedraw);
+}
+
+#[test]
 fn effort_picker_offers_levels_and_declines_when_none() {
     let mut a = app();
     // No effort control ⇒ a calm notice, no overlay.
