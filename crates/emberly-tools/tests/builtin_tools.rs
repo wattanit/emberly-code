@@ -254,6 +254,34 @@ async fn write_refuses_git_directory() {
 }
 
 #[tokio::test]
+async fn write_allows_a_git_dir_outside_the_project_root() {
+    // A `.git/` outside the project root (e.g. a vendored checkout under
+    // `~/.cargo/git/checkouts/…/.git/`) is not the project's own history —
+    // HC-5 must not catch it. It still goes through the ordinary outside-root
+    // Allow/Deny path, exactly like any other path outside the root.
+    let root = temp_project();
+    let outside = std::env::temp_dir().join(format!(
+        "emberly-outside-git-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::create_dir_all(outside.join(".git"));
+    let abs = outside.join(".git").join("config").display().to_string();
+
+    let outcome = WriteFileTool
+        .execute(
+            json!({ "path": abs, "content": "[core]\n" }),
+            &ctx(&root, true),
+        )
+        .await;
+    assert!(
+        outcome.ok,
+        "a .git/ outside the root must not be tool-layer refused: {}",
+        outcome.content
+    );
+}
+
+#[tokio::test]
 async fn write_denied_by_gate_returns_denied() {
     let root = temp_project();
     let outcome = WriteFileTool

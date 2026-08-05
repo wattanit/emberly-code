@@ -67,7 +67,7 @@ impl Tool for EditFileTool {
             Err(e) => return ToolOutcome::failure(e, "path error"),
         };
 
-        if is_under_git_dir(&resolved.path) {
+        if is_under_git_dir(ctx.project_root(), &resolved.path) {
             return ToolOutcome::failure(
                 format!(
                     "refusing to edit under .git/: {} (only git may modify git data)",
