@@ -465,6 +465,33 @@ async fn bash_denied_by_gate() {
     assert!(outcome.content.contains("denied"));
 }
 
+#[tokio::test]
+async fn bash_denied_chained_git_gets_hint() {
+    let root = temp_project();
+    let outcome = BashTool::default()
+        .execute(
+            json!({ "command": "git add . && git commit -m 'wip'" }),
+            &ctx(&root, false),
+        )
+        .await;
+    assert!(!outcome.ok);
+    assert!(
+        outcome.content.contains("Hint:") && outcome.content.contains("one at a time"),
+        "expected a chained-git hint: {}",
+        outcome.content
+    );
+}
+
+#[tokio::test]
+async fn bash_denied_plain_command_gets_no_hint() {
+    let root = temp_project();
+    let outcome = BashTool::default()
+        .execute(json!({ "command": "echo hi" }), &ctx(&root, false))
+        .await;
+    assert!(!outcome.ok);
+    assert!(!outcome.content.contains("Hint:"));
+}
+
 /// Tiny helper so a `None` file_change fails loudly without `.unwrap()`.
 trait ExpectSome<T> {
     fn expect_none_marker(self) -> T;
