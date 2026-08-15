@@ -273,6 +273,16 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect, hit
             Vec::new(),
             None,
         ),
+        OverlayContent::AgentActivity { text, .. } => (
+            text.split('\n')
+                .flat_map(|l| text::wrap(l, body_w))
+                .map(|row| Line::from(Span::styled(row, theme.primary())))
+                .collect(),
+            None,
+            strings::agents::ACTIVITY_HINT.to_string(),
+            Vec::new(),
+            None,
+        ),
         OverlayContent::Sessions { rows, selected } => {
             let (lines, sel_line, map) = session_picker_lines(rows, *selected, theme);
             (
@@ -2724,6 +2734,41 @@ mod tests {
         let screen = draw(&app, 100, 24);
         assert!(screen.contains("-old"));
         assert!(screen.contains("+new"));
+    }
+
+    #[test]
+    fn agent_activity_overlay_shows_text_and_the_live_refresh_hint() {
+        // Design §4.13: the activity overlay's hint names the live refresh so
+        // its text changing under the user's eyes reads as expected.
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.agents.push(crate::app::AgentSummary {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            ended: false,
+        });
+        app.run_command(crate::commands::AppCommand::Agents);
+        app.apply_event(UiEvent::AgentActivity {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            text: "assistant: reviewing the diff now".into(),
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(screen.contains("reviewing the diff now"));
+        assert!(screen.contains("updates live"), "{screen:?}");
+
+        // Read-only: no click target is registered under it (mirrors the
+        // plain Text overlay's `a_read_only_overlay_blocks_click_through`).
+        let hit = hit_map_of(&app, 100, 24);
+        assert!(
+            (0..24).all(|y| (0..100).all(|x| hit.hit(x, y).is_none())),
+            "nothing under the activity overlay is clickable"
+        );
     }
 
     #[test]

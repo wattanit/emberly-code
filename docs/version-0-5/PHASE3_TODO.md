@@ -28,18 +28,40 @@ Phase 2 (the events this phase renders).
 - [x] New overlay variant (`OverlayContent::AgentList`, `RowKind::Agent`)
       reusing the existing §4.2 overlay machinery (scrollable, Esc to
       dismiss; tested: `agents_inspector_esc_dismisses`).
-- [x] Renders `UiEvent::AgentActivity` as a read-only text overlay on top
-      of the list (`apply_agent_activity` → `open_text_overlay`, mirroring
-      `SkillBody`; tested: `agent_activity_opens_a_read_only_overlay`).
-- [ ] **Known deviation from Design §4.13:** the overlay is a **snapshot
-      fetched once on Enter** (reads the subagent's transcript as of its
-      last flush — Tech Spec §8.4's documented choice from Phase 2), not
-      the "live-updating... as it happens" overlay the Design Guideline
-      describes. True live streaming would need a second per-subagent
-      event subscription into the open overlay; not built this phase.
-      Flagged for the owner: accept as a v0.5 simplification (record as
-      upstream feedback against Design §4.13) or schedule the live variant
-      before release.
+- [x] Renders `UiEvent::AgentActivity` as its own read-only overlay
+      (`OverlayContent::AgentActivity { id, name, text }`, distinct from the
+      generic `Text` variant so a reply can be matched back to what's on
+      screen; tested: `agent_activity_opens_a_read_only_overlay`).
+- [x] **Closed (with a documented approach, not full token streaming):**
+      the overlay now live-updates while open (Design §4.13). Rather than
+      inventing a new per-subagent event-subscription channel — which
+      would mean either relaxing "no raw concurrent streaming" (§4.13's own
+      other rule) or building a second, parallel activity pipe — this reuses
+      the existing one-shot `Command::InspectAgent`/`UiEvent::AgentActivity`
+      round trip on a timer: `tui::run` gained a 1.5s
+      `agent_watch_ticker` that re-sends `Command::InspectAgent` for
+      whichever id `App::watched_agent_id()` reports (the id of the
+      `AgentActivity` overlay currently on top, `None` otherwise), and
+      `apply_agent_activity` now updates that overlay's text **in place**
+      on a matching reply instead of stacking a new one, preserving the
+      user's scroll position. A reply for a *different* id than what's
+      shown (a stale/abandoned request) is dropped rather than
+      surprise-switching the view. The foot hint says "updates live" so
+      the text changing under the user's eyes reads as expected, not as a
+      glitch. Granularity note: because the subagent's own transcript is
+      written per tool-call/per-completed-message (not per streaming
+      delta — confirmed in `engine/turn.rs`), what "live" means here is
+      "each step lands within ~1.5s of happening," not token-by-token
+      streaming; §4.13's own "no raw concurrent streaming" rule made
+      token-level live text an explicit non-goal anyway, so this is judged
+      to satisfy the requirement's intent rather than a compromise on it.
+      Degraded/line mode is unchanged (still one-shot on `/agents <name>`)
+      — plain mode has no redraw loop to refresh against, the same as
+      every other read-only text dump there. Tested:
+      `agent_activity_refresh_updates_the_open_overlay_in_place`,
+      `agent_activity_reply_for_an_abandoned_id_is_dropped`,
+      `watched_agent_id_is_none_without_an_open_activity_overlay`,
+      `agent_activity_overlay_shows_text_and_the_live_refresh_hint`.
 - [x] **Closed:** an ended subagent's inspector stays reachable for the
       rest of the session (Design §4.13). `AgentSummary` gained an `ended`
       flag; `SubagentEnded` now marks the matching entry instead of
@@ -99,11 +121,11 @@ Phase 2 (the events this phase renders).
       new degraded output is plain ASCII, checked by the existing
       `degraded_output_has_no_ansi_escapes` sweep test.
 
-**Status:** functionally complete and tested except one remaining flagged
-item in Group 2 (the live-updating overlay), a real gap against Design
-§4.13 as written, not an oversight — surfaced there for an owner decision
-rather than silently built around. The ended-agent-reachability gap is
-now closed.
+**Status:** functionally complete and tested. Both Group 2 gaps flagged in
+the previous pass are now closed: the ended-agent-reachability gap, and
+the live-updating overlay (via a periodic re-fetch of the existing
+snapshot round trip rather than a new streaming channel — see Group 2 for
+why that is judged to satisfy Design §4.13's intent).
 
 `cargo build --workspace`, `cargo test --workspace`, `cargo clippy
 --workspace --all-targets` (`-D warnings`), and `cargo fmt -p emberly-tui

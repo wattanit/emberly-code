@@ -2214,11 +2214,88 @@ fn agent_activity_opens_a_read_only_overlay() {
         text: "user: review this diff\nassistant: looks good".into(),
     });
     match a.overlays.last().map(|o| &o.content) {
-        Some(OverlayContent::Text(body)) => {
-            assert!(body.contains("looks good"));
+        Some(OverlayContent::AgentActivity { id, name, text }) => {
+            assert_eq!(id, "agent-1");
+            assert_eq!(name, "reviewer");
+            assert!(text.contains("looks good"));
         }
-        other => panic!("expected a Text overlay, got {other:?}"),
+        other => panic!("expected an AgentActivity overlay, got {other:?}"),
     }
+    assert_eq!(
+        a.watched_agent_id(),
+        Some("agent-1".into()),
+        "the open activity overlay is the one the periodic refresh polls"
+    );
+}
+
+#[test]
+fn agent_activity_refresh_updates_the_open_overlay_in_place() {
+    // Design §4.13's "live-updating... as it happens": a second reply for
+    // the *same* id (what the periodic refresh ticker in `tui::run` sends)
+    // updates the existing overlay's text rather than stacking a new one.
+    let mut a = app();
+    a.agents = vec![agent_summary("agent-1", "reviewer", false)];
+    a.run_command(AppCommand::Agents);
+    a.on_key(key(KeyCode::Enter));
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        text: "user: start".into(),
+    });
+    let depth_before = a.overlays.len();
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        text: "user: start\nassistant: still working".into(),
+    });
+    assert_eq!(a.overlays.len(), depth_before, "no new overlay is stacked");
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentActivity { text, .. }) => {
+            assert!(text.contains("still working"));
+        }
+        other => panic!("expected an AgentActivity overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn agent_activity_reply_for_an_abandoned_id_is_dropped() {
+    // A stale reply for an id the user is no longer looking at must not
+    // silently replace what is currently on screen.
+    let mut a = app();
+    a.agents = vec![
+        agent_summary("agent-1", "reviewer", false),
+        agent_summary("agent-2", "tester", false),
+    ];
+    a.run_command(AppCommand::Agents);
+    a.on_key(key(KeyCode::Enter)); // opens agent-1's activity
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        text: "reviewer's activity".into(),
+    });
+    // A late reply for a different subagent arrives (e.g. a stale periodic
+    // refresh from before the user moved on).
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-2".into(),
+        name: "tester".into(),
+        text: "tester's activity".into(),
+    });
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentActivity { id, text, .. }) => {
+            assert_eq!(id, "agent-1", "the shown subagent did not silently change");
+            assert!(text.contains("reviewer's activity"));
+        }
+        other => panic!("expected an AgentActivity overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn watched_agent_id_is_none_without_an_open_activity_overlay() {
+    let mut a = app();
+    assert_eq!(a.watched_agent_id(), None);
+    a.agents = vec![agent_summary("agent-1", "reviewer", false)];
+    a.run_command(AppCommand::Agents); // AgentList, not AgentActivity, is open
+    assert_eq!(a.watched_agent_id(), None);
 }
 
 #[test]

@@ -68,6 +68,14 @@ pub async fn run(
     // redraw while something is animating, so an idle screen stays quiet.
     let frame_ms = 1000 / u64::try_from(crate::app::ANIM_FPS).unwrap_or(12);
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(frame_ms));
+    // The Agents-inspector activity overlay's live-refresh ticker (Design
+    // §4.13 — "live-updating... as it happens"): while that overlay is the
+    // top one, re-issue the same `Command::InspectAgent` its first Enter
+    // did, so the read-only snapshot re-reads the subagent's transcript on a
+    // cadence a person reads comfortably, rather than only once. A separate,
+    // much coarser ticker than the animation one above — this is a network/
+    // disk round trip, not a repaint.
+    let mut agent_watch_ticker = tokio::time::interval(std::time::Duration::from_millis(1500));
     // Dropped when this function returns (on quit or engine close), which
     // closes the command channel — the engine then finishes and closes its
     // events. No hard cancel: an in-flight reply is still allowed to complete.
@@ -84,6 +92,11 @@ pub async fn run(
                 if app.is_animating() {
                     app.tick();
                     redraw(&mut guard, &mut app)?;
+                }
+            },
+            _ = agent_watch_ticker.tick() => {
+                if let Some(id) = app.watched_agent_id() {
+                    let _ = commands_tx.send(Command::InspectAgent { id }).await;
                 }
             },
             event = events_rx.recv() => match event {

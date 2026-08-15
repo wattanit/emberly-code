@@ -165,6 +165,18 @@ pub enum OverlayContent {
         agents: Vec<AgentSummary>,
         selected: usize,
     },
+    /// A subagent's own activity, read-only (Design §4.13). Unlike the plain
+    /// `Text` overlay this names which subagent it shows, so the rich TUI's
+    /// periodic refresh (`tui::run`, [`App::watched_agent_id`]) can re-fetch
+    /// and update it **in place** while it stays open — the "live-updating...
+    /// as it happens" behaviour Design §4.13 asks for, built on the existing
+    /// one-shot `Command::InspectAgent`/`UiEvent::AgentActivity` round trip
+    /// rather than a new streaming channel.
+    AgentActivity {
+        id: String,
+        name: String,
+        text: String,
+    },
 }
 
 /// Whether an inspector body-fetch is for read-only viewing or for editing

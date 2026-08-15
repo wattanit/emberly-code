@@ -194,6 +194,10 @@ pub mod agents {
     pub const EMPTY: &str = "(no subagents are currently alive)";
     /// The action hint at the foot of the inspector.
     pub const HINT: &str = " Enter view activity · ↑↓ move · Esc close";
+    /// The foot hint on the activity overlay itself — names the live refresh
+    /// (Design §4.13) so the text changing under the user's eyes reads as
+    /// expected, not as a glitch.
+    pub const ACTIVITY_HINT: &str = " Esc close · ↑↓ PgUp/PgDn scroll · updates live";
 }
 
 /// Keybinding hints for the status bar (Design §3.1, §6.2 — 2–5 words each).

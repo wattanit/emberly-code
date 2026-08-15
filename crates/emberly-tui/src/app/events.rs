@@ -303,8 +303,8 @@ impl App {
                     agent.ended = true;
                 }
             }
-            UiEvent::AgentActivity { id: _, name, text } => {
-                self.apply_agent_activity(&name, text);
+            UiEvent::AgentActivity { id, name, text } => {
+                self.apply_agent_activity(&id, &name, text);
             }
             UiEvent::MemoryEntries { user, project } => {
                 self.apply_memory_entries(user, project);

@@ -21,11 +21,41 @@ impl App {
         Action::None
     }
 
-    /// Apply an `AgentActivity` reply: open the subagent's activity
-    /// **read-only** on top of the list (§4.13 — inspectable, never a black
-    /// box). An unknown/ended id still gets a body, naming why.
-    pub(super) fn apply_agent_activity(&mut self, name: &str, text: String) {
-        self.open_text_overlay(name, text);
+    /// Apply an `AgentActivity` reply (§4.13 — inspectable, never a black
+    /// box). If the top overlay is already showing this **same** subagent's
+    /// activity — the periodic-refresh case (`tui::run`, "live-updating...
+    /// as it happens") — its text is updated **in place**, keeping the
+    /// user's scroll position instead of stacking a fresh overlay each time.
+    /// Otherwise (the first Enter on this subagent) it opens a new overlay.
+    /// A reply for a different id than the one currently shown is a stale,
+    /// already-abandoned request and is dropped rather than surprising the
+    /// user with a switch they did not ask for.
+    pub(super) fn apply_agent_activity(&mut self, id: &str, name: &str, text: String) {
+        if let Some(Overlay {
+            content:
+                OverlayContent::AgentActivity {
+                    id: shown_id,
+                    name: shown_name,
+                    text: shown_text,
+                },
+            ..
+        }) = self.overlays.last_mut()
+        {
+            if shown_id == id {
+                *shown_name = name.to_string();
+                *shown_text = text;
+            }
+            return;
+        }
+        self.push_overlay(Overlay {
+            title: name.to_string(),
+            content: OverlayContent::AgentActivity {
+                id: id.to_string(),
+                name: name.to_string(),
+                text,
+            },
+            scroll: 0,
+        });
     }
 
     pub(super) fn set_agent_selection(&mut self, next: usize) {
