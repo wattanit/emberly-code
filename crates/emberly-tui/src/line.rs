@@ -240,6 +240,9 @@ impl LineRenderer {
         }
         writeln!(out, "{}: {}", p::HEADING, rendering.summary)?;
         writeln!(out, "  {}: {}", p::WHY_LABEL, rendering.reason)?;
+        if let Some(name) = &rendering.on_behalf_of {
+            writeln!(out, "  {} {name}", p::ON_BEHALF_OF_LABEL)?;
+        }
         if !rendering.affected_paths.is_empty() {
             writeln!(
                 out,
@@ -1472,6 +1475,25 @@ mod tests {
         assert!(out.contains("PERMISSION REQUIRED"));
         assert!(out.contains("rm -rf build"), "full command must be shown");
         assert!(out.contains("[Enter] DENY"), "deny is the default");
+    }
+
+    /// Degraded mode keeps the same provenance line, plain (Design §7).
+    #[test]
+    fn permission_prompt_names_the_subagent_in_degraded_mode() {
+        let rendering = PermissionRendering {
+            tool: "bash".into(),
+            summary: "run: make build".into(),
+            detail: "make build".into(),
+            affected_paths: vec![],
+            outside_root: false,
+            reason: "bash requires your approval".into(),
+            on_behalf_of: Some("db-migration".into()),
+        };
+        let out = render_to_string(&UiEvent::PermissionRequest {
+            id: PermissionId(1),
+            rendering,
+        });
+        assert!(out.contains("on behalf of subagent db-migration"));
     }
 
     #[test]

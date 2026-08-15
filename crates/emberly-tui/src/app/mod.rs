@@ -246,6 +246,14 @@ pub struct ModifiedFile {
     pub dels: u32,
 }
 
+/// One currently alive subagent (sidebar Agents section, FR-9, Design
+/// §3.1/§4.13).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSummary {
+    pub id: String,
+    pub name: String,
+}
+
 /// Session identity for the sidebar/header (Design §3.1).
 #[derive(Debug, Clone, Default)]
 pub struct SessionInfo {
@@ -585,6 +593,13 @@ pub struct App {
     /// The skill catalog for the sidebar (T-15, FR-7, Design §4.9). Updated
     /// from `UiEvent::SkillsAvailable`; cleared on a new session.
     pub(crate) skills: Vec<SkillMeta>,
+    /// Currently alive subagents for the sidebar Agents section (FR-9, Design
+    /// §3.1/§4.13). Unlike `skills` (a full-replace catalog snapshot), this is
+    /// maintained incrementally: `UiEvent::SubagentSpawned` pushes an entry,
+    /// `UiEvent::SubagentEnded` removes it — there is no bulk "all agents"
+    /// event. Present only while non-empty (the established no-empty-stub
+    /// rule); cleared on a new session.
+    pub(crate) agents: Vec<AgentSummary>,
     /// The registered completion checks' most recent results, for the
     /// sidebar's gate-status line (S-6, Design §8.7, §3.1). Updated from
     /// `UiEvent::CompletionStatus`; empty (and so hidden — never a "None"
@@ -688,6 +703,7 @@ impl App {
             mode: emberly_core::Mode::default(),
             tasks: Vec::new(),
             skills: Vec::new(),
+            agents: Vec::new(),
             completion_status: Vec::new(),
             sidebar_visible: true,
             overlays: Vec::new(),

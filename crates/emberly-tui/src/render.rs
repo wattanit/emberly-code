@@ -1368,6 +1368,12 @@ fn render_permission(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
         format!("{}: {}", strings::permission::WHY_LABEL, r.reason),
         theme.chrome(),
     )));
+    if let Some(name) = &r.on_behalf_of {
+        header.push(Line::from(Span::styled(
+            format!("{} {name}", strings::permission::ON_BEHALF_OF_LABEL),
+            theme.chrome(),
+        )));
+    }
     if !r.affected_paths.is_empty() {
         header.push(Line::from(Span::styled(
             format!(
@@ -2279,6 +2285,38 @@ mod tests {
             screen.contains("OUTSIDE YOUR PROJECT"),
             "loud banner for outside-root escalation"
         );
+    }
+
+    /// A subagent's own action gets one added provenance line (FR-9, Design
+    /// §4.13/§5) — every other guarantee (full content, deny default, no
+    /// reserved-band dilution) is unchanged.
+    #[test]
+    fn permission_prompt_names_the_subagent_it_is_on_behalf_of() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.apply_event(UiEvent::PermissionRequest {
+            id: PermissionId(1),
+            rendering: PermissionRendering {
+                tool: "bash".into(),
+                summary: "run: make build".into(),
+                detail: "make build".into(),
+                affected_paths: Vec::new(),
+                outside_root: false,
+                reason: "bash requires approval".into(),
+                on_behalf_of: Some("db-migration".into()),
+            },
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(
+            screen.contains("on behalf of subagent db-migration"),
+            "names which subagent is asking: {screen}"
+        );
+        assert!(screen.contains("DENY"), "deny is still the default");
     }
 
     #[test]

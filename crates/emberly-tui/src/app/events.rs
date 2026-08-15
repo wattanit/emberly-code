@@ -288,6 +288,12 @@ impl App {
             UiEvent::SkillsAvailable { skills } => {
                 self.skills = skills;
             }
+            UiEvent::SubagentSpawned { id, name, .. } => {
+                self.agents.push(AgentSummary { id, name });
+            }
+            UiEvent::SubagentEnded { id, .. } => {
+                self.agents.retain(|a| a.id != id);
+            }
             UiEvent::MemoryEntries { user, project } => {
                 self.apply_memory_entries(user, project);
             }

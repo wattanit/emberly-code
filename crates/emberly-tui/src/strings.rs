@@ -27,6 +27,10 @@ pub mod permission {
     pub const HEADING: &str = "PERMISSION REQUIRED";
     pub const WHY_LABEL: &str = "why";
     pub const PATHS_LABEL: &str = "paths";
+    /// Provenance line when the action is a subagent's own, not the primary
+    /// agent's (FR-9, Design §4.13/§5) — every other guarantee on this prompt
+    /// holds unchanged; this is the only addition.
+    pub const ON_BEHALF_OF_LABEL: &str = "on behalf of subagent";
     /// The choices. Deny is the safe default and the meaning of Enter/Esc.
     pub const ALLOW_ONCE: &str = "allow once";
     pub const ALLOW_SESSION: &str = "allow this session";

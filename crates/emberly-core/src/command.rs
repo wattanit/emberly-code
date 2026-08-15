@@ -129,4 +129,14 @@ pub enum Command {
     /// [`UiEvent::SkillBody`](crate::event::UiEvent::SkillBody). Fetching the
     /// body for display runs no bundled script (FR-7).
     InspectSkill { name: String },
+
+    /// Fetch a subagent's own activity for the sidebar Agents inspector (FR-9,
+    /// Tech Spec §8.4, Design §4.13). Issued at idle; the engine reads that
+    /// subagent's own nested transcript (the same file its own `Engine`
+    /// writes, Tech Spec §3.2) and replies with
+    /// [`UiEvent::AgentActivity`](crate::event::UiEvent::AgentActivity) — a
+    /// read-only snapshot as of the last flush, not a continuously live
+    /// stream. An unknown or already-ended id still replies, with a body
+    /// saying so, rather than doing nothing.
+    InspectAgent { id: String },
 }
