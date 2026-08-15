@@ -28,7 +28,7 @@ confidence-threshold = 0.9
 [bans]
 # Duplicate versions are a smell (bloat, audit surface); warn and review.
 multiple-versions = "warn"
-wildcard-dependencies = "deny"
+wildcards = "deny"
 # HC-2: no third-party C libraries linked or bundled. OpenSSL is the canonical
 # offender we replace with rustls; ban it outright so a transitive pull fails
 # CI loudly. (OS-provided system interfaces are exempt per HC-2 and are not
