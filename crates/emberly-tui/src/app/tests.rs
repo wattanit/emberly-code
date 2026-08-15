@@ -563,6 +563,7 @@ fn busy_spinner_spans_the_turn_and_respects_gates() {
             affected_paths: vec![],
             outside_root: false,
             reason: "asks".into(),
+            on_behalf_of: None,
         },
     });
     assert!(!a.is_animating(), "no motion during a permission prompt");
@@ -947,6 +948,7 @@ fn pending_permission_app() -> App {
             affected_paths: vec![],
             outside_root: false,
             reason: "bash asks".into(),
+            on_behalf_of: None,
         },
     });
     a
@@ -1084,6 +1086,7 @@ fn permission_defaults_to_deny_on_enter() {
             affected_paths: vec![],
             outside_root: false,
             reason: "bash asks".into(),
+            on_behalf_of: None,
         },
     });
     let action = a.on_key(KeyEvent::from(KeyCode::Enter));
@@ -1421,6 +1424,7 @@ fn permission_scroll_keys_review_without_deciding() {
             affected_paths: vec![],
             outside_root: false,
             reason: "bash asks".into(),
+            on_behalf_of: None,
         },
     });
     // Scrolling and Space page-down must NOT decide.
@@ -1449,6 +1453,7 @@ fn wheel_scrolls_a_permission_prompt_without_deciding() {
             affected_paths: vec![],
             outside_root: false,
             reason: "bash asks".into(),
+            on_behalf_of: None,
         },
     });
     // The wheel reviews the prompt body (permission_scroll), never the
@@ -1477,6 +1482,7 @@ fn permission_allows_only_on_deliberate_key() {
             affected_paths: vec![],
             outside_root: false,
             reason: "bash asks".into(),
+            on_behalf_of: None,
         },
     });
     let action = a.on_key(KeyEvent::from(KeyCode::Char('y')));

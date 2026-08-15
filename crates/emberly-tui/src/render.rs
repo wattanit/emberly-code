@@ -2209,6 +2209,7 @@ mod tests {
                 affected_paths: vec!["/etc/x".into()],
                 outside_root,
                 reason: "bash requires approval".into(),
+                on_behalf_of: None,
             },
         });
     }

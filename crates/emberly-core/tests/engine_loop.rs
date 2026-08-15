@@ -111,6 +111,9 @@ fn make_config(
         skills: emberly_core::SkillsConfig::default(),
         user_skills_dir: None,
         project_skills_dir: None,
+        agents: emberly_core::AgentsConfig::default(),
+        external_permission_gate: None,
+        external_ask_gate: None,
     }
 }
 
@@ -150,7 +153,7 @@ fn start_with_file_transcript(
 
 fn spawn(config: EngineConfig) -> Harness {
     let (engine_ports, frontend) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx) =
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx, subagent_rx) =
         Engine::new(config, engine_ports.events_tx);
     tokio::spawn(engine.run(
         engine_ports.commands_rx,
@@ -160,6 +163,7 @@ fn spawn(config: EngineConfig) -> Harness {
         task_rx,
         memory_rx,
         skill_rx,
+        subagent_rx,
     ));
     Harness {
         commands_tx: frontend.commands_tx,
@@ -5964,5 +5968,272 @@ async fn completion_gate_transcript_events_are_additive_for_resume() {
             .iter()
             .any(|r| matches!(&r.event, TranscriptEvent::CompletionGateHalt { .. })),
         "transcript contains a completion_gate_halt event"
+    );
+}
+
+// ---- multi-agent subsystem (FR-9, T-18–T-21, Tech Spec §8.4) --------------
+//
+// M12 phase 2: these exercise the real, functional engine machinery (nested
+// `Engine` construction, the permission proxy, the tool-registry ceiling,
+// resource bounds) — not just the tool-layer contract Phase 1 covered.
+
+/// A one-shot [`ProviderFactory`](emberly_core::ProviderFactory) that hands out
+/// a single, independent `FakeProvider` script for a subagent — used instead
+/// of the "default to the parent's own provider" path whenever a test needs
+/// the subagent's own turns to run against a *separate* script, so the
+/// parent's and the subagent's scripted completions never contend over the
+/// same queue.
+struct OneShotFactory {
+    script: std::sync::Mutex<Option<Vec<ScriptedResponse>>>,
+}
+
+impl OneShotFactory {
+    fn new(script: Vec<ScriptedResponse>) -> Self {
+        Self {
+            script: std::sync::Mutex::new(Some(script)),
+        }
+    }
+}
+
+impl emberly_core::ProviderFactory for OneShotFactory {
+    fn build(&self, profile: &str, model: &str) -> Result<emberly_core::ProviderChoice, String> {
+        let script = self
+            .script
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+            .unwrap_or_default();
+        Ok(emberly_core::ProviderChoice {
+            provider: Arc::new(FakeProvider::new(script)),
+            profile: profile.to_string(),
+            model: model.to_string(),
+        })
+    }
+
+    fn profiles(&self) -> Vec<String> {
+        vec!["helper".to_string()]
+    }
+}
+
+/// The whole point of the proxy design (Tech Spec §8.4): a session grant the
+/// primary agent's own action already earned is consulted by a subagent's
+/// identical action too — because both go through the *same* `RuleEngine*,
+/// not an independent copy. If this ever regresses to a per-subagent copy,
+/// this test starts seeing two prompts instead of one.
+#[tokio::test]
+async fn subagent_permission_ask_is_covered_by_an_existing_session_grant() {
+    let root = temp_project();
+    let root_scripts = vec![
+        ScriptedResponse::tool_call("c1", "bash", r#"{"command":"make build"}"#),
+        ScriptedResponse::tool_call(
+            "c2",
+            "spawn_agents",
+            r#"{"agents":[{"name":"helper","system_prompt":"build it too","profile":"helper"}]}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let subagent_scripts = vec![
+        ScriptedResponse::tool_call("s1", "bash", r#"{"command":"make build"}"#),
+        ScriptedResponse::text("subagent done"),
+    ];
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(root_scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    config.sandbox = SandboxStatus::Confined {
+        backend: "test".into(),
+    };
+    config.rules = RuleEngine::new(Vec::new(), true);
+    config.provider_factory = Some(Arc::new(OneShotFactory::new(subagent_scripts)));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "build everything".into(),
+    })
+    .await;
+    let events = h.collect(Some(PermissionDecision::AllowForSession)).await;
+
+    assert_eq!(
+        prompt_count(&events),
+        1,
+        "only the primary agent's own `make build` prompts; the session grant \
+         it earns covers the subagent's identical command too — proving the \
+         subagent consulted the *same* rule state, not an independent copy"
+    );
+    assert_eq!(deltas(&events), "done", "the subagent's own text never streams onto the primary agent's own event stream (Design §4.13)");
+    assert!(has_tool_finished(&events, true), "spawn_agents succeeded");
+}
+
+/// The full multi-turn round trip (T-18 then T-19): spawn a subagent, get its
+/// first answer, then send it a further prompt and get its second answer —
+/// the "issue another prompt" half of a delegation, not just one-shot
+/// delegate-and-forget.
+#[tokio::test]
+async fn spawn_then_message_round_trip() {
+    let root = temp_project();
+    let root_scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "spawn_agents",
+            r#"{"agents":[{"name":"helper","system_prompt":"investigate the bug","profile":"helper"}]}"#,
+        ),
+        // "agent-1" is the first subagent id a fresh session mints (Tech Spec
+        // §8.4's `next_agent_id`) — asserting on it is a deliberate white-box
+        // check of the id scheme documented in PHASE1/2_TODO.
+        ScriptedResponse::tool_call(
+            "c2",
+            "message_agent",
+            r#"{"id":"agent-1","message":"what did you find?"}"#,
+        ),
+        ScriptedResponse::text("root done"),
+    ];
+    let subagent_scripts = vec![
+        ScriptedResponse::text("found nothing yet"),
+        ScriptedResponse::text("found the bug in parser.rs"),
+    ];
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(root_scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    config.provider_factory = Some(Arc::new(OneShotFactory::new(subagent_scripts)));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "delegate this".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert_eq!(deltas(&events), "root done");
+    let debug_text: String = events.iter().map(|e| format!("{e:?}")).collect();
+    assert!(
+        debug_text.contains("found the bug in parser.rs"),
+        "the subagent's second-turn answer reached message_agent's tool result: {debug_text}"
+    );
+}
+
+/// A subagent's tool registry is a ceiling, never a superset (Requirements
+/// FR-9): explicitly asking for one of the four multi-agent tools by name is
+/// a clear, structured spawn failure, not a silently smaller registry and
+/// not a crash — the depth bound (Requirements §2.2) made observable.
+#[tokio::test]
+async fn spawn_agents_rejects_a_requested_multi_agent_tool_by_name() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "spawn_agents",
+            r#"{"agents":[{"name":"h","system_prompt":"x","tools":["spawn_agents"]}]}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let config = make_config(
+        Arc::new(FakeProvider::new(scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "try it".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert_eq!(
+        deltas(&events),
+        "done",
+        "the batch failure never aborts the turn"
+    );
+    let debug_text: String = events.iter().map(|e| format!("{e:?}")).collect();
+    assert!(
+        debug_text.contains("cannot be given to a subagent"),
+        "the rejection names why: {debug_text}"
+    );
+}
+
+/// The `max_concurrent` ceiling (default 3, Tech Spec §8.4): the excess names
+/// in an over-limit batch fail structured, never a crash and never a silent
+/// partial spawn.
+#[tokio::test]
+async fn spawn_agents_over_max_concurrent_fails_only_the_excess() {
+    let root = temp_project();
+    let agent_spec = |n: usize| {
+        format!(r#"{{"name":"a{n}","system_prompt":"x","tools":["definitely_not_a_real_tool"]}}"#)
+    };
+    let batch = format!(
+        r#"{{"agents":[{},{},{},{}]}}"#,
+        agent_spec(0),
+        agent_spec(1),
+        agent_spec(2),
+        agent_spec(3)
+    );
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "spawn_agents", batch),
+        ScriptedResponse::text("done"),
+    ];
+    let config = make_config(
+        Arc::new(FakeProvider::new(scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "try it".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert_eq!(deltas(&events), "done");
+    let debug_text: String = events.iter().map(|e| format!("{e:?}")).collect();
+    assert!(
+        debug_text.contains("max_concurrent (3) reached"),
+        "the fourth agent is rejected for the ceiling, not for its bogus tool name: {debug_text}"
+    );
+    // All four fail here (the first three on the bogus tool name, the fourth
+    // on the ceiling) — every failure is structured data, never a panic.
+    assert!(debug_text.contains("is not available in this session"));
+}
+
+/// `message_agent`/`end_agent` against an id that is unknown (never spawned,
+/// or already ended) return a structured failure, never a crash or a silent
+/// no-op (T-19/T-21, HC-6) — the crash/resume honesty clause made a test
+/// without needing an actual process restart.
+#[tokio::test]
+async fn message_and_end_agent_on_unknown_id_are_structured_failures() {
+    let root = temp_project();
+    let scripts = vec![
+        ScriptedResponse::tool_call("c1", "message_agent", r#"{"id":"nope","message":"hi"}"#),
+        ScriptedResponse::tool_call("c2", "end_agent", r#"{"id":"nope"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let config = make_config(
+        Arc::new(FakeProvider::new(scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "try it".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert_eq!(
+        deltas(&events),
+        "done",
+        "two failed lifecycle calls never stall or abort the turn"
+    );
+    let debug_text: String = events.iter().map(|e| format!("{e:?}")).collect();
+    assert_eq!(
+        debug_text.matches("no such agent").count(),
+        2,
+        "both message_agent and end_agent report the same clear reason: {debug_text}"
     );
 }

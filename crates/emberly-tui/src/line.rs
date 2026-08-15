@@ -1463,6 +1463,7 @@ mod tests {
             affected_paths: vec![],
             outside_root: false,
             reason: "bash requires your approval".into(),
+            on_behalf_of: None,
         };
         let out = render_to_string(&UiEvent::PermissionRequest {
             id: PermissionId(1),
@@ -1482,6 +1483,7 @@ mod tests {
             affected_paths: vec!["/etc/x".into()],
             outside_root: true,
             reason: "this action affects files OUTSIDE the project root".into(),
+            on_behalf_of: None,
         };
         let out = render_to_string(&UiEvent::PermissionRequest {
             id: PermissionId(2),

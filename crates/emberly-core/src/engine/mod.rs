@@ -19,8 +19,11 @@ use emberly_providers::{
 };
 use emberly_sandbox::{Decision, Mode, Query, Rule, RuleEngine};
 use emberly_tools::{
-    reduce_output, truncate_output, AskUserOutcome, PermissionOutcome, PermissionRequest,
-    RecallOutcome, Reduction, Sandbox, ToolCtx, ToolRegistry, TruncateConfig,
+    reduce_output, truncate_output, AskUserGate, AskUserOutcome, PermissionGate, PermissionOutcome,
+    PermissionRequest, RecallOutcome, Reduction, Sandbox, SubagentEndOutcome, SubagentError,
+    SubagentListEntry, SubagentMessageOutcome, SubagentMessageRequest, SubagentSpawnBatch,
+    SubagentSpawnOutcome, SubagentSpawnResult, SubagentSpawnSpec, SubagentStatus, ToolCtx,
+    ToolRegistry, TruncateConfig,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -30,7 +33,10 @@ use tokio::sync::mpsc;
 use crate::command::Command;
 use crate::event::UiEvent;
 use crate::factory::{ConfigReloader, ProviderFactory};
-use crate::gate::{AskUserAsk, Gate, MemoryAsk, PermissionAsk, RecallAsk, SkillAsk, TaskListAsk};
+use crate::gate::{
+    AskUserAsk, Gate, MemoryAsk, PermissionAsk, RecallAsk, SkillAsk, SubagentAsk,
+    SubagentAskUserGate, SubagentPermissionGate, TaskListAsk,
+};
 use crate::id::{AskId, PermissionId, SessionId};
 use crate::memory::MemoryStore;
 use crate::scratch::ScratchStore;
@@ -182,6 +188,46 @@ impl Default for SkillsConfig {
     }
 }
 
+/// Multi-agent subsystem config (FR-9, Tech Spec §8.4). Resolved from
+/// `[agents]` config. `max_depth` (a subagent may never itself spawn a
+/// subagent, Requirements §2.2) is deliberately **not** a field here — it is
+/// a Rust-level structural guarantee (a subagent's tool registry never
+/// contains the four multi-agent tools), not a tunable that could be
+/// misconfigured away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentsConfig {
+    /// Whether the multi-agent subsystem is enabled (default `true`). When
+    /// `false`, the four multi-agent tools return a structured failure
+    /// instead of spawning anything.
+    pub enabled: bool,
+    /// The ceiling on subagents alive at once per session (default `3`).
+    /// Exceeding it from `spawn_agents` fails the excess names, not the whole
+    /// batch (HC-6).
+    pub max_concurrent: usize,
+    /// How long `spawn_agents`/`message_agent` wait for a subagent's turn
+    /// before reporting it `still running` rather than canceling it (default
+    /// 600s).
+    pub spawn_timeout_secs: u64,
+    /// How long a subagent may go without a `message_agent` call before it is
+    /// reclaimed as idle (default 1800s). Tech Spec §16 open item: automatic
+    /// reaping against this value is not yet wired into the run loop in this
+    /// phase — only `end_agent` and session end currently reclaim a
+    /// subagent; the value is threaded through so it is meaningful the moment
+    /// reaping lands.
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_concurrent: 3,
+            spawn_timeout_secs: 600,
+            idle_timeout_secs: 1800,
+        }
+    }
+}
+
 /// Everything needed to construct an [`Engine`].
 pub struct EngineConfig {
     pub provider: Arc<dyn Provider>,
@@ -302,6 +348,20 @@ pub struct EngineConfig {
     /// Project skills directory (`<root>/.agents/skills/`). `None` on an
     /// untrusted root — structural trust-gating (FR-1, Tech Spec §6.7).
     pub project_skills_dir: Option<PathBuf>,
+    /// Multi-agent subsystem config (FR-9, Tech Spec §8.4).
+    pub agents: AgentsConfig,
+    /// Override the permission gate this engine's `ToolCtx`s use, in place of
+    /// a fresh `Gate<PermissionAsk>` over a channel this engine owns (Tech
+    /// Spec §8.4). `None` (every top-level session) is the production path;
+    /// `Some` is how a subagent's tool calls are proxied to the *root*
+    /// engine's own rule state instead of getting an independent copy — the
+    /// same override-seam shape as `sandbox_spawn` above.
+    pub external_permission_gate: Option<Arc<dyn PermissionGate>>,
+    /// The `ask_user` (T-8) analogue of `external_permission_gate`: proxies a
+    /// subagent's question to the root engine's own ask-user round trip
+    /// instead of opening a second, competing prompt (Tech Spec §8.4). `None`
+    /// is the production path for a top-level session.
+    pub external_ask_gate: Option<Arc<dyn AskUserGate>>,
 }
 
 impl EngineConfig {
@@ -618,6 +678,7 @@ struct TurnChannels<'a> {
     task: &'a mut mpsc::Receiver<TaskListAsk>,
     memory: &'a mut mpsc::Receiver<MemoryAsk>,
     skill: &'a mut mpsc::Receiver<SkillAsk>,
+    subagent: &'a mut mpsc::Receiver<SubagentAsk>,
 }
 
 /// SIGKILLs a completion check's entire process group on drop (S-6, mirrors
@@ -750,11 +811,24 @@ struct CompletionState {
 /// The tool→engine gates, each installed into every `ToolCtx` so a tool can
 /// reach engine-owned state without owning any of it (Tech Spec §5.1).
 struct Gates {
-    /// The permission gate (Requirements §6).
-    permission: Arc<Gate<PermissionAsk>>,
+    /// The permission gate (Requirements §6). A trait object rather than the
+    /// concrete `Gate<PermissionAsk>` so a subagent's engine can install
+    /// `SubagentPermissionGate` here instead (Tech Spec §8.4,
+    /// `EngineConfig::external_permission_gate`) — the production path (every
+    /// top-level session) is still exactly `Gate::new(..)`.
+    permission: Arc<dyn PermissionGate>,
+    /// The raw sender behind `permission` **only when this is the production
+    /// `Gate::new(..)` path** — i.e. always, for a top-level session. Kept
+    /// alongside the trait object so `engine::subagents` can hand a subagent
+    /// a proxy pointed at *this* engine's own permission channel (Tech Spec
+    /// §8.4) without reaching through the trait object, which erases the
+    /// concrete sender.
+    permission_tx: mpsc::Sender<PermissionAsk>,
     /// The ask-user gate (T-8), so the `ask_user` tool can block on a frontend
-    /// round trip.
-    ask: Arc<Gate<AskUserAsk>>,
+    /// round trip. A trait object for the same reason as `permission`.
+    ask: Arc<dyn AskUserGate>,
+    /// The raw sender behind `ask`, for the same reason as `permission_tx`.
+    ask_tx: mpsc::Sender<AskUserAsk>,
     /// The recall gate (T-10), so the `recall` tool can retrieve elided turns
     /// from the in-memory conversation.
     recall: Arc<Gate<RecallAsk>>,
@@ -772,6 +846,12 @@ struct Gates {
     /// — a scratch write has no side effect on any other engine-owned state
     /// (FR-8, Tech Spec §8.3).
     scratch: Arc<ScratchStore>,
+    /// The subagent gate (T-18–T-21), so the four multi-agent tools can reach
+    /// this engine's own subagent registry (Tech Spec §8.4). A subagent's own
+    /// tool registry never contains these four tools (the structural depth
+    /// bound, Requirements §2.2), so a subagent's own copy of this gate is
+    /// simply never exercised.
+    subagent: Arc<Gate<SubagentAsk>>,
 }
 
 /// Which session this is, where it is recorded, and the per-session totals
@@ -911,6 +991,9 @@ pub struct Engine {
     /// Maximum document file size in bytes (Tech Spec §5.2). Threaded to the
     /// `read_document` tool via `ToolCtx`.
     document_max_bytes: usize,
+    /// The multi-agent subsystem's own state (FR-9, Tech Spec §8.4): every
+    /// currently alive subagent, keyed by the id the model addresses it by.
+    agents: AgentState,
 }
 
 // The `Engine` impl is spread across these modules by topic, each holding its
@@ -926,7 +1009,10 @@ mod permissions;
 mod runtime_config;
 mod session;
 mod skills;
+mod subagents;
 mod turn;
+
+use subagents::AgentState;
 
 impl Engine {
     /// Build an engine and the receivers for its internal permission-ask and
@@ -945,6 +1031,7 @@ impl Engine {
         mpsc::Receiver<TaskListAsk>,
         mpsc::Receiver<MemoryAsk>,
         mpsc::Receiver<SkillAsk>,
+        mpsc::Receiver<SubagentAsk>,
     ) {
         let (asks_tx, asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (user_asks_tx, user_asks_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
@@ -952,6 +1039,13 @@ impl Engine {
         let (task_list_tx, task_list_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (memory_tx, memory_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
         let (skill_tx, skill_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        let (subagent_tx, subagent_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        // Cloned before `asks_tx`/`user_asks_tx` are (possibly) moved into the
+        // default `Gate::new(..)` below — the raw senders let a subagent's
+        // derived config point its own permission/ask gates at *this* engine's
+        // channel instead of building a fresh one (Tech Spec §8.4).
+        let permission_tx = asks_tx.clone();
+        let ask_tx = user_asks_tx.clone();
         let memory_store = build_memory_store(
             config.memory.enabled,
             config.user_memory_dir.as_ref(),
@@ -1041,13 +1135,22 @@ impl Engine {
                 attempts: 0,
             },
             gates: Gates {
-                permission: Arc::new(Gate::new(asks_tx)),
-                ask: Arc::new(Gate::new(user_asks_tx)),
+                permission: config
+                    .external_permission_gate
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(Gate::new(asks_tx))),
+                permission_tx,
+                ask: config
+                    .external_ask_gate
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(Gate::new(user_asks_tx))),
+                ask_tx,
                 recall: Arc::new(Gate::new(recall_tx)),
                 task_list: Arc::new(Gate::new(task_list_tx)),
                 memory: Arc::new(Gate::new(memory_tx)),
                 skill: Arc::new(Gate::new(skill_tx)),
                 scratch: scratch_store,
+                subagent: Arc::new(Gate::new(subagent_tx)),
             },
             session: SessionState {
                 transcript: config.transcript,
@@ -1103,6 +1206,11 @@ impl Engine {
             task_list: Vec::new(),
             image_max_bytes: config.image_max_bytes,
             document_max_bytes: config.document_max_bytes,
+            agents: AgentState {
+                config: config.agents,
+                instances: std::collections::HashMap::new(),
+                next_seq: 0,
+            },
         };
         // Load memory indexes at session start (Tech Spec §8.1).
         engine.refresh_memory_indexes();
@@ -1129,6 +1237,7 @@ impl Engine {
             task_list_rx,
             memory_rx,
             skill_rx,
+            subagent_rx,
         )
     }
 
@@ -1148,8 +1257,18 @@ impl Engine {
     // construction across the boundary. This is the last signature to list them:
     // everything below takes a [`TurnChannels`] borrow, which also lets this
     // function retain ownership for its own between-turns select.
+    // Explicit `Pin<Box<dyn Future + Send>>` return, not `async fn`: a
+    // subagent's own tool use can reach back into this same function
+    // (`engine::subagents::spawn_one_subagent` spawning *another* nested
+    // `Engine::run`, Tech Spec §8.4) — a recursive async call graph through
+    // the same function. Rust's Send-auto-trait inference on an implicit
+    // `impl Future` cannot resolve that cycle (verified: it cannot, even
+    // with a `Box::pin` at the *call* site — only boxing the function's own
+    // return type breaks it). Every existing call site is unaffected: this
+    // type still implements `Future` and is passed to `tokio::spawn`
+    // identically to before.
     #[allow(clippy::too_many_arguments)]
-    pub async fn run(
+    pub fn run(
         mut self,
         mut commands_rx: mpsc::Receiver<Command>,
         mut asks_rx: mpsc::Receiver<PermissionAsk>,
@@ -1158,176 +1277,180 @@ impl Engine {
         mut task_rx: mpsc::Receiver<TaskListAsk>,
         mut memory_rx: mpsc::Receiver<MemoryAsk>,
         mut skill_rx: mpsc::Receiver<SkillAsk>,
-    ) {
-        if self.session.resuming {
-            // Continuing an existing transcript: no fresh session_start, but
-            // surface the restored context size right away (Design §8.4).
-            // When the resume fell back to transcript replay (no valid cache),
-            // say so in one dimmed line — speech about the slow path only
-            // (Design §8.6). The fast path is silent.
-            if self.session.replayed {
+        mut subagent_rx: mpsc::Receiver<SubagentAsk>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(async move {
+            if self.session.resuming {
+                // Continuing an existing transcript: no fresh session_start, but
+                // surface the restored context size right away (Design §8.4).
+                // When the resume fell back to transcript replay (no valid cache),
+                // say so in one dimmed line — speech about the slow path only
+                // (Design §8.6). The fast path is silent.
+                if self.session.replayed {
+                    self.emit(UiEvent::Notice {
+                        message: "Rebuilding the session from its transcript…".into(),
+                    })
+                    .await;
+                }
+                self.emit_context_usage().await;
+            } else {
+                self.write_transcript(TranscriptEvent::SessionStart {
+                    session_id: self.session.id,
+                    provider: self.provider.label.clone(),
+                    model: self.provider.model.clone(),
+                    project_root: self.project_root.display().to_string(),
+                    sandbox: self.safety.sandbox.clone(),
+                    config_provenance: self.config_provenance.clone(),
+                    prompts_version: crate::prompts::VERSION,
+                });
+            }
+            // Record a newly-granted workspace-trust decision right after session
+            // start (FR-1, Tech Spec §3.2). Already-trusted launches record nothing.
+            if self.trust_granted {
+                self.write_transcript(TranscriptEvent::TrustDecision {
+                    path: self.project_root.display().to_string(),
+                    trusted: true,
+                });
+            }
+
+            // Sandbox status is always-visible state (Requirements §6.7): surface it
+            // at session start, and — when confinement is unavailable — explain the
+            // degraded path once, in plain language (Design §8.2).
+            self.emit(UiEvent::SandboxStatus {
+                status: self.safety.sandbox.clone(),
+            })
+            .await;
+            if !self.safety.sandbox.is_confined() {
                 self.emit(UiEvent::Notice {
-                    message: "Rebuilding the session from its transcript…".into(),
+                    message: degraded_notice(&self.safety.sandbox),
                 })
                 .await;
             }
-            self.emit_context_usage().await;
-        } else {
-            self.write_transcript(TranscriptEvent::SessionStart {
-                session_id: self.session.id,
-                provider: self.provider.label.clone(),
-                model: self.provider.model.clone(),
-                project_root: self.project_root.display().to_string(),
-                sandbox: self.safety.sandbox.clone(),
-                config_provenance: self.config_provenance.clone(),
-                prompts_version: crate::prompts::VERSION,
-            });
-        }
-        // Record a newly-granted workspace-trust decision right after session
-        // start (FR-1, Tech Spec §3.2). Already-trusted launches record nothing.
-        if self.trust_granted {
-            self.write_transcript(TranscriptEvent::TrustDecision {
-                path: self.project_root.display().to_string(),
-                trusted: true,
-            });
-        }
+            // Surface the initial reasoning-effort state so the sidebar and picker
+            // start correct (P-9).
+            self.emit_effort().await;
 
-        // Sandbox status is always-visible state (Requirements §6.7): surface it
-        // at session start, and — when confinement is unavailable — explain the
-        // degraded path once, in plain language (Design §8.2).
-        self.emit(UiEvent::SandboxStatus {
-            status: self.safety.sandbox.clone(),
-        })
-        .await;
-        if !self.safety.sandbox.is_confined() {
-            self.emit(UiEvent::Notice {
-                message: degraded_notice(&self.safety.sandbox),
-            })
-            .await;
-        }
-        // Surface the initial reasoning-effort state so the sidebar and picker
-        // start correct (P-9).
-        self.emit_effort().await;
-
-        while let Some(command) = commands_rx.recv().await {
-            match command {
-                Command::UserInput { text } => {
-                    // No provider configured (C-7): refuse before it ever
-                    // becomes a turn, rather than round-tripping through the
-                    // inert stand-in `Provider` the binary substitutes in
-                    // this case (id "placeholder" — never a real backend, and
-                    // distinct from `configured_provider`, which is just
-                    // config-reload bookkeeping and legitimately `None` in
-                    // tests that use a real `FakeProvider`). Not
-                    // recorded/pushed — a message that never ran shouldn't
-                    // burn a turn number or claim the "original task" slot;
-                    // the real first message still gets both once a
-                    // provider is added.
-                    if self.provider.client.id() == ProviderId::new("placeholder") {
-                        self.emit(UiEvent::Notice {
-                            message: "no provider configured — run /model to add one before \
+            while let Some(command) = commands_rx.recv().await {
+                match command {
+                    Command::UserInput { text } => {
+                        // No provider configured (C-7): refuse before it ever
+                        // becomes a turn, rather than round-tripping through the
+                        // inert stand-in `Provider` the binary substitutes in
+                        // this case (id "placeholder" — never a real backend, and
+                        // distinct from `configured_provider`, which is just
+                        // config-reload bookkeeping and legitimately `None` in
+                        // tests that use a real `FakeProvider`). Not
+                        // recorded/pushed — a message that never ran shouldn't
+                        // burn a turn number or claim the "original task" slot;
+                        // the real first message still gets both once a
+                        // provider is added.
+                        if self.provider.client.id() == ProviderId::new("placeholder") {
+                            self.emit(UiEvent::Notice {
+                                message: "no provider configured — run /model to add one before \
                                       sending a message"
-                                .into(),
+                                    .into(),
+                            })
+                            .await;
+                            self.emit(UiEvent::TurnEnded).await;
+                            continue;
+                        }
+                        self.record_user_message(&text);
+                        self.push_conversation_message(Message::user_text(text));
+                        self.emit_context_usage().await;
+                        self.run_turn(&mut TurnChannels {
+                            commands: &mut commands_rx,
+                            asks: &mut asks_rx,
+                            user_asks: &mut user_asks_rx,
+                            recall: &mut recall_rx,
+                            task: &mut task_rx,
+                            memory: &mut memory_rx,
+                            skill: &mut skill_rx,
+                            subagent: &mut subagent_rx,
                         })
                         .await;
+                        // The engine is idle again; let the frontend stop its
+                        // "working" affordance (Design §6.3).
                         self.emit(UiEvent::TurnEnded).await;
-                        continue;
+                        // A `/compact` sent mid-turn or an auto-trigger request
+                        // runs now, at the clean boundary (every tool_use has its
+                        // tool_result — Tech Spec §7).
+                        if let Some(trigger) = self.context.pending.take() {
+                            self.compact(trigger).await;
+                        }
                     }
-                    self.record_user_message(&text);
-                    self.push_conversation_message(Message::user_text(text));
-                    self.emit_context_usage().await;
-                    self.run_turn(&mut TurnChannels {
-                        commands: &mut commands_rx,
-                        asks: &mut asks_rx,
-                        user_asks: &mut user_asks_rx,
-                        recall: &mut recall_rx,
-                        task: &mut task_rx,
-                        memory: &mut memory_rx,
-                        skill: &mut skill_rx,
-                    })
-                    .await;
-                    // The engine is idle again; let the frontend stop its
-                    // "working" affordance (Design §6.3).
-                    self.emit(UiEvent::TurnEnded).await;
-                    // A `/compact` sent mid-turn or an auto-trigger request
-                    // runs now, at the clean boundary (every tool_use has its
-                    // tool_result — Tech Spec §7).
-                    if let Some(trigger) = self.context.pending.take() {
-                        self.compact(trigger).await;
+                    // No turn is running while idle; these are strays or no-ops here.
+                    Command::Cancel
+                    | Command::PermissionAnswer { .. }
+                    | Command::AskUserAnswer { .. }
+                    | Command::ResolveLoop { .. }
+                    | Command::ResolveCompletionGate { .. } => {}
+                    // Idle is already a clean boundary — compact immediately.
+                    Command::Compact => self.compact(CompactTrigger::Manual).await,
+                    // Session switches are only issued at idle (the frontend gates
+                    // them while a turn runs), so a clean boundary is guaranteed.
+                    Command::NewSession { session_id } => self.start_new_session(session_id).await,
+                    Command::ResumeSession { session_id } => self.resume_session(session_id).await,
+                    Command::SetMode { mode } => self.set_mode(mode).await,
+                    Command::SwitchModel { profile, model } => {
+                        self.switch_model(profile, model).await;
                     }
-                }
-                // No turn is running while idle; these are strays or no-ops here.
-                Command::Cancel
-                | Command::PermissionAnswer { .. }
-                | Command::AskUserAnswer { .. }
-                | Command::ResolveLoop { .. }
-                | Command::ResolveCompletionGate { .. } => {}
-                // Idle is already a clean boundary — compact immediately.
-                Command::Compact => self.compact(CompactTrigger::Manual).await,
-                // Session switches are only issued at idle (the frontend gates
-                // them while a turn runs), so a clean boundary is guaranteed.
-                Command::NewSession { session_id } => self.start_new_session(session_id).await,
-                Command::ResumeSession { session_id } => self.resume_session(session_id).await,
-                Command::SetMode { mode } => self.set_mode(mode).await,
-                Command::SwitchModel { profile, model } => {
-                    self.switch_model(profile, model).await;
-                }
-                Command::SetEffort { effort } => self.set_effort(effort).await,
-                Command::ReloadConfig => self.reload_config().await,
-                // Inspector reads/mutations — user/TUI actions, issued at idle
-                // (a clean boundary), mirroring the config/effort commands above.
-                Command::MemoryList => self.emit_memory_entries().await,
-                Command::MemoryMutate {
-                    op,
-                    scope,
-                    name,
-                    description,
-                    type_,
-                    body,
-                } => {
-                    // The harness performs the write via the shared validated
-                    // path (FR-6) — never the TUI. `MemoryStatus` re-emits
-                    // inside on success; the inspector re-issues `MemoryList` to
-                    // refresh its open list.
-                    let req = emberly_tools::MemoryRequest {
+                    Command::SetEffort { effort } => self.set_effort(effort).await,
+                    Command::ReloadConfig => self.reload_config().await,
+                    // Inspector reads/mutations — user/TUI actions, issued at idle
+                    // (a clean boundary), mirroring the config/effort commands above.
+                    Command::MemoryList => self.emit_memory_entries().await,
+                    Command::MemoryMutate {
                         op,
                         scope,
                         name,
                         description,
                         type_,
                         body,
-                    };
-                    if let emberly_tools::MemoryOutcome::Rejected { reason } =
-                        self.execute_memory_op(&req).await
-                    {
-                        // Surface a rejection (disabled memory, untrusted scope,
-                        // invalid name) so the user sees why (Design §6.1).
-                        self.emit(UiEvent::Notice {
-                            message: format!("memory change rejected: {reason}"),
-                        })
-                        .await;
+                    } => {
+                        // The harness performs the write via the shared validated
+                        // path (FR-6) — never the TUI. `MemoryStatus` re-emits
+                        // inside on success; the inspector re-issues `MemoryList` to
+                        // refresh its open list.
+                        let req = emberly_tools::MemoryRequest {
+                            op,
+                            scope,
+                            name,
+                            description,
+                            type_,
+                            body,
+                        };
+                        if let emberly_tools::MemoryOutcome::Rejected { reason } =
+                            self.execute_memory_op(&req).await
+                        {
+                            // Surface a rejection (disabled memory, untrusted scope,
+                            // invalid name) so the user sees why (Design §6.1).
+                            self.emit(UiEvent::Notice {
+                                message: format!("memory change rejected: {reason}"),
+                            })
+                            .await;
+                        }
                     }
+                    Command::MemoryView { scope, name } => self.emit_memory_body(scope, name).await,
+                    Command::InspectSkill { name } => self.inspect_skill(name).await,
                 }
-                Command::MemoryView { scope, name } => self.emit_memory_body(scope, name).await,
-                Command::InspectSkill { name } => self.inspect_skill(name).await,
+                // The idle boundary is where the derived cache is reconciled with
+                // the log (FR-5, Tech Spec §3.2a): one flush covers a completed
+                // turn, a compaction, and the out-of-turn writes that have no view
+                // of their own to settle — a model switch, an effort change, a mode
+                // change. Gated on the flag so commands that touched no transcript
+                // line (an inspector read) cost nothing (issue #18).
+                if self.session.cache_dirty {
+                    self.write_view_cache();
+                }
             }
-            // The idle boundary is where the derived cache is reconciled with
-            // the log (FR-5, Tech Spec §3.2a): one flush covers a completed
-            // turn, a compaction, and the out-of-turn writes that have no view
-            // of their own to settle — a model switch, an effort change, a mode
-            // change. Gated on the flag so commands that touched no transcript
-            // line (an inspector read) cost nothing (issue #18).
-            if self.session.cache_dirty {
-                self.write_view_cache();
-            }
-        }
 
-        // Command channel closed: the frontend is gone. Clean end of session.
-        self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
-        // Write the cache one final time so it reflects the final transcript
-        // (the SessionEnd line grew the file; without this the cache would be
-        // stale on the next resume — FR-5).
-        self.write_view_cache();
+            // Command channel closed: the frontend is gone. Clean end of session.
+            self.write_transcript(TranscriptEvent::SessionEnd { reason: None });
+            // Write the cache one final time so it reflects the final transcript
+            // (the SessionEnd line grew the file; without this the cache would be
+            // stale on the next resume — FR-5).
+            self.write_view_cache();
+        })
     }
 
     fn take_permission_id(&mut self) -> PermissionId {
@@ -1576,7 +1699,13 @@ fn build_skill_catalog(
 /// Enrich a tool's [`PermissionRequest`] into a UI [`PermissionRendering`] with
 /// the `reason` the rule engine produced — the matched rule or the hard line —
 /// shown as the dimmed "why" that teaches the model in situ (Design §5).
-fn build_rendering(request: &PermissionRequest, reason: String) -> PermissionRendering {
+/// `on_behalf_of` names the subagent that raised this ask, if any (FR-9, Tech
+/// Spec §8.4) — `None` for the primary agent's own requests.
+fn build_rendering(
+    request: &PermissionRequest,
+    reason: String,
+    on_behalf_of: Option<String>,
+) -> PermissionRendering {
     PermissionRendering {
         tool: request.tool.clone(),
         summary: request.summary.clone(),
@@ -1588,6 +1717,7 @@ fn build_rendering(request: &PermissionRequest, reason: String) -> PermissionRen
             .collect(),
         outside_root: request.outside_root,
         reason,
+        on_behalf_of,
     }
 }
 
@@ -1664,7 +1794,9 @@ fn append_rule_block(path: &std::path::Path, block: &str) -> std::io::Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::{explanation_from_args, inject_explanation_property, normalize_args, parse_tool_args};
+    use super::{
+        explanation_from_args, inject_explanation_property, normalize_args, parse_tool_args,
+    };
     use serde_json::json;
 
     #[test]
@@ -1681,7 +1813,10 @@ mod tests {
 
     #[test]
     fn parse_tool_args_valid_json_parses_normally() {
-        assert_eq!(parse_tool_args(r#"{"path":"a.txt"}"#), json!({ "path": "a.txt" }));
+        assert_eq!(
+            parse_tool_args(r#"{"path":"a.txt"}"#),
+            json!({ "path": "a.txt" })
+        );
     }
 
     #[test]
