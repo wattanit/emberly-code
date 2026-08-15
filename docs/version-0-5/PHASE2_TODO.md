@@ -5,14 +5,17 @@
 §7 (config). Pinned to **Req v0.11 / Design v0.11 / Spec v0.13** (all
 `approved`). Depends on Phase 1 (the tools this phase makes real).
 
-**Status:** 🚧 **core done and tested** (2026-08-15, branch `v0.5-phase2`) —
-`spawn_agents`/`message_agent`/`list_agents`/`end_agent` are fully functional,
-proven by five real `FakeProvider`-driven integration tests (not just unit
-tests against a stub gate). What's **not** done this pass: TUI-facing event
-plumbing (`SubagentSpawned`/`Status`/`Ended`, the inspector's `InspectAgent`),
-cost rollup into the session total, idle-reap, and `[agents]` config-file
-reading — see "Not done this pass" below. None of these gaps affect
-correctness or safety; they're visibility/config-surface work, tracked
+**Status:** 🚧 **core + cost rollup + spawn/end events done and tested**
+(2026-08-15, branch `v0.5-phase2`) — `spawn_agents`/`message_agent`/
+`list_agents`/`end_agent` are fully functional, proven by seven real
+`FakeProvider`-driven integration tests (not just unit tests against a stub
+gate), including the FR-9 cost-rollup honesty clause and the
+`SubagentSpawned`/`SubagentEnded` sidebar events. What's **not** done this
+pass: `SubagentStatus` (a live per-subagent status, vs. the current uniform
+`Running`), the inspector's `Command::InspectAgent`/`UiEvent::AgentActivity`,
+idle-reap, and `[agents]` config-file reading — see "Not done this pass"
+below. None of these gaps affect correctness or safety; they're
+visibility/config-surface work, tracked
 honestly rather than silently deferred.
 
 **Design correction discovered during implementation:** the plan named
@@ -177,23 +180,32 @@ next bump.
 
 ## Group 6 — Events, cost, config
 
-- [ ] **Not implemented this pass:** `UiEvent::SubagentSpawned`/
-      `SubagentStatus`/`SubagentEnded` and `Command::InspectAgent`/
-      `UiEvent::AgentActivity`. The subsystem is fully functional through
-      the tool/transcript surface already (proven by the tests below); what's
-      missing is purely the TUI-facing visibility layer Phase 3 needs to
-      render the sidebar Agents section and inspector. `list_agents`
-      reports every alive subagent as `SubagentStatus::Running` uniformly
-      (a live, round-tripped status is designed for in the type but not
-      wired up — see `engine/subagents.rs`'s module docs).
-- [ ] **Not implemented this pass:** cost rollup. Each subagent's own
-      `TokenUsage`/cost accrues in *its own* `Engine`'s session accounting
-      (since it's a real `Engine`), but nothing yet folds it into the
-      parent's `SessionUsage`/`CostEstimate`. A session's displayed total
-      currently undercounts delegated work — this is the one gap with a
-      real (if narrow) honesty-clause concern (Requirements FR-9: "cost is
-      never hidden") worth prioritizing early in whatever continues this
+- [x] `UiEvent::SubagentSpawned { id, name, profile, model }` — emitted right
+      after a subagent is registered (`spawn_one_subagent`) — and
+      `UiEvent::SubagentEnded { id, reason }` — emitted on a successful
+      `end_agent`. Verified by `spawn_and_end_agent_emit_their_sidebar_events`.
+      **Not implemented this pass:** `UiEvent::SubagentStatus` (a live,
+      round-tripped per-subagent status) and `Command::InspectAgent`/
+      `UiEvent::AgentActivity` (the inspector's data source) — `list_agents`
+      still reports every alive subagent as `SubagentStatus::Running`
+      uniformly. Both are Phase 3's dependency, not blocking anything in this
       phase.
+- [x] **Cost rollup, implemented and tested.** A new fire-and-forget
+      `SubagentAsk::ReportUsage{usage, cost_usd}` variant (no reply — nothing
+      awaits it): each per-subagent driver tracks the subagent's own
+      *cumulative* `SessionUsage`/`CostEstimate` (already emitted by its own
+      `Engine` after every completion) and, after each turn, reports the
+      *delta* since the last report — so the root can simply add what it
+      receives with no double-counting risk. The root's
+      `roll_up_subagent_usage` adds the delta into `self.session.usage`/
+      `cost_usd` and re-emits both events, mirroring `emit_context_usage`'s
+      own update shape. Verified end to end by
+      `subagent_cost_and_usage_roll_up_into_the_session_total`: a priced
+      subagent provider's scripted `Usage` event reaches the *root's own*
+      `SessionUsage`/`CostEstimate` stream, with the exact dollar amount
+      checked (not just "some cost changed"). Closes the one real (if
+      narrow) honesty-clause gap from the first cut of this phase
+      (Requirements FR-9: "cost is never hidden").
 - [x] `AgentsConfig` (`enabled` default `true`, `max_concurrent` default
       `3`, `spawn_timeout_secs` default `600`, `idle_timeout_secs` default
       `1800`) exists and is threaded through `EngineConfig`/`Engine::new`.
@@ -218,17 +230,21 @@ next bump.
   structural depth bound, made observable.
 - `spawn_agents_over_max_concurrent_fails_only_the_excess`.
 - `message_and_end_agent_on_unknown_id_are_structured_failures`.
+- `subagent_cost_and_usage_roll_up_into_the_session_total` — the FR-9 cost
+  honesty clause, with the exact dollar amount checked.
+- `spawn_and_end_agent_emit_their_sidebar_events` — `SubagentSpawned`/
+  `SubagentEnded` carry the right id/name and fire at the right moments.
 
 Plus new unit tests in `gate.rs` (Phase 1 additions extended):
 `subagent_permission_gate_tags_the_ask_with_its_label`,
 `the_root_gate_tags_no_subagent`, and fail-closed coverage for the new
 `SubagentAsk`/proxy gates.
 
-**Done when:** ✅ `cargo build --workspace`, `cargo test --workspace` (670
+**Done when:** ✅ `cargo build --workspace`, `cargo test --workspace` (673
 tests, all passing), `cargo clippy --workspace --all-targets` (`-D
 warnings`), and `cargo fmt --check` (per touched crate) are all clean,
 confirmed 2026-08-15. `Cargo.lock`/`Cargo.toml` show zero diff — no new
-dependency, as planned. **Not done:** the TUI-facing event plumbing above
-(Phase 3's dependency), cost rollup, `[agents]` config-file reading, and
+dependency, as planned. **Not done:** `SubagentStatus`/`InspectAgent`/
+`AgentActivity` (Phase 3's dependency), `[agents]` config-file reading, and
 idle reap — each called out explicitly rather than silently folded into
 "done."

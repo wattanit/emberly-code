@@ -174,6 +174,14 @@ pub enum SubagentAsk {
         id: String,
         reply: oneshot::Sender<Result<SubagentEndOutcome, SubagentError>>,
     },
+    /// Fire-and-forget: a subagent's own driver reports the token/cost delta
+    /// its just-finished turn accrued, so the root can roll it into the
+    /// session's own total (Requirements FR-9 — "cost is never hidden").
+    /// Carries no reply; nothing awaits it.
+    ReportUsage {
+        usage: crate::types::TokenUsage,
+        cost_usd: f64,
+    },
 }
 
 #[async_trait]

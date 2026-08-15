@@ -852,6 +852,12 @@ struct Gates {
     /// bound, Requirements §2.2), so a subagent's own copy of this gate is
     /// simply never exercised.
     subagent: Arc<Gate<SubagentAsk>>,
+    /// The raw sender behind `subagent`, for the same reason as
+    /// `permission_tx`/`ask_tx`: a spawned subagent's own per-subagent driver
+    /// task (`engine::subagents`) reports its token/cost usage back through
+    /// this same channel via `SubagentAsk::ReportUsage`, a fire-and-forget
+    /// notification outside the `SubagentGate` trait surface.
+    subagent_tx: mpsc::Sender<SubagentAsk>,
 }
 
 /// Which session this is, where it is recorded, and the per-session totals
@@ -1046,6 +1052,7 @@ impl Engine {
         // channel instead of building a fresh one (Tech Spec §8.4).
         let permission_tx = asks_tx.clone();
         let ask_tx = user_asks_tx.clone();
+        let subagent_tx_raw = subagent_tx.clone();
         let memory_store = build_memory_store(
             config.memory.enabled,
             config.user_memory_dir.as_ref(),
@@ -1151,6 +1158,7 @@ impl Engine {
                 skill: Arc::new(Gate::new(skill_tx)),
                 scratch: scratch_store,
                 subagent: Arc::new(Gate::new(subagent_tx)),
+                subagent_tx: subagent_tx_raw,
             },
             session: SessionState {
                 transcript: config.transcript,

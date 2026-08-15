@@ -5985,12 +5985,24 @@ async fn completion_gate_transcript_events_are_additive_for_resume() {
 /// same queue.
 struct OneShotFactory {
     script: std::sync::Mutex<Option<Vec<ScriptedResponse>>>,
+    model_info: Option<ModelInfo>,
 }
 
 impl OneShotFactory {
     fn new(script: Vec<ScriptedResponse>) -> Self {
         Self {
             script: std::sync::Mutex::new(Some(script)),
+            model_info: None,
+        }
+    }
+
+    /// A one-shot factory whose `FakeProvider` also declares priced
+    /// `ModelInfo` — for tests asserting on the subagent's own token/cost
+    /// accounting (e.g. the FR-9 cost-rollup test).
+    fn with_model_info(script: Vec<ScriptedResponse>, info: ModelInfo) -> Self {
+        Self {
+            script: std::sync::Mutex::new(Some(script)),
+            model_info: Some(info),
         }
     }
 }
@@ -6003,8 +6015,12 @@ impl emberly_core::ProviderFactory for OneShotFactory {
             .ok()
             .and_then(|mut guard| guard.take())
             .unwrap_or_default();
+        let mut provider = FakeProvider::new(script);
+        if let Some(info) = self.model_info.clone() {
+            provider = provider.with_model_info(info);
+        }
         Ok(emberly_core::ProviderChoice {
-            provider: Arc::new(FakeProvider::new(script)),
+            provider: Arc::new(provider),
             profile: profile.to_string(),
             model: model.to_string(),
         })
@@ -6012,6 +6028,91 @@ impl emberly_core::ProviderFactory for OneShotFactory {
 
     fn profiles(&self) -> Vec<String> {
         vec!["helper".to_string()]
+    }
+}
+
+/// The cost-rollup honesty clause (Requirements FR-9 — "cost is never
+/// hidden"): a subagent's own token usage and estimated cost accrue into the
+/// *session's* running total, not a side channel the primary agent's own
+/// accounting never sees.
+#[tokio::test]
+async fn subagent_cost_and_usage_roll_up_into_the_session_total() {
+    let root = temp_project();
+    let root_scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "spawn_agents",
+            r#"{"agents":[{"name":"helper","system_prompt":"investigate","profile":"helper"}]}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let priced_info = ModelInfo {
+        model: "helper-model".into(),
+        context_window: 1_000,
+        max_output_tokens: 100,
+        pricing: Some(Pricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+        }),
+        effort_levels: Vec::new(),
+        default_effort: None,
+        vision: false,
+        documents: false,
+    };
+    let subagent_scripts = vec![ScriptedResponse {
+        events: vec![
+            StreamEvent::TextDelta {
+                text: "found it".into(),
+            },
+            StreamEvent::Usage {
+                usage: TokenUsage {
+                    input: 400,
+                    output: 500,
+                },
+            },
+        ],
+        outcome: ScriptOutcome::Done(StopReason::EndTurn),
+    }];
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(root_scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    config.provider_factory = Some(Arc::new(OneShotFactory::with_model_info(
+        subagent_scripts,
+        priced_info,
+    )));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "delegate".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert_eq!(deltas(&events), "done");
+    // The root's own script never scripts a Usage event, so any non-zero
+    // SessionUsage/CostEstimate the root's stream shows came only from the
+    // subagent's rollup.
+    assert!(
+        events.iter().any(
+            |e| matches!(e, UiEvent::SessionUsage { usage } if usage.input == 400 && usage.output == 500)
+        ),
+        "the subagent's token usage rolled into the session total"
+    );
+    let cost = events.iter().find_map(|e| match e {
+        UiEvent::CostEstimate { usd, usage } if usage.input == 400 && usage.output == 500 => {
+            Some(*usd)
+        }
+        _ => None,
+    });
+    match cost {
+        Some(usd) => assert!(
+            (usd - 0.0087).abs() < 1e-9,
+            "cost = 400/1e6*3 + 500/1e6*15 = 0.0087, got {usd}"
+        ),
+        None => panic!("expected a CostEstimate reflecting the subagent's rolled-up cost"),
     }
 }
 
@@ -6113,6 +6214,51 @@ async fn spawn_then_message_round_trip() {
     assert!(
         debug_text.contains("found the bug in parser.rs"),
         "the subagent's second-turn answer reached message_agent's tool result: {debug_text}"
+    );
+}
+
+/// The sidebar Agents section's data source (Design §3.1/§4.13): spawning
+/// emits `SubagentSpawned` and explicitly ending emits `SubagentEnded`, so a
+/// frontend can show "present only while alive" without polling.
+#[tokio::test]
+async fn spawn_and_end_agent_emit_their_sidebar_events() {
+    let root = temp_project();
+    let root_scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "spawn_agents",
+            r#"{"agents":[{"name":"helper","system_prompt":"investigate","profile":"helper"}]}"#,
+        ),
+        ScriptedResponse::tool_call("c2", "end_agent", r#"{"id":"agent-1"}"#),
+        ScriptedResponse::text("done"),
+    ];
+    let subagent_scripts = vec![ScriptedResponse::text("ok")];
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(root_scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    config.provider_factory = Some(Arc::new(OneShotFactory::new(subagent_scripts)));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "delegate then end it".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert_eq!(deltas(&events), "done");
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::SubagentSpawned { id, name, .. } if id == "agent-1" && name == "helper")),
+        "SubagentSpawned carries the id and name"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::SubagentEnded { id, .. } if id == "agent-1")),
+        "SubagentEnded fires on an explicit end_agent"
     );
 }
 

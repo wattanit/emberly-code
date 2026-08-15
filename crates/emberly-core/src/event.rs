@@ -257,4 +257,20 @@ pub enum UiEvent {
         body: String,
         resources: Vec<String>,
     },
+
+    /// A subagent was created (T-18, Tech Spec §8.4), for the sidebar Agents
+    /// section (Design §3.1/§4.13): present only while at least one subagent
+    /// is alive, following the established no-empty-stub rule (Tasks/Memory/
+    /// Skills). Additive — older frontends warn-skip it.
+    SubagentSpawned {
+        id: String,
+        name: String,
+        profile: String,
+        model: String,
+    },
+
+    /// A subagent was ended (T-21, Tech Spec §8.4) — explicitly, or as part
+    /// of the owning session ending. Additive — older frontends warn-skip
+    /// it.
+    SubagentEnded { id: String, reason: String },
 }

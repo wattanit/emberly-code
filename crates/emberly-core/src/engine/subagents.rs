@@ -134,13 +134,22 @@ fn build_subagent_tools(
 /// for its whole life — no handoff, no race over who reads it. Loops on
 /// `turn_rx`: each request sends `Command::UserInput` into the subagent
 /// engine, drains its events accumulating assistant text until `TurnEnded`,
-/// and replies. Exits (ending the chain, see [`SubagentInstance`]'s doc) when
-/// `turn_rx` closes.
+/// reports the turn's token/cost delta back to the root (`subagent_tx`,
+/// Requirements FR-9 — "cost is never hidden"), and replies. Exits (ending
+/// the chain, see [`SubagentInstance`]'s doc) when `turn_rx` closes.
 async fn run_subagent_driver(
     commands_tx: mpsc::Sender<Command>,
     mut events_rx: mpsc::Receiver<UiEvent>,
     mut turn_rx: mpsc::Receiver<SubagentTurnRequest>,
+    subagent_tx: mpsc::Sender<SubagentAsk>,
 ) {
+    // The subagent's own `Engine` reports its *cumulative* session usage/cost
+    // after every completion (`emit_context_usage`); tracking the last-seen
+    // total here and reporting only the delta after each turn is what lets
+    // the root simply *add* what it receives, with no risk of double-
+    // counting a turn's usage across multiple `ReportUsage` messages.
+    let mut last_usage = TokenUsage::default();
+    let mut last_cost = 0.0_f64;
     while let Some(SubagentTurnRequest { text, reply }) = turn_rx.recv().await {
         if commands_tx.send(Command::UserInput { text }).await.is_err() {
             let _ = reply.send(SubagentTurnOutcome::Errored(
@@ -150,6 +159,8 @@ async fn run_subagent_driver(
         }
         let mut answer = String::new();
         let mut errored = false;
+        let mut turn_usage = last_usage;
+        let mut turn_cost = last_cost;
         loop {
             match events_rx.recv().await {
                 Some(UiEvent::AssistantDelta { text }) => answer.push_str(&text),
@@ -158,6 +169,8 @@ async fn run_subagent_driver(
                     errored = true;
                     answer = format!("{what}: {why}");
                 }
+                Some(UiEvent::SessionUsage { usage }) => turn_usage = usage,
+                Some(UiEvent::CostEstimate { usd, .. }) => turn_cost = usd,
                 // Tool activity, context usage, and everything else the
                 // subagent's own turn emits is not surfaced to the caller
                 // (Design §4.13 — no raw concurrent streaming); it is
@@ -171,6 +184,21 @@ async fn run_subagent_driver(
                     break;
                 }
             }
+        }
+        let usage_delta = TokenUsage {
+            input: turn_usage.input.saturating_sub(last_usage.input),
+            output: turn_usage.output.saturating_sub(last_usage.output),
+        };
+        let cost_delta = (turn_cost - last_cost).max(0.0);
+        last_usage = turn_usage;
+        last_cost = turn_cost;
+        if usage_delta.input > 0 || usage_delta.output > 0 || cost_delta > 0.0 {
+            let _ = subagent_tx
+                .send(SubagentAsk::ReportUsage {
+                    usage: usage_delta,
+                    cost_usd: cost_delta,
+                })
+                .await;
         }
         let outcome = if errored {
             SubagentTurnOutcome::Errored(answer)
@@ -204,12 +232,46 @@ impl Engine {
             }
             SubagentAsk::End { id, reply } => {
                 let outcome = if self.agents.instances.remove(&id).is_some() {
+                    self.emit(UiEvent::SubagentEnded {
+                        id,
+                        reason: "ended".into(),
+                    })
+                    .await;
                     SubagentEndOutcome::Ended
                 } else {
                     SubagentEndOutcome::NotFound
                 };
                 let _ = reply.send(Ok(outcome));
             }
+            SubagentAsk::ReportUsage { usage, cost_usd } => {
+                self.roll_up_subagent_usage(usage, cost_usd).await;
+            }
+        }
+    }
+
+    /// Fold a subagent's turn-delta token usage and cost into the session's
+    /// own running total (Requirements FR-9 — delegated work is still the
+    /// session's spend, never hidden), and re-announce both — the same
+    /// events `emit_context_usage` sends after the primary agent's own
+    /// turns, so the sidebar total is never stale after a delegation.
+    async fn roll_up_subagent_usage(&mut self, usage: TokenUsage, cost_usd: f64) {
+        self.session.usage.input = self.session.usage.input.saturating_add(usage.input);
+        self.session.usage.output = self.session.usage.output.saturating_add(usage.output);
+        self.session.cost_usd += cost_usd;
+        // The updated total belongs in the next view-cache write (FR-5,
+        // Tech Spec §3.2a) even though nothing was appended to the
+        // transcript by this rollup itself.
+        self.session.cache_dirty = true;
+        self.emit(UiEvent::SessionUsage {
+            usage: self.session.usage,
+        })
+        .await;
+        if cost_usd > 0.0 {
+            self.emit(UiEvent::CostEstimate {
+                usage: self.session.usage,
+                usd: self.session.cost_usd,
+            })
+            .await;
         }
     }
 
@@ -350,6 +412,8 @@ impl Engine {
         let system = self.compose_subagent_system_prompt(&spec.system_prompt);
 
         let (events_tx, events_rx) = mpsc::channel(crate::channels::DEFAULT_CHANNEL_CAPACITY);
+        let event_profile = provider_label.clone();
+        let event_model = model.clone();
         let config = self.build_subagent_engine_config(
             &spec,
             provider,
@@ -378,7 +442,12 @@ impl Engine {
         ));
 
         let (turn_tx, turn_rx) = mpsc::channel(4);
-        tokio::spawn(run_subagent_driver(commands_tx, events_rx, turn_rx));
+        tokio::spawn(run_subagent_driver(
+            commands_tx,
+            events_rx,
+            turn_rx,
+            self.gates.subagent_tx.clone(),
+        ));
 
         let (first_reply_tx, first_reply_rx) = oneshot::channel();
         // The channel is brand new with spare capacity, so this resolves
@@ -394,10 +463,17 @@ impl Engine {
         self.agents.instances.insert(
             id.clone(),
             SubagentInstance {
-                name: spec.name,
+                name: spec.name.clone(),
                 turn_tx,
             },
         );
+        self.emit(UiEvent::SubagentSpawned {
+            id: id.clone(),
+            name: spec.name,
+            profile: event_profile,
+            model: event_model,
+        })
+        .await;
         Ok((id, first_reply_rx))
     }
 
