@@ -6034,6 +6034,38 @@ impl emberly_core::ProviderFactory for OneShotFactory {
     }
 }
 
+/// A [`ProviderFactory`](emberly_core::ProviderFactory) that hands out a fresh,
+/// independent `FakeProvider` on *every* `build` call, all scripted from the
+/// same closure — unlike `OneShotFactory` (good for exactly one subagent),
+/// this is for a batch spawn where several subagents each need their own
+/// working script, e.g. the FR-9 concurrency proof (Phase 4 Group 1).
+struct RepeatingFactory<F: Fn() -> Vec<ScriptedResponse> + Send + Sync> {
+    make_script: F,
+}
+
+impl<F: Fn() -> Vec<ScriptedResponse> + Send + Sync> RepeatingFactory<F> {
+    fn new(make_script: F) -> Self {
+        Self { make_script }
+    }
+}
+
+impl<F: Fn() -> Vec<ScriptedResponse> + Send + Sync> emberly_core::ProviderFactory
+    for RepeatingFactory<F>
+{
+    fn build(&self, profile: &str, model: &str) -> Result<emberly_core::ProviderChoice, String> {
+        let provider = FakeProvider::new((self.make_script)());
+        Ok(emberly_core::ProviderChoice {
+            provider: Arc::new(provider),
+            profile: profile.to_string(),
+            model: model.to_string(),
+        })
+    }
+
+    fn profiles(&self) -> Vec<String> {
+        vec!["helper".to_string()]
+    }
+}
+
 /// The cost-rollup honesty clause (Requirements FR-9 — "cost is never
 /// hidden"): a subagent's own token usage and estimated cost accrue into the
 /// *session's* running total, not a side channel the primary agent's own
@@ -6511,5 +6543,360 @@ async fn message_and_end_agent_on_unknown_id_are_structured_failures() {
         debug_text.matches("no such agent").count(),
         2,
         "both message_agent and end_agent report the same clear reason: {debug_text}"
+    );
+}
+
+// ---- Phase 4 Group 1: end-to-end hardening (Tech Spec §14 item 9) --------
+
+/// Genuine concurrency (not simulated): three subagents spawned in one
+/// `spawn_agents` batch each run a real, unmocked one-second `bash sleep`
+/// tool call. The design (Tech Spec §8.4) runs every subagent's own turn on
+/// its own `tokio::spawn`ed task and waits on all of them via `join_all`; if
+/// that ever regressed to running them one after another, this batch would
+/// take >=3 real seconds instead of close to one. Measured on the real
+/// clock (no `tokio::time::pause`) since a paused clock never exercises
+/// genuine OS-level process concurrency.
+#[tokio::test]
+async fn spawn_agents_batch_runs_subagents_concurrently_not_serially() {
+    let root = temp_project();
+    let root_scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "spawn_agents",
+            r#"{"agents":[
+                {"name":"a","system_prompt":"work","profile":"helper"},
+                {"name":"b","system_prompt":"work","profile":"helper"},
+                {"name":"c","system_prompt":"work","profile":"helper"}
+            ]}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(root_scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    config.provider_factory = Some(Arc::new(RepeatingFactory::new(|| {
+        vec![
+            ScriptedResponse::tool_call("s1", "bash", r#"{"command":"sleep 1"}"#),
+            ScriptedResponse::text("done"),
+        ]
+    })));
+    let mut h = spawn(config);
+
+    let started = Instant::now();
+    h.send(Command::UserInput {
+        text: "delegate to three helpers".into(),
+    })
+    .await;
+
+    // A manual loop, not `collect`'s 250ms idle timeout — three genuine 1s
+    // sleeps leave real multi-second gaps in the event stream.
+    let mut prompts_answered = 0;
+    let mut saw_done = false;
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(4000), h.events_rx.recv()).await
+    {
+        if let UiEvent::PermissionRequest { id, .. } = &event {
+            prompts_answered += 1;
+            h.send(Command::PermissionAnswer {
+                id: *id,
+                decision: PermissionDecision::AllowOnce,
+            })
+            .await;
+        }
+        if matches!(&event, UiEvent::AssistantDelta { text } if text == "done") {
+            saw_done = true;
+        }
+        if saw_done && prompts_answered >= 3 {
+            break;
+        }
+    }
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        prompts_answered, 3,
+        "each of the three subagents' own bash call asked separately"
+    );
+    assert!(
+        elapsed < Duration::from_millis(2500),
+        "three concurrent 1s sleeps should finish well under what three \
+         *serialized* sleeps would (>=3s); took {elapsed:?}"
+    );
+}
+
+/// The tool-registry ceiling proven against the *actual* filtered registry a
+/// spawned subagent holds, not the spawn-time rejection
+/// `spawn_agents_rejects_a_requested_multi_agent_tool_by_name` already covers
+/// (which only proves an *explicit request* for a multi-agent tool fails
+/// before any subagent exists). Here the subagent is never given
+/// `spawn_agents` at all — the silent default exclusion (Requirements
+/// §2.2) — and its own model tries to call it mid-conversation anyway; its
+/// real registry simply does not have the tool, so the call fails as an
+/// ordinary "unknown tool" result recorded in its own transcript — never a
+/// crash, and never an actual nested spawn.
+#[tokio::test]
+async fn a_subagent_cannot_call_spawn_agents_against_its_own_actual_registry() {
+    let root = temp_project();
+    let root_scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "spawn_agents",
+            r#"{"agents":[{"name":"helper","system_prompt":"try to spawn your own helper","profile":"helper"}]}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let subagent_scripts = vec![
+        ScriptedResponse::tool_call(
+            "s1",
+            "spawn_agents",
+            r#"{"agents":[{"name":"sub-helper","system_prompt":"x"}]}"#,
+        ),
+        ScriptedResponse::text("reported back"),
+    ];
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(root_scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    config.provider_factory = Some(Arc::new(OneShotFactory::new(subagent_scripts)));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "delegate".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    h.send(Command::InspectAgent {
+        id: "agent-1".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    let activity = events.iter().find_map(|e| match e {
+        UiEvent::AgentActivity { id, text, .. } if id == "agent-1" => Some(text.clone()),
+        _ => None,
+    });
+    match activity {
+        Some(text) => assert!(
+            text.contains("unknown tool: spawn_agents"),
+            "the subagent's own attempt to spawn failed against its real, filtered \
+             registry — never a crash, never an actual nested spawn: {text}"
+        ),
+        None => panic!("expected an AgentActivity reply, got: {events:?}"),
+    }
+}
+
+/// Complements `subagent_permission_ask_is_covered_by_an_existing_session_grant`
+/// (which proves an *existing* grant suppresses a duplicate prompt): this
+/// proves the first, genuinely new ask for a subagent's own tool call queues
+/// normally and its rendering names which subagent it is for (Design §5's
+/// provenance line, Tech Spec §8.4) — the tag is not lost on the way to a
+/// brand-new prompt.
+#[tokio::test]
+async fn a_new_subagent_permission_ask_queues_and_carries_the_subagent_tag() {
+    let root = temp_project();
+    let root_scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "spawn_agents",
+            r#"{"agents":[{"name":"db-migration","system_prompt":"migrate","profile":"helper"}]}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let subagent_scripts = vec![
+        ScriptedResponse::tool_call("s1", "bash", r#"{"command":"echo migrating"}"#),
+        ScriptedResponse::text("migrated"),
+    ];
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(root_scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    config.provider_factory = Some(Arc::new(OneShotFactory::new(subagent_scripts)));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "delegate".into(),
+    })
+    .await;
+    let events = h.collect(Some(PermissionDecision::AllowOnce)).await;
+
+    let rendering = events.iter().find_map(|e| match e {
+        UiEvent::PermissionRequest { rendering, .. } => Some(rendering.clone()),
+        _ => None,
+    });
+    match rendering {
+        Some(r) => assert_eq!(
+            r.on_behalf_of.as_deref(),
+            Some("db-migration"),
+            "the prompt names which subagent it is for"
+        ),
+        None => {
+            panic!("expected a PermissionRequest for the subagent's own bash call, got: {events:?}")
+        }
+    }
+    assert_eq!(deltas(&events), "done");
+}
+
+/// A slow subagent is reported "still running" rather than canceled or
+/// crashed when it outlives `spawn_timeout_secs`, and — the "remains
+/// addressable afterward" half of the same requirement — a subsequent
+/// `list_agents` still lists it (never silently dropped just because one
+/// call to it timed out).
+#[tokio::test]
+async fn spawn_timeout_reports_still_running_and_the_subagent_remains_listed() {
+    let root = temp_project();
+    let root_scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "spawn_agents",
+            r#"{"agents":[{"name":"helper","system_prompt":"work slowly","profile":"helper"}]}"#,
+        ),
+        ScriptedResponse::text("spawned"),
+        ScriptedResponse::tool_call("c2", "list_agents", "{}"),
+        ScriptedResponse::text("checked"),
+    ];
+    let subagent_scripts = vec![
+        ScriptedResponse::tool_call("s1", "bash", r#"{"command":"sleep 2"}"#),
+        ScriptedResponse::text("done eventually"),
+    ];
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(root_scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    // Comfortably shorter than the subagent's own real 2s sleep, so
+    // spawn_agents times out waiting for its first turn to finish.
+    config.agents.spawn_timeout_secs = 1;
+    config.provider_factory = Some(Arc::new(OneShotFactory::new(subagent_scripts)));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "delegate".into(),
+    })
+    .await;
+
+    // A manual loop (the real 1s spawn-timeout wait exceeds `collect`'s
+    // 250ms idle timeout): auto-approve the subagent's own bash permission
+    // ask, and send the follow-up turn as soon as the first one's "spawned"
+    // text lands.
+    let mut events = Vec::new();
+    let mut sent_followup = false;
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(4000), h.events_rx.recv()).await
+    {
+        match &event {
+            UiEvent::PermissionRequest { id, .. } => {
+                h.send(Command::PermissionAnswer {
+                    id: *id,
+                    decision: PermissionDecision::AllowOnce,
+                })
+                .await;
+            }
+            UiEvent::AssistantDelta { text } if text == "spawned" && !sent_followup => {
+                sent_followup = true;
+                h.send(Command::UserInput {
+                    text: "check on it".into(),
+                })
+                .await;
+            }
+            _ => {}
+        }
+        let stop = matches!(&event, UiEvent::AssistantDelta { text } if text == "checked");
+        events.push(event);
+        if stop {
+            break;
+        }
+    }
+
+    let debug_text: String = events.iter().map(|e| format!("{e:?}")).collect();
+    assert!(
+        debug_text.contains("still running — reachable via message_agent/list_agents"),
+        "expected a still-running report: {debug_text}"
+    );
+    assert!(
+        debug_text.contains("agent-1") && debug_text.contains("running"),
+        "the still-running subagent remains listed as addressable afterward: {debug_text}"
+    );
+}
+
+/// The crash/resume honesty clause (Phase 4 Group 1): a subagent's state
+/// lives only in the process's memory (`AgentState.instances`), never
+/// rehydrated from the transcript. Simulates a restart with two genuinely
+/// separate `Engine` instances rather than literally killing the process —
+/// the second one's `next_seq` counter also starts fresh, so its own first
+/// spawn would mint the very same id "agent-1"; this proves there is no
+/// accidental false positive from id reuse, only a clean, structured
+/// "unknown agent" for the id that was real before the restart.
+#[tokio::test]
+async fn a_subagent_id_from_before_a_restart_is_unknown_to_the_new_process() {
+    let root = temp_project();
+
+    // "Before the restart": spawn a real subagent and confirm its id.
+    let before_scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "spawn_agents",
+            r#"{"agents":[{"name":"helper","system_prompt":"investigate","profile":"helper"}]}"#,
+        ),
+        ScriptedResponse::text("spawned"),
+    ];
+    let mut before_config = make_config(
+        Arc::new(FakeProvider::new(before_scripts)),
+        root.clone(),
+        EngineConfig::no_transcript(),
+    );
+    before_config.provider_factory =
+        Some(Arc::new(OneShotFactory::new(vec![ScriptedResponse::text(
+            "ok",
+        )])));
+    let mut before = spawn(before_config);
+    before
+        .send(Command::UserInput {
+            text: "delegate".into(),
+        })
+        .await;
+    let before_events = before.collect(None).await;
+    assert!(
+        before_events
+            .iter()
+            .any(|e| matches!(e, UiEvent::SubagentSpawned { id, .. } if id == "agent-1")),
+        "agent-1 is genuinely valid before the simulated restart"
+    );
+    drop(before); // "the process ends" — no in-memory AgentState survives this
+
+    // "After the restart": a brand-new Engine sharing nothing in memory with
+    // the one above.
+    let after_scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "message_agent",
+            r#"{"id":"agent-1","message":"status?"}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let after_config = make_config(
+        Arc::new(FakeProvider::new(after_scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    let mut after = spawn(after_config);
+    after
+        .send(Command::UserInput {
+            text: "check on it".into(),
+        })
+        .await;
+    let after_events = after.collect(None).await;
+
+    assert_eq!(deltas(&after_events), "done");
+    let debug_text: String = after_events.iter().map(|e| format!("{e:?}")).collect();
+    assert!(
+        debug_text.contains("no such agent"),
+        "a pre-restart id is unknown to the new process: {debug_text}"
     );
 }

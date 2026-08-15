@@ -443,11 +443,13 @@ mod tests {
             profile("openai", Some("http://localhost:0/v1")),
         );
 
-        let anth = build_profile(&providers, "a", "m1", StreamTimeouts::default()).expect("anthropic builds");
+        let anth = build_profile(&providers, "a", "m1", StreamTimeouts::default())
+            .expect("anthropic builds");
         assert_eq!(anth.id().to_string(), "anthropic");
         assert_eq!(anth.model_info().model, "m1");
 
-        let oai = build_profile(&providers, "o", "m2", StreamTimeouts::default()).expect("openai builds");
+        let oai =
+            build_profile(&providers, "o", "m2", StreamTimeouts::default()).expect("openai builds");
         assert_eq!(oai.id().to_string(), "openai-compat");
         assert_eq!(oai.model_info().model, "m2");
     }
@@ -463,15 +465,30 @@ mod tests {
         }
 
         let empty = HashMap::new();
-        assert!(err(build_profile(&empty, "nope", "m", StreamTimeouts::default())).contains("unknown provider profile"));
+        assert!(err(build_profile(
+            &empty,
+            "nope",
+            "m",
+            StreamTimeouts::default()
+        ))
+        .contains("unknown provider profile"));
 
         let mut weird = HashMap::new();
         weird.insert("x".to_string(), profile("weird", None));
-        assert!(err(build_profile(&weird, "x", "m", StreamTimeouts::default())).contains("unknown adapter"));
+        assert!(
+            err(build_profile(&weird, "x", "m", StreamTimeouts::default()))
+                .contains("unknown adapter")
+        );
 
         let mut no_adapter = HashMap::new();
         no_adapter.insert("y".to_string(), ProfileFile::default());
-        assert!(err(build_profile(&no_adapter, "y", "m", StreamTimeouts::default())).contains("no `adapter`"));
+        assert!(err(build_profile(
+            &no_adapter,
+            "y",
+            "m",
+            StreamTimeouts::default()
+        ))
+        .contains("no `adapter`"));
     }
 
     #[test]

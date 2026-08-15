@@ -1,21 +1,27 @@
 # Emberly Code — Implementation Plan (0.5 feature set)
 
-**Status:** 🚧 **in progress** — Phases 1 and 2 are **done**. Phase 1
-(tool-layer contract, 2026-08-15, branch `v0.5-phase1`) is merged to `v0.5`.
-Phase 2 (engine machinery, branch `v0.5-phase2`, 2026-08-15) is fully done:
-the four multi-agent tools are functional end to end — the load-bearing
-permission-proxy correctness property, a multi-turn spawn-then-message round
-trip, the tool ceiling and `max_concurrent` bound, the FR-9 cost-rollup
-honesty clause, the sidebar's `SubagentSpawned`/`SubagentEnded` events,
-`[agents]` config-file reading (including live `/config` reload), and idle
-reap — all proven by real integration tests (nine `FakeProvider`-driven
-tests plus supporting unit tests), not just unit tests against a stub gate.
-See `docs/version-0-5/PHASE2_TODO.md` for the full breakdown; the only
-things left out are `SubagentStatus` and the inspector's
-`Command::InspectAgent`/`UiEvent::AgentActivity`, which are genuinely Phase
-3's own scope. Phases 3–4 not started. This plan was written prospectively,
-before any code, the normal SFD order (unlike the 0.4.2/0.4.3 plans, which
-were written as-built after the fact).
+**Status:** ✅ **M12 complete** — all four phases done, merged to `v0.5`.
+Phase 1 (tool-layer contract, 2026-08-15, branch `v0.5-phase1`). Phase 2
+(engine machinery, 2026-08-15, branch `v0.5-phase2`): the four multi-agent
+tools functional end to end — the load-bearing permission-proxy correctness
+property, a multi-turn spawn-then-message round trip, the tool ceiling and
+`max_concurrent` bound, the FR-9 cost-rollup honesty clause, the sidebar's
+`SubagentSpawned`/`SubagentEnded` events, `[agents]` config-file reading
+(including live `/config` reload), and idle reap. Phase 3 (TUI,
+2026-08-16, branch `v0.5-phase3`): the sidebar Agents section, the
+`AgentList`/`AgentActivity` inspector overlay (made genuinely
+live-updating, not just fetch-once, per a follow-up pass), the `/agents`
+command in both frontends, the permission-prompt provenance line, and
+ended-agent inspector reachability. Phase 4 (hardening/docs/verification,
+2026-08-16, branch `v0.5-phase4`): five new end-to-end tests closing the
+Tech Spec §14 item-9 checklist (real concurrent execution, the tool ceiling
+against a subagent's actual filtered registry, a genuinely-new
+permission-proxy ask, spawn-timeout addressability, crash/restart id
+handling), README docs for the four tools/`/agents`/`[agents]` config, and a
+full workspace pass. See each phase's own `PHASE*_TODO.md` for the detailed
+breakdown. This plan was written prospectively, before any code, the normal
+SFD order (unlike the 0.4.2/0.4.3 plans, which were written as-built after
+the fact).
 **Date:** 2026-08-15
 **Owner:** Wattanit
 **Source documents** (G-14 as-built pin for the 0.5 release):
@@ -280,8 +286,17 @@ are all wired together.
 turns where it doesn't, with no second engine implementation, no second
 safety model, and no new dependency.
 
-**Done when:** every item above passes, confirmed 2026-08-XX (date filled in
-on completion, per this project's as-built convention).
+**Done when:** every item above passes. **Confirmed 2026-08-16** — see
+`docs/version-0-5/PHASE4_TODO.md` for the full breakdown. One exception,
+explicitly out of scope by owner direction: `cargo deny check` surfaced a
+substantial set of pre-existing, unrelated supply-chain findings (RUSTSEC
+advisories, a license rejection, unmaintained transitive crates, and
+internal-workspace "wildcard dependency" flags) once a broken config key
+was fixed enough for the check to even parse — none of it caused by or
+related to the multi-agent work, so it is tracked as a standalone
+follow-up rather than triaged here. `cargo vet` was not run for the same
+reason CI itself treats it as non-blocking: no audit set has been seeded
+yet.
 
 ---
 
