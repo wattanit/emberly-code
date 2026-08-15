@@ -11,6 +11,10 @@ use crate::recall::{DeclineRecallGate, RecallGate, RecallOutcome};
 use crate::sandbox::Sandbox;
 use crate::scratch::{DropScratchGate, ScratchError, ScratchGate, ScratchOutcome, ScratchRequest};
 use crate::skills::{DropSkillGate, SkillError, SkillGate, SkillInvocation};
+use crate::subagent::{
+    DropSubagentGate, SubagentEndOutcome, SubagentError, SubagentGate, SubagentListEntry,
+    SubagentMessageOutcome, SubagentMessageRequest, SubagentSpawnBatch, SubagentSpawnResult,
+};
 use crate::task_list::{DropTaskListGate, TaskItem, TaskListError, TaskListGate};
 
 /// Truncation-at-ingestion configuration (Requirements §8.1, Tech Spec §5.3).
@@ -68,6 +72,7 @@ pub struct ToolCtx {
     memory: Arc<dyn MemoryGate>,
     skill: Arc<dyn SkillGate>,
     scratch: Arc<dyn ScratchGate>,
+    subagent: Arc<dyn SubagentGate>,
     /// Whether the active model accepts image input (P-11). `read_image`
     /// checks this to produce the HC-6 unsupported result before encoding.
     vision: bool,
@@ -103,6 +108,7 @@ impl ToolCtx {
             memory: Arc::new(DropMemoryGate),
             skill: Arc::new(DropSkillGate),
             scratch: Arc::new(DropScratchGate),
+            subagent: Arc::new(DropSubagentGate),
             vision: false,
             image_max_bytes: IMAGE_MAX_BYTES_DEFAULT,
             documents: false,
@@ -155,6 +161,14 @@ impl ToolCtx {
     #[must_use]
     pub fn with_scratch_gate(mut self, scratch: Arc<dyn ScratchGate>) -> Self {
         self.scratch = scratch;
+        self
+    }
+
+    /// Install the subagent gate (T-18–T-21). Kept a builder so existing
+    /// callers and tests, which never spawn subagents, need no change.
+    #[must_use]
+    pub fn with_subagent_gate(mut self, subagent: Arc<dyn SubagentGate>) -> Self {
+        self.subagent = subagent;
         self
     }
 
@@ -253,6 +267,39 @@ impl ToolCtx {
     /// does not widen HC-4 (FR-8). Not permission-gated.
     pub async fn scratch_write(&self, req: ScratchRequest) -> Result<ScratchOutcome, ScratchError> {
         self.scratch.scratch_write(req).await
+    }
+
+    /// Create one or more subagents and run each to its first natural stop
+    /// (T-18). The single path to the subagent gate; every subagent runs
+    /// under the same permission/sandbox/workspace-trust posture as this
+    /// session (Requirements FR-9 honesty clause) — enforced by the gate's
+    /// implementation, not by this passthrough.
+    pub async fn spawn_agents(
+        &self,
+        req: SubagentSpawnBatch,
+    ) -> Result<Vec<SubagentSpawnResult>, SubagentError> {
+        self.subagent.spawn_agents(req).await
+    }
+
+    /// Send a further prompt to a specific, still-alive subagent (T-19). The
+    /// single path to the subagent gate.
+    pub async fn message_agent(
+        &self,
+        req: SubagentMessageRequest,
+    ) -> Result<SubagentMessageOutcome, SubagentError> {
+        self.subagent.message_agent(req).await
+    }
+
+    /// Enumerate currently alive subagents (T-20). The single path to the
+    /// subagent gate.
+    pub async fn list_agents(&self) -> Result<Vec<SubagentListEntry>, SubagentError> {
+        self.subagent.list_agents().await
+    }
+
+    /// End a subagent and free its resources (T-21). The single path to the
+    /// subagent gate.
+    pub async fn end_agent(&self, id: String) -> Result<SubagentEndOutcome, SubagentError> {
+        self.subagent.end_agent(id).await
     }
 
     /// Whether the active model accepts image input (P-11).
