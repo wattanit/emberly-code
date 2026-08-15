@@ -2111,8 +2111,20 @@ fn skills_inspector_esc_dismisses() {
 
 // ---- Agents inspector (`/agents`, FR-9, Design §3.1/§4.13) -------------
 
+fn agent_summary(id: &str, name: &str, ended: bool) -> crate::app::AgentSummary {
+    crate::app::AgentSummary {
+        id: id.into(),
+        name: name.into(),
+        ended,
+    }
+}
+
 #[test]
-fn subagent_spawned_and_ended_events_maintain_the_alive_list() {
+fn subagent_spawned_and_ended_events_mark_ended_rather_than_remove() {
+    // Design §4.13: an ended subagent stays reachable from `/agents` for the
+    // rest of the session, so `SubagentEnded` marks the entry rather than
+    // dropping it — only the sidebar section (rendering) filters ended ones
+    // back out.
     let mut a = app();
     a.apply_event(UiEvent::SubagentSpawned {
         id: "agent-1".into(),
@@ -2123,28 +2135,25 @@ fn subagent_spawned_and_ended_events_maintain_the_alive_list() {
     assert_eq!(a.agents.len(), 1);
     assert_eq!(a.agents[0].id, "agent-1");
     assert_eq!(a.agents[0].name, "reviewer");
+    assert!(!a.agents[0].ended);
     a.apply_event(UiEvent::SubagentEnded {
         id: "agent-1".into(),
         reason: "done".into(),
     });
-    assert!(
-        a.agents.is_empty(),
-        "ended subagent is removed from the list"
+    assert_eq!(
+        a.agents.len(),
+        1,
+        "ended subagent stays in the catalog, not removed"
     );
+    assert!(a.agents[0].ended);
 }
 
 #[test]
 fn agents_command_opens_inspector_from_cached_list() {
     let mut a = app();
     a.agents = vec![
-        crate::app::AgentSummary {
-            id: "agent-1".into(),
-            name: "reviewer".into(),
-        },
-        crate::app::AgentSummary {
-            id: "agent-2".into(),
-            name: "tester".into(),
-        },
+        agent_summary("agent-1", "reviewer", false),
+        agent_summary("agent-2", "tester", false),
     ];
     // No engine round-trip — the alive list is already cached.
     assert_eq!(a.run_slash("agents"), Action::None);
@@ -2164,14 +2173,8 @@ fn agents_command_opens_inspector_from_cached_list() {
 fn agents_enter_issues_inspect_for_the_selected_agent() {
     let mut a = app();
     a.agents = vec![
-        crate::app::AgentSummary {
-            id: "agent-1".into(),
-            name: "reviewer".into(),
-        },
-        crate::app::AgentSummary {
-            id: "agent-2".into(),
-            name: "tester".into(),
-        },
+        agent_summary("agent-1", "reviewer", false),
+        agent_summary("agent-2", "tester", false),
     ];
     a.run_command(AppCommand::Agents);
     a.on_key(key(KeyCode::Down)); // select agent-2
@@ -2184,12 +2187,25 @@ fn agents_enter_issues_inspect_for_the_selected_agent() {
 }
 
 #[test]
+fn agents_enter_on_an_ended_entry_still_inspects_it() {
+    // Design §4.13: "a subagent that has ended keeps its inspector
+    // reachable for the rest of the session" — Enter on an ended row issues
+    // the same InspectAgent command as a live one.
+    let mut a = app();
+    a.agents = vec![agent_summary("agent-1", "reviewer", true)];
+    a.run_command(AppCommand::Agents);
+    assert_eq!(
+        a.on_key(key(KeyCode::Enter)),
+        Action::Command(Command::InspectAgent {
+            id: "agent-1".into(),
+        })
+    );
+}
+
+#[test]
 fn agent_activity_opens_a_read_only_overlay() {
     let mut a = app();
-    a.agents = vec![crate::app::AgentSummary {
-        id: "agent-1".into(),
-        name: "reviewer".into(),
-    }];
+    a.agents = vec![agent_summary("agent-1", "reviewer", false)];
     a.run_command(AppCommand::Agents);
     a.on_key(key(KeyCode::Enter));
     a.apply_event(UiEvent::AgentActivity {
@@ -2219,10 +2235,7 @@ fn agents_empty_list_opens_an_empty_overlay() {
 #[test]
 fn agents_inspector_esc_dismisses() {
     let mut a = app();
-    a.agents = vec![crate::app::AgentSummary {
-        id: "agent-1".into(),
-        name: "reviewer".into(),
-    }];
+    a.agents = vec![agent_summary("agent-1", "reviewer", false)];
     a.run_command(AppCommand::Agents);
     assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
     assert!(a.overlays.is_empty());

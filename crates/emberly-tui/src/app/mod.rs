@@ -256,12 +256,16 @@ pub struct ModifiedFile {
     pub dels: u32,
 }
 
-/// One currently alive subagent (sidebar Agents section, FR-9, Design
-/// §3.1/§4.13).
+/// One subagent this session has spawned (sidebar Agents section + inspector
+/// catalog, FR-9, Design §3.1/§4.13). Kept after it ends (`ended`) so its
+/// activity stays reviewable for the rest of the session (§4.13) — the
+/// sidebar section filters this catalog down to alive entries only, but the
+/// `/agents` inspector list shows the whole thing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSummary {
     pub id: String,
     pub name: String,
+    pub ended: bool,
 }
 
 /// Session identity for the sidebar/header (Design §3.1).

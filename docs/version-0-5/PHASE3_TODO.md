@@ -13,9 +13,9 @@ Phase 2 (the events this phase renders).
       `App.agents` is empty (tested:
       `agents_section_is_absent_while_no_subagent_is_alive`).
 - [x] Renders from `SubagentSpawned`/`SubagentEnded`: one line per alive
-      subagent (`name (id)`), pushed/retained in `App.agents`
-      (`apply_event`, tested:
-      `subagent_spawned_and_ended_events_maintain_the_alive_list`).
+      subagent (`name (id)`), sourced from `App.agents` filtered to
+      `!ended` (`render_sidebar`, tested:
+      `ended_agent_drops_from_the_sidebar_but_the_last_one_ending_hides_the_section`).
       Deviation: `SubagentStatus` (running/idle/timed-out) is **not**
       rendered on the line — the event carries no such field yet and none
       was added; the line is name+id only, same shape as Skills.
@@ -40,18 +40,21 @@ Phase 2 (the events this phase renders).
       Flagged for the owner: accept as a v0.5 simplification (record as
       upstream feedback against Design §4.13) or schedule the live variant
       before release.
-- [ ] **Known gap:** a subagent that has ended is removed from
-      `App.agents` (`SubagentEnded` → `retain`), so once ended it drops out
-      of the `/agents` list and its inspector becomes unreachable from the
-      UI — Design §4.13 says an ended subagent's inspector should stay
-      reachable for the rest of the session. The engine side already
-      supports this (`inspect_agent` reads the transcript regardless of
-      alive state — Phase 2's `inspect_agent_returns_its_rebuilt_activity`
-      test proves it for a live id), but the frontend has no surviving
-      reference to an ended agent's id/name to ask for it again. Not
-      fixed this phase; needs either a "recently ended" retained entry
-      (with a rendered ended marker) or an owner decision to accept the
-      current alive-only list.
+- [x] **Closed:** an ended subagent's inspector stays reachable for the
+      rest of the session (Design §4.13). `AgentSummary` gained an `ended`
+      flag; `SubagentEnded` now marks the matching entry instead of
+      removing it (`app/events.rs`, `line.rs`'s run loop), so it survives
+      in `App.agents` / `LineState.agents`. The **sidebar section** still
+      filters to `!ended` only (§3.1's "currently alive" + no-empty-stub
+      rule), but the `/agents` **inspector** list — both the rich overlay
+      (`AgentList`) and plain-mode `/agents` — shows the full catalog, with
+      an ended entry marked (`(id, ended)`) so it's never confused with a
+      live one, and Enter/`{name}` still issues `Command::InspectAgent`
+      for it exactly as for a live one. Tested:
+      `agents_enter_on_an_ended_entry_still_inspects_it`,
+      `subagent_spawned_and_ended_events_mark_ended_rather_than_remove`,
+      `agent_list_marks_an_ended_entry`, `resolve_agent_still_resolves_an_ended_entry`,
+      `agents_slash_still_lists_and_resolves_an_ended_agent`.
 - [x] Confirmed the main pane never receives a subagent's raw streaming
       text — `AgentActivity` is the only subagent-activity event a
       frontend applies, and it only ever opens on an explicit `InspectAgent`
@@ -96,10 +99,11 @@ Phase 2 (the events this phase renders).
       new degraded output is plain ASCII, checked by the existing
       `degraded_output_has_no_ansi_escapes` sweep test.
 
-**Status:** functionally complete and tested except the two flagged items
-in Group 2 (live-updating overlay, ended-agent reachability), which are
-real gaps against Design §4.13 as written, not oversights — surfaced here
-for an owner decision rather than silently built around.
+**Status:** functionally complete and tested except one remaining flagged
+item in Group 2 (the live-updating overlay), a real gap against Design
+§4.13 as written, not an oversight — surfaced there for an owner decision
+rather than silently built around. The ended-agent-reachability gap is
+now closed.
 
 `cargo build --workspace`, `cargo test --workspace`, `cargo clippy
 --workspace --all-targets` (`-D warnings`), and `cargo fmt -p emberly-tui

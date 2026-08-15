@@ -289,10 +289,19 @@ impl App {
                 self.skills = skills;
             }
             UiEvent::SubagentSpawned { id, name, .. } => {
-                self.agents.push(AgentSummary { id, name });
+                self.agents.push(AgentSummary {
+                    id,
+                    name,
+                    ended: false,
+                });
             }
+            // Marked ended rather than removed, so the entry survives in the
+            // `/agents` inspector catalog for the rest of the session (Design
+            // §4.13); only the sidebar section filters it back out (§3.1).
             UiEvent::SubagentEnded { id, .. } => {
-                self.agents.retain(|a| a.id != id);
+                if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
+                    agent.ended = true;
+                }
             }
             UiEvent::AgentActivity { id: _, name, text } => {
                 self.apply_agent_activity(&name, text);

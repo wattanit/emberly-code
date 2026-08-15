@@ -633,10 +633,15 @@ fn agent_list_lines(
         } else {
             theme.primary()
         };
+        let suffix = if agent.ended {
+            format!("  ({}, ended)", agent.id)
+        } else {
+            format!("  ({})", agent.id)
+        };
         lines.push(Line::from(vec![
             Span::styled(marker.to_string(), theme.accent()),
             Span::styled(agent.name.clone(), name_style),
-            Span::styled(format!("  ({})", agent.id), theme.chrome()),
+            Span::styled(suffix, theme.chrome()),
         ]));
         row_of_line.push(Some(i));
     }
@@ -1141,12 +1146,17 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
     // Currently alive subagents (FR-9, Design §3.1/§4.13): name + id per
     // entry. Present only while at least one is alive — the same
     // no-empty-stub rule as Tasks/Memory/Skills (Design §3.1); the section
-    // simply does not appear once the last subagent ends.
-    if !app.agents.is_empty() {
+    // simply does not appear once the last subagent ends. Ended subagents
+    // stay in `app.agents` for the `/agents` inspector (§4.13), so this
+    // section filters down to the alive subset rather than reading the
+    // catalog directly.
+    let alive_agents: Vec<&crate::app::AgentSummary> =
+        app.agents.iter().filter(|a| !a.ended).collect();
+    if !alive_agents.is_empty() {
         lines.push(Line::from(""));
         let start = lines.len();
         lines.push(Line::from(Span::styled("Agents", theme.chrome())));
-        for agent in &app.agents {
+        for agent in &alive_agents {
             let desc = format!("{} ({})", agent.name, agent.id);
             lines.push(Line::from(Span::styled(fit(&desc, w), theme.primary())));
         }
@@ -2230,6 +2240,7 @@ mod tests {
         app.agents.push(crate::app::AgentSummary {
             id: "agent-1".into(),
             name: "reviewer".into(),
+            ended: false,
         });
         // Wide enough for the sidebar to show (>= COLLAPSE_BELOW).
         let hit = hit_map_of(&app, 120, 40);
@@ -2256,6 +2267,51 @@ mod tests {
             (0..40)
                 .all(|y| (0..120).all(|x| hit.hit(x, y) != Some(ClickTarget::OpenAgentsInspector))),
             "no Agents section without a live subagent"
+        );
+    }
+
+    #[test]
+    fn ended_agent_drops_from_the_sidebar_but_the_last_one_ending_hides_the_section() {
+        // Design §4.13: the sidebar shows only *currently alive* subagents,
+        // even though the catalog (`App.agents`) keeps ended ones for the
+        // `/agents` inspector. With one alive and one ended, the section
+        // still shows (for the alive one); once the last one ends, it goes
+        // away entirely — the catalog is non-empty but the section is gone.
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.agents.push(crate::app::AgentSummary {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            ended: true,
+        });
+        app.agents.push(crate::app::AgentSummary {
+            id: "agent-2".into(),
+            name: "tester".into(),
+            ended: false,
+        });
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40)
+                .any(|y| (0..120).any(|x| hit.hit(x, y) == Some(ClickTarget::OpenAgentsInspector))),
+            "one alive subagent keeps the section visible"
+        );
+
+        app.agents[1].ended = true; // the last alive one now ends too
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40)
+                .all(|y| (0..120).all(|x| hit.hit(x, y) != Some(ClickTarget::OpenAgentsInspector))),
+            "no alive subagents left → the section disappears, though the catalog is not empty"
+        );
+        assert_eq!(
+            app.agents.len(),
+            2,
+            "the catalog itself retains both entries"
         );
     }
 
