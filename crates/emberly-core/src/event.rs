@@ -273,4 +273,18 @@ pub enum UiEvent {
     /// of the owning session ending. Additive — older frontends warn-skip
     /// it.
     SubagentEnded { id: String, reason: String },
+
+    /// A subagent's own activity, read from its nested transcript (Tech Spec
+    /// §8.4), sent in reply to
+    /// [`Command::InspectAgent`](crate::command::Command::InspectAgent). A
+    /// read-only snapshot as of the last flush (Design §4.13) — `text` is
+    /// already formatted for display, so the frontend renders it exactly like
+    /// any other text overlay (`SkillBody`'s pattern). An unknown/ended id
+    /// still gets a reply, with `text` saying so. Additive — older frontends
+    /// warn-skip it.
+    AgentActivity {
+        id: String,
+        name: String,
+        text: String,
+    },
 }

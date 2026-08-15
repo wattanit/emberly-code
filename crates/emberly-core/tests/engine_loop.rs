@@ -6265,6 +6265,82 @@ async fn spawn_and_end_agent_emit_their_sidebar_events() {
     );
 }
 
+/// The sidebar Agents inspector's data source (Design §4.13): `InspectAgent`
+/// reads a subagent's own nested transcript and replies with its rebuilt
+/// activity — a read-only snapshot, not a live stream, but genuinely reading
+/// that subagent's own audit trail rather than a stub.
+#[tokio::test]
+async fn inspect_agent_returns_its_rebuilt_activity() {
+    let root = temp_project();
+    let root_scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "spawn_agents",
+            r#"{"agents":[{"name":"helper","system_prompt":"investigate the bug","profile":"helper"}]}"#,
+        ),
+        ScriptedResponse::text("done"),
+    ];
+    let subagent_scripts = vec![ScriptedResponse::text("found it")];
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(root_scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    config.provider_factory = Some(Arc::new(OneShotFactory::new(subagent_scripts)));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "delegate".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    h.send(Command::InspectAgent {
+        id: "agent-1".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    let activity = events.iter().find_map(|e| match e {
+        UiEvent::AgentActivity { id, name, text } if id == "agent-1" => {
+            Some((name.clone(), text.clone()))
+        }
+        _ => None,
+    });
+    match activity {
+        Some((name, text)) => {
+            assert_eq!(name, "helper");
+            assert!(
+                text.contains("investigate the bug") && text.contains("found it"),
+                "activity shows both the task and the subagent's own answer: {text}"
+            );
+        }
+        None => panic!("expected an AgentActivity reply, got: {events:?}"),
+    }
+}
+
+/// An unknown/ended id still replies (never silently nothing), naming why.
+#[tokio::test]
+async fn inspect_agent_on_unknown_id_replies_with_a_clear_reason() {
+    let root = temp_project();
+    let config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    let mut h = spawn(config);
+
+    h.send(Command::InspectAgent { id: "nope".into() }).await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e,
+            UiEvent::AgentActivity { id, text, .. } if id == "nope" && text.contains("No alive subagent"))),
+        "expected a clear reason, got: {events:?}"
+    );
+}
+
 /// Idle reap (Tech Spec §8.4): a subagent with no `message_agent` traffic for
 /// `idle_timeout_secs` is reclaimed automatically, even though the primary
 /// agent's own turn has long since finished and nothing else is happening —

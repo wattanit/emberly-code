@@ -2108,3 +2108,212 @@ fn skills_inspector_esc_dismisses() {
     assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
     assert!(a.overlays.is_empty());
 }
+
+// ---- Agents inspector (`/agents`, FR-9, Design §3.1/§4.13) -------------
+
+fn agent_summary(id: &str, name: &str, ended: bool) -> crate::app::AgentSummary {
+    crate::app::AgentSummary {
+        id: id.into(),
+        name: name.into(),
+        ended,
+    }
+}
+
+#[test]
+fn subagent_spawned_and_ended_events_mark_ended_rather_than_remove() {
+    // Design §4.13: an ended subagent stays reachable from `/agents` for the
+    // rest of the session, so `SubagentEnded` marks the entry rather than
+    // dropping it — only the sidebar section (rendering) filters ended ones
+    // back out.
+    let mut a = app();
+    a.apply_event(UiEvent::SubagentSpawned {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        profile: "default".into(),
+        model: "m".into(),
+    });
+    assert_eq!(a.agents.len(), 1);
+    assert_eq!(a.agents[0].id, "agent-1");
+    assert_eq!(a.agents[0].name, "reviewer");
+    assert!(!a.agents[0].ended);
+    a.apply_event(UiEvent::SubagentEnded {
+        id: "agent-1".into(),
+        reason: "done".into(),
+    });
+    assert_eq!(
+        a.agents.len(),
+        1,
+        "ended subagent stays in the catalog, not removed"
+    );
+    assert!(a.agents[0].ended);
+}
+
+#[test]
+fn agents_command_opens_inspector_from_cached_list() {
+    let mut a = app();
+    a.agents = vec![
+        agent_summary("agent-1", "reviewer", false),
+        agent_summary("agent-2", "tester", false),
+    ];
+    // No engine round-trip — the alive list is already cached.
+    assert_eq!(a.run_slash("agents"), Action::None);
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentList { agents, selected }) => {
+            assert_eq!(agents.len(), 2);
+            assert_eq!(agents[0].id, "agent-1");
+            assert_eq!(*selected, 0);
+        }
+        other => panic!("expected AgentList overlay, got {other:?}"),
+    }
+    assert_eq!(a.run_command(AppCommand::Agents), Action::None);
+    assert!(commands::COMMANDS.iter().any(|c| c.name == "agents"));
+}
+
+#[test]
+fn agents_enter_issues_inspect_for_the_selected_agent() {
+    let mut a = app();
+    a.agents = vec![
+        agent_summary("agent-1", "reviewer", false),
+        agent_summary("agent-2", "tester", false),
+    ];
+    a.run_command(AppCommand::Agents);
+    a.on_key(key(KeyCode::Down)); // select agent-2
+    assert_eq!(
+        a.on_key(key(KeyCode::Enter)),
+        Action::Command(Command::InspectAgent {
+            id: "agent-2".into(),
+        })
+    );
+}
+
+#[test]
+fn agents_enter_on_an_ended_entry_still_inspects_it() {
+    // Design §4.13: "a subagent that has ended keeps its inspector
+    // reachable for the rest of the session" — Enter on an ended row issues
+    // the same InspectAgent command as a live one.
+    let mut a = app();
+    a.agents = vec![agent_summary("agent-1", "reviewer", true)];
+    a.run_command(AppCommand::Agents);
+    assert_eq!(
+        a.on_key(key(KeyCode::Enter)),
+        Action::Command(Command::InspectAgent {
+            id: "agent-1".into(),
+        })
+    );
+}
+
+#[test]
+fn agent_activity_opens_a_read_only_overlay() {
+    let mut a = app();
+    a.agents = vec![agent_summary("agent-1", "reviewer", false)];
+    a.run_command(AppCommand::Agents);
+    a.on_key(key(KeyCode::Enter));
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        text: "user: review this diff\nassistant: looks good".into(),
+    });
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentActivity { id, name, text }) => {
+            assert_eq!(id, "agent-1");
+            assert_eq!(name, "reviewer");
+            assert!(text.contains("looks good"));
+        }
+        other => panic!("expected an AgentActivity overlay, got {other:?}"),
+    }
+    assert_eq!(
+        a.watched_agent_id(),
+        Some("agent-1".into()),
+        "the open activity overlay is the one the periodic refresh polls"
+    );
+}
+
+#[test]
+fn agent_activity_refresh_updates_the_open_overlay_in_place() {
+    // Design §4.13's "live-updating... as it happens": a second reply for
+    // the *same* id (what the periodic refresh ticker in `tui::run` sends)
+    // updates the existing overlay's text rather than stacking a new one.
+    let mut a = app();
+    a.agents = vec![agent_summary("agent-1", "reviewer", false)];
+    a.run_command(AppCommand::Agents);
+    a.on_key(key(KeyCode::Enter));
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        text: "user: start".into(),
+    });
+    let depth_before = a.overlays.len();
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        text: "user: start\nassistant: still working".into(),
+    });
+    assert_eq!(a.overlays.len(), depth_before, "no new overlay is stacked");
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentActivity { text, .. }) => {
+            assert!(text.contains("still working"));
+        }
+        other => panic!("expected an AgentActivity overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn agent_activity_reply_for_an_abandoned_id_is_dropped() {
+    // A stale reply for an id the user is no longer looking at must not
+    // silently replace what is currently on screen.
+    let mut a = app();
+    a.agents = vec![
+        agent_summary("agent-1", "reviewer", false),
+        agent_summary("agent-2", "tester", false),
+    ];
+    a.run_command(AppCommand::Agents);
+    a.on_key(key(KeyCode::Enter)); // opens agent-1's activity
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        text: "reviewer's activity".into(),
+    });
+    // A late reply for a different subagent arrives (e.g. a stale periodic
+    // refresh from before the user moved on).
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-2".into(),
+        name: "tester".into(),
+        text: "tester's activity".into(),
+    });
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentActivity { id, text, .. }) => {
+            assert_eq!(id, "agent-1", "the shown subagent did not silently change");
+            assert!(text.contains("reviewer's activity"));
+        }
+        other => panic!("expected an AgentActivity overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn watched_agent_id_is_none_without_an_open_activity_overlay() {
+    let mut a = app();
+    assert_eq!(a.watched_agent_id(), None);
+    a.agents = vec![agent_summary("agent-1", "reviewer", false)];
+    a.run_command(AppCommand::Agents); // AgentList, not AgentActivity, is open
+    assert_eq!(a.watched_agent_id(), None);
+}
+
+#[test]
+fn agents_empty_list_opens_an_empty_overlay() {
+    let mut a = app();
+    a.agents.clear();
+    a.run_command(AppCommand::Agents);
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentList { agents, .. }) => assert!(agents.is_empty()),
+        other => panic!("expected an empty AgentList overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn agents_inspector_esc_dismisses() {
+    let mut a = app();
+    a.agents = vec![agent_summary("agent-1", "reviewer", false)];
+    a.run_command(AppCommand::Agents);
+    assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
+    assert!(a.overlays.is_empty());
+}

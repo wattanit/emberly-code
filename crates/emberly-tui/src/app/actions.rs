@@ -285,6 +285,7 @@ impl App {
             }
             AppCommand::Memory => self.open_memory_inspector(),
             AppCommand::Skills => self.open_skills_inspector(),
+            AppCommand::Agents => self.open_agents_inspector(),
             AppCommand::Config => self.edit_config(),
             AppCommand::Prompt => self.edit_prompt("system"),
             AppCommand::Reload => Action::Command(Command::ReloadConfig),

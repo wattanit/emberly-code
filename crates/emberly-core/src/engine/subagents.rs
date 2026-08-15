@@ -70,6 +70,12 @@ pub(super) struct SubagentInstance {
     /// it, or sent it a further prompt) — what `idle_timeout_secs` measures
     /// against (Tech Spec §8.4).
     last_activity: tokio::time::Instant,
+    /// Where this subagent's own nested transcript lives (Tech Spec §3.2,
+    /// §8.4) — the inspector (`Command::InspectAgent`) reads it directly
+    /// rather than adding a second, live-streamed channel; the transcript is
+    /// already the durable, per-event-fsynced record of everything the
+    /// subagent did.
+    transcript_path: PathBuf,
 }
 
 /// The multi-agent subsystem's own state (FR-9, Tech Spec §8.4): every
@@ -502,6 +508,7 @@ impl Engine {
                 name: spec.name.clone(),
                 turn_tx,
                 last_activity: tokio::time::Instant::now(),
+                transcript_path: self.subagent_transcript_path(session_id),
             },
         );
         self.emit(UiEvent::SubagentSpawned {
@@ -560,6 +567,22 @@ impl Engine {
         }
     }
 
+    /// The directory a subagent's own nested transcript lives in (Tech Spec
+    /// §3.2/§8.4): `.agents/sessions/<parent-session-id>/subagents/`.
+    fn subagents_dir(&self) -> PathBuf {
+        self.session
+            .dir
+            .join(self.session.id.to_string())
+            .join("subagents")
+    }
+
+    /// The exact path a subagent's own transcript lives at, given its
+    /// internal `SessionId` — shared by construction (`build_subagent_engine_config`)
+    /// and lookup (`inspect_agent`) so the two can never disagree.
+    fn subagent_transcript_path(&self, session_id: SessionId) -> PathBuf {
+        self.subagents_dir().join(format!("{session_id}.jsonl"))
+    }
+
     /// Derive a subagent's `EngineConfig` from this (the root) engine's own
     /// current state (Tech Spec §8.4): the same project root, sandbox
     /// confinement, image/document caps, tool-explanation setting, and
@@ -577,11 +600,7 @@ impl Engine {
         system: String,
         session_id: SessionId,
     ) -> EngineConfig {
-        let subagents_dir = self
-            .session
-            .dir
-            .join(self.session.id.to_string())
-            .join("subagents");
+        let subagents_dir = self.subagents_dir();
         let transcript: Box<dyn TranscriptSink> =
             match FileTranscript::create(&subagents_dir, session_id) {
                 Ok(sink) => Box::new(sink),
@@ -658,4 +677,82 @@ impl Engine {
             })),
         }
     }
+
+    /// Fetch a subagent's own activity for the inspector (Design §4.13), in
+    /// reply to `Command::InspectAgent`. Reads that subagent's own nested
+    /// transcript directly (Tech Spec §3.2/§8.4) rather than adding a second,
+    /// live-streamed channel — the transcript is already the durable,
+    /// per-event-fsynced record of everything the subagent did, so this is a
+    /// read-only snapshot as of the last flush, not a continuously live view.
+    /// An unknown or already-ended id still replies, with a body saying so.
+    pub(super) async fn inspect_agent(&mut self, id: String) {
+        let Some(instance) = self.agents.instances.get(&id) else {
+            self.emit(UiEvent::AgentActivity {
+                name: id.clone(),
+                id,
+                text: "No alive subagent with this id. It may not exist, or it has already ended."
+                    .into(),
+            })
+            .await;
+            return;
+        };
+        let name = instance.name.clone();
+        let path = instance.transcript_path.clone();
+        let text = match crate::resume::read_records(&path) {
+            Ok(loaded) => {
+                format_agent_activity(&crate::resume::rebuild_conversation(&loaded.records))
+            }
+            // Best-effort, matching HC-3's "never crash, degrade instead": no
+            // transcript yet (or unreadable) reads as "nothing to show," never
+            // a harness error surfaced through this reply.
+            Err(_) => "This subagent's activity is not available yet.".into(),
+        };
+        self.emit(UiEvent::AgentActivity { id, name, text }).await;
+    }
+}
+
+/// Render a subagent's rebuilt conversation as plain, readable text for the
+/// inspector overlay (Design §4.13) — a first cut: role-tagged lines, tool
+/// calls/results named plainly. Not meant to be pretty, only informative;
+/// the frontend shows it verbatim via the same read-only text-overlay path
+/// `SkillBody` already uses.
+fn format_agent_activity(messages: &[Message]) -> String {
+    if messages.is_empty() {
+        return "(no activity recorded yet)".to_string();
+    }
+    let mut out = String::new();
+    for message in messages {
+        let role = match message.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        };
+        for block in &message.content {
+            match block {
+                ContentBlock::Text { text } => {
+                    out.push_str(&format!("[{role}] {text}\n"));
+                }
+                ContentBlock::ToolUse { name, input, .. } => {
+                    out.push_str(&format!("[{role}] tool_use: {name} {input}\n"));
+                }
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    let tag = if *is_error {
+                        "tool error"
+                    } else {
+                        "tool result"
+                    };
+                    out.push_str(&format!("[{tag}] {content}\n"));
+                }
+                ContentBlock::Reasoning { text, .. } => {
+                    out.push_str(&format!("[{role} reasoning] {text}\n"));
+                }
+                ContentBlock::Image { .. } => out.push_str(&format!("[{role}] (image)\n")),
+                ContentBlock::Document { .. } => out.push_str(&format!("[{role}] (document)\n")),
+            }
+        }
+    }
+    out
 }

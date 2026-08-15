@@ -1464,6 +1464,7 @@ impl Engine {
                     }
                     Command::MemoryView { scope, name } => self.emit_memory_body(scope, name).await,
                     Command::InspectSkill { name } => self.inspect_skill(name).await,
+                    Command::InspectAgent { id } => self.inspect_agent(id).await,
                 }
                 // The idle boundary is where the derived cache is reconciled with
                 // the log (FR-5, Tech Spec §3.2a): one flush covers a completed

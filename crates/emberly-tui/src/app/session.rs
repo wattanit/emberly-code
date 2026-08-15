@@ -71,6 +71,7 @@ impl App {
         self.memory.user = 0;
         self.memory.project = 0;
         self.skills.clear();
+        self.agents.clear();
         self.completion_status.clear();
         self.memory.fetch = None;
         self.memory.pending_edit = None;

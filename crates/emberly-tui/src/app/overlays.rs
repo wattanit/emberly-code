@@ -42,4 +42,16 @@ impl App {
     pub fn active_overlay(&self) -> Option<&Overlay> {
         self.overlays.last()
     }
+
+    /// The id of the subagent whose activity overlay is currently on top, if
+    /// any (Design §4.13). What the rich TUI's periodic refresh (`tui::run`)
+    /// polls to decide whether to re-issue `Command::InspectAgent` — `None`
+    /// means no activity overlay is open, so nothing gets re-fetched.
+    #[must_use]
+    pub fn watched_agent_id(&self) -> Option<String> {
+        match self.overlays.last().map(|o| &o.content) {
+            Some(OverlayContent::AgentActivity { id, .. }) => Some(id.clone()),
+            _ => None,
+        }
+    }
 }

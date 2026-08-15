@@ -56,6 +56,9 @@ pub enum AppCommand {
     /// (FR-7, Design §4.9) — "what could this skill tell the model to do" is
     /// inspectable before it ever runs.
     Skills,
+    /// List currently alive subagents and inspect one's activity read-only
+    /// (FR-9, Design §3.1/§4.13).
+    Agents,
     /// Manually compact the conversation — summarize older turns into a
     /// summary at a clean boundary (Requirements §8.3, Tech Spec §7).
     Compact,
@@ -230,6 +233,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "List available skills and inspect a skill's instructions",
         cmd: AppCommand::Skills,
+    },
+    CommandSpec {
+        name: "agents",
+        plain: Plain::Same,
+        key: None,
+        desc: "List currently alive subagents and inspect one's activity",
+        cmd: AppCommand::Agents,
     },
     CommandSpec {
         name: "help",
