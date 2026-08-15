@@ -1,11 +1,11 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.12 
+**Version:** 0.13 
 **Status:** approved
-**Date:** 2026-08-02
+**Date:** 2026-08-15
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.10 (upstream contract),
-Design Guideline v0.10 (upstream for all UI/UX decisions)
+**Companion documents:** Requirements Document v0.11 (upstream contract),
+Design Guideline v0.11 (upstream for all UI/UX decisions)
 
 This document defines HOW Emberly Code is built. Requirements-level
 identifiers (HC-n, FR-n, P-n, T-n, C-n, S-n, A-n) refer to the Requirements
@@ -102,6 +102,22 @@ so per-check results need no UiEvent — only the halt does; and a document read
 an ordinary tool call flowing through `ToolStarted`/`ToolFinished` like an image
 read (Design renders the §4.11 reference line from the result payload).
 
+The 0.5 feature set adds `SubagentSpawned{id, name, profile, model}` (FR-9,
+T-18, §8.4) when a subagent is created, `SubagentStatus{id, name, status}`
+(status: `running | awaiting_permission | done | timed_out | error`) on each
+of its status changes, and `SubagentEnded{id, reason}` (T-21, §8.4) — the
+sidebar Agents section (Design §3.1) and its per-agent inspector (Design
+§4.13) render from these three. A subagent's own assistant text and tool
+activity are **not** re-emitted as top-level `UiEvent`s onto the primary
+session's stream (Design §4.13's "no raw concurrent streaming"); they are
+recorded to the subagent's own transcript (§8.4) and served to the
+inspector on demand via `Command::InspectAgent` / `UiEvent::AgentActivity`
+(§8.4), mirroring the existing `InspectSkill`/`SkillBody` request-reply
+pair. The primary agent's own `spawn_agents`/`message_agent`/`list_agents`/
+`end_agent` calls are ordinary tool calls, so they already flow through the
+existing `ToolStarted`/`ToolFinished` events like any other tool — no
+separate event is needed for those.
+
 Workspace trust (FR-1) is **not** a `UiEvent`: it is a pre-engine gate in the
 binary (§6.7), resolved before the engine loop starts and before any project
 file is read into a prompt, so it never crosses the engine↔frontend channel.
@@ -154,7 +170,14 @@ gate — S-6, Design §8.7); both are additive, older readers warn-skip, no
 `SCHEMA_VERSION` bump. A document read needs no new transcript type — it is a
 `tool_call`/`tool_result` pair recording the project-relative path in args, the
 document bytes re-derived from the file when building the provider request
-(§4.1) exactly as an image read.
+(§4.1) exactly as an image read. The 0.5 feature set needs no new
+transcript event type at the **primary session's** level either:
+`spawn_agents`/`message_agent`/`list_agents`/`end_agent` are ordinary
+`tool_call`/`tool_result` pairs like any other tool (HC-7); a subagent's own
+turns, tool calls, and permission events instead go to that subagent's own
+transcript file (§8.4), which reuses `TranscriptEvent`/`FileTranscript`
+unchanged — it is a nested session in the audit-trail sense, not a new
+schema.
 - The transcript is ground truth; the in-context conversation is rebuilt
 from it (resume) or maintained in parallel with it (live session).
 Nothing ever rewrites a transcript line (HC-7, Requirements §8.2). The
@@ -934,6 +957,133 @@ with nothing to clean says so and exits zero.
 the model has the name it used; there is no dedicated read/list tool
 (Requirements §5, T-17) — scope kept to the write path that motivated this.
 
+### 8.4 Multi-agent subsystem (FR-9)
+
+The central design decision: **a subagent is a nested `Engine`, not a second
+implementation.** §2's "Engine as single owner" is preserved, not broken, by
+making the *root* engine of a session the sole owner of everything that must
+stay singular (the rule engine and its session grants, the frontend's one
+screen), while a subagent gets its own instance of everything that is
+naturally per-loop (conversation, context window, compaction, the guardrail,
+its own task list) — reusing `turn.rs`, `context.rs`, `guardrail.rs`, and the
+completion gate wholesale. This is the same payoff A-2 (a fake frontend can
+drive the engine in tests) already banked: a subagent's "frontend" is simply
+a second, headless driver — `SubagentManager` (`engine/subagents.rs`, new,
+alongside the existing `guardrail.rs`/`skills.rs`/`memory.rs` per-concern
+modules) — instead of the TUI.
+
+- **Construction.** `spawn_agents` (T-18) builds one `EngineConfig` per
+requested subagent, each a **derivation** of the parent's own, never a fresh
+default:
+  - `provider` — resolved via the existing `ProviderFactory` (§4.5's
+  injected seam, unchanged) from an optional `profile`/`model` in the spawn
+  args, defaulting to the parent's own active profile/model. Selecting a
+  different already-configured profile is the only "new provider" surface
+  this feature needs (P-8 pays rent again).
+  - `tools` — a `ToolRegistry` filtered from the parent's own: **never** the
+  four multi-agent tools themselves (this is where the depth bound lives —
+  a subagent's registry structurally cannot contain `spawn_agents`, so
+  recursive spawning is not a runtime check to get right, it is a
+  registration that never happens), and, when the spawn args name a subset,
+  further filtered to only those names — validated against the parent's
+  *own* registry (`ToolRegistry::get` returning `None` for a name the
+  parent itself lacks is a spawn-time structured failure, HC-6, never a
+  silent grant). `max_depth` is a compile-time constant (`1`), not a config
+  key — exposing a dial that cannot honestly be turned in this version
+  would be worse than not exposing one (Requirements §2.2).
+  - `system` — the subagent's spawn-time system prompt is the harness's own
+  baked-in tool-use scaffold (unchanged, C-1) with the spawn call's
+  model-authored persona/task text inserted into a dedicated section, never
+  a bare replacement of the scaffold — a subagent still knows the tool-call
+  conventions and safety framing every agent loop assumes.
+  - `project_root`, `tool_explanations`, `image_max_bytes`/
+  `document_max_bytes`, and the `LoopConfig`/`CompletionConfig`/
+  `ContextConfig` in force are the parent's current values, copied at spawn
+  time — one runtime configuration per session, not a second tier to keep
+  in sync (Requirements §13 leaves independent subagent tuning an open,
+  tune-with-use question).
+  - **Permission gate is proxied, not duplicated.** A subagent's `ToolCtx`
+  gets a `ProxyPermissionGate` (`emberly-tools`, implementing the existing
+  `PermissionGate` trait) that forwards `authorize()` over an internal
+  channel to the **root** engine, tagged with the subagent's id/name. The
+  root engine remains the sole owner of `RuleEngine` and session grants
+  (§2's invariant extended, not relaxed): a subagent never gets its own copy
+  of the rules that could drift from the session's. The root engine's
+  existing permission round trip (`PermissionRequest`/`PermissionAnswer`,
+  §3.1) already serializes to one prompt on screen; a subagent's request
+  queues behind it exactly like a second concurrent request would, carrying
+  the tag Design §4.13/§5 renders as the provenance line. `ask_user` (T-8)
+  proxies the same way, for the same reason — one user, one place they are
+  ever asked anything. The tag rides as a new optional `on_behalf_of:
+  Option<String>` field on `PermissionRendering` (`crate::types`) — additive,
+  `None` for the primary agent's own requests, unchanged for every consumer
+  that does not read it.
+  - **Memory, skills, and scratch are shared, not forked.** A subagent's
+  `MemoryGate`/`SkillGate`/`ScratchGate` point at the parent session's own
+  `MemoryStore`/`SkillCatalog`/`ScratchStore` (already `Arc`-held, §8.1/§8.2/
+  §8.3) — a subagent reads and writes the *same* durable memory, invokes the
+  *same* skill catalog, and drops scratch files into the *same* session
+  scratch directory as the parent. The **task list is not shared** — each
+  subagent gets its own private `TaskListGate` state, since it is planning
+  its own delegated work, not the parent's (T-11 is per-loop by nature).
+  - **Transcript.** A fresh `FileTranscript` at
+  `.agents/sessions/<parent-session-id>/subagents/<subagent-id>.jsonl`
+  (new nested directory; `SessionId` reused as-is). The subagent's own
+  `Engine` records `session_start`/`user_message`/`assistant_message`/
+  `tool_call`/`tool_result`/`permission_request`/`permission_decision` exactly
+  as any engine does (HC-7 unmodified) — a nested session in the audit-trail
+  sense, discoverable from the parent's `tool_call` args (which record the
+  subagent's id and, via it, its transcript path) exactly as an image/
+  document read records a project-relative path (§4.1) rather than
+  duplicating bytes.
+- **Driving a turn.** `SubagentManager` sends a `Command::UserInput` into the
+subagent engine's own command channel (the spawn task/persona text, or a
+`message_agent` call's follow-up text) and awaits its `UiEvent::TurnEnded`,
+collecting the final assistant text as the tool result. It does **not**
+forward the subagent's `AssistantDelta`/`ToolStarted`/`ToolFinished` events
+onto the parent session's own `UiEvent` stream (Design §4.13); it instead
+emits the three coarse events of §3.1 (`SubagentSpawned`/`SubagentStatus`/
+`SubagentEnded`) to the parent frontend and writes the fine-grained ones only
+to the subagent's own transcript, served to the per-agent inspector via a new
+`Command::InspectAgent{id}` → `UiEvent::AgentActivity{id, turns: Vec<..>}`
+pair (mirroring `InspectSkill`/`SkillBody`, §3.1) that reads the subagent's
+live conversation state directly (no polling the transcript file — the
+subagent `Engine`'s in-memory history is queryable the same way
+`recall_turns` already exposes the parent's, §6).
+- **Concurrency.** `spawn_agents` builds its N `EngineConfig`s, spawns N
+`tokio::spawn`ned subagent engine tasks, and drives all N "run this turn"
+futures with `futures::future::join_all` (already a workspace dependency,
+§12) — the actual fan-out primitive. Each is individually wrapped in
+`tokio::time::timeout(agents.spawn_timeout_secs)`; a timeout leaves that
+subagent's engine task alive and addressable via `message_agent`/
+`list_agents` and reports `still running` in the batch result (Design
+§4.13), rather than canceling it.
+- **Resource bounds (config, `[agents]`, initial; tune with use).**
+`enabled = true`; `max_concurrent = 3` — the ceiling on subagents alive at
+once per session; exceeding it from `spawn_agents` is a structured failure
+(HC-6) for the excess names, not a partial silent spawn; `spawn_timeout_secs
+= 600` (§8.4 above); `idle_timeout_secs = 1800` — a subagent with no
+`message_agent` traffic for this long is reaped (ended, §3.1
+`SubagentEnded{reason: "idle timeout"}`) as a resource safety valve distinct
+from the spawn timeout, which bounds only the *first* call.
+- **Lifecycle and crash honesty (extends HC-3).** `end_agent` (T-21) drops
+the subagent engine task and its channels; every subagent still alive when
+the owning session ends is ended with it (its transcript's `session_end` is
+written exactly as the parent's is). On process crash or restart, subagent
+engine tasks are gone with the process (they hold no cross-process state);
+the parent session's own resume (§3.3) does **not** attempt to reconstruct
+or reconnect them — a `message_agent`/`list_agents` call against a
+pre-crash id returns the structured "no such agent" failure of Requirements
+FR-9, and the model may re-spawn. Reconnecting a live subagent across a
+resume is deferred (Requirements §2.2).
+- **Cost accounting.** Each subagent engine tracks its own `TokenUsage`/cost
+exactly as any engine does (§4.4); `SubagentManager` adds each subagent's
+usage into the **parent session's** running totals as it accrues (the same
+`SessionUsage`/`CostEstimate` events, §3.1) so a delegated task's spend is
+never a side channel (Requirements FR-9). Per-subagent detail remains
+available via the inspector; whether it also shows inline in the sidebar
+entry is a Design choice (Design Guideline §13, open).
+
 ## 9. TUI (`emberly-tui`)
 
 - `ratatui` + `crossterm`. Layout per Design §3: main pane, collapsible
@@ -1010,6 +1160,16 @@ the tool-result payload; untrusted-folder memory/skills are simply absent.
 - **Web results (Design §4.10):** the `web_search` tool result renders as a
 list of `{title, url, snippet}` explicitly styled as untrusted fetched web
 content with visible source URLs — never harness or assistant voice.
+- **Agents (Design §3.1/§4.13):** sidebar Agents section lists currently
+alive subagents from `SubagentSpawned`/`SubagentStatus`/`SubagentEnded`
+(§3.1, §8.4), present only while at least one is alive; selecting one sends
+`Command::InspectAgent` and renders the returned `AgentActivity` as a
+read-only, live-updating overlay (§4.2 pattern) — the subagent's own
+assistant text and tool activity, never streamed into the main pane.
+`spawn_agents`/`message_agent`/`end_agent` tool lines carry the subagent
+name (Design §4.13); a permission prompt raised by a subagent's own tool
+call carries its `PermissionRendering`'s new optional `on_behalf_of: Option<String>` field (§8.4) as one dimmed line, with no other change to the
+prompt (Design §5).
 - **Mouse (Design §3.4):** `crossterm` `EnableMouseCapture` gated on
 `ui.mouse` and rich mode — a single control point (like the §6.4 animation
 ticker) so capture is off whenever `ui.mouse = false`, degraded mode, or
@@ -1109,6 +1269,17 @@ The 0.4.2 feature set adds **no new dependencies**: guided provider setup
 the reformatting tradeoff, §8) and the existing `LineEditor`/`Choices` TUI
 primitives (§9) for the wizard's screens. `emberly-sandbox` is untouched.
 
+The 0.5 feature set adds **no new dependencies**: the multi-agent subsystem
+(FR-9, §8.4) is `emberly-core`/`emberly-tools` composition over already-locked
+crates — `tokio::spawn` and `tokio::time::timeout` (already in use for the
+existing single engine task and the bash tool's timeout, §2/§5.2) drive
+concurrent subagent engines, and `futures::future::join_all` is a new call
+against `futures`, already a direct `emberly-core` dependency (used by
+`turn.rs`'s stream draining, §3). `emberly-sandbox` is untouched — a
+subagent's tool calls run under the same confinement as the primary agent's,
+proxied through the same root-owned rule engine (§8.4), never a second
+sandbox configuration.
+
 Policy (Requirements §10): additions require `cargo vet` acceptance;
 `cargo deny` (licenses, duplicates, advisories) + `cargo geiger` report
 in CI; `emberly-sandbox` additions require explicit owner sign-off.
@@ -1204,6 +1375,29 @@ test suite incl. degraded-mode and Thai-fixture tests, `cargo deny`,
    each resolution (`resume`/`steer`/`stop`/`finish`) behaving correctly and
    `finish` recording `override: true`; and an inert gate (no registered checks)
    leaving loop termination unchanged (S-6).
+9. **0.5 feature coverage** (offline via `FakeProvider` where possible): a
+  `spawn_agents` concurrency test asserting N subagents given in one call
+   genuinely overlap in wall-clock time (not serialized) and the call returns
+   once every one reaches its first stop, each tagged with its id and answer
+   (T-18, FR-9); a `message_agent` round trip against a still-alive subagent
+   id, and a structured failure for an unknown/ended id (T-19); a tool-ceiling
+   test asserting a subagent's registry never contains the four multi-agent
+   tools themselves (the depth bound, FR-9) and never a name absent from the
+   parent's own registry even when explicitly requested; a permission-proxy
+   test asserting a subagent's `authorize()` call reaches the **root**
+   engine's `RuleEngine` (an existing session grant already covers a
+   subagent's action without a second prompt, and a genuinely new one queues
+   behind whatever prompt is currently showing, tagged with the subagent's
+   name) rather than consulting an independent rule state; a `max_concurrent`
+   ceiling test asserting a spawn attempt over the limit returns a structured
+   failure for the excess names only (HC-6); a spawn-timeout test asserting a
+   slow subagent is reported `still running` rather than canceled and remains
+   addressable afterward; a crash/resume test asserting a `message_agent`/
+   `list_agents` call against a pre-restart subagent id returns the structured
+   "no such agent" failure rather than hanging or panicking (the HC-3
+   honesty clause made a test); and a cost-rollup test asserting a
+   subagent's token usage lands in the owning session's `SessionUsage`/
+   `CostEstimate` totals (P-6, FR-9).
 
 Agent *quality* evaluation (does it code well) is explicitly out of
 scope for this spec — post-release discipline with separate tooling.
@@ -1260,8 +1454,60 @@ the 0.4.3 scope: the model has disposable, harness-owned working space that
 costs no permission prompt and never lands in the user's tracked project,
 and the user can reclaim it on demand — with no widening of HC-4 and no new
 dependency.*
+M12 — 0.5 feature set: the multi-agent subsystem (FR-9) — spawning one or
+more subagents concurrently (T-18), conversing with a specific one across
+further calls (T-19), enumerating (T-20) and ending (T-21) them — built as
+nested `Engine` instances driven by a headless `SubagentManager` frontend,
+with permission/sandbox/workspace-trust enforcement proxied through the
+root engine so no subagent runs under a weaker safety posture than the
+session itself. *Proves the 0.5 scope: the primary agent can delegate
+bounded, independent, fully-audited work to subagents — in parallel where
+it fans out, addressable across turns where it doesn't — without a second
+implementation of the engine loop, a second safety model, or a single new
+dependency.*
 
 ## 16. Open Items
+
+**v0.13 (2026-08-15, 0.5 feature set).** The multi-agent subsystem, absorbed
+as FR-9/T-18–T-21, lands as `emberly-core`/`emberly-tools` composition with
+**no new dependencies** (§12) — a subagent is a nested `Engine` instance
+driven by a new headless `SubagentManager` frontend rather than a second
+engine implementation, with its permission gate proxied through the root
+engine so `emberly-sandbox` needs no change and no subagent runs under
+weaker enforcement than the session itself (§8.4). New IDs realized: FR-9
+(multi-agent subsystem, §8.4), T-18 (`spawn_agents`, §8.4), T-19
+(`message_agent`, §8.4), T-20 (`list_agents`, §8.4), T-21 (`end_agent`,
+§8.4). Three new `UiEvent` variants (`SubagentSpawned`/`SubagentStatus`/
+`SubagentEnded`, §3.1) and one new `PermissionRendering` field
+(`on_behalf_of`, §8.4) are additive, and no new `TranscriptEvent` variant is
+needed at the primary session's level (spawn/message/list/end are ordinary
+`tool_call`/`tool_result` pairs, §3.2) — no `SCHEMA_VERSION` bump. Minor,
+additive bump; Requirements bumped to v0.11 and Design to v0.11 in lockstep
+(pins refreshed).
+
+Open items introduced by the 0.5 scope:
+
+- **Resource-bound defaults (FR-9, §8.4, Requirements §13 open question).**
+`max_concurrent = 3`, `spawn_timeout_secs = 600`, and `idle_timeout_secs =
+1800` are placeholders; tune with real multi-agent sessions so the ceiling
+stops a runaway fan-out without cutting off genuinely long-running
+delegation.
+- **Independent per-subagent tuning (FR-9, §8.4).** v0.5 copies the parent's
+`LoopConfig`/`CompletionConfig`/`ContextConfig` onto every subagent at spawn
+time; whether a subagent should ever get its own independently-tuned
+guardrail/completion-gate/window settings (e.g. a stricter loop guardrail
+for an untrusted delegated task) is deferred to a tune-with-use pass.
+- **Per-subagent cost display (FR-9, §8.4, Design Guideline §10 open
+question).** Cost rolls into the session total unconditionally (built); the
+sidebar Agents entry showing per-subagent cost inline versus only on
+inspection is a Design decision still open.
+- **The Hugging Face / local-inference-server request is not absorbed this
+version.** See Requirements §2.2/§13 and Design (unchanged) — the harness's
+existing endpoint-configurable provider profiles (P-8) already reach such a
+server at zero Tech Spec cost once one exists; whether Emberly Code
+additionally gains a thin, provider-agnostic CLI process-management
+convenience is an owner decision to make before any Tech Spec content is
+drafted for it.
 
 **v0.11 (2026-07-30, 0.4.3 feature set).** Session scratch space, absorbed as
 FR-8/T-17, lands as tool-layer + binary logic with **no new dependencies**

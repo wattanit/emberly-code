@@ -1,11 +1,11 @@
 # Emberly Code — Design Guideline
 
-**Version:** 0.10 
+**Version:** 0.11 
 **Status:** approved
-**Date:** 2026-07-30
+**Date:** 2026-08-15
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.10 (upstream), Technical
-Specification v0.12 (downstream — this document constrains it)
+**Companion documents:** Requirements Document v0.11 (upstream), Technical
+Specification v0.13 (downstream — this document constrains it)
 
 This document defines how Emberly Code looks, feels, and speaks. It is the
 second of three project documents. Where a decision here has technical
@@ -124,13 +124,16 @@ activity, diffs, permission prompts. This pane owns scrollback.
     exists: each item on its own line with a status glyph (§4.7), the
      in-progress item lightly accented. Absent when the model has not opened
      a list; never an empty stub.
-  7. Extension sections — **Memory**, **Skills**, MCP, LSP — each rendered
-    only when its subsystem exists and has content. Memory (Requirements
-     FR-6) and Skills (Requirements FR-7) become real in this version:
-     Memory shows a count and opens an entry inspector (§4.9); Skills lists
-     the available skills by name and origin (§4.9). MCP and LSP remain
-     absent, not shown as empty "None" stubs. The layout reserves the
-     pattern, not the pixels.
+  7. Extension sections — **Memory**, **Skills**, **Agents**, MCP, LSP — each
+    rendered only when its subsystem exists and has content. Memory
+     (Requirements FR-6) and Skills (Requirements FR-7) became real in the 0.4
+     feature set: Memory shows a count and opens an entry inspector (§4.9);
+     Skills lists the available skills by name and origin (§4.9). **Agents**
+     (Requirements FR-9) becomes real in this version: it lists currently
+     alive subagents by name and status, absent entirely when none are alive
+     — never an empty "Agents (0)" stub — and each entry opens a per-agent
+     inspector (§4.13). MCP and LSP remain absent, not shown as empty "None"
+     stubs. The layout reserves the pattern, not the pixels.
 - **Status line** (bottom, one line): current mode (normal /
 auto-accept-edits / auto), context %, and 3–5 contextual keybinding
 hints in dimmed text. Hints change with state (e.g. during a permission
@@ -419,6 +422,53 @@ gate the write. It is otherwise ordinary tool activity: it may carry a §4.5
 explanation when the model supplied one, and degraded mode (§7) renders it
 ASCII-only like any other tool line.
 
+### 4.13 Subagents in the flow
+
+A subagent (Requirements FR-9, T-18–T-21) is delegated work, not a second
+voice in the room: its activity surfaces as **quiet, ordinary tool
+activity**, the same register as memory, skills, and scratch writes (§4.9,
+§4.12) — never a second live-streamed conversation competing with the
+primary agent's own text for the user's attention. Calm under load (§1.2)
+applies most exactly when several subagents are running at once.
+
+- **Spawn, message, and end read as one-line events.** `spawn_agents` reads
+like `agents · spawned "db-migration", "test-writer" · running`; a reply
+from `message_agent` reads like `agent · db-migration · replied`; `end_agent`
+reads like `agent · db-migration · ended`. Each may carry a §4.5 explanation
+when the model supplied one. None of these is a harness-voice moment — the
+model is using its own delegated workers, shown without weight, exactly as
+§4.9 already establishes for memory and skills.
+- **No raw concurrent streaming.** When several subagents run at once
+(a batch spawn, §5), their individual assistant text does *not* stream into
+the main pane — that would turn the conversation into an illegible braid of
+interleaved voices. The main pane shows only the one-line events above; a
+subagent's full turn-by-turn activity is available on demand.
+- **Inspectors, not black boxes (extends §4.9).** The sidebar's Agents
+section (§3.1) lists every currently alive subagent; selecting one opens a
+read-only, live-updating overlay (the §4.2 pattern) showing that subagent's
+own conversation as it happens — its assistant text, its tool calls, and
+its own tool-activity lines — so "what is this delegate actually doing" is
+always inspectable, never assumed. A subagent that has ended keeps its
+inspector reachable for the rest of the session so its work is reviewable
+after the fact, not just while live.
+- **Permission prompts name their subagent.** When a subagent's own tool
+call raises a permission prompt (Requirements FR-9 — the same rule/sandbox
+model as the primary agent, §5), the prompt carries one additional dimmed
+line naming which subagent is asking — e.g. "on behalf of subagent
+db-migration" — so the user is never asked to approve an action without
+knowing who it's for. This is an addition to, never a dilution of, the
+ordinary permission prompt: no new styling, no reserved-band treatment,
+the same Deny-default and forbidden patterns as §5 apply unchanged.
+- **A timed-out or still-running spawn is a calm, one-line fact.** When
+`spawn_agents` returns with one or more subagents still running past the
+per-call timeout (Requirements T-18), the tool-result line for that
+subagent reads like `agent · test-writer · still running` rather than an
+error — a slower delegate is normal, not a failure, and it stays reachable
+via `message_agent`/`list_agents`.
+- Degraded mode (§7): the same one-line events, ASCII-only, exactly as
+memory/skill/scratch lines already degrade; the inspector overlay falls
+back the same way any overlay does in plain mode.
+
 ## 5. The Permission Prompt
 
 The most important screen in the product. It is where the safety model
@@ -447,6 +497,12 @@ always a deliberate, distinct key.
 - Every prompt shows *why* it appeared (which rule matched, or "outside
 project root") in one dimmed line — this teaches the permission model
 in situ.
+- **A subagent's request names the subagent (Requirements FR-9, §4.13).**
+When the action belongs to a subagent's own tool call rather than the
+primary agent's, the prompt carries one additional dimmed line naming which
+subagent is asking. Every other guarantee on this page — Deny default,
+full content, the forbidden patterns — holds exactly as if the primary
+agent had asked; a subagent earns no different treatment, easier or harder.
 
 ### 5.1 The question prompt (the model asking your opinion)
 
@@ -598,6 +654,13 @@ Neither relies on color, motion, or the pointer.
 provider setup (§4.6) is not offered in degraded mode; the same
 print-the-path-and-`/reload` pattern `/config`/`/prompt` already use there
 covers the same ground.
+- The 0.5 surface degrades like memory/skills/scratch before it: subagent
+spawn/message/end lines (§4.13) are plain ASCII tool-activity lines, a
+permission prompt raised on a subagent's behalf keeps its full capitalized
+guarantees with the subagent's name in the same plain dimmed line, and the
+per-agent inspector overlay degrades the same way any overlay does in plain
+mode. No 0.5 feature relies on color, motion, or the pointer to carry
+meaning.
 - Degraded mode is a supported, tested configuration, not a best-effort
 fallback.
 
@@ -784,6 +847,31 @@ that confirmation is a plain question with a plain `y`/`n` answer, matching
 the trust prompt's tone (§8.4) — not a scary dialog for what is, after all,
 disposable working space.
 
+### 8.9 Delegating to a subagent
+
+Spawning and conversing with a subagent (Requirements FR-9, §4.13) is the
+one 0.5 moment that could, mishandled, feel like losing sight of what the
+agent is doing — so it stays legible at every step, in keeping with §1.2's
+transparency.
+
+- **A batch spawn is one calm block, not a wall of chatter.** When the
+primary agent spawns several subagents in one call (T-18), the main pane
+shows one line per subagent as each reaches its own first stop — "running,"
+then a result or "still running" — never a flood of interleaved streaming
+text (§4.13).
+- **The sidebar Agents count is the at-a-glance answer to "what's still
+going."** Exactly like Tasks (§4.7) and the completion-gate status (§8.7),
+it is present only while at least one subagent is alive and disappears
+quietly when the last one ends — never a lingering "Agents (0)."
+- **Ending a subagent is quiet, not a confirmation dialog.** `end_agent`
+(T-21) reads as an ordinary one-line tool event (§4.13); a session ending
+with subagents still alive ends them silently along with it — this is
+expected cleanup, not a moment the user is interrupted to confirm.
+- **A subagent's own permission prompts feel like the session's own**, just
+labeled (§5) — the user is never asked to context-switch into "now I'm
+approving for a delegate" versus "now I'm approving for the main agent";
+it is one continuous safety model with one added fact per prompt.
+
 ## 9. Design-Driven Requirements Feedback
 
 Decisions in this document that add to or refine the Requirements doc,
@@ -873,6 +961,20 @@ a labeled reference line (file · size · format), never in-terminal rendering a
 never a page count or extracted text, since the harness passes the document
 unparsed. The Tech Spec absorbs the read-document surface as a reference, not
 content.
+- **Subagent activity is quiet tool activity, never live-concurrent streaming**
+(§4.13) — realizes Requirements FR-9 as one-line spawn/message/end events
+matching the memory/skill/scratch register (§4.9/§4.12), with a per-agent
+inspector overlay carrying the full turn-by-turn detail on demand. The Tech
+Spec absorbs "no raw text streaming from a subagent to the main pane" as an
+event-routing decision, not just a rendering choice.
+- **Permission prompts gain a subagent-provenance line, never a new prompt type**
+(§5, §4.13) — refines Requirements FR-9: a subagent's action is asked for
+through the exact same prompt, guarantees, and defaults as the primary
+agent's, with one added dimmed line naming the subagent. The Tech Spec
+absorbs the provenance field on the permission-rendering payload.
+- **The sidebar Agents section is present only while a subagent is alive**
+(§3.1, §8.9) — extends the established "no empty stub" rule (Tasks, Memory,
+Skills, the completion gate) to Requirements FR-9.
 
 ## 10. Open Questions
 
@@ -902,6 +1004,12 @@ modifier (§3.4). Lean to the latter until a real need appears.
 - Completion-gate halt wording and how the registered-checks status reads in the
 sidebar (§8.7) — candidate lines are examples; tune against real gated sessions
 so the halt informs without nagging when a check fails repeatedly.
+- Exact wording for the spawn/message/end tool-activity lines and the
+"still running" note past a spawn timeout (§4.13, §8.9) — candidate lines
+are examples; tune against real multi-agent sessions.
+- Whether the Agents sidebar entry shows a subagent's own token/cost usage
+inline, or only on opening its inspector (§4.13, Requirements §13 — Design
+resolves this one). Tune with use once real sessions exist.
 
 Resolved since v0.4: reasoning-trail default view — `collapsed` (§4.4,
 owner); tool-call explanation line — on by default, config-defeatable
@@ -938,3 +1046,20 @@ agent-world content the model reacts to, and the bounded-attempt halt is a
 harness-voice moment offering keep-going / steer / stop / finish-anyway, where
 "finish anyway" is a deliberate, transcript-recorded user override of a red gate
 (§8.7). Both degrade to plain, tested, meaning-preserving output (§7).
+
+Resolved since v0.11 (0.5 feature set): the multi-agent subsystem is given
+feel under the same calm-and-honest rules as memory, skills, and scratch
+writes before it. Subagent spawn/message/end events render as one-line
+quiet tool activity (§4.13), never raw concurrent text streamed into the
+main pane — chosen deliberately over a multi-pane live view (which the
+Requirements deferred, §2.2) because interleaving several assistants'
+streaming text in one pane would break "calm under load" (§1.2) long before
+it became genuinely useful. A subagent's own full activity is always
+available via a per-agent inspector overlay, the same "inspectors, not
+black boxes" pattern already established for memory and skills (§4.9). A
+subagent's permission prompts reuse the ordinary prompt verbatim with one
+added provenance line — deliberately not a new prompt type or the reserved
+safety band, matching how web-search (§5.2) and completion checks already
+avoid diluting that band. The sidebar Agents section follows the
+established no-empty-stub rule. Degrades to plain, tested, meaning-
+preserving output (§7).
