@@ -155,6 +155,16 @@ pub enum OverlayContent {
         skills: Vec<SkillMeta>,
         selected: usize,
     },
+    /// The Agents inspector (`/agents`, FR-9, Design §3.1/§4.13): currently
+    /// alive subagents as a selectable list; Enter fetches the selected
+    /// subagent's own activity to view **read-only** (`Command::InspectAgent`).
+    /// Mirrors `SkillList` exactly — the list is already cached in
+    /// `App::agents`, so opening it needs no engine round-trip; only a
+    /// selected entry's activity is fetched on demand.
+    AgentList {
+        agents: Vec<AgentSummary>,
+        selected: usize,
+    },
 }
 
 /// Whether an inspector body-fetch is for read-only viewing or for editing
@@ -625,6 +635,7 @@ pub struct App {
 // sibling's, so a method called from another of these modules is marked
 // `pub(super)`.
 mod actions;
+mod agents;
 mod anim;
 mod events;
 mod keys;

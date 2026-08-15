@@ -193,6 +193,16 @@ impl LineRenderer {
             } => {
                 self.render_skill_body(name, *origin, body, resources, out)?;
             }
+            // Agents inspector activity, degraded form (FR-9, §4.13): the same
+            // read-only inline text as a skill body — a snapshot as of the
+            // subagent's last transcript flush, never a black box.
+            UiEvent::AgentActivity { name, text, .. } => {
+                writeln!(out, "\n--- agent: {name} ---")?;
+                for line in text.lines() {
+                    writeln!(out, "{line}")?;
+                }
+                writeln!(out, "---")?;
+            }
             UiEvent::CompactionStatus { message } => {
                 // Same harness voice as `Notice` (Design §8.2) — plain mode
                 // has no sidebar/status line, so this is the only surface
@@ -450,6 +460,32 @@ fn render_skill_list(skills: &[SkillMeta], out: &mut impl Write) -> io::Result<(
     Ok(())
 }
 
+/// The currently alive subagents in degraded form (FR-9, Design §3.1/§4.13):
+/// `name (id)` per line, read-only inline text — same no-round-trip shape as
+/// [`render_skill_list`], since the list is cached state, not an event.
+fn render_agent_list(agents: &[crate::app::AgentSummary], out: &mut impl Write) -> io::Result<()> {
+    use crate::strings::agents as a;
+    writeln!(out)?;
+    if agents.is_empty() {
+        writeln!(out, "{}", a::EMPTY)?;
+        return Ok(());
+    }
+    for agent in agents {
+        writeln!(out, "  {} ({})", agent.name, agent.id)?;
+    }
+    Ok(())
+}
+
+/// Resolve `/agents <name-or-id>` against the cached alive list — by name
+/// first, then by id, so either the human label or the exact `agent-N` works.
+fn resolve_agent(query: &str, agents: &[crate::app::AgentSummary]) -> Option<String> {
+    agents
+        .iter()
+        .find(|a| a.name == query)
+        .or_else(|| agents.iter().find(|a| a.id == query))
+        .map(|a| a.id.clone())
+}
+
 /// Resolve a memory entry name to its scope from the last-listed entries (user
 /// first, then project). `None` when the name is unknown — the plain frontend
 /// asks the user to `/memory` first so the list is current.
@@ -583,6 +619,7 @@ struct LineState {
     skills: Vec<SkillMeta>,
     mem_user: Vec<EntrySummary>,
     mem_project: Vec<EntrySummary>,
+    agents: Vec<crate::app::AgentSummary>,
 }
 
 /// What the driver should do with a typed `/command`.
@@ -742,6 +779,27 @@ fn on_slash(input: &str, state: &LineState, out: &mut impl Write) -> io::Result<
                 })
             }
         }
+        // The alive-subagent list is standing state (cached from
+        // SubagentSpawned/SubagentEnded), so listing needs no round trip; a
+        // named subagent's activity is fetched read-only (§4.13), same shape
+        // as `/skills`.
+        AppCommand::Agents => {
+            if args.is_empty() {
+                render_agent_list(&state.agents, out)?;
+                LineAction::Done
+            } else {
+                match resolve_agent(args, &state.agents) {
+                    Some(id) => LineAction::Send(Command::InspectAgent { id }),
+                    None => {
+                        writeln!(
+                            out,
+                            "no subagent named or id '{args}' — run /agents to list"
+                        )?;
+                        LineAction::Done
+                    }
+                }
+            }
+        }
         // Rich-only commands are refused by the `plain` check above; naming them
         // here keeps this match exhaustive, so a new command cannot be added
         // without deciding what line mode does with it.
@@ -798,6 +856,7 @@ pub async fn run(
         skills: Vec::new(),
         mem_user: Vec::new(),
         mem_project: Vec::new(),
+        agents: Vec::new(),
     };
     let mut renderer = LineRenderer::new(reasoning_view);
     let mut stdout = io::stdout();
@@ -852,6 +911,16 @@ pub async fn run(
                         UiEvent::MemoryEntries { user, project } => {
                             state.mem_user = user;
                             state.mem_project = project;
+                        }
+                        // Mirrors the rich TUI's sidebar cache (App.agents):
+                        // pushed/retained incrementally, not a full-replace
+                        // list, since there is no "AgentsAvailable" snapshot
+                        // event (Tech Spec §8.4).
+                        UiEvent::SubagentSpawned { id, name, .. } => {
+                            state.agents.push(crate::app::AgentSummary { id, name });
+                        }
+                        UiEvent::SubagentEnded { id, .. } => {
+                            state.agents.retain(|a| a.id != id);
                         }
                         _ => {}
                     }
@@ -947,6 +1016,7 @@ mod tests {
             skills: Vec::new(),
             mem_user: Vec::new(),
             mem_project: Vec::new(),
+            agents: Vec::new(),
         }
     }
 
@@ -1704,6 +1774,83 @@ mod tests {
         assert!(String::from_utf8(empty)
             .unwrap_or_default()
             .contains("no skills available"));
+    }
+
+    #[test]
+    fn agent_activity_renders_inline_read_only() {
+        let out = render_to_string(&UiEvent::AgentActivity {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            text: "user: review this diff\nassistant: looks good".into(),
+        });
+        assert!(out.contains("agent: reviewer"), "header: {out:?}");
+        assert!(out.contains("looks good"));
+        assert!(!out.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn agent_list_renders_name_id_and_empty() {
+        let agents = vec![
+            crate::app::AgentSummary {
+                id: "agent-1".into(),
+                name: "reviewer".into(),
+            },
+            crate::app::AgentSummary {
+                id: "agent-2".into(),
+                name: "tester".into(),
+            },
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(render_agent_list(&agents, &mut buf).is_ok());
+        let out = String::from_utf8(buf).unwrap_or_default();
+        assert!(out.contains("reviewer (agent-1)"), "{out:?}");
+        assert!(out.contains("tester (agent-2)"), "{out:?}");
+        assert!(!out.contains('\u{1b}'));
+
+        let mut empty: Vec<u8> = Vec::new();
+        assert!(render_agent_list(&[], &mut empty).is_ok());
+        assert!(String::from_utf8(empty)
+            .unwrap_or_default()
+            .contains("no subagents are currently alive"));
+    }
+
+    #[test]
+    fn resolve_agent_matches_by_name_then_id() {
+        let agents = vec![
+            crate::app::AgentSummary {
+                id: "agent-1".into(),
+                name: "reviewer".into(),
+            },
+            crate::app::AgentSummary {
+                id: "agent-2".into(),
+                name: "tester".into(),
+            },
+        ];
+        assert_eq!(resolve_agent("reviewer", &agents), Some("agent-1".into()));
+        assert_eq!(resolve_agent("agent-2", &agents), Some("agent-2".into()));
+        assert_eq!(resolve_agent("nope", &agents), None);
+    }
+
+    #[test]
+    fn agents_slash_lists_then_resolves_a_name() {
+        let mut state = state();
+        state.agents = vec![crate::app::AgentSummary {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+        }];
+        let (out, action) = slash_in(&state, "agents");
+        assert!(out.contains("reviewer (agent-1)"));
+        assert!(matches!(action, LineAction::Done));
+
+        let (_, action) = slash_in(&state, "agents reviewer");
+        match action {
+            LineAction::Send(Command::InspectAgent { id }) => assert_eq!(id, "agent-1"),
+            _ => panic!("expected InspectAgent"),
+        }
+
+        let (out, action) = slash_in(&state, "agents nope");
+        assert!(out.contains("no subagent named or id 'nope'"));
+        assert!(matches!(action, LineAction::Done));
     }
 
     #[test]

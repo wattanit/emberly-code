@@ -2108,3 +2108,122 @@ fn skills_inspector_esc_dismisses() {
     assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
     assert!(a.overlays.is_empty());
 }
+
+// ---- Agents inspector (`/agents`, FR-9, Design §3.1/§4.13) -------------
+
+#[test]
+fn subagent_spawned_and_ended_events_maintain_the_alive_list() {
+    let mut a = app();
+    a.apply_event(UiEvent::SubagentSpawned {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        profile: "default".into(),
+        model: "m".into(),
+    });
+    assert_eq!(a.agents.len(), 1);
+    assert_eq!(a.agents[0].id, "agent-1");
+    assert_eq!(a.agents[0].name, "reviewer");
+    a.apply_event(UiEvent::SubagentEnded {
+        id: "agent-1".into(),
+        reason: "done".into(),
+    });
+    assert!(
+        a.agents.is_empty(),
+        "ended subagent is removed from the list"
+    );
+}
+
+#[test]
+fn agents_command_opens_inspector_from_cached_list() {
+    let mut a = app();
+    a.agents = vec![
+        crate::app::AgentSummary {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+        },
+        crate::app::AgentSummary {
+            id: "agent-2".into(),
+            name: "tester".into(),
+        },
+    ];
+    // No engine round-trip — the alive list is already cached.
+    assert_eq!(a.run_slash("agents"), Action::None);
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentList { agents, selected }) => {
+            assert_eq!(agents.len(), 2);
+            assert_eq!(agents[0].id, "agent-1");
+            assert_eq!(*selected, 0);
+        }
+        other => panic!("expected AgentList overlay, got {other:?}"),
+    }
+    assert_eq!(a.run_command(AppCommand::Agents), Action::None);
+    assert!(commands::COMMANDS.iter().any(|c| c.name == "agents"));
+}
+
+#[test]
+fn agents_enter_issues_inspect_for_the_selected_agent() {
+    let mut a = app();
+    a.agents = vec![
+        crate::app::AgentSummary {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+        },
+        crate::app::AgentSummary {
+            id: "agent-2".into(),
+            name: "tester".into(),
+        },
+    ];
+    a.run_command(AppCommand::Agents);
+    a.on_key(key(KeyCode::Down)); // select agent-2
+    assert_eq!(
+        a.on_key(key(KeyCode::Enter)),
+        Action::Command(Command::InspectAgent {
+            id: "agent-2".into(),
+        })
+    );
+}
+
+#[test]
+fn agent_activity_opens_a_read_only_overlay() {
+    let mut a = app();
+    a.agents = vec![crate::app::AgentSummary {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+    }];
+    a.run_command(AppCommand::Agents);
+    a.on_key(key(KeyCode::Enter));
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        text: "user: review this diff\nassistant: looks good".into(),
+    });
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::Text(body)) => {
+            assert!(body.contains("looks good"));
+        }
+        other => panic!("expected a Text overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn agents_empty_list_opens_an_empty_overlay() {
+    let mut a = app();
+    a.agents.clear();
+    a.run_command(AppCommand::Agents);
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentList { agents, .. }) => assert!(agents.is_empty()),
+        other => panic!("expected an empty AgentList overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn agents_inspector_esc_dismisses() {
+    let mut a = app();
+    a.agents = vec![crate::app::AgentSummary {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+    }];
+    a.run_command(AppCommand::Agents);
+    assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
+    assert!(a.overlays.is_empty());
+}

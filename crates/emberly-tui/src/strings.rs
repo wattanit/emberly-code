@@ -184,6 +184,18 @@ pub mod skills {
     pub const HINT: &str = " Enter view · ↑↓ move · Esc close";
 }
 
+/// The Agents inspector (FR-9, Design §4.13) — mirrors `skills`'s shape: a
+/// selectable list, Enter opens a read-only body on top (a subagent's own
+/// activity, not an instruction to inspect before it runs, but the same
+/// "inspectors, not black boxes" pattern).
+pub mod agents {
+    pub const TITLE: &str = "agents";
+    /// Shown when no subagents are currently alive.
+    pub const EMPTY: &str = "(no subagents are currently alive)";
+    /// The action hint at the foot of the inspector.
+    pub const HINT: &str = " Enter view activity · ↑↓ move · Esc close";
+}
+
 /// Keybinding hints for the status bar (Design §3.1, §6.2 — 2–5 words each).
 /// Hints change with state; the permission set is shown while a prompt is open.
 pub mod hints {

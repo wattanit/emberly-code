@@ -261,6 +261,11 @@ impl App {
                 self.set_skill_selection(row);
                 self.on_skills_inspector_key(KeyEvent::from(KeyCode::Enter))
             }
+            ClickTarget::AgentRow(row) => {
+                // Focus + Enter on the Agents inspector (read-only activity view).
+                self.set_agent_selection(row);
+                self.on_agents_inspector_key(KeyEvent::from(KeyCode::Enter))
+            }
             ClickTarget::ReasoningToggle => {
                 // Exactly the Ctrl+R action — toggle the most recent trail.
                 self.toggle_reasoning();
@@ -278,6 +283,10 @@ impl App {
             ClickTarget::OpenSkillsInspector => {
                 // Exactly the `/skills` action.
                 self.run_command(AppCommand::Skills)
+            }
+            ClickTarget::OpenAgentsInspector => {
+                // Exactly the `/agents` action.
+                self.run_command(AppCommand::Agents)
             }
             ClickTarget::PermissionChoice(choice) => {
                 // Reuse `on_permission_key` EXACTLY (Design §3.4/§5): a click on
@@ -336,6 +345,12 @@ impl App {
             Some(OverlayContent::SkillList { .. })
         ) {
             return self.on_skills_inspector_key(key);
+        }
+        if matches!(
+            self.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::AgentList { .. })
+        ) {
+            return self.on_agents_inspector_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {

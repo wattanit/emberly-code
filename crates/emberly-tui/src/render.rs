@@ -200,6 +200,7 @@ enum RowKind {
     Session,
     Memory,
     Skill,
+    Agent,
 }
 
 impl RowKind {
@@ -209,6 +210,7 @@ impl RowKind {
             RowKind::Session => ClickTarget::SessionRow(row),
             RowKind::Memory => ClickTarget::MemoryRow(row),
             RowKind::Skill => ClickTarget::SkillRow(row),
+            RowKind::Agent => ClickTarget::AgentRow(row),
         }
     }
 }
@@ -323,6 +325,16 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect, hit
                 strings::skills::HINT.to_string(),
                 map,
                 Some(RowKind::Skill),
+            )
+        }
+        OverlayContent::AgentList { agents, selected } => {
+            let (lines, sel_line, map) = agent_list_lines(agents, *selected, theme);
+            (
+                lines,
+                Some(sel_line),
+                strings::agents::HINT.to_string(),
+                map,
+                Some(RowKind::Agent),
             )
         }
     };
@@ -587,6 +599,45 @@ fn skill_list_lines(
         }
         spans.push(Span::styled(format!("  ({origin})"), theme.chrome()));
         lines.push(Line::from(spans));
+        row_of_line.push(Some(i));
+    }
+    (lines, sel_line, row_of_line)
+}
+
+/// The Agents inspector's list body (FR-9, Design §4.13) — mirrors
+/// `skill_list_lines`'s shape (marker, name, dimmed id) with no origin/
+/// description, since a subagent has neither.
+fn agent_list_lines(
+    agents: &[crate::app::AgentSummary],
+    selected: usize,
+    theme: &crate::theme::Theme,
+) -> PickerLines {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut row_of_line: Vec<Option<usize>> = Vec::new();
+    if agents.is_empty() {
+        lines.push(Line::from(Span::styled(
+            strings::agents::EMPTY.to_string(),
+            theme.chrome(),
+        )));
+        row_of_line.push(None);
+        return (lines, 0, row_of_line);
+    }
+    let mut sel_line = 0;
+    for (i, agent) in agents.iter().enumerate() {
+        if i == selected {
+            sel_line = lines.len();
+        }
+        let marker = if i == selected { "▶ " } else { "  " };
+        let name_style = if i == selected {
+            theme.strong()
+        } else {
+            theme.primary()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(marker.to_string(), theme.accent()),
+            Span::styled(agent.name.clone(), name_style),
+            Span::styled(format!("  ({})", agent.id), theme.chrome()),
+        ]));
         row_of_line.push(Some(i));
     }
     (lines, sel_line, row_of_line)
@@ -899,6 +950,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
     let mut modified_range: Option<(usize, usize)> = None;
     let mut memory_range: Option<(usize, usize)> = None;
     let mut skills_range: Option<(usize, usize)> = None;
+    let mut agents_range: Option<(usize, usize)> = None;
 
     // Wordmark + version (Design §1.1): ember `emberly`, dimmed `code` + version.
     // While the model is working, the wordmark breathes — the ember glowing
@@ -1086,6 +1138,21 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
         skills_range = Some((start, lines.len())); // clickable → open /skills
     }
 
+    // Currently alive subagents (FR-9, Design §3.1/§4.13): name + id per
+    // entry. Present only while at least one is alive — the same
+    // no-empty-stub rule as Tasks/Memory/Skills (Design §3.1); the section
+    // simply does not appear once the last subagent ends.
+    if !app.agents.is_empty() {
+        lines.push(Line::from(""));
+        let start = lines.len();
+        lines.push(Line::from(Span::styled("Agents", theme.chrome())));
+        for agent in &app.agents {
+            let desc = format!("{} ({})", agent.name, agent.id);
+            lines.push(Line::from(Span::styled(fit(&desc, w), theme.primary())));
+        }
+        agents_range = Some((start, lines.len())); // clickable → open /agents
+    }
+
     // Render **without wrap** so each logical line is exactly one screen row
     // (ratatui truncates overflow) — this is what makes the sidebar's click
     // regions reliable (Design §3.4): line index `i` sits at screen row
@@ -1118,6 +1185,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
         push_section(modified_range, ClickTarget::OpenDiff);
         push_section(memory_range, ClickTarget::OpenMemoryInspector);
         push_section(skills_range, ClickTarget::OpenSkillsInspector);
+        push_section(agents_range, ClickTarget::OpenAgentsInspector);
     }
 }
 
@@ -2159,12 +2227,36 @@ mod tests {
             description: "d".into(),
             origin: SkillOrigin::User,
         });
+        app.agents.push(crate::app::AgentSummary {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+        });
         // Wide enough for the sidebar to show (>= COLLAPSE_BELOW).
         let hit = hit_map_of(&app, 120, 40);
         let has = |t: ClickTarget| (0..40).any(|y| (0..120).any(|x| hit.hit(x, y) == Some(t)));
         assert!(has(ClickTarget::OpenDiff), "modified files → open diff");
         assert!(has(ClickTarget::OpenMemoryInspector), "Memory → inspector");
         assert!(has(ClickTarget::OpenSkillsInspector), "Skills → inspector");
+        assert!(has(ClickTarget::OpenAgentsInspector), "Agents → inspector");
+    }
+
+    #[test]
+    fn agents_section_is_absent_while_no_subagent_is_alive() {
+        // The no-empty-stub rule (Design §3.1): the section simply does not
+        // appear until at least one subagent is alive.
+        let app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40)
+                .all(|y| (0..120).all(|x| hit.hit(x, y) != Some(ClickTarget::OpenAgentsInspector))),
+            "no Agents section without a live subagent"
+        );
     }
 
     #[test]

@@ -294,6 +294,9 @@ impl App {
             UiEvent::SubagentEnded { id, .. } => {
                 self.agents.retain(|a| a.id != id);
             }
+            UiEvent::AgentActivity { id: _, name, text } => {
+                self.apply_agent_activity(&name, text);
+            }
             UiEvent::MemoryEntries { user, project } => {
                 self.apply_memory_entries(user, project);
             }
