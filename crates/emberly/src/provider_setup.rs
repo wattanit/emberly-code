@@ -278,6 +278,7 @@ impl emberly_core::ConfigReloader for ConfiguredReloader {
             document_max_bytes: resolved.document_max_bytes,
             memory: resolved.memory.clone(),
             skills: resolved.skills.clone(),
+            agents: resolved.agents,
             tools,
             rule_specs,
             restart_notes,

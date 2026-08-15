@@ -1,15 +1,21 @@
 # Emberly Code — Implementation Plan (0.5 feature set)
 
-**Status:** 🚧 **in progress** — Phase 1 (tool-layer contract) is **done**
-(2026-08-15, branch `v0.5-phase1`, merged to `v0.5`). Phase 2 (engine
-machinery, branch `v0.5-phase2`) has its **core done and tested**
-(2026-08-15): the four multi-agent tools are fully functional end to end,
-including the load-bearing permission-proxy correctness property, proven by
-five real integration tests — see `docs/version-0-5/PHASE2_TODO.md` for the
-precise done/not-done split (TUI event plumbing, cost rollup, `[agents]`
-config-file reading, and idle reap remain). Phases 3–4 not started. This
-plan was written prospectively, before any code, the normal SFD order
-(unlike the 0.4.2/0.4.3 plans, which were written as-built after the fact).
+**Status:** 🚧 **in progress** — Phases 1 and 2 are **done**. Phase 1
+(tool-layer contract, 2026-08-15, branch `v0.5-phase1`) is merged to `v0.5`.
+Phase 2 (engine machinery, branch `v0.5-phase2`, 2026-08-15) is fully done:
+the four multi-agent tools are functional end to end — the load-bearing
+permission-proxy correctness property, a multi-turn spawn-then-message round
+trip, the tool ceiling and `max_concurrent` bound, the FR-9 cost-rollup
+honesty clause, the sidebar's `SubagentSpawned`/`SubagentEnded` events,
+`[agents]` config-file reading (including live `/config` reload), and idle
+reap — all proven by real integration tests (nine `FakeProvider`-driven
+tests plus supporting unit tests), not just unit tests against a stub gate.
+See `docs/version-0-5/PHASE2_TODO.md` for the full breakdown; the only
+things left out are `SubagentStatus` and the inspector's
+`Command::InspectAgent`/`UiEvent::AgentActivity`, which are genuinely Phase
+3's own scope. Phases 3–4 not started. This plan was written prospectively,
+before any code, the normal SFD order (unlike the 0.4.2/0.4.3 plans, which
+were written as-built after the fact).
 **Date:** 2026-08-15
 **Owner:** Wattanit
 **Source documents** (G-14 as-built pin for the 0.5 release):

@@ -24,16 +24,18 @@
 //! hands the actual waiting to a detached `tokio::spawn`ed task that holds no
 //! reference to `self` at all.
 //!
-//! **Known v0.5 scope cuts (honesty clauses, tracked in
-//! `docs/version-0-5/PHASE2_TODO.md`):**
-//! - `list_agents` reports every alive subagent as [`SubagentStatus::Running`]
-//!   — a live, round-tripped status (awaiting permission / done / timed out /
-//!   error) is designed for in the type but not wired up this phase.
-//! - `idle_timeout_secs` (`AgentsConfig`) is threaded through config but no
-//!   background reaper is wired into the run loop yet; only `end_agent` and
-//!   session end currently reclaim a subagent.
-//! - `[agents]` is not yet read from `config.toml`; `AgentsConfig::default()`
-//!   is used until that wiring lands.
+//! **Known v0.5 scope cut (honesty clause, tracked in
+//! `docs/version-0-5/PHASE2_TODO.md`):** `list_agents` reports every alive
+//! subagent as [`SubagentStatus::Running`] — a live, round-tripped status
+//! (awaiting permission / done / timed out / error) is designed for in the
+//! type but not wired up this phase.
+//!
+//! Idle reap (`AgentsConfig::idle_timeout_secs`) and `[agents]` config-file
+//! reading are both implemented: [`Engine::reap_idle_subagents`] runs off a
+//! periodic tick in the idle loop (`IDLE_REAP_CHECK_INTERVAL`, `engine::mod`)
+//! rather than the per-turn select this module's other handlers use — it has
+//! to fire even when the primary agent is doing nothing at all, which a
+//! `TurnChannels`-scoped select never sees.
 
 use tokio::sync::oneshot;
 
@@ -64,6 +66,10 @@ enum SubagentTurnOutcome {
 pub(super) struct SubagentInstance {
     name: String,
     turn_tx: mpsc::Sender<SubagentTurnRequest>,
+    /// Last time the primary agent interacted with this subagent (spawned
+    /// it, or sent it a further prompt) — what `idle_timeout_secs` measures
+    /// against (Tech Spec §8.4).
+    last_activity: tokio::time::Instant,
 }
 
 /// The multi-agent subsystem's own state (FR-9, Tech Spec §8.4): every
@@ -275,6 +281,35 @@ impl Engine {
         }
     }
 
+    /// End every subagent that has gone longer than `idle_timeout_secs`
+    /// without a `message_agent` call (Tech Spec §8.4) — called from the
+    /// idle loop's periodic tick (`IDLE_REAP_CHECK_INTERVAL`), so this fires
+    /// even when the primary agent itself is doing nothing at all, not only
+    /// during its own turns. Dropping a `SubagentInstance` cascades the same
+    /// clean shutdown as an explicit `end_agent` (see its own doc comment).
+    pub(super) async fn reap_idle_subagents(&mut self) {
+        if self.agents.instances.is_empty() {
+            return;
+        }
+        let timeout = std::time::Duration::from_secs(self.agents.config.idle_timeout_secs);
+        let now = tokio::time::Instant::now();
+        let expired: Vec<String> = self
+            .agents
+            .instances
+            .iter()
+            .filter(|(_, inst)| now.duration_since(inst.last_activity) >= timeout)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in expired {
+            self.agents.instances.remove(&id);
+            self.emit(UiEvent::SubagentEnded {
+                id,
+                reason: "idle timeout".into(),
+            })
+            .await;
+        }
+    }
+
     /// Spawn one or more subagents and hand back their first-turn results
     /// once every one finishes, times out, or fails (T-18). Fast: builds
     /// configs and kicks off tasks, then hands the actual waiting to a
@@ -359,13 +394,14 @@ impl Engine {
         req: SubagentMessageRequest,
         reply: oneshot::Sender<Result<SubagentMessageOutcome, SubagentError>>,
     ) {
-        let Some(instance) = self.agents.instances.get(&req.id) else {
+        let Some(instance) = self.agents.instances.get_mut(&req.id) else {
             let _ = reply.send(Ok(SubagentMessageOutcome::NotFound));
             return;
         };
+        instance.last_activity = tokio::time::Instant::now();
+        let turn_tx = instance.turn_tx.clone();
         let (turn_reply_tx, turn_reply_rx) = oneshot::channel();
-        if instance
-            .turn_tx
+        if turn_tx
             .send(SubagentTurnRequest {
                 text: req.message,
                 reply: turn_reply_tx,
@@ -465,6 +501,7 @@ impl Engine {
             SubagentInstance {
                 name: spec.name.clone(),
                 turn_tx,
+                last_activity: tokio::time::Instant::now(),
             },
         );
         self.emit(UiEvent::SubagentSpawned {

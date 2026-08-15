@@ -58,6 +58,13 @@ const TITLE_CLIP: usize = 60;
 /// or the model's max output, whichever is smaller (Tech Spec §7).
 const OUTPUT_RESERVE: u64 = 8_000;
 
+/// How often the idle loop checks alive subagents against
+/// `AgentsConfig::idle_timeout_secs` (Tech Spec §8.4). A fixed, coarse sweep
+/// interval — independent of the configured timeout itself — is simplest and
+/// keeps the check cheap; a subagent is reaped at most this long after it
+/// actually goes idle, never sooner.
+const IDLE_REAP_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The loop-breaking guardrail's tunables (S-5, Tech Spec §7). Defaults are
 /// initial — tune with use. `enabled = false` turns the guardrail off entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1338,7 +1345,24 @@ impl Engine {
             // start correct (P-9).
             self.emit_effort().await;
 
-            while let Some(command) = commands_rx.recv().await {
+            // A periodic tick alongside `commands_rx` is what makes idle-reap
+            // (Tech Spec §8.4, `idle_timeout_secs`) work even while genuinely
+            // idle (no user input at all) — a subagent's own proxied asks are
+            // already covered by `run_one_tool_call`'s own select (Tech Spec
+            // §8.4's module docs on `engine::subagents`), but that select only
+            // runs *during* a turn. `MissedTickBehavior::Delay` means a long
+            // turn never produces a burst of catch-up ticks afterward.
+            let mut idle_tick = tokio::time::interval(IDLE_REAP_CHECK_INTERVAL);
+            idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                let command = tokio::select! {
+                    cmd = commands_rx.recv() => cmd,
+                    _ = idle_tick.tick() => {
+                        self.reap_idle_subagents().await;
+                        continue;
+                    }
+                };
+                let Some(command) = command else { break };
                 match command {
                     Command::UserInput { text } => {
                         // No provider configured (C-7): refuse before it ever

@@ -605,10 +605,7 @@ async fn run() -> anyhow::Result<()> {
         skills: resolved.skills.clone(),
         user_skills_dir: config::skills_dir(),
         project_skills_dir: Some(project_skills_dir),
-        // `[agents]` is not yet read from config.toml (Tech Spec §8.4 Phase 2
-        // scope cut, tracked in docs/version-0-5/PHASE2_TODO.md); the
-        // in-code defaults apply until that wiring lands.
-        agents: emberly_core::AgentsConfig::default(),
+        agents: resolved.agents,
         // Both `None`: this is a top-level session, which owns its own
         // permission/ask-user state (the production path). Only a
         // subagent's derived config overrides these (Tech Spec §8.4).

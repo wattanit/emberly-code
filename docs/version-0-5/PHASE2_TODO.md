@@ -5,18 +5,20 @@
 §7 (config). Pinned to **Req v0.11 / Design v0.11 / Spec v0.13** (all
 `approved`). Depends on Phase 1 (the tools this phase makes real).
 
-**Status:** 🚧 **core + cost rollup + spawn/end events done and tested**
-(2026-08-15, branch `v0.5-phase2`) — `spawn_agents`/`message_agent`/
-`list_agents`/`end_agent` are fully functional, proven by seven real
-`FakeProvider`-driven integration tests (not just unit tests against a stub
-gate), including the FR-9 cost-rollup honesty clause and the
-`SubagentSpawned`/`SubagentEnded` sidebar events. What's **not** done this
-pass: `SubagentStatus` (a live per-subagent status, vs. the current uniform
-`Running`), the inspector's `Command::InspectAgent`/`UiEvent::AgentActivity`,
-idle-reap, and `[agents]` config-file reading — see "Not done this pass"
-below. None of these gaps affect correctness or safety; they're
-visibility/config-surface work, tracked
-honestly rather than silently deferred.
+**Status:** ✅ **done** (2026-08-15, branch `v0.5-phase2`) —
+`spawn_agents`/`message_agent`/`list_agents`/`end_agent` are fully
+functional, proven by nine real `FakeProvider`-driven integration tests (not
+just unit tests against a stub gate): the permission-proxy correctness
+property, a multi-turn spawn-then-message round trip, the tool-ceiling and
+`max_concurrent` bounds, unknown-id handling, the FR-9 cost-rollup honesty
+clause, the `SubagentSpawned`/`SubagentEnded` sidebar events, and idle reap
+(verified with a paused clock, not a real 60+-second wait). `[agents]` is
+now read from `config.toml` through the same tiered-merge/provenance
+machinery every other config section uses. What's genuinely **out of scope
+for Phase 2** (Phase 3's own dependency, not a gap in this phase):
+`SubagentStatus` (a live per-subagent status, vs. the current uniform
+`Running`) and the inspector's `Command::InspectAgent`/`UiEvent::AgentActivity`
+— see "Not done this pass" below.
 
 **Design correction discovered during implementation:** the plan named
 `ProxyPermissionGate` in `emberly-tools`. It actually landed as
@@ -165,12 +167,28 @@ next bump.
       ordinary Rust drop semantics, no explicit "kill" message anywhere**,
       and it's what makes "every subagent still alive at session end is
       ended with it" true for free, with no special-cased code.
-- [ ] **Idle reap not implemented this pass.** `idle_timeout_secs` is
-      threaded through `AgentsConfig` but nothing currently checks it —
-      only `end_agent` and session end reclaim a subagent. Needs a
-      background tick in the run loop (a genuinely separate, smaller piece
-      of work from everything else here); tracked as a Tech Spec §16 open
-      item already.
+- [x] **Idle reap, implemented and tested.** `Engine::run`'s outer idle loop
+      (`engine/mod.rs`) now selects on `commands_rx` *and* a
+      `tokio::time::interval` tick (`IDLE_REAP_CHECK_INTERVAL`, a fixed 60s
+      sweep — deliberately independent of the configured
+      `idle_timeout_secs`, which just sets the threshold the sweep checks
+      against). This had to land in the outer loop, not the per-turn
+      `TurnChannels` select `on_subagent_ask`'s other handlers use, because
+      it must fire even when the primary agent is doing nothing at all — a
+      `TurnChannels`-scoped check only runs *during* a turn. Each
+      `SubagentInstance` tracks `last_activity` (`tokio::time::Instant`,
+      not `std::time::Instant` — deliberately, so the paused-clock test
+      technique already used elsewhere in this codebase actually virtualizes
+      it); `reap_idle_subagents` ends anything past the threshold exactly
+      like an explicit `end_agent` (same drop cascade). Verified by
+      `idle_subagent_is_reaped_after_the_configured_timeout`
+      (`#[tokio::test(start_paused = true)]` + `tokio::time::advance` — no
+      real wait). **A real, if narrow, bug caught during implementation:**
+      the first draft used `std::time::Instant`, which a paused Tokio clock
+      does not virtualize at all — the test would have passed against real
+      wall-clock time but hung/failed under the paused-clock technique this
+      codebase already relies on elsewhere (`emberly-providers`'s SSE
+      idle-timeout tests). Caught before it shipped, not after.
 - [x] Crash/resume honesty **verified without an actual process restart**:
       `message_and_end_agent_on_unknown_id_are_structured_failures` proves
       an unknown id fails structured (HC-6), which is the same code path a
@@ -209,10 +227,17 @@ next bump.
 - [x] `AgentsConfig` (`enabled` default `true`, `max_concurrent` default
       `3`, `spawn_timeout_secs` default `600`, `idle_timeout_secs` default
       `1800`) exists and is threaded through `EngineConfig`/`Engine::new`.
-      **Not implemented this pass:** reading `[agents]` from `config.toml`
-      or wiring it into `reload_config`/`ReloadedConfig` — `main.rs`
-      currently passes `AgentsConfig::default()` unconditionally, documented
-      inline as a known gap.
+      **`[agents]` config-file reading, implemented and tested.** A new
+      `AgentsConfigFile` (all-optional, `emberly/src/config.rs`) follows the
+      exact `[loop]`/`[skills]` precedent: parsed, merged tier-by-tier
+      (project wins per key, exactly like `[loop]`), given `config show`
+      provenance lines, and resolved into `Resolved.agents` with the same
+      "engine owns the defaults" pattern every other section uses. Threaded
+      into both the startup `EngineConfig` (`main.rs`) *and* `reload_config`
+      (`ReloadedConfig.agents`, `engine/runtime_config.rs` compares and
+      applies it like every other tunable) — a `/config` reload picks up an
+      edited `[agents]` section live, not just at startup. Verified by
+      `agents_config_parses_and_merges` (`emberly/src/config.rs`).
 - [x] `max_concurrent` enforcement: verified by
       `spawn_agents_over_max_concurrent_fails_only_the_excess` — the excess
       names in an over-limit batch fail structured
@@ -234,17 +259,22 @@ next bump.
   honesty clause, with the exact dollar amount checked.
 - `spawn_and_end_agent_emit_their_sidebar_events` — `SubagentSpawned`/
   `SubagentEnded` carry the right id/name and fire at the right moments.
+- `idle_subagent_is_reaped_after_the_configured_timeout` — a paused-clock
+  test proving the periodic sweep fires and reaps correctly, no real wait.
 
 Plus new unit tests in `gate.rs` (Phase 1 additions extended):
 `subagent_permission_gate_tags_the_ask_with_its_label`,
-`the_root_gate_tags_no_subagent`, and fail-closed coverage for the new
-`SubagentAsk`/proxy gates.
+`the_root_gate_tags_no_subagent`, fail-closed coverage for the new
+`SubagentAsk`/proxy gates, and `agents_config_parses_and_merges`
+(`emberly/src/config.rs`) for `[agents]` config-file parsing/merging.
 
-**Done when:** ✅ `cargo build --workspace`, `cargo test --workspace` (673
+**Done when:** ✅ `cargo build --workspace`, `cargo test --workspace` (675
 tests, all passing), `cargo clippy --workspace --all-targets` (`-D
 warnings`), and `cargo fmt --check` (per touched crate) are all clean,
-confirmed 2026-08-15. `Cargo.lock`/`Cargo.toml` show zero diff — no new
-dependency, as planned. **Not done:** `SubagentStatus`/`InspectAgent`/
-`AgentActivity` (Phase 3's dependency), `[agents]` config-file reading, and
-idle reap — each called out explicitly rather than silently folded into
-"done."
+confirmed 2026-08-15. `Cargo.lock` shows zero diff; the only `Cargo.toml`
+change is enabling tokio's existing `test-util` feature for
+`emberly-core`'s dev-dependencies (needed for the paused-clock idle-reap
+test) — a compile-time feature flag on an already-present dependency, never
+shipped in the release binary, not a new dependency. **Not done:**
+`SubagentStatus`/`InspectAgent`/`AgentActivity` — genuinely Phase 3's own
+scope, not a Phase 2 gap.

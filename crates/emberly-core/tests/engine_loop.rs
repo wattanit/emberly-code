@@ -1258,6 +1258,7 @@ impl emberly_core::ConfigReloader for FakeReloader {
             document_max_bytes: 32 * 1024 * 1024,
             memory: emberly_core::MemoryConfig::default(),
             skills: emberly_core::SkillsConfig::default(),
+            agents: emberly_core::AgentsConfig::default(),
             tools: default_registry(),
             rule_specs: Vec::new(),
             restart_notes: vec!["sandbox.require changed — restart to apply".to_string()],
@@ -1335,6 +1336,7 @@ impl emberly_core::ConfigReloader for ContentOnlyReloader {
             document_max_bytes: 32 * 1024 * 1024,
             memory: emberly_core::MemoryConfig::default(),
             skills: emberly_core::SkillsConfig::default(),
+            agents: emberly_core::AgentsConfig::default(),
             tools: default_registry(),
             rule_specs: Vec::new(),
             restart_notes: Vec::new(),
@@ -1404,6 +1406,7 @@ impl emberly_core::ConfigReloader for SelectionOnlyReloader {
             document_max_bytes: 32 * 1024 * 1024,
             memory: emberly_core::MemoryConfig::default(),
             skills: emberly_core::SkillsConfig::default(),
+            agents: emberly_core::AgentsConfig::default(),
             tools: default_registry(),
             rule_specs: Vec::new(),
             restart_notes: Vec::new(),
@@ -6259,6 +6262,57 @@ async fn spawn_and_end_agent_emit_their_sidebar_events() {
             .iter()
             .any(|e| matches!(e, UiEvent::SubagentEnded { id, .. } if id == "agent-1")),
         "SubagentEnded fires on an explicit end_agent"
+    );
+}
+
+/// Idle reap (Tech Spec §8.4): a subagent with no `message_agent` traffic for
+/// `idle_timeout_secs` is reclaimed automatically, even though the primary
+/// agent's own turn has long since finished and nothing else is happening —
+/// proving the periodic check runs off the idle loop's own tick, not just
+/// during an active turn. A paused clock makes this instant instead of a
+/// real 60+-second wait.
+#[tokio::test(start_paused = true)]
+async fn idle_subagent_is_reaped_after_the_configured_timeout() {
+    let root = temp_project();
+    let root_scripts = vec![
+        ScriptedResponse::tool_call(
+            "c1",
+            "spawn_agents",
+            r#"{"agents":[{"name":"helper","system_prompt":"wait","profile":"helper"}]}"#,
+        ),
+        ScriptedResponse::text("spawned"),
+    ];
+    let subagent_scripts = vec![ScriptedResponse::text("ok")];
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(root_scripts)),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    // Shorter than the 60s sweep interval so the very first sweep after the
+    // timeout elapses already catches it.
+    config.agents.idle_timeout_secs = 30;
+    config.provider_factory = Some(Arc::new(OneShotFactory::new(subagent_scripts)));
+    let mut h = spawn(config);
+
+    h.send(Command::UserInput {
+        text: "delegate".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert_eq!(deltas(&events), "spawned");
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::SubagentSpawned { .. })));
+
+    // Past both the 30s idle timeout and the 60s sweep tick — nothing else
+    // happens in this window, so the paused clock auto-advances to it.
+    tokio::time::advance(Duration::from_secs(70)).await;
+    let later_events = h.collect(None).await;
+    assert!(
+        later_events.iter().any(|e| matches!(e,
+            UiEvent::SubagentEnded { id, reason } if id == "agent-1" && reason == "idle timeout")),
+        "expected an idle-timeout SubagentEnded, got: {later_events:?}"
     );
 }
 

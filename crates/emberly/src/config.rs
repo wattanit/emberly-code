@@ -71,6 +71,9 @@ pub struct ConfigFile {
     /// `[stream]` completion-stream liveness windows (issue #15).
     #[serde(default)]
     pub stream: StreamConfigFile,
+    /// `[agents]` multi-agent subsystem (FR-9, Tech Spec §8.4).
+    #[serde(default)]
+    pub agents: AgentsConfigFile,
 }
 
 /// `[ui]` — presentation toggles that shape what the interface shows without
@@ -182,6 +185,24 @@ pub struct MemoryConfigFile {
 pub struct SkillsConfigFile {
     /// Whether the skill system is enabled (default `true`).
     pub enabled: Option<bool>,
+}
+
+/// `[agents]` — the multi-agent subsystem (FR-9, Tech Spec §8.4). All
+/// optional; the engine applies defaults when unset. `max_depth` has no
+/// field here — it is a structural guarantee (Requirements §2.2), not a
+/// tunable a config file could relax.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct AgentsConfigFile {
+    /// Whether the multi-agent subsystem is enabled (default `true`).
+    pub enabled: Option<bool>,
+    /// The ceiling on subagents alive at once per session (default `3`).
+    pub max_concurrent: Option<u32>,
+    /// How long `spawn_agents`/`message_agent` wait for a subagent's turn
+    /// before reporting it `still running` (default 600s).
+    pub spawn_timeout_secs: Option<u64>,
+    /// How long a subagent may go without a `message_agent` call before it
+    /// is reclaimed as idle (default 1800s).
+    pub idle_timeout_secs: Option<u64>,
 }
 
 /// `[search]` — web-search backend (T-14, Tech Spec §5.5). Mirrors the provider
@@ -486,6 +507,19 @@ impl ConfigFile {
         if higher.skills.enabled.is_some() {
             self.skills.enabled = higher.skills.enabled;
         }
+        // `[agents]` (FR-9) merges field-by-field.
+        if higher.agents.enabled.is_some() {
+            self.agents.enabled = higher.agents.enabled;
+        }
+        if higher.agents.max_concurrent.is_some() {
+            self.agents.max_concurrent = higher.agents.max_concurrent;
+        }
+        if higher.agents.spawn_timeout_secs.is_some() {
+            self.agents.spawn_timeout_secs = higher.agents.spawn_timeout_secs;
+        }
+        if higher.agents.idle_timeout_secs.is_some() {
+            self.agents.idle_timeout_secs = higher.agents.idle_timeout_secs;
+        }
         // `[search]` (T-14) merges field-by-field, including nested auth.
         if higher.search.enabled.is_some() {
             self.search.enabled = higher.search.enabled;
@@ -572,6 +606,9 @@ pub struct Resolved {
     pub memory: emberly_core::MemoryConfig,
     /// Resolved skills config (FR-7, Tech Spec §8.2), ready for the engine.
     pub skills: emberly_core::SkillsConfig,
+    /// Resolved multi-agent subsystem config (FR-9, Tech Spec §8.4), ready
+    /// for the engine.
+    pub agents: emberly_core::AgentsConfig,
     /// Resolved search config (T-14, Tech Spec §5.5). The binary conditionally
     /// registers the `web_search` tool when `enabled` and an endpoint is set.
     pub search: SearchConfig,
@@ -752,6 +789,18 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
     });
     provenance.file_field("skills.enabled", |c| c.skills.enabled.is_some());
 
+    // Multi-agent subsystem (FR-9).
+    provenance.file_field("agents.enabled", |c| c.agents.enabled.is_some());
+    provenance.file_field("agents.max_concurrent", |c| {
+        c.agents.max_concurrent.is_some()
+    });
+    provenance.file_field("agents.spawn_timeout_secs", |c| {
+        c.agents.spawn_timeout_secs.is_some()
+    });
+    provenance.file_field("agents.idle_timeout_secs", |c| {
+        c.agents.idle_timeout_secs.is_some()
+    });
+
     // Search (T-14).
     provenance.file_field("search.enabled", |c| c.search.enabled.is_some());
     provenance.file_field("search.adapter", |c| c.search.adapter.is_some());
@@ -883,6 +932,24 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             let d = emberly_core::SkillsConfig::default();
             emberly_core::SkillsConfig {
                 enabled: merged.skills.enabled.unwrap_or(d.enabled),
+            }
+        },
+        agents: {
+            let d = emberly_core::AgentsConfig::default();
+            emberly_core::AgentsConfig {
+                enabled: merged.agents.enabled.unwrap_or(d.enabled),
+                max_concurrent: merged
+                    .agents
+                    .max_concurrent
+                    .map_or(d.max_concurrent, |v| v as usize),
+                spawn_timeout_secs: merged
+                    .agents
+                    .spawn_timeout_secs
+                    .unwrap_or(d.spawn_timeout_secs),
+                idle_timeout_secs: merged
+                    .agents
+                    .idle_timeout_secs
+                    .unwrap_or(d.idle_timeout_secs),
             }
         },
         search: SearchConfig {
@@ -1632,6 +1699,26 @@ mod tests {
         base.merge(cfg);
         assert_eq!(base.loop_.enabled, Some(false));
         assert_eq!(base.loop_.repeat_window, Some(5));
+    }
+
+    #[test]
+    fn agents_config_parses_and_merges() {
+        let cfg = ConfigFile::parse(
+            "[agents]\nenabled = false\nmax_concurrent = 5\n\
+             spawn_timeout_secs = 60\nidle_timeout_secs = 120",
+        )
+        .expect("agents");
+        assert_eq!(cfg.agents.enabled, Some(false));
+        assert_eq!(cfg.agents.max_concurrent, Some(5));
+        assert_eq!(cfg.agents.spawn_timeout_secs, Some(60));
+        assert_eq!(cfg.agents.idle_timeout_secs, Some(120));
+        // [agents] merges normally — a project may tune the resource bounds.
+        let mut base = ConfigFile::default();
+        base.merge(cfg);
+        assert_eq!(base.agents.enabled, Some(false));
+        assert_eq!(base.agents.max_concurrent, Some(5));
+        assert_eq!(base.agents.spawn_timeout_secs, Some(60));
+        assert_eq!(base.agents.idle_timeout_secs, Some(120));
     }
 
     #[test]

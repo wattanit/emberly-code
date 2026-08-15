@@ -11,7 +11,8 @@ use emberly_sandbox::Rule;
 use emberly_tools::{ToolRegistry, TruncateConfig};
 
 use crate::engine::{
-    CompletionCheck, CompletionConfig, ContextConfig, LoopConfig, MemoryConfig, SkillsConfig,
+    AgentsConfig, CompletionCheck, CompletionConfig, ContextConfig, LoopConfig, MemoryConfig,
+    SkillsConfig,
 };
 
 /// A provider chosen for the active profile: the client, the resolved model id,
@@ -85,6 +86,8 @@ pub struct ReloadedConfig {
     /// Skills config (FR-7, Tech Spec §8.2). A changed value triggers a
     /// skill-catalog rebuild, not just a struct swap.
     pub skills: SkillsConfig,
+    /// Multi-agent subsystem config (FR-9, Tech Spec §8.4).
+    pub agents: AgentsConfig,
     /// The rebuilt tool registry (default suite plus e.g. `web_search` when
     /// `[search]` is enabled and configured).
     pub tools: ToolRegistry,
