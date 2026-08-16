@@ -1,11 +1,11 @@
 # Emberly Code AI Coding Harness — Requirements Document
 
-**Version:** 0.10    
+**Version:** 0.11    
 **Status:** approved
-**Date:** 2026-07-30    
+**Date:** 2026-08-15    
 **Owner:** Wattanit    
-**Companion documents:** Design Guideline v0.10 (downstream), Technical  
-Specification v0.12 (downstream)
+**Companion documents:** Design Guideline v0.11 (downstream), Technical  
+Specification v0.13 (downstream)
 
 This document defines WHAT the harness must do and WHY. HOW it is built is
 deferred to the Technical Specification. UX, visual, and voice decisions are
@@ -148,6 +148,24 @@ the section cited; this list is the scope overview, not the requirement):
 model-authored temporary files, with a CLI command to reclaim its disk space
 (§8.9, FR-8; §5, T-17).
 
+Added in the 0.5 feature set (multi-agent capability — the primary agent
+delegating bounded, independent tool-use loops to subagents it creates,
+converses with, and ends; each item carries an ID and full statement in the
+section cited; this list is the scope overview, not the requirement):
+
+- A multi-agent subsystem: the primary agent may spawn one or more subagents
+concurrently, each with its own model-authored persona/task layered on the
+harness's own tool-use scaffold, its own selectable provider profile, and a
+tool set that is never a superset of the primary agent's own (§5, FR-9).
+- Four tools giving the primary agent the full lifecycle: spawn one or more
+subagents in one call (§5, T-18), send a further prompt to a specific
+still-alive subagent (§5, T-19), enumerate currently alive subagents (§5,
+T-20), and explicitly end one (§5, T-21).
+- Every subagent's activity is governed by the same permission rules, sandbox
+confinement, and workspace trust as the primary agent (no privileged path
+around the safety model, FR-9), is fully audited (extends HC-7), and its cost
+is rolled into the owning session's existing cost estimate (P-6).
+
 ### 2.2 Explicitly deferred (designed-for, not yet built)
 
 - **MCP client support.** The internal tool abstraction must permit a future
@@ -170,10 +188,37 @@ search (or other server-side tools) is not used, because a capability that
 works only on the vendors that offer it is not provider-agnostic. The tool
 abstraction (T-7) does not preclude wrapping such a capability later, but it
 must never become the only way a capability works.
+- **Recursive subagent spawning.** A subagent spawning its own subagent
+(depth beyond 1, FR-9) is deferred; v0.5 fixes the depth bound rather than
+making it a per-project setting, so raising it later is a config change to a
+door already designed for, not a re-architecture.
+- **Cross-session subagent reconnection.** A subagent is not automatically
+reconnected after the owning session crashes or is restarted (FR-9); the
+primary agent discovers a stale id as a structured failure and may spawn a
+fresh one. Preserving a live subagent's own conversation state across a
+crash/resume is a future door, not built now.
+- **A dedicated multi-agent live view.** v0.5 surfaces a subagent's activity
+through a per-agent inspector the user opens on demand (Design Guideline); a
+concurrent multi-pane view showing every alive subagent's activity at once,
+side by side, is a future display nicety, not required to make delegation
+usable or auditable.
+- **A built-in local/HuggingFace inference server.** Running inference
+locally against a Hugging Face model cache is not built into the harness
+(see the §2.3 out-of-scope note this deferral pairs with); the door it keeps
+open is P-8's existing endpoint-configurable adapters, which already reach
+any local server speaking a wire format an adapter parses — such a server
+needs zero harness code, only a configuration profile, whenever one exists.
+Whether the harness additionally gains a thin, provider-agnostic CLI
+convenience for starting/stopping a user-configured local server process
+(as distinct from hosting inference itself) is an open question (§13).
 
 ### 2.3 Out of scope
 
-- Model hosting or fine-tuning.
+- Model hosting or fine-tuning. This explicitly covers a harness-bundled
+local inference server (e.g. one serving models from a Hugging Face cache):
+running inference is model hosting, and building it into the harness would
+need an explicit reversal of this line, not a routine addition — see the
+deferred door above and the open question at §13.
 - Guaranteeing git history immortality (see §6.3 — the harness protects
 `.git/` from non-git writes; it does not prevent destructive but
 legitimate git operations).
@@ -442,6 +487,82 @@ temporary script or intermediate output either lands in the user's tracked
 project (cluttering a repository the user did not ask to change) or costs a
 permission prompt on every write; this gives the model disposable working
 space that is neither.
+- **FR-9 — Multi-agent subsystem.** The harness lets the primary agent create,
+message, enumerate, and end **subagents** — independent, model-driven
+tool-use loops it delegates work to. Each subagent gets a name, a
+model-authored persona/task layered on the same harness-authored,
+baked-in tool-use scaffold every agent runs under (C-1) — never a raw prompt
+with no scaffold — and runs under a resolved provider profile (P-8),
+defaulting to the primary agent's own. A subagent is addressed by the id its
+spawn returned, so the primary agent can hold a multi-turn conversation with
+it across separate tool calls (T-18–T-21), not just a single delegate-and-
+forget round trip.
+  - **Bounded depth.** A subagent may not itself spawn a subagent in this
+  version — only the primary (top-level) agent loop may call T-18. This is a
+  hard bound for v0.5, not a per-project setting (§2.2).
+  - **Bounded concurrency.** A configurable ceiling caps how many subagents
+  may be alive at once per session (Technical Specification sets the initial
+  default); exceeding it is a structured tool failure (HC-6), never a silent
+  queue or a crash.
+  - **Tool ceiling.** A subagent's available tools are never a superset of
+  the primary agent's own — spawning grants no new capability, only a
+  subset the primary agent may narrow further per spawn (e.g. read-only
+  tools for a research subagent).
+  - **No privileged path around the safety model (honesty clause).** Every
+  subagent's own tool calls are governed by the exact same permission rules,
+  sandbox confinement, and workspace trust as the primary agent's (HC-4,
+  HC-5, §6) — spawning a subagent is never a way to act with less oversight,
+  and a subagent's system prompt cannot itself grant a permission, escape
+  the sandbox, or waive workspace trust. A subagent's own loop is bound by
+  the same loop-breaking guardrail (S-5) and, where checks are registered,
+  the same completion gate (S-6) as any agent loop — the same principle
+  FR-7/S-6 already state for skills and completion checks, extended here.
+  - **Complete audit trail (extends HC-7).** Every subagent's turns, tool
+  calls, tool results, and permission events are recorded durably and are
+  never lost to a crash, exactly as the primary session's are. The primary
+  agent's own spawn/message/list/end calls are themselves ordinary tool
+  calls and tool results in its own transcript (HC-7) — no separate
+  mechanism is needed for those to be complete.
+  - **Cost is never hidden.** A subagent's token usage and estimated cost
+  (P-6) are attributed to it individually and always roll into the owning
+  session's total — delegated work is still the session's spend, visible,
+  never a side channel.
+  - **Crash/resume honesty clause.** A subagent is not reconnected
+  automatically after a crash or process restart (§2.2); the primary agent
+  discovers a stale id as a structured "no such agent" result (HC-6) and may
+  spawn a fresh one.
+  - **Transparency (§1).** No subagent is a silent background process: its
+  existence, current status, and full activity are always inspectable by
+  the user, never only by the model (Design Guideline).
+- **T-18 — Spawn-agents tool.** A built-in tool the primary agent calls to
+create one or more subagents in a single call, each given a name, a
+task/persona system-prompt layer, and optionally a provider profile (P-8)
+and a restricted tool subset (FR-9's ceiling). Subagents given in the same
+call run concurrently — this is the harness's fan-out primitive: delegating
+three independent subtasks costs one round trip, not three sequential ones.
+The call returns once every subagent in it has reached its own first natural
+stop (an assistant turn with no further tool calls), each tagged with its id
+and either its answer, a structured reason it did not finish, or — past a
+configurable per-call timeout — a note that it is still running and remains
+addressable via T-19/T-20. A subagent that errors internally (e.g. a
+provider failure) reports that as its own structured failure within the
+batch result; one subagent's failure never aborts the others (HC-6).
+- **T-19 — Message-agent tool.** A built-in tool the primary agent calls to
+send a further prompt to a specific, still-alive subagent (by the id T-18
+returned), running that subagent's next turn to completion and returning
+its response — the "issue another prompt" half of a multi-turn delegation.
+A message to an id that is unknown or has ended returns a structured
+failure (HC-6) naming the reason, never a crash or a silent no-op.
+- **T-20 — List-agents tool.** A built-in tool the primary agent calls to
+enumerate currently alive subagents (id, name, and status), for situational
+awareness when an id has fallen out of the working context window (FR-3) or
+the model has simply lost track — the multi-agent analogue of the task list
+(T-11) staying legible across a long session.
+- **T-21 — End-agent tool.** A built-in tool the primary agent calls to
+explicitly terminate a subagent and free its resources before the session
+itself ends. Ending an already-ended or unknown id is a structured failure
+(HC-6), not a crash. Every subagent still alive when the owning session
+ends is ended with it — no subagent outlives its session.
 
 ## 6. Permission and Safety Model
 
@@ -943,6 +1064,29 @@ Tech Spec sets the initial scope; tune with use.
 - The scratch-space CLI reclaim command's exact verb, scope (current session,
 a named session, or every session), and whether it warns before deleting
 (FR-8, T-17). Tech Spec sets the initial scope; tune with use.
+- Default values for the multi-agent subsystem's resource bounds — maximum
+concurrent subagents per session, the per-call spawn timeout, and the
+idle-lifetime before an unattended subagent is reclaimed (FR-9). Tech Spec
+sets initial defaults; tune with use so the ceiling stops a runaway fan-out
+without cutting off a genuinely long-running delegation.
+- Whether a subagent's token/cost usage is shown as its own line in the
+sidebar or only rolled into the session total with detail on inspection
+(FR-9, P-6). Design Guideline decides.
+- **Owner decision needed: the local/HuggingFace inference-server request.**
+The harness's provider abstraction (P-2, P-8) already reaches any local
+server that speaks a wire format an adapter parses, at zero harness cost,
+once such a server exists — so nothing in the harness blocks pointing it at
+a local Hugging Face-backed server today. What is undecided is whether
+Emberly Code should additionally: (a) do nothing further, leaving such a
+server and its Hugging Face cache management as a separate project with its
+own SFD suite (per the shared-requirements project boundary), reached only
+through an ordinary provider profile; or (b) absorb a thin,
+provider-agnostic CLI convenience — start/stop/status of a user-configured
+local server *process* (not hosting inference itself) — as new Emberly Code
+scope. Option (b) does not by itself reverse the §2.3 "model hosting" line
+(it manages a process the user already configured; it runs no inference),
+but the boundary needs the owner's explicit call before either is drafted
+into scope.
 
 Resolved since v0.1: product/command name (Emberly Code / `emberly`,
 Design Guideline §1.1); default bash allowlist initial contents (Tech
@@ -1027,3 +1171,28 @@ with no confinement implementation — is deferred until a real platform need
 exists. A fourth request (compile-time tool profiles) was withdrawn by the
 requester before absorption. S-6, P-12, and T-16 are the IDs the Yggdrasil
 foundation suite will cite as their origin when drafted (G-24/G-25).
+
+Resolved since v0.11 (0.5 feature set): the multi-agent capability is scoped
+as a bounded delegation subsystem, not open-ended agent autonomy. Key
+routing decisions: depth is fixed at 1 (a subagent cannot itself spawn one)
+rather than a configurable ceiling, so the no-recursive-spawn guarantee
+cannot be loosened by a config edit (FR-9, §2.2); a subagent's tool access
+is a ceiling, never a superset of the primary agent's own, so spawning
+cannot be used to reach a capability the session itself lacks; permission,
+sandbox, and workspace-trust enforcement extend to subagents verbatim (no
+new safety mechanism, no privileged path — the same principle already
+governing skills, FR-7, and completion checks, S-6); and a subagent's cost
+is attributed and rolled into the session total rather than tracked
+separately outside P-6. The batch/addressable split — spawn one or more
+subagents in one call (T-18), then converse with a specific one across
+further calls (T-19) — was chosen over either a purely one-shot
+delegate-and-forget tool or a single tool overloaded with both spawn and
+message semantics, because the user's stated need was both fan-out
+(parallel workers on independent subtasks) and an ongoing conversation with
+a named subagent, and conflating them into one call shape would have made
+neither ergonomic. The Hugging Face / local-inference-server request is
+explicitly **not** absorbed this version: it is routed to a deferred door
+(§2.2) resting on the existing P-8 endpoint-configurable adapter, with the
+scope question of a harness-side process-management convenience left to the
+owner (§13) rather than decided here, since it bears on the existing §2.3
+"model hosting" out-of-scope line.

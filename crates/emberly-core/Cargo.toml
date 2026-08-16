@@ -26,5 +26,5 @@ toml.workspace = true
 rustix = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "test-util"] }
 base64.workspace = true

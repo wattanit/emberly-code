@@ -331,6 +331,7 @@ impl Engine {
                 Some(task) = chans.task.recv() => self.on_task_list_set(task).await,
                 Some(mem) = chans.memory.recv() => self.on_memory_op(mem).await,
                 Some(skill) = chans.skill.recv() => self.on_skill_invoke(skill).await,
+                Some(ask) = chans.subagent.recv() => self.on_subagent_ask(ask).await,
                 command = chans.commands.recv(), if commands_open => match command {
                     Some(Command::PermissionAnswer { id, decision }) => {
                         self.answer_permission(id, decision, &mut pending).await;
@@ -676,6 +677,7 @@ impl Engine {
         .with_memory_gate(self.gates.memory.clone())
         .with_skill_gate(self.gates.skill.clone())
         .with_scratch_gate(self.gates.scratch.clone())
+        .with_subagent_gate(self.gates.subagent.clone())
         .with_vision(self.provider.client.model_info().vision)
         .with_image_max_bytes(self.image_max_bytes)
         .with_documents(self.provider.client.model_info().documents)

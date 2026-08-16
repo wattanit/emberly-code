@@ -40,8 +40,8 @@ pub use emberly_tools::{MemoryOp, MemoryScope};
 pub use emberly_tools::{SkillMeta, SkillOrigin};
 pub use emberly_tools::{TaskItem, TaskStatus};
 pub use engine::{
-    CompletionCheck, CompletionConfig, ContextConfig, Engine, EngineConfig, LoopConfig,
-    MemoryConfig, SkillsConfig,
+    AgentsConfig, CompletionCheck, CompletionConfig, ContextConfig, Engine, EngineConfig,
+    LoopConfig, MemoryConfig, SkillsConfig,
 };
 pub use event::UiEvent;
 pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfig};

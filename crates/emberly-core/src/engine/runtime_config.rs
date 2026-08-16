@@ -237,6 +237,10 @@ impl Engine {
             self.refresh_skill_catalog();
             changed.push("skills");
         }
+        if reloaded.agents != self.agents.config {
+            self.agents.config = reloaded.agents;
+            changed.push("multi-agent subsystem");
+        }
         let mut old_tool_names = self.tools.names();
         old_tool_names.sort();
         self.tools = reloaded.tools;

@@ -27,6 +27,10 @@ pub mod permission {
     pub const HEADING: &str = "PERMISSION REQUIRED";
     pub const WHY_LABEL: &str = "why";
     pub const PATHS_LABEL: &str = "paths";
+    /// Provenance line when the action is a subagent's own, not the primary
+    /// agent's (FR-9, Design §4.13/§5) — every other guarantee on this prompt
+    /// holds unchanged; this is the only addition.
+    pub const ON_BEHALF_OF_LABEL: &str = "on behalf of subagent";
     /// The choices. Deny is the safe default and the meaning of Enter/Esc.
     pub const ALLOW_ONCE: &str = "allow once";
     pub const ALLOW_SESSION: &str = "allow this session";
@@ -178,6 +182,22 @@ pub mod skills {
     pub const RESOURCES_HEADER: &str = "bundled files:";
     /// The action hint at the foot of the inspector.
     pub const HINT: &str = " Enter view · ↑↓ move · Esc close";
+}
+
+/// The Agents inspector (FR-9, Design §4.13) — mirrors `skills`'s shape: a
+/// selectable list, Enter opens a read-only body on top (a subagent's own
+/// activity, not an instruction to inspect before it runs, but the same
+/// "inspectors, not black boxes" pattern).
+pub mod agents {
+    pub const TITLE: &str = "agents";
+    /// Shown when no subagents are currently alive.
+    pub const EMPTY: &str = "(no subagents are currently alive)";
+    /// The action hint at the foot of the inspector.
+    pub const HINT: &str = " Enter view activity · ↑↓ move · Esc close";
+    /// The foot hint on the activity overlay itself — names the live refresh
+    /// (Design §4.13) so the text changing under the user's eyes reads as
+    /// expected, not as a glitch.
+    pub const ACTIVITY_HINT: &str = " Esc close · ↑↓ PgUp/PgDn scroll · updates live";
 }
 
 /// Keybinding hints for the status bar (Design §3.1, §6.2 — 2–5 words each).

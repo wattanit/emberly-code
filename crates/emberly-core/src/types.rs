@@ -36,6 +36,13 @@ pub struct PermissionRendering {
     /// Why this prompt appeared — the rule that matched, or "outside project
     /// root". Shown as one dimmed line to teach the model in situ (Design §5).
     pub reason: String,
+    /// The subagent this request came from, if any (FR-9, Tech Spec §8.4) —
+    /// `None` for the primary agent's own requests. Lets the frontend add one
+    /// dimmed "on behalf of subagent X" line (Design §4.13/§5) without a
+    /// second prompt type or diluting the reserved outside-root styling.
+    /// Additive: absent on older transcript records reads as `None`.
+    #[serde(default)]
+    pub on_behalf_of: Option<String>,
 }
 
 /// The user's answer to a permission request. Deny is the safe default and

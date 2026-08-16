@@ -257,4 +257,34 @@ pub enum UiEvent {
         body: String,
         resources: Vec<String>,
     },
+
+    /// A subagent was created (T-18, Tech Spec §8.4), for the sidebar Agents
+    /// section (Design §3.1/§4.13): present only while at least one subagent
+    /// is alive, following the established no-empty-stub rule (Tasks/Memory/
+    /// Skills). Additive — older frontends warn-skip it.
+    SubagentSpawned {
+        id: String,
+        name: String,
+        profile: String,
+        model: String,
+    },
+
+    /// A subagent was ended (T-21, Tech Spec §8.4) — explicitly, or as part
+    /// of the owning session ending. Additive — older frontends warn-skip
+    /// it.
+    SubagentEnded { id: String, reason: String },
+
+    /// A subagent's own activity, read from its nested transcript (Tech Spec
+    /// §8.4), sent in reply to
+    /// [`Command::InspectAgent`](crate::command::Command::InspectAgent). A
+    /// read-only snapshot as of the last flush (Design §4.13) — `text` is
+    /// already formatted for display, so the frontend renders it exactly like
+    /// any other text overlay (`SkillBody`'s pattern). An unknown/ended id
+    /// still gets a reply, with `text` saying so. Additive — older frontends
+    /// warn-skip it.
+    AgentActivity {
+        id: String,
+        name: String,
+        text: String,
+    },
 }

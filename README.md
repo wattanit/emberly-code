@@ -55,8 +55,8 @@ Not a thin wrapper around a chat API — a real coding harness: a two-pane TUI,
 multi-provider support, durable sessions with crash-safe resume, a permission
 rule engine beneath an OS sandbox, reasoning-effort control and a thinking
 trail, a live agent task list, image input, persistent cross-session memory, a
-skill system, web search, and mouse support. All keyboard-first; the mouse only
-ever adds convenience, never new authority.
+skill system, web search, multi-agent delegation, and mouse support. All
+keyboard-first; the mouse only ever adds convenience, never new authority.
 
 ### 📉 Built-in token optimiser & better economy
 Emberly treats your context window and API bill as scarce resources. Large tool
@@ -193,6 +193,7 @@ is picked up automatically as standing context.
 | `[document] max_bytes` | _limit_ | Max size for a PDF read into the conversation |
 | `[memory] enabled` | `true` | Persistent cross-session memory (+ `max_index_entries`) |
 | `[skills] enabled` | `true` | The skill system |
+| `[agents] enabled` | `true` | Multi-agent delegation (+ `max_concurrent` default `3`, `spawn_timeout_secs` default `600`, `idle_timeout_secs` default `1800`) |
 | `[search] enabled` | `true` | Register the `web_search` tool (needs `adapter`/`endpoint`/`auth` to work; `max_results` caps results) |
 | `[stream] first_chunk_secs` | `300` | Seconds to wait for a completion stream's first chunk (+ `idle_secs`, default `90`, for the gap between later chunks) — raise both for a slow local/cloud inference backend |
 | `[sandbox] require` | `false` | Refuse to start without active OS confinement |
@@ -227,7 +228,7 @@ plain mode).
 
 The screen is a conversation timeline — your messages and the agent's, tool
 calls, and diffs — with a sidebar showing the model, context usage, cost, the
-agent's task list, and changed files.
+agent's task list, changed files, and any currently alive subagents.
 
 **Input & keybindings**
 
@@ -263,6 +264,7 @@ agent's task list, and changed files.
 | `/reload` | | Re-read config & prompts from disk and apply them |
 | `/memory` | | Inspect, edit, and delete stored memory |
 | `/skills` | | List available skills and inspect a skill's instructions |
+| `/agents` | | List currently alive subagents and inspect one's activity |
 | `/help` | `Ctrl-P` | List commands and keybindings |
 | `/quit` | `Ctrl-D` | Exit |
 
@@ -328,6 +330,30 @@ records the trace to the transcript).
   clash). `/skills` lists what's available and lets you **read a skill's full
   instructions before it ever runs** — "what could this tell the model to do" is
   always inspectable.
+
+#### Multi-agent delegation
+
+The agent can delegate a self-contained subtask to a subagent — a nested
+Emberly session with its own conversation, context window, and completion
+gate, running the exact same code as the primary agent rather than a second
+implementation. Four tools drive it: `spawn_agents` (start one or more, in
+parallel), `message_agent` (send a further prompt to one that's still alive),
+`list_agents` (situational awareness when an id has been forgotten), and
+`end_agent`. A subagent can never itself spawn, message, list, or end
+subagents — that ceiling is structural (the tool is simply not in its own
+registry), not a depth counter that could be gotten wrong.
+
+Delegation never lowers the bar on anything: a subagent's tool calls are
+decided by the *same* permission rules and sandbox as the primary agent's —
+proxied to the one session-wide decision state, never an independent copy —
+so a permission prompt raised on a subagent's behalf carries a dimmed
+"on behalf of subagent `<name>`" line rather than appearing unattributed, and
+its token usage/cost rolls into your session's own displayed total, never a
+hidden side channel. Everything a subagent does shows up as quiet, ordinary
+tool activity in the main conversation — never a second live-streamed voice —
+and the sidebar's **Agents** section (present only while at least one is
+alive) lets you open a read-only, live-updating inspector on any of them, past
+or present, via **`/agents`**.
 
 #### Web search & image/document input
 

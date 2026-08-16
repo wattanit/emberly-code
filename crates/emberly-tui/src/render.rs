@@ -200,6 +200,7 @@ enum RowKind {
     Session,
     Memory,
     Skill,
+    Agent,
 }
 
 impl RowKind {
@@ -209,6 +210,7 @@ impl RowKind {
             RowKind::Session => ClickTarget::SessionRow(row),
             RowKind::Memory => ClickTarget::MemoryRow(row),
             RowKind::Skill => ClickTarget::SkillRow(row),
+            RowKind::Agent => ClickTarget::AgentRow(row),
         }
     }
 }
@@ -271,6 +273,16 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect, hit
             Vec::new(),
             None,
         ),
+        OverlayContent::AgentActivity { text, .. } => (
+            text.split('\n')
+                .flat_map(|l| text::wrap(l, body_w))
+                .map(|row| Line::from(Span::styled(row, theme.primary())))
+                .collect(),
+            None,
+            strings::agents::ACTIVITY_HINT.to_string(),
+            Vec::new(),
+            None,
+        ),
         OverlayContent::Sessions { rows, selected } => {
             let (lines, sel_line, map) = session_picker_lines(rows, *selected, theme);
             (
@@ -323,6 +335,16 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect, hit
                 strings::skills::HINT.to_string(),
                 map,
                 Some(RowKind::Skill),
+            )
+        }
+        OverlayContent::AgentList { agents, selected } => {
+            let (lines, sel_line, map) = agent_list_lines(agents, *selected, theme);
+            (
+                lines,
+                Some(sel_line),
+                strings::agents::HINT.to_string(),
+                map,
+                Some(RowKind::Agent),
             )
         }
     };
@@ -587,6 +609,50 @@ fn skill_list_lines(
         }
         spans.push(Span::styled(format!("  ({origin})"), theme.chrome()));
         lines.push(Line::from(spans));
+        row_of_line.push(Some(i));
+    }
+    (lines, sel_line, row_of_line)
+}
+
+/// The Agents inspector's list body (FR-9, Design §4.13) — mirrors
+/// `skill_list_lines`'s shape (marker, name, dimmed id) with no origin/
+/// description, since a subagent has neither.
+fn agent_list_lines(
+    agents: &[crate::app::AgentSummary],
+    selected: usize,
+    theme: &crate::theme::Theme,
+) -> PickerLines {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut row_of_line: Vec<Option<usize>> = Vec::new();
+    if agents.is_empty() {
+        lines.push(Line::from(Span::styled(
+            strings::agents::EMPTY.to_string(),
+            theme.chrome(),
+        )));
+        row_of_line.push(None);
+        return (lines, 0, row_of_line);
+    }
+    let mut sel_line = 0;
+    for (i, agent) in agents.iter().enumerate() {
+        if i == selected {
+            sel_line = lines.len();
+        }
+        let marker = if i == selected { "▶ " } else { "  " };
+        let name_style = if i == selected {
+            theme.strong()
+        } else {
+            theme.primary()
+        };
+        let suffix = if agent.ended {
+            format!("  ({}, ended)", agent.id)
+        } else {
+            format!("  ({})", agent.id)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(marker.to_string(), theme.accent()),
+            Span::styled(agent.name.clone(), name_style),
+            Span::styled(suffix, theme.chrome()),
+        ]));
         row_of_line.push(Some(i));
     }
     (lines, sel_line, row_of_line)
@@ -899,6 +965,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
     let mut modified_range: Option<(usize, usize)> = None;
     let mut memory_range: Option<(usize, usize)> = None;
     let mut skills_range: Option<(usize, usize)> = None;
+    let mut agents_range: Option<(usize, usize)> = None;
 
     // Wordmark + version (Design §1.1): ember `emberly`, dimmed `code` + version.
     // While the model is working, the wordmark breathes — the ember glowing
@@ -1086,6 +1153,26 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
         skills_range = Some((start, lines.len())); // clickable → open /skills
     }
 
+    // Currently alive subagents (FR-9, Design §3.1/§4.13): name + id per
+    // entry. Present only while at least one is alive — the same
+    // no-empty-stub rule as Tasks/Memory/Skills (Design §3.1); the section
+    // simply does not appear once the last subagent ends. Ended subagents
+    // stay in `app.agents` for the `/agents` inspector (§4.13), so this
+    // section filters down to the alive subset rather than reading the
+    // catalog directly.
+    let alive_agents: Vec<&crate::app::AgentSummary> =
+        app.agents.iter().filter(|a| !a.ended).collect();
+    if !alive_agents.is_empty() {
+        lines.push(Line::from(""));
+        let start = lines.len();
+        lines.push(Line::from(Span::styled("Agents", theme.chrome())));
+        for agent in &alive_agents {
+            let desc = format!("{} ({})", agent.name, agent.id);
+            lines.push(Line::from(Span::styled(fit(&desc, w), theme.primary())));
+        }
+        agents_range = Some((start, lines.len())); // clickable → open /agents
+    }
+
     // Render **without wrap** so each logical line is exactly one screen row
     // (ratatui truncates overflow) — this is what makes the sidebar's click
     // regions reliable (Design §3.4): line index `i` sits at screen row
@@ -1118,6 +1205,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
         push_section(modified_range, ClickTarget::OpenDiff);
         push_section(memory_range, ClickTarget::OpenMemoryInspector);
         push_section(skills_range, ClickTarget::OpenSkillsInspector);
+        push_section(agents_range, ClickTarget::OpenAgentsInspector);
     }
 }
 
@@ -1368,6 +1456,12 @@ fn render_permission(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
         format!("{}: {}", strings::permission::WHY_LABEL, r.reason),
         theme.chrome(),
     )));
+    if let Some(name) = &r.on_behalf_of {
+        header.push(Line::from(Span::styled(
+            format!("{} {name}", strings::permission::ON_BEHALF_OF_LABEL),
+            theme.chrome(),
+        )));
+    }
     if !r.affected_paths.is_empty() {
         header.push(Line::from(Span::styled(
             format!(
@@ -2153,12 +2247,82 @@ mod tests {
             description: "d".into(),
             origin: SkillOrigin::User,
         });
+        app.agents.push(crate::app::AgentSummary {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            ended: false,
+        });
         // Wide enough for the sidebar to show (>= COLLAPSE_BELOW).
         let hit = hit_map_of(&app, 120, 40);
         let has = |t: ClickTarget| (0..40).any(|y| (0..120).any(|x| hit.hit(x, y) == Some(t)));
         assert!(has(ClickTarget::OpenDiff), "modified files → open diff");
         assert!(has(ClickTarget::OpenMemoryInspector), "Memory → inspector");
         assert!(has(ClickTarget::OpenSkillsInspector), "Skills → inspector");
+        assert!(has(ClickTarget::OpenAgentsInspector), "Agents → inspector");
+    }
+
+    #[test]
+    fn agents_section_is_absent_while_no_subagent_is_alive() {
+        // The no-empty-stub rule (Design §3.1): the section simply does not
+        // appear until at least one subagent is alive.
+        let app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40)
+                .all(|y| (0..120).all(|x| hit.hit(x, y) != Some(ClickTarget::OpenAgentsInspector))),
+            "no Agents section without a live subagent"
+        );
+    }
+
+    #[test]
+    fn ended_agent_drops_from_the_sidebar_but_the_last_one_ending_hides_the_section() {
+        // Design §4.13: the sidebar shows only *currently alive* subagents,
+        // even though the catalog (`App.agents`) keeps ended ones for the
+        // `/agents` inspector. With one alive and one ended, the section
+        // still shows (for the alive one); once the last one ends, it goes
+        // away entirely — the catalog is non-empty but the section is gone.
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.agents.push(crate::app::AgentSummary {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            ended: true,
+        });
+        app.agents.push(crate::app::AgentSummary {
+            id: "agent-2".into(),
+            name: "tester".into(),
+            ended: false,
+        });
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40)
+                .any(|y| (0..120).any(|x| hit.hit(x, y) == Some(ClickTarget::OpenAgentsInspector))),
+            "one alive subagent keeps the section visible"
+        );
+
+        app.agents[1].ended = true; // the last alive one now ends too
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40)
+                .all(|y| (0..120).all(|x| hit.hit(x, y) != Some(ClickTarget::OpenAgentsInspector))),
+            "no alive subagents left → the section disappears, though the catalog is not empty"
+        );
+        assert_eq!(
+            app.agents.len(),
+            2,
+            "the catalog itself retains both entries"
+        );
     }
 
     #[test]
@@ -2209,6 +2373,7 @@ mod tests {
                 affected_paths: vec!["/etc/x".into()],
                 outside_root,
                 reason: "bash requires approval".into(),
+                on_behalf_of: None,
             },
         });
     }
@@ -2278,6 +2443,38 @@ mod tests {
             screen.contains("OUTSIDE YOUR PROJECT"),
             "loud banner for outside-root escalation"
         );
+    }
+
+    /// A subagent's own action gets one added provenance line (FR-9, Design
+    /// §4.13/§5) — every other guarantee (full content, deny default, no
+    /// reserved-band dilution) is unchanged.
+    #[test]
+    fn permission_prompt_names_the_subagent_it_is_on_behalf_of() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.apply_event(UiEvent::PermissionRequest {
+            id: PermissionId(1),
+            rendering: PermissionRendering {
+                tool: "bash".into(),
+                summary: "run: make build".into(),
+                detail: "make build".into(),
+                affected_paths: Vec::new(),
+                outside_root: false,
+                reason: "bash requires approval".into(),
+                on_behalf_of: Some("db-migration".into()),
+            },
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(
+            screen.contains("on behalf of subagent db-migration"),
+            "names which subagent is asking: {screen}"
+        );
+        assert!(screen.contains("DENY"), "deny is still the default");
     }
 
     #[test]
@@ -2537,6 +2734,41 @@ mod tests {
         let screen = draw(&app, 100, 24);
         assert!(screen.contains("-old"));
         assert!(screen.contains("+new"));
+    }
+
+    #[test]
+    fn agent_activity_overlay_shows_text_and_the_live_refresh_hint() {
+        // Design §4.13: the activity overlay's hint names the live refresh so
+        // its text changing under the user's eyes reads as expected.
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.agents.push(crate::app::AgentSummary {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            ended: false,
+        });
+        app.run_command(crate::commands::AppCommand::Agents);
+        app.apply_event(UiEvent::AgentActivity {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            text: "assistant: reviewing the diff now".into(),
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(screen.contains("reviewing the diff now"));
+        assert!(screen.contains("updates live"), "{screen:?}");
+
+        // Read-only: no click target is registered under it (mirrors the
+        // plain Text overlay's `a_read_only_overlay_blocks_click_through`).
+        let hit = hit_map_of(&app, 100, 24);
+        assert!(
+            (0..24).all(|y| (0..100).all(|x| hit.hit(x, y).is_none())),
+            "nothing under the activity overlay is clickable"
+        );
     }
 
     #[test]

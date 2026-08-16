@@ -605,10 +605,16 @@ async fn run() -> anyhow::Result<()> {
         skills: resolved.skills.clone(),
         user_skills_dir: config::skills_dir(),
         project_skills_dir: Some(project_skills_dir),
+        agents: resolved.agents,
+        // Both `None`: this is a top-level session, which owns its own
+        // permission/ask-user state (the production path). Only a
+        // subagent's derived config overrides these (Tech Spec §8.4).
+        external_permission_gate: None,
+        external_ask_gate: None,
     };
 
     let (engine_ports, frontend_ports) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx) =
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx, subagent_rx) =
         Engine::new(config, engine_ports.events_tx);
     let engine_task = tokio::spawn(engine.run(
         engine_ports.commands_rx,
@@ -618,6 +624,7 @@ async fn run() -> anyhow::Result<()> {
         task_rx,
         memory_rx,
         skill_rx,
+        subagent_rx,
     ));
 
     // Drive the session until the user quits or the engine closes its events.

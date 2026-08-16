@@ -18,7 +18,9 @@ use async_trait::async_trait;
 use emberly_tools::{
     AskUserGate, AskUserOutcome, MemoryError, MemoryGate, MemoryOutcome, MemoryRequest,
     PermissionGate, PermissionOutcome, PermissionRequest, RecallGate, RecallOutcome, SkillError,
-    SkillGate, SkillInvocation, TaskItem, TaskListError, TaskListGate,
+    SkillGate, SkillInvocation, SubagentEndOutcome, SubagentError, SubagentGate, SubagentListEntry,
+    SubagentMessageOutcome, SubagentMessageRequest, SubagentSpawnBatch, SubagentSpawnResult,
+    TaskItem, TaskListError, TaskListGate,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -62,6 +64,11 @@ where
 pub struct PermissionAsk {
     pub(crate) request: PermissionRequest,
     pub(crate) reply: oneshot::Sender<PermissionOutcome>,
+    /// The subagent that raised this ask, if any (FR-9, Tech Spec §8.4) —
+    /// `None` for the primary agent's own requests. Threaded into
+    /// `PermissionRendering` so the frontend can show "on behalf of subagent
+    /// X" (Design §4.13/§5) without a second permission-prompt mechanism.
+    pub(crate) on_behalf_of: Option<String>,
 }
 
 #[async_trait]
@@ -71,6 +78,7 @@ impl PermissionGate for Gate<PermissionAsk> {
         ask_engine(&self.asks, PermissionOutcome::Deny, |reply| PermissionAsk {
             request,
             reply,
+            on_behalf_of: None,
         })
         .await
     }
@@ -91,6 +99,128 @@ impl AskUserGate for Gate<AskUserAsk> {
         ask_engine(&self.asks, AskUserOutcome::Declined, |reply| AskUserAsk {
             question,
             options,
+            reply,
+        })
+        .await
+    }
+}
+
+/// A permission gate that proxies every request to the **session's root
+/// engine** instead of owning a `RuleEngine` of its own, tagged with the
+/// subagent that raised it (FR-9, Tech Spec §8.4). Installed as a subagent's
+/// `ToolCtx` permission gate in place of a fresh `Gate<PermissionAsk>`: the
+/// whole point is that a subagent never gets its own copy of the session's
+/// rules to drift from the root's — every subagent's tool call is decided by
+/// the *same* rule state as the primary agent's, and a grant an approval
+/// writes (session or project) widens that one shared state, visible to every
+/// agent in the session (Requirements FR-9 honesty clause).
+pub struct SubagentPermissionGate {
+    pub(crate) tx: mpsc::Sender<PermissionAsk>,
+    pub(crate) label: String,
+}
+
+#[async_trait]
+impl PermissionGate for SubagentPermissionGate {
+    async fn authorize(&self, request: PermissionRequest) -> PermissionOutcome {
+        let label = self.label.clone();
+        ask_engine(&self.tx, PermissionOutcome::Deny, move |reply| {
+            PermissionAsk {
+                request,
+                reply,
+                on_behalf_of: Some(label),
+            }
+        })
+        .await
+    }
+}
+
+/// The `ask_user` (T-8) analogue of [`SubagentPermissionGate`]: proxies a
+/// subagent's question to the root engine's own ask-user round trip, so a
+/// subagent never opens a second, competing question prompt — one user, one
+/// place they are ever asked anything (Tech Spec §8.4).
+pub struct SubagentAskUserGate {
+    pub(crate) tx: mpsc::Sender<AskUserAsk>,
+}
+
+#[async_trait]
+impl AskUserGate for SubagentAskUserGate {
+    async fn ask(&self, question: String, options: Vec<String>) -> AskUserOutcome {
+        ask_engine(&self.tx, AskUserOutcome::Declined, |reply| AskUserAsk {
+            question,
+            options,
+            reply,
+        })
+        .await
+    }
+}
+
+/// A multi-agent lifecycle request in flight from the `spawn_agents`/
+/// `message_agent`/`list_agents`/`end_agent` tools to the engine (T-18–T-21,
+/// Tech Spec §8.4). One channel, one ask type covering all four operations —
+/// the multi-method mirror of the single-method asks above.
+pub enum SubagentAsk {
+    Spawn {
+        req: SubagentSpawnBatch,
+        reply: oneshot::Sender<Result<Vec<SubagentSpawnResult>, SubagentError>>,
+    },
+    Message {
+        req: SubagentMessageRequest,
+        reply: oneshot::Sender<Result<SubagentMessageOutcome, SubagentError>>,
+    },
+    List {
+        reply: oneshot::Sender<Result<Vec<SubagentListEntry>, SubagentError>>,
+    },
+    End {
+        id: String,
+        reply: oneshot::Sender<Result<SubagentEndOutcome, SubagentError>>,
+    },
+    /// Fire-and-forget: a subagent's own driver reports the token/cost delta
+    /// its just-finished turn accrued, so the root can roll it into the
+    /// session's own total (Requirements FR-9 — "cost is never hidden").
+    /// Carries no reply; nothing awaits it.
+    ReportUsage {
+        usage: crate::types::TokenUsage,
+        cost_usd: f64,
+    },
+}
+
+#[async_trait]
+impl SubagentGate for Gate<SubagentAsk> {
+    /// Fails closed to `Err`; the tool maps it to a structured failure (HC-6).
+    async fn spawn_agents(
+        &self,
+        req: SubagentSpawnBatch,
+    ) -> Result<Vec<SubagentSpawnResult>, SubagentError> {
+        ask_engine(&self.asks, Err(SubagentError), |reply| SubagentAsk::Spawn {
+            req,
+            reply,
+        })
+        .await
+    }
+
+    /// Fails closed to `Err`; the tool maps it to a structured failure (HC-6).
+    async fn message_agent(
+        &self,
+        req: SubagentMessageRequest,
+    ) -> Result<SubagentMessageOutcome, SubagentError> {
+        ask_engine(&self.asks, Err(SubagentError), |reply| {
+            SubagentAsk::Message { req, reply }
+        })
+        .await
+    }
+
+    /// Fails closed to `Err`; the tool maps it to a structured failure (HC-6).
+    async fn list_agents(&self) -> Result<Vec<SubagentListEntry>, SubagentError> {
+        ask_engine(&self.asks, Err(SubagentError), |reply| SubagentAsk::List {
+            reply,
+        })
+        .await
+    }
+
+    /// Fails closed to `Err`; the tool maps it to a structured failure (HC-6).
+    async fn end_agent(&self, id: String) -> Result<SubagentEndOutcome, SubagentError> {
+        ask_engine(&self.asks, Err(SubagentError), |reply| SubagentAsk::End {
+            id,
             reply,
         })
         .await
@@ -237,6 +367,12 @@ mod tests {
             .invoke_skill("s".into())
             .await
             .is_err());
+        assert!(matches!(
+            orphaned::<SubagentAsk>()
+                .spawn_agents(SubagentSpawnBatch { agents: vec![] })
+                .await,
+            Err(SubagentError)
+        ));
     }
 
     // ---- the engine takes the ask and never answers ---------------------
@@ -299,5 +435,73 @@ mod tests {
             });
             assert!(outcome.is_err());
         }
+    }
+
+    // ---- subagent proxy gates (FR-9, Tech Spec §8.4) ---------------------
+
+    #[tokio::test]
+    async fn subagent_permission_gate_fails_closed_when_the_engine_is_gone() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let gate = SubagentPermissionGate {
+            tx,
+            label: "helper".into(),
+        };
+        assert!(matches!(
+            gate.authorize(permission_request()).await,
+            PermissionOutcome::Deny
+        ));
+    }
+
+    #[tokio::test]
+    async fn subagent_ask_user_gate_fails_closed_when_the_engine_is_gone() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let gate = SubagentAskUserGate { tx };
+        assert!(matches!(
+            gate.ask("q".into(), Vec::new()).await,
+            AskUserOutcome::Declined
+        ));
+    }
+
+    /// The whole point of [`SubagentPermissionGate`]: it tags the ask with the
+    /// subagent's name so the frontend can show "on behalf of subagent X"
+    /// (Design §4.13/§5) — verified end to end through the channel, not just
+    /// by inspecting the gate's own fields.
+    #[tokio::test]
+    async fn subagent_permission_gate_tags_the_ask_with_its_label() {
+        let (tx, mut rx) = mpsc::channel::<PermissionAsk>(1);
+        let gate = SubagentPermissionGate {
+            tx,
+            label: "db-migration".into(),
+        };
+        let (outcome, received) = tokio::join!(gate.authorize(permission_request()), async {
+            let ask = rx.recv().await;
+            let on_behalf_of = ask.as_ref().and_then(|a| a.on_behalf_of.clone());
+            if let Some(ask) = ask {
+                let _ = ask.reply.send(PermissionOutcome::Allow);
+            }
+            on_behalf_of
+        });
+        assert!(matches!(outcome, PermissionOutcome::Allow));
+        assert_eq!(received, Some("db-migration".to_string()));
+    }
+
+    /// The root's own `Gate<PermissionAsk>` (used for the primary agent's own
+    /// requests) tags nothing — only the subagent proxy does.
+    #[tokio::test]
+    async fn the_root_gate_tags_no_subagent() {
+        let (tx, mut rx) = mpsc::channel::<PermissionAsk>(1);
+        let gate = Gate::new(tx);
+        let (outcome, received) = tokio::join!(gate.authorize(permission_request()), async {
+            let ask = rx.recv().await;
+            let on_behalf_of = ask.as_ref().and_then(|a| a.on_behalf_of.clone());
+            if let Some(ask) = ask {
+                let _ = ask.reply.send(PermissionOutcome::Allow);
+            }
+            on_behalf_of
+        });
+        assert!(matches!(outcome, PermissionOutcome::Allow));
+        assert_eq!(received, None);
     }
 }
