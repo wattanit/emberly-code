@@ -214,25 +214,49 @@ total. CLI command manually smoke-tested end to end.
 
 ---
 
-## Phase 3 — MCP tool-layer contract (`emberly-tools`)
+## Phase 3 — MCP tool-layer contract (`emberly-tools`) — ✅ code-complete 2026-08-16
 
-**Goal:** Define the trait boundary for MCP-sourced tools, following the
-exact `SubagentGate`/`MemoryGate` pattern already established in this crate
-— compiling, tested, and inert (stub gate, every call fails closed) until
-Phase 4 wires a real connection in.
+**Goal:** Define the trait boundary for MCP-sourced tools — compiling,
+tested, and inert (no registry wiring) until Phase 4 wires a real
+connection in.
 
-**Scope**
-- Request/outcome types for connecting to a configured server, discovering
-  its tools, and invoking one; a fail-closed `McpError`; an `McpGate` trait.
-- A `DropMcpGate` default, exactly like `DropSubagentGate`/`DropMemoryGate`.
-- The namespacing convention Phase 0 named, enforced at this layer so a
-  collision is a structured construction-time failure, never a silent
-  overwrite of a built-in tool's registry entry.
-- Unit tests: fail-closed behavior surfaces as `ToolOutcome::failure` (HC-6),
-  never a panic; namespacing collision cases.
+**Architectural refinement from the original plan (disclosed, not silent):**
+the plan as written called for a `McpGate`/`DropMcpGate` pair mirroring
+`SubagentGate`/`MemoryGate`. Building it out, that pattern turned out not to
+fit: a `*Gate` exists because a *fixed, statically-registered* built-in tool
+(`memory`, `spawn_agents`) needs `ToolCtx` to carry engine-owned state that
+doesn't exist until runtime. An MCP-sourced tool is the opposite shape — an
+unbounded, dynamically-discovered set, and each one only exists once a real
+connection has already named it (Phase 4). There is nothing to gate a *call*
+through in the meantime, so a `Drop`-style fail-closed default would be
+inert by definition, not a meaningful contract. What Phase 3 actually needed
+to fix — and does — is the shape Phase 4 builds against: a `McpTransport`
+trait, the namespacing/collision rule, and a generic `Tool` proxy
+constructed directly over a transport handle, fully testable now against a
+fake transport with no gate indirection at all. This is a plan-level
+correction, not a Tech Spec conflict — §5.6 only ever committed to "a thin
+proxy implementing the `Tool` trait," which this satisfies exactly.
 
-**Done when:** `cargo build/test/clippy/fmt -p emberly-tools` clean; no
-engine wiring yet, proving the contract is correct in isolation.
+**Landed as built (`emberly-tools/src/mcp.rs`):**
+- `McpTransport` trait — `async fn call(&self, method, params) -> Result<Value, McpError>` — exactly the Tech Spec §5.6 shape, so Phase 4's stdio
+  client is a drop-in implementer.
+- `McpError` (`thiserror`, `Connect`/`Protocol` variants) — mapped to a
+  structured `ToolOutcome::failure` by `McpTool::execute`, never a panic
+  (HC-6).
+- `namespaced_tool_name(server, tool) -> "mcp__<server>__<tool>"` (Requirements
+  §13 resolved) and `build_mcp_tools(server, specs, transport)`, which
+  detects a same-server name collision as a structured `McpError` naming
+  both tools before any `McpTool` is even constructed.
+- `McpTool: Tool` — a thin proxy: `execute` calls `transport.call("tools/call", …)` and maps the result to `ToolOutcome::success(..).with_untrusted()`
+  (mirroring `web_search`'s untrusted-content tagging, T-14/Design §4.15) or
+  a structured failure. `describe()` names the original tool and its server.
+
+**Done when:** `cargo build/test/clippy(-D warnings)/fmt --check -p
+emberly-tools` clean — ✅ all green. 6 new unit tests against a fake
+`McpTransport`: namespacing, collision detection, successful proxy + untrusted
+tagging + correct `tools/call` params, transport-failure-as-structured-
+failure, and `describe()`. No engine wiring yet — proven correct in isolation,
+exactly as planned.
 
 ---
 
