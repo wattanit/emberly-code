@@ -66,6 +66,9 @@ pub enum AppCommand {
     /// §4.14). `/attach <path>` validates and stages it immediately; the
     /// engine replies with the attachment chip or a plain input-time error.
     Attach,
+    /// Export this session — plus any subagents it spawned — to a
+    /// self-contained HTML file (FR-12, Design §8.11). `/export <path>`.
+    Export,
     /// Cancel the in-flight turn.
     Cancel,
     /// Exit emberly.
@@ -153,6 +156,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "Attach an image to the prompt (/attach <path>)",
         cmd: AppCommand::Attach,
+    },
+    CommandSpec {
+        name: "export",
+        plain: Plain::Same,
+        key: None,
+        desc: "Export this session to a shareable HTML file (/export <path>)",
+        cmd: AppCommand::Export,
     },
     CommandSpec {
         name: "model",

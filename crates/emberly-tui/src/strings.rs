@@ -200,6 +200,13 @@ pub mod agents {
     pub const ACTIVITY_HINT: &str = " Esc close · ↑↓ PgUp/PgDn scroll · updates live";
 }
 
+/// Session export (FR-12, Design §8.11): the calm, one-time disclosure line
+/// shared verbatim by both frontends, since export does not redact content
+/// (Requirements FR-12 honesty clause) — the disclosure is the mitigation.
+pub mod export {
+    pub const SENSITIVE_CONTENT_NOTE: &str = "This file may contain file contents, command output, and anything else this session touched — review before sharing.";
+}
+
 /// Keybinding hints for the status bar (Design §3.1, §6.2 — 2–5 words each).
 /// Hints change with state; the permission set is shown while a prompt is open.
 pub mod hints {

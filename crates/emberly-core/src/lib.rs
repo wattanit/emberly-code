@@ -18,6 +18,7 @@ pub mod channels;
 pub mod command;
 pub mod engine;
 pub mod event;
+pub mod export;
 pub mod factory;
 pub mod gate;
 pub mod id;
@@ -44,6 +45,7 @@ pub use engine::{
     LoopConfig, MemoryConfig, SkillsConfig,
 };
 pub use event::UiEvent;
+pub use export::{collect_subagent_transcripts, render_session_html, SubagentTranscript};
 pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfig};
 pub use gate::{AskUserAsk, MemoryAsk, PermissionAsk, SkillAsk, TaskListAsk};
 pub use id::{AskId, PermissionId, SessionId, ToolCallId};

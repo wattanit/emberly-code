@@ -243,6 +243,12 @@ impl LineRenderer {
             UiEvent::AttachFailed { path, reason } => {
                 writeln!(out, "attach failed: {path}: {reason}")?;
             }
+            // `init`/`clean` voice: exactly what was written and where, plus
+            // the one calm, non-blocking disclosure line (FR-12, Design §8.11).
+            UiEvent::SessionExported { path } => {
+                writeln!(out, "exported to {path}")?;
+                writeln!(out, "{}", crate::strings::export::SENSITIVE_CONTENT_NOTE)?;
+            }
             // Unknown future events are ignored (non_exhaustive).
             _ => {}
         }
@@ -731,6 +737,19 @@ fn on_slash(input: &str, state: &LineState, out: &mut impl Write) -> io::Result<
                 })
             }
         }
+        // No output-location picker in plain mode either (Design §8.11) —
+        // an explicit path is the only surface, same as `/attach`.
+        AppCommand::Export => {
+            let path = args.trim();
+            if path.is_empty() {
+                writeln!(out, "usage: /export <path>")?;
+                LineAction::Done
+            } else {
+                LineAction::Send(Command::ExportSession {
+                    path: path.to_string(),
+                })
+            }
+        }
         AppCommand::Effort => match emberly_core::Effort::parse(args) {
             Some(effort) => LineAction::Send(Command::SetEffort { effort }),
             None => {
@@ -1193,6 +1212,34 @@ mod tests {
             }
             _ => panic!("expected an AttachImage"),
         }
+    }
+
+    #[test]
+    fn export_needs_a_path_and_sends_it_verbatim() {
+        // FR-12: no output-location picker in plain mode, so a bare
+        // `/export` is a usage line rather than silence (Design §8.11/§7).
+        let (out, action) = slash("export");
+        assert!(out.contains("usage: /export <path>"), "{out}");
+        assert!(matches!(action, LineAction::Done));
+
+        match slash("export session.html").1 {
+            LineAction::Send(Command::ExportSession { path }) => {
+                assert_eq!(path, "session.html");
+            }
+            _ => panic!("expected an ExportSession"),
+        }
+    }
+
+    #[test]
+    fn session_exported_event_prints_the_path_and_disclosure() {
+        let out = render_to_string(&UiEvent::SessionExported {
+            path: "session.html".into(),
+        });
+        assert!(out.contains("exported to session.html"), "{out}");
+        assert!(
+            out.contains("review before sharing"),
+            "the sensitive-content disclosure must always print: {out}"
+        );
     }
 
     #[test]

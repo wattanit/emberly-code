@@ -157,4 +157,15 @@ pub enum Command {
     /// stream. An unknown or already-ended id still replies, with a body
     /// saying so, rather than doing nothing.
     InspectAgent { id: String },
+
+    /// Export this session — plus any subagents it spawned (FR-9) — to a
+    /// self-contained HTML file at `path` (FR-12, Design §8.11, Tech Spec
+    /// §8.6). Issued at idle; reads the session's own transcript and derived
+    /// view read-only, never mutating either. `path` may fall outside the
+    /// project root — a user-initiated action, so HC-4 does not apply (the
+    /// same posture as `emberly clean`'s scratch-path handling, FR-8). Replies
+    /// with [`UiEvent::SessionExported`](crate::event::UiEvent::SessionExported)
+    /// on success or a [`UiEvent::Notice`](crate::event::UiEvent::Notice) on
+    /// an ordinary I/O failure — never a crash (HC-3).
+    ExportSession { path: String },
 }

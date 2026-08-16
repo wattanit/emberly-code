@@ -158,35 +158,59 @@ credentials to run one; flagged here rather than assumed passing.
 
 ---
 
-## Phase 2 — Session export (FR-12)
+## Phase 2 — Session export (FR-12) — ✅ code-complete 2026-08-16
 
 **Goal:** Let the user export a complete session — including any subagents it
 spawned (FR-9) — to a portable, human-readable file, without adding any new
 persistence mechanism.
 
-**Scope**
-- An exporter reading the existing derived conversation-state / transcript
-  (§8.2, §8.8) read-only; no write path back into transcript or cache.
-- Renders to the format(s) Phase 0 named (e.g. static, dependency-free HTML)
-  using first-party string building — no templating-engine dependency
-  unless Phase 0 explicitly named one.
-- Includes: conversation, tool calls/results (respecting existing
-  truncation/reduction markers, §8.1/§8.5), permission decisions, mode
-  changes, and a cost/usage summary (P-6); subagent activity included per
-  FR-12's extension of FR-9.
-- Surface: a CLI command (`emberly export` or Tech Spec's chosen verb) and,
-  per Design Guideline's Phase-0 decision, an in-session command. Output path
-  is user-chosen and may fall outside the project root (FR-12 — user-
-  initiated, HC-4 does not apply).
-- No content redaction, per FR-12's honesty clause; Design's export-time
-  warning (Phase 0) is the mitigation, not a filter this phase builds.
+**Landed as built:**
+- `emberly-core`: new `export` module — `render_session_html` (first-party
+  HTML string building, no templating dependency) walks a session's
+  `TranscriptRecord`s directly (not the model-facing derived `Message` view,
+  which drops too much — tool calls/results, permission decisions, mode
+  changes) and renders each event in its existing agent-world/harness-world
+  register. `collect_subagent_transcripts` reads every `*.jsonl` under
+  `<sessions_dir>/<session_id>/subagents/`, best-effort-labeled by name via
+  a small parser over the parent's own `spawn_agents` tool-result text
+  (falls back to the bare id — never load-bearing). Usage/cost summary reads
+  the existing derived-view cache (`try_load_view_cache`, §3.2a) when fresh;
+  when it's missing or stale, the export says so honestly rather than
+  fabricating a number — a real, disclosed limitation of the pre-existing
+  cache design (usage/cost was never persisted to the transcript itself),
+  not something this phase could fix without expanding scope.
+- `Command::ExportSession{path}` (engine-issued at idle, mirroring
+  `AttachImage`): reads the session's own live transcript path
+  (`active_path`) and subagents directory read-only, writes the rendered
+  HTML, and emits `UiEvent::SessionExported` on success or a plain `Notice`
+  on an ordinary I/O failure (HC-3 — never a crash). `path` is user-named
+  directly, so — like `AttachImage` — no project-root confinement or
+  permission prompt applies.
+- `emberly-tui`: `/export <path>` in both frontends, sharing one
+  `strings::export::SENSITIVE_CONTENT_NOTE` constant for the Design §8.11
+  disclosure line so both frontends print it verbatim.
+- `emberly` (binary): `emberly export [--session <id>] <output-path>` CLI
+  command, sharing `emberly_core::render_session_html`/
+  `collect_subagent_transcripts` with the in-session path — no divergent
+  logic between the two entry points, as the Tech Spec required. Manually
+  smoke-tested end to end against a synthetic transcript (unlike Phase 1,
+  this needed no live provider — output verified: correct HTML escaping,
+  tool call/result rendering, and the honest "usage unavailable" fallback).
 
-**Done when:** `cargo build/test/clippy/fmt` clean; a test exports a session
-with a nested subagent transcript and asserts the output contains both,
-contains no transcript mutation (checksum the source transcript before/
-after), and round-trips a session already reduced by truncation/compaction
-without losing the "content elided, N available on demand" markers into
-false completeness.
+**Scope cut from the original plan (disclosed, not silent):** no
+output-location picker in either frontend — `/export <path>` is the only
+in-session surface, the same cut Phase 1 made for `/attach`. Still open per
+Design §4.14/§10 pattern; adding one later is frontend-only.
+
+**Done when:** `cargo build/test/clippy(-D warnings)/fmt --check` clean for
+the whole workspace — ✅ all green. 3 new engine-level tests (writes HTML +
+never mutates the source transcript, checksummed before/after; preserves a
+truncation marker rather than claiming false completeness; an unwritable
+output path is a plain notice, never a crash), 5 new `export` module unit
+tests (rendering, HTML-escaping, subagent-section labeling, missing-subagents-
+dir honesty), 3 new CLI-layer tests, 4 new TUI tests (both frontends'
+`/export` parsing and the `SessionExported` disclosure line) — 15 new tests
+total. CLI command manually smoke-tested end to end.
 
 ---
 

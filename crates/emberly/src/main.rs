@@ -28,6 +28,7 @@ use emberly_tui::{frontend, SessionInfo};
 
 mod clean;
 mod config;
+mod export;
 mod init;
 mod placeholder;
 mod provider_setup;
@@ -233,6 +234,10 @@ enum Cli {
     TrustList,
     TrustRevoke(String),
     Clean(Option<String>),
+    Export {
+        session_id: Option<String>,
+        output_path: String,
+    },
     Run(RunOpts),
 }
 
@@ -285,6 +290,26 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
                     }
                 }
                 return Ok(Cli::Clean(clean_id));
+            }
+            // `export [--session <id>] <output-path>` (FR-12, Tech Spec §10).
+            "export" => {
+                let mut session_id = None;
+                let mut output_path = None;
+                while let Some(next) = args.peek() {
+                    if next == "--session" {
+                        args.next();
+                        session_id = Some(args.next().context("--session needs a value")?);
+                    } else if output_path.is_none() {
+                        output_path = args.next();
+                    } else {
+                        break;
+                    }
+                }
+                let output_path = output_path.context("export needs an <output-path>")?;
+                return Ok(Cli::Export {
+                    session_id,
+                    output_path,
+                });
             }
             // Force degraded/line mode (Design §7); also implied by `NO_COLOR`,
             // `TERM=dumb`, and a non-tty stdout — see `frontend::detect`.
@@ -345,6 +370,14 @@ async fn run() -> anyhow::Result<()> {
         Cli::Clean(session_id) => {
             let scratch_root = std::env::current_dir()?.join(".agents").join("scratch");
             clean::clean(&scratch_root, session_id.as_deref())?;
+            return Ok(());
+        }
+        Cli::Export {
+            session_id,
+            output_path,
+        } => {
+            let sessions_dir = std::env::current_dir()?.join(".agents").join("sessions");
+            export::export(&sessions_dir, session_id.as_deref(), &output_path)?;
             return Ok(());
         }
         Cli::Run(opts) => opts,

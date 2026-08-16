@@ -310,4 +310,11 @@ pub enum UiEvent {
     /// `image.max_attachments`. Rendered as a plain input-time error (Design
     /// §4.14), never a silent drop.
     AttachFailed { path: String, reason: String },
+
+    /// An in-session `/export` command finished writing a session export
+    /// (FR-12, Tech Spec §8.6) to `path`. Not a transcript event — the export
+    /// is an action taken on the session's own record, not part of what the
+    /// session did (Tech Spec §3.1). A failure surfaces as a plain
+    /// [`Notice`](UiEvent::Notice) instead (HC-3 — never a crash).
+    SessionExported { path: String },
 }

@@ -32,6 +32,7 @@ use tokio::sync::mpsc;
 
 use crate::command::Command;
 use crate::event::UiEvent;
+use crate::export::{collect_subagent_transcripts, render_session_html};
 use crate::factory::{ConfigReloader, ProviderFactory};
 use crate::gate::{
     AskUserAsk, Gate, MemoryAsk, PermissionAsk, RecallAsk, SkillAsk, SubagentAsk,
@@ -1484,6 +1485,7 @@ impl Engine {
                     Command::InspectSkill { name } => self.inspect_skill(name).await,
                     Command::InspectAgent { id } => self.inspect_agent(id).await,
                     Command::AttachImage { path } => self.attach_image(path).await,
+                    Command::ExportSession { path } => self.export_session(path).await,
                 }
                 // The idle boundary is where the derived cache is reconciled with
                 // the log (FR-5, Tech Spec §3.2a): one flush covers a completed

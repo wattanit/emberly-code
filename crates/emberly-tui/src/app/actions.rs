@@ -182,6 +182,7 @@ impl App {
                 AppCommand::Effort => self.effort_command(args),
                 AppCommand::CycleMode => self.mode_command(args),
                 AppCommand::Attach => self.attach_command(args),
+                AppCommand::Export => self.export_command(args),
                 cmd => self.run_command(cmd),
             },
             Slash::Unknown(name) => {
@@ -232,6 +233,23 @@ impl App {
             return Action::None;
         }
         Action::Command(Command::AttachImage {
+            path: path.to_string(),
+        })
+    }
+
+    /// `/export <path>` — export this session to a self-contained HTML file
+    /// (FR-12, Design §8.11). No output-location picker in this pass (same
+    /// scope cut as `/attach`'s missing file-picker) — an explicit path is
+    /// always available and works identically in plain mode (`line.rs`).
+    fn export_command(&mut self, args: &str) -> Action {
+        let path = args.trim();
+        if path.is_empty() {
+            self.timeline
+                .items
+                .push(ConvItem::Notice("usage: /export <path>".into()));
+            return Action::None;
+        }
+        Action::Command(Command::ExportSession {
             path: path.to_string(),
         })
     }
@@ -318,6 +336,12 @@ impl App {
                 self.timeline
                     .items
                     .push(ConvItem::Notice("usage: /attach <path>".into()));
+                Action::None
+            }
+            AppCommand::Export => {
+                self.timeline
+                    .items
+                    .push(ConvItem::Notice("usage: /export <path>".into()));
                 Action::None
             }
             AppCommand::Cancel => Action::Command(Command::Cancel),

@@ -340,6 +340,16 @@ impl App {
                     .items
                     .push(ConvItem::Notice(format!("attach failed: {path}: {reason}")));
             }
+            // `init`/`clean` voice: exactly what was written and where, plus
+            // the one calm, non-blocking disclosure line (FR-12, Design §8.11).
+            UiEvent::SessionExported { path } => {
+                self.timeline
+                    .items
+                    .push(ConvItem::Notice(format!("exported to {path}")));
+                self.timeline.items.push(ConvItem::Notice(
+                    crate::strings::export::SENSITIVE_CONTENT_NOTE.to_string(),
+                ));
+            }
             UiEvent::MemoryEntries { user, project } => {
                 self.apply_memory_entries(user, project);
             }

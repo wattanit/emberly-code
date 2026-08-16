@@ -1532,6 +1532,47 @@ fn slash_attach_sends_the_path() {
 }
 
 #[test]
+fn slash_export_sends_the_path() {
+    // FR-12: `/export <path>` sends ExportSession verbatim; no path is a
+    // plain usage notice, not a silent no-op (Design §8.11).
+    let mut a = app();
+    assert_eq!(
+        a.run_slash("export session.html"),
+        Action::Command(Command::ExportSession {
+            path: "session.html".into(),
+        })
+    );
+    let mut a = app();
+    assert_eq!(a.run_slash("export"), Action::None);
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("usage: /export"))));
+}
+
+#[test]
+fn session_exported_event_shows_path_and_disclosure() {
+    let mut a = app();
+    a.apply_event(UiEvent::SessionExported {
+        path: "session.html".into(),
+    });
+    let notices: Vec<&str> = a
+        .timeline
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            ConvItem::Notice(m) => Some(m.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(notices
+        .iter()
+        .any(|m| m.contains("exported to session.html")));
+    assert!(notices.iter().any(|m| m.contains("review before sharing")));
+}
+
+#[test]
 fn image_attached_event_stages_then_send_turns_it_into_a_chip() {
     // FR-10, Design §4.14: `ImageAttached` stages the image in the compose
     // area; sending the message drains it into a chip right after the

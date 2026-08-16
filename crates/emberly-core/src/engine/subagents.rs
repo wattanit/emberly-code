@@ -569,7 +569,7 @@ impl Engine {
 
     /// The directory a subagent's own nested transcript lives in (Tech Spec
     /// §3.2/§8.4): `.agents/sessions/<parent-session-id>/subagents/`.
-    fn subagents_dir(&self) -> PathBuf {
+    pub(super) fn subagents_dir(&self) -> PathBuf {
         self.session
             .dir
             .join(self.session.id.to_string())

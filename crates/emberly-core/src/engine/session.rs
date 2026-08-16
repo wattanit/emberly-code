@@ -210,6 +210,56 @@ impl Engine {
         }
     }
 
+    /// Export this session — plus any subagents it spawned — to a
+    /// self-contained HTML file at `output_path` (FR-12, Design §8.11, Tech
+    /// Spec §8.6), issued at idle. Reads this session's own transcript (its
+    /// current `active_path`, always in sync with what has been written so
+    /// far) and its subagents directory read-only; writes nothing back to
+    /// either. `output_path` is whatever the user named directly — a
+    /// **user**-initiated write, not an agent-initiated one, so no
+    /// project-root confinement or permission prompt applies (mirrors
+    /// `Command::AttachImage`'s reasoning, FR-10/FR-12).
+    pub(super) async fn export_session(&mut self, output_path: String) {
+        // Scoped so the lock guard (not `Send`) is dropped before any `.await`.
+        let transcript_path: Option<PathBuf> = self
+            .session
+            .active_path
+            .read()
+            .ok()
+            .map(|guard| guard.clone());
+        let Some(transcript_path) = transcript_path else {
+            self.emit(UiEvent::Notice {
+                message: "export failed: session state is unavailable".into(),
+            })
+            .await;
+            return;
+        };
+        let loaded = match crate::resume::read_records(&transcript_path) {
+            Ok(l) => l,
+            Err(e) => {
+                self.emit(UiEvent::Notice {
+                    message: format!("export failed: cannot read this session's transcript: {e}"),
+                })
+                .await;
+                return;
+            }
+        };
+        let subagents = collect_subagent_transcripts(&self.subagents_dir(), &loaded.records);
+        let html = render_session_html(&transcript_path, &loaded.records, &subagents);
+        match tokio::fs::write(&output_path, html).await {
+            Ok(()) => {
+                self.emit(UiEvent::SessionExported { path: output_path })
+                    .await;
+            }
+            Err(e) => {
+                self.emit(UiEvent::Notice {
+                    message: format!("export failed: cannot write {output_path}: {e}"),
+                })
+                .await;
+            }
+        }
+    }
+
     /// Resolve a turn-number range to the messages it contains (T-10, FR-3).
     /// Returns the engine's normalized, in-memory messages for those turns —
     /// never raw JSONL. `from`/`to` are inclusive stable turn numbers as shown
