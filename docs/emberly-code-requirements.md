@@ -1,11 +1,11 @@
 # Emberly Code AI Coding Harness — Requirements Document
 
-**Version:** 0.11    
+**Version:** 0.12    
 **Status:** approved
-**Date:** 2026-08-15    
+**Date:** 2026-08-16    
 **Owner:** Wattanit    
-**Companion documents:** Design Guideline v0.11 (downstream), Technical  
-Specification v0.13 (downstream)
+**Companion documents:** Design Guideline v0.12 (downstream), Technical  
+Specification v0.14 (downstream)
 
 This document defines WHAT the harness must do and WHY. HOW it is built is
 deferred to the Technical Specification. UX, visual, and voice decisions are
@@ -166,10 +166,24 @@ confinement, and workspace trust as the primary agent (no privileged path
 around the safety model, FR-9), is fully audited (extends HC-7), and its cost
 is rolled into the owning session's existing cost estimate (P-6).
 
+Added in the 0.5.1 feature set (three doors held open since earlier versions,
+requested together to round out v0.5's usability; each item carries an ID and
+full statement in the section cited; this list is the scope overview, not the
+requirement):
+
+- MCP client support: external Model Context Protocol servers, configured by
+the user (§7, C-8), present their own tools to the model through the
+harness's existing tool abstraction, governed by the same
+permission/sandbox/workspace-trust posture as any built-in tool (§5, FR-11).
+- User-attached image input: a frontend surface (paste, file-picker, and
+drag-and-drop where the terminal supports it) lets the user attach an image
+directly to a prompt, over the existing multimodal content path (§4, FR-10).
+- Session export: a portable, human-readable rendering of a complete
+session — conversation, tool activity, permission decisions, and cost
+summary — for sharing outside the harness (§8.10, FR-12).
+
 ### 2.2 Explicitly deferred (designed-for, not yet built)
 
-- **MCP client support.** The internal tool abstraction must permit a future
-MCP adapter, but no MCP implementation ships yet.
 - Headless / server / IDE frontends (enabled by the event-model boundary,
 not built).
 - **User theming.** Current scope ships a single built-in theme; all colors live in
@@ -177,11 +191,6 @@ one centralized theme definition so a theme system later is a data
 change, not a refactor.
 - **Windows support.** No Landlock/Seatbelt equivalent exists; shipping
 a platform in a weaker safety tier is declined (current scope).
-- **User-attached images.** Current scope ingests images the model reads
-from the project (T-12); a surface for the user to attach, paste, or drag
-an image into a prompt is deferred. The multimodal content path (P-11) is
-built so adding an attach surface later is a frontend affordance, needing
-no provider or engine change.
 - **Provider-native / server-side tools.** Web search is harness-owned and
 provider-agnostic by decision (§1, T-14); a provider's own server-side
 search (or other server-side tools) is not used, because a capability that
@@ -347,6 +356,21 @@ token and cost accounting (P-6). Document support lives behind the Provider
 abstraction (P-1), not in the tool, so the read-document tool (T-16) is
 portable across providers rather than tied to one vendor — the same reasoning
 as P-11.
+- **FR-10 — User-attached image input.** The user must be able to attach one
+or more images directly to a prompt — at minimum a paste-from-clipboard
+action and an explicit file-picker/path affordance; drag-and-drop is
+included where the terminal and frontend support it (Design Guideline
+decides the exact gestures and how each degrades where a terminal cannot
+support one). An attached image enters context as an image content block
+over the existing multimodal path (P-11) — attaching is a frontend
+affordance constructing the same content block the read-image tool (T-12)
+already produces, needing no new provider or engine capability. Attached
+images are subject to the same format and per-image size caps as T-12
+(Technical Specification sets the exact values; §13); a provider or model
+without vision support returns the same structured unsupported-capability
+result (P-11, HC-6) rather than silently dropping the attachment. This
+graduates the user-attached-images item formerly deferred in §2.2 through
+its named door (see §13, "Resolved since v0.12").
 
 ## 5. Tool Suite
 
@@ -563,6 +587,44 @@ explicitly terminate a subagent and free its resources before the session
 itself ends. Ending an already-ended or unknown id is a structured failure
 (HC-6), not a crash. Every subagent still alive when the owning session
 ends is ended with it — no subagent outlives its session.
+- **FR-11 — MCP client support.** The harness can connect, as a client, to
+external Model Context Protocol (MCP) servers configured by the user (C-8)
+and present each server's own tools to the model through the same internal
+tool abstraction (T-7) every built-in tool already uses — adding a new
+external tool is a server configuration, never an engine or provider
+change. Each externally-sourced tool is namespaced by its owning server so
+a name collision with a built-in tool, or between two servers, is never
+silently ambiguous (Technical Specification sets the exact naming
+convention).
+  - **No privileged path around the safety model (honesty clause).** An
+  MCP-sourced tool call is governed by the exact same permission rules,
+  sandbox confinement, and workspace trust as any built-in tool (§6) — an
+  external server grants the model no capability the harness's own
+  permission model does not already gate, and connecting to a server is
+  never itself a way to act with less oversight.
+  - **Trust gate on project-declared servers.** An MCP server is a
+  locally-run process (or a configured remote endpoint) the user chose to
+  point the harness at; where a server is declared in project
+  configuration rather than user-global configuration, it is neither
+  connected to nor surfaced to the model from a folder the user has not
+  trusted (FR-1) — the same posture already governing project-resident
+  skills (FR-7), because a project-declared MCP server is, like a skill's
+  bundled script, code execution the project itself named.
+  - **Untrusted content, like web search.** A tool result returned by an
+  MCP server may carry content the harness did not generate and cannot
+  vouch for (e.g. a ticket body, a database row); such results are treated
+  as untrusted content the model reads, never as instructions to the
+  harness — the same posture T-14 already takes with web-search results.
+  - **Complete audit trail (extends HC-7).** Connecting to a server, every
+  tool it exposes, and every call and result through it are transcript
+  events exactly like a built-in tool call — no separate mechanism and no
+  exemption from the audit trail.
+  - **Provider-agnostic by construction.** MCP client support is a
+  capability of the harness's tool layer, not of any one provider adapter
+  (P-1) — every configured provider reaches every connected server's tools
+  identically.
+This graduates the MCP-client-support item formerly deferred in §2.2
+through the door T-7 already held open (see §13, "Resolved since v0.12").
 
 ## 6. Permission and Safety Model
 
@@ -733,6 +795,18 @@ path. Guided setup is an additional path onto the same configuration, not a
 parallel system: raw editing (C-5) remains available as the fallback for any
 profile shape (per-model metadata, a non-standard auth scheme) the guided
 flow's fixed field set does not cover.
+- **C-8 — MCP server configuration.** The user declares each MCP server the
+harness may connect to as a named profile — at minimum a name, a transport
+(Technical Specification sets the initial supported transport(s), e.g.
+local stdio-launched servers), and whatever that transport needs to reach
+the server (a command and arguments, or an endpoint and auth reference) —
+mirroring the endpoint-configurable pattern already established for
+providers (P-8) and web search (T-14). Profiles follow the same
+two-tier-plus-project resolution (C-1) and provenance visibility (C-3) as
+every other configuration piece; a project-tier server profile is subject
+to the workspace-trust gate exactly as FR-11 states. Disabling a configured
+server, or the MCP subsystem entirely, must be a configuration change,
+never a code change.
 
 ### 7.1 Persistent memory
 
@@ -937,6 +1011,38 @@ not a cross-session memory mechanism (that is FR-6); losing scratch content
 to the clean command, or to disk loss, must never lose anything the harness
 depends on to function correctly.
 
+### 8.10 Session export
+
+- **FR-12 — Session export.** The user can export a session to a portable,
+human-readable file outside the harness's own session state. The value this
+adds over the transcript's existing raw JSONL (already a plain file the user
+could copy) is a rendering meant to be read and shared: the conversation,
+tool calls and their results (respecting the same truncation/reduction
+markers already in the transcript, §8.1/§8.5), permission decisions, mode
+changes, and a cost/usage summary (P-6), laid out for a reader who is not
+the harness. The Technical Specification names the exact output format(s)
+(at least one self-contained, dependency-free format such as static HTML)
+and whether more than one is offered. Export is a **user-invoked action**,
+available as a CLI command and/or an in-session command (Design Guideline
+decides the exact surface); like the scratch-space reclaim command (FR-8)
+and `init` (C-2), its output path is chosen by the user and may fall outside
+the project root — this is a user-initiated action, not an agent-initiated
+one, so HC-4 does not apply to where the export file lands.
+  - **Never mutates the transcript (extends HC-7).** Export reads the
+  transcript and any derived state; it never rewrites, prunes, or otherwise
+  changes the append-only log that remains the sole ground truth.
+  - **Subagents included (extends FR-9).** Exporting a session includes the
+  activity of any subagents it spawned (FR-9) — a session's full audited
+  activity, not only its primary agent's turns.
+  - **No content redaction (honesty clause).** Export does not attempt to
+  detect or redact secrets or sensitive content the transcript may already
+  contain (e.g. file contents, command output, a pasted API key) — the same
+  content already exists in the raw transcript on disk; export changes its
+  portability, not what it contains. The risk this changes is exposure
+  through sharing, not exposure through storage; warning the user at export
+  time is a Design Guideline concern, not a filtering guarantee this
+  document makes.
+
 ## 9. Architecture Requirements
 
 (Behavioral requirements only; structure belongs to the Technical Spec.)
@@ -1072,6 +1178,17 @@ without cutting off a genuinely long-running delegation.
 - Whether a subagent's token/cost usage is shown as its own line in the
 sidebar or only rolled into the session total with detail on inspection
 (FR-9, P-6). Design Guideline decides.
+- MCP transport(s) supported initially (e.g. local stdio-launched servers
+only, vs. also remote SSE/HTTP), the per-server/per-tool default permission
+posture, and the tool-name collision/namespacing convention (FR-11). Tech
+Spec sets initial values; tune with use.
+- Maximum images (and combined size) attachable to a single prompt, and
+whether the existing per-image format/size caps (T-12, P-11) simply extend
+to the attach path or need their own limit (FR-10). Tech Spec sets initial
+values; tune with use.
+- Session export's exact output format(s), whether subagent transcripts are
+inlined or linked, and any size/streaming handling for a very large session
+(FR-12). Tech Spec sets initial values; tune with use.
 - **Owner decision needed: the local/HuggingFace inference-server request.**
 The harness's provider abstraction (P-2, P-8) already reaches any local
 server that speaks a wire format an adapter parses, at zero harness cost,
@@ -1196,3 +1313,22 @@ explicitly **not** absorbed this version: it is routed to a deferred door
 scope question of a harness-side process-management convenience left to the
 owner (§13) rather than decided here, since it bears on the existing §2.3
 "model hosting" out-of-scope line.
+
+Resolved since v0.12 (0.5.1 feature set): three doors are addressed together
+to round out v0.5's usability without reopening the shipped v0.5 release
+itself. **MCP client support** graduates through the door T-7 already held
+open since v0.1: external tools reach the model through the same tool
+abstraction every built-in tool uses, gated by a new server-configuration
+tier (C-8) and the same permission/sandbox/workspace-trust posture as any
+other tool (FR-11); the key routing decision is that a project-declared
+server is trust-gated exactly like a skill (FR-7), because it is user-chosen
+code execution the project itself named, not a passive capability. **User-
+attached image input** graduates through the door P-11/T-12 already held
+open since v0.4: attaching is a frontend affordance producing the same image
+content block the harness already carries, so no provider or engine change
+was needed (FR-10). **Session export** is new scope, not a graduated
+deferral — it was not previously named in §2.2 because the value of a
+shareable, human-readable rendering of a session's audit trail was not
+identified until use surfaced the gap; it is scoped as a read-only,
+user-invoked view over the existing transcript (HC-7), extended to include
+subagent activity (FR-9), and is never a second form of persistence (FR-12).
