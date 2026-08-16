@@ -1512,6 +1512,74 @@ fn enter_submits_user_input() {
 }
 
 #[test]
+fn slash_attach_sends_the_path() {
+    // FR-10: `/attach <path>` sends AttachImage verbatim; no path is a plain
+    // usage notice, not a silent no-op (Design §4.14).
+    let mut a = app();
+    assert_eq!(
+        a.run_slash("attach mockup.png"),
+        Action::Command(Command::AttachImage {
+            path: "mockup.png".into(),
+        })
+    );
+    let mut a = app();
+    assert_eq!(a.run_slash("attach"), Action::None);
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("usage: /attach"))));
+}
+
+#[test]
+fn image_attached_event_stages_then_send_turns_it_into_a_chip() {
+    // FR-10, Design §4.14: `ImageAttached` stages the image in the compose
+    // area; sending the message drains it into a chip right after the
+    // user's own message, never as tool activity.
+    let mut a = app();
+    a.apply_event(UiEvent::ImageAttached {
+        path: "/tmp/mockup.png".into(),
+        name: "mockup.png".into(),
+        media_type: "image/png".into(),
+        width: 800,
+        height: 600,
+        format_label: "PNG".into(),
+        pending_count: 1,
+    });
+    assert_eq!(a.pending_attachments.len(), 1);
+
+    a.on_key(KeyEvent::from(KeyCode::Char('h')));
+    a.on_key(KeyEvent::from(KeyCode::Char('i')));
+    a.on_key(KeyEvent::from(KeyCode::Enter));
+
+    assert!(a.pending_attachments.is_empty());
+    let last_two: Vec<_> = a.timeline.items.iter().rev().take(2).collect();
+    assert!(matches!(
+        last_two[1],
+        ConvItem::User(t) if t == "hi"
+    ));
+    assert!(matches!(
+        last_two[0],
+        ConvItem::Attachment { name, width: 800, height: 600, format_label }
+        if name == "mockup.png" && format_label == "PNG"
+    ));
+}
+
+#[test]
+fn attach_failed_event_is_a_plain_notice() {
+    let mut a = app();
+    a.apply_event(UiEvent::AttachFailed {
+        path: "data.bin".into(),
+        reason: "not a recognized image format".into(),
+    });
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("attach failed") && m.contains("data.bin"))));
+}
+
+#[test]
 fn slash_command_is_not_echoed_as_a_message() {
     let mut a = app();
     for c in "/help".chars() {

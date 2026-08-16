@@ -153,12 +153,17 @@ pub struct ContextConfigFile {
     pub pin_task_list: Option<bool>,
 }
 
-/// `[image]` — the `read_image` size cap (P-11, Tech Spec §5.2). All optional;
-/// the engine applies the 5 MiB default when unset.
+/// `[image]` — the `read_image` size cap (P-11, Tech Spec §5.2) and the
+/// user-attach count cap (FR-10, Tech Spec §8). All optional; the engine
+/// applies defaults when unset.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct ImageConfigFile {
     /// Maximum image file size in bytes (default 5 MiB).
     pub max_bytes: Option<usize>,
+    /// Maximum images attachable to a single prompt via `/attach` (FR-10,
+    /// default 4). Reuses `max_bytes`/format checks per-attachment; this
+    /// caps only the count.
+    pub max_attachments: Option<usize>,
 }
 
 /// `[document]` — the `read_document` size cap (P-12, Tech Spec §5.2). All
@@ -599,6 +604,9 @@ pub struct Resolved {
     /// Resolved image size limit in bytes for `read_image` (P-11, Tech Spec
     /// §5.2). Default 5 MiB.
     pub image_max_bytes: usize,
+    /// Resolved cap on images attached to one prompt via `/attach` (FR-10,
+    /// Tech Spec §8). Default 4.
+    pub image_max_attachments: usize,
     /// Resolved document size limit in bytes for `read_document` (P-12, Tech
     /// Spec §5.2). Default 32 MiB.
     pub document_max_bytes: usize,
@@ -917,6 +925,7 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             }
         },
         image_max_bytes: merged.image.max_bytes.unwrap_or(5 * 1024 * 1024),
+        image_max_attachments: merged.image.max_attachments.unwrap_or(4),
         document_max_bytes: merged.document.max_bytes.unwrap_or(32 * 1024 * 1024),
         memory: {
             let d = emberly_core::MemoryConfig::default();

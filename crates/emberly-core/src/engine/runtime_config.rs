@@ -213,6 +213,10 @@ impl Engine {
             self.image_max_bytes = reloaded.image_max_bytes;
             changed.push("image size limit");
         }
+        if reloaded.image_max_attachments != self.image_max_attachments {
+            self.image_max_attachments = reloaded.image_max_attachments;
+            changed.push("image attachment limit");
+        }
         if reloaded.document_max_bytes != self.document_max_bytes {
             self.document_max_bytes = reloaded.document_max_bytes;
             changed.push("document size limit");

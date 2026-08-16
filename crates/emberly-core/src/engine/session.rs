@@ -154,6 +154,11 @@ impl Engine {
         self.next_permission_id = 0;
         self.completion.attempts = 0;
         self.task_list.clear();
+        // A staged-but-unsent attachment (FR-10) belongs to the composing
+        // message, not the session it was composed in — a switch drops it
+        // rather than silently attaching it to the first message of a
+        // different session.
+        self.pending_attachments.clear();
         // Reload memory indexes for the new session (user-global unchanged,
         // project re-pointed to the new root). The store reads from disk, so a
         // resumed session re-reads the current store (Tech Spec §8.1). Re-emit
@@ -186,12 +191,16 @@ impl Engine {
 
     /// Record a user message durably, tagging the first one as the pinned
     /// `original_task` and deriving the session title from it (Tech Spec §7,
-    /// §16).
-    pub(super) fn record_user_message(&mut self, text: &str) {
+    /// §16). `images` is the durable, byte-free record of any attachments
+    /// (FR-10) — always recorded regardless of whether the active model has
+    /// vision, since it states what the *user* attached, not what reached
+    /// the model.
+    pub(super) fn record_user_message(&mut self, text: &str, images: Vec<AttachedImageMeta>) {
         let original_task = !self.session.original_task_recorded;
         self.write_transcript(TranscriptEvent::UserMessage {
             text: text.to_string(),
             original_task,
+            images,
         });
         if original_task {
             self.session.original_task_recorded = true;

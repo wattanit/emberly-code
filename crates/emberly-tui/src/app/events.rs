@@ -13,8 +13,16 @@ impl App {
     pub fn seed_history(&mut self, records: &[TranscriptRecord]) {
         for record in records {
             match &record.event {
-                TranscriptEvent::UserMessage { text, .. } => {
+                TranscriptEvent::UserMessage { text, images, .. } => {
                     self.timeline.items.push(ConvItem::User(text.clone()));
+                    for image in images {
+                        self.timeline.items.push(ConvItem::Attachment {
+                            name: image.name.clone(),
+                            width: image.width,
+                            height: image.height,
+                            format_label: image.format_label.clone(),
+                        });
+                    }
                 }
                 TranscriptEvent::AssistantMessage { text, reasoning } => {
                     // Replay a recorded reasoning trail (collapsed) unless the
@@ -305,6 +313,32 @@ impl App {
             }
             UiEvent::AgentActivity { id, name, text } => {
                 self.apply_agent_activity(&id, &name, text);
+            }
+            // A staged attachment (FR-10, Design §4.14): mirror the engine's
+            // own staging list so the compose area can confirm what's
+            // pending; the chip itself only lands in the timeline once the
+            // message is actually sent (`send_prompt`).
+            UiEvent::ImageAttached {
+                name,
+                width,
+                height,
+                format_label,
+                ..
+            } => {
+                self.pending_attachments.push(PendingAttachment {
+                    name: name.clone(),
+                    width,
+                    height,
+                    format_label: format_label.clone(),
+                });
+                self.timeline.items.push(ConvItem::Notice(format!(
+                    "attached {name} · {width}×{height} · {format_label}"
+                )));
+            }
+            UiEvent::AttachFailed { path, reason } => {
+                self.timeline
+                    .items
+                    .push(ConvItem::Notice(format!("attach failed: {path}: {reason}")));
             }
             UiEvent::MemoryEntries { user, project } => {
                 self.apply_memory_entries(user, project);

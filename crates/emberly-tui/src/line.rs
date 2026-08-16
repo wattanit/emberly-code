@@ -227,6 +227,22 @@ impl LineRenderer {
                     writeln!(out, "  {mark} {}", item.text)?;
                 }
             }
+            // A staged attachment (FR-10, Design §4.14) — the plain-mode
+            // equivalent of the compose-area chip: a one-line confirmation
+            // naming the file and its dimensions/format, exactly as an
+            // attached image renders once sent (§4.14's ASCII degradation).
+            UiEvent::ImageAttached {
+                name,
+                width,
+                height,
+                format_label,
+                ..
+            } => {
+                writeln!(out, "attached {name} · {width}x{height} · {format_label}")?;
+            }
+            UiEvent::AttachFailed { path, reason } => {
+                writeln!(out, "attach failed: {path}: {reason}")?;
+            }
             // Unknown future events are ignored (non_exhaustive).
             _ => {}
         }
@@ -701,6 +717,20 @@ fn on_slash(input: &str, state: &LineState, out: &mut impl Write) -> io::Result<
                 }
             }
         }
+        // Plain mode has no drag-and-drop or file-picker (Design §4.14) — the
+        // path argument is the only surface, exactly as `/model` needs one
+        // without a picker.
+        AppCommand::Attach => {
+            let path = args.trim();
+            if path.is_empty() {
+                writeln!(out, "usage: /attach <path>")?;
+                LineAction::Done
+            } else {
+                LineAction::Send(Command::AttachImage {
+                    path: path.to_string(),
+                })
+            }
+        }
         AppCommand::Effort => match emberly_core::Effort::parse(args) {
             Some(effort) => LineAction::Send(Command::SetEffort { effort }),
             None => {
@@ -1146,6 +1176,22 @@ mod tests {
                 assert_eq!(effort, emberly_core::Effort::High);
             }
             _ => panic!("expected a SetEffort"),
+        }
+    }
+
+    #[test]
+    fn attach_needs_a_path_and_sends_it_verbatim() {
+        // FR-10: no file-picker in plain mode, so a bare `/attach` is a usage
+        // line rather than silence (Design §4.14/§7).
+        let (out, action) = slash("attach");
+        assert!(out.contains("usage: /attach <path>"), "{out}");
+        assert!(matches!(action, LineAction::Done));
+
+        match slash("attach mockup.png").1 {
+            LineAction::Send(Command::AttachImage { path }) => {
+                assert_eq!(path, "mockup.png");
+            }
+            _ => panic!("expected an AttachImage"),
         }
     }
 

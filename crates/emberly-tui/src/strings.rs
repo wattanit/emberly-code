@@ -211,6 +211,10 @@ pub mod hints {
 /// these are the rich-mode glyphs.
 pub mod markers {
     pub const USER_PROMPT: &str = "›";
+    /// Leads a user-attached image's chip on the sent message (FR-10, Design
+    /// §4.14) — deliberately distinct from `NOTICE`/tool-activity styling,
+    /// since this is content on the user's own message, not tool activity.
+    pub const ATTACHMENT: &str = "📎";
     pub const NOTICE: &str = "·";
     pub const RUNNING: &str = "…";
     pub const OK: &str = "ok";

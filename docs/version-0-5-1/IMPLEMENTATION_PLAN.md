@@ -109,28 +109,52 @@ done, this header's pin above is confirmed, no caveat remains.
 
 ---
 
-## Phase 1 — User-attached image input (FR-10)
+## Phase 1 — User-attached image input (FR-10) — ✅ code-complete 2026-08-16
 
 **Goal:** Let the user attach an image to a prompt through the TUI, entering
 context over the existing multimodal content path (P-11) with no provider or
 engine change.
 
-**Scope**
-- Paste-from-clipboard and an explicit file-picker/path affordance in the
-  TUI input, per Design Guideline's Phase-0 decision; drag-and-drop where
-  the terminal protocol supports it, degrading cleanly where it does not.
-- Attached images are validated against the same format/size caps as T-12
-  (Tech Spec, Phase 0) and converted to the same `ContentBlock::Image` T-12
-  already produces — reusing that construction path, not duplicating it.
-- A provider/model without vision support returns P-11's existing structured
-  unsupported-capability result; attaching never silently drops the image.
-- Transcript event for an attached image (extends HC-7) so it is
-  indistinguishable, in the audit trail, from any other content block.
+**Landed as built:**
+- `emberly-tools`: shared `image::encode_image_bytes` extracted from
+  `read_image` (T-12) so both paths enforce identical format/size rules —
+  `read_image.rs` refactored to call it, no behavior change (existing tests
+  unchanged and still passing).
+- `emberly-core`: `Command::AttachImage{path}` validates and stages an image
+  into new engine state, `Engine::pending_attachments` — deliberately *not*
+  a new field on `Command::UserInput`, to avoid a ~130-callsite mechanical
+  change across `engine_loop.rs`'s test suite; `UserInput` drains the
+  staged list into the outgoing message unchanged in shape. On a vision
+  model the image becomes the identical `ContentBlock::Image` T-12 already
+  produces; on a non-vision model, a plain text note takes its place — never
+  a silent drop (P-11/HC-6 honesty clause). New `UiEvent::ImageAttached` /
+  `AttachFailed`. `TranscriptEvent::UserMessage` gained an additive `images`
+  field (metadata only — name/dimensions/format, never the base64 bytes,
+  matching T-12's own `ToolResult` precedent) so a resumed/exported session
+  still shows what was attached. `image.max_attachments` (default 4)
+  threaded through config exactly like `image.max_bytes`.
+- `emberly-tui`: `/attach <path>` (both frontends — rich TUI and plain/line
+  mode); a new `ConvItem::Attachment` chip renders right after the user's
+  message in the timeline (`📎 name · WxH · FORMAT attached`), distinct from
+  tool-activity styling; `seed_history` replays it from the transcript's
+  `images` field on resume; a compose-area `pending_attachments` list
+  confirms staged images before send and is cleared on send or session
+  switch.
 
-**Done when:** `cargo build/test/clippy/fmt` clean for `emberly-tui` and
-`emberly-core`; an offline `FakeProvider`-driven test attaches an image and
-asserts the resulting content block matches T-12's own; a real vision-capable
-provider smoke-tested manually per this repo's existing practice.
+**Scope cut from the original plan (disclosed, not silent):** no
+paste-from-clipboard or drag-and-drop recognition, and no file-picker
+overlay, in this pass — `/attach <path>` is the only surface. Both are
+still open per Design §4.14/§10 and Requirements §13; adding them later is
+a frontend-only addition, no engine change (the same reuse property this
+phase already banked for `read_image`).
+
+**Done when:** `cargo build/test/clippy(-D warnings)/fmt --check` clean for
+the whole workspace — ✅ all green (`emberly-core`: 5 new engine-level
+tests incl. the vision/non-vision/cap/oversize/transcript-metadata cases;
+`emberly-tui`: 4 new tests for `/attach` parsing in both frontends and the
+stage-then-send chip). **Not done:** a real vision-capable provider smoke
+test — this environment has no interactive TUI session or live provider
+credentials to run one; flagged here rather than assumed passing.
 
 ---
 

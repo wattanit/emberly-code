@@ -144,6 +144,113 @@ impl Engine {
         Ok(text.trim().to_string())
     }
 
+    /// Validate and stage an image attachment for the prompt currently being
+    /// composed (FR-10, Design §4.14), issued at idle before the message is
+    /// sent. `path` is whatever the user named directly via `/attach` — a
+    /// **user**-initiated read, not an agent-initiated one, so no project-root
+    /// confinement or permission prompt applies (mirrors `emberly export`'s
+    /// output path, FR-12). The cap (`image.max_attachments`) is enforced
+    /// against the engine's own staging list before reading the file, so a
+    /// call over the cap costs no I/O.
+    pub(super) async fn attach_image(&mut self, path: String) {
+        if self.pending_attachments.len() >= self.image_max_attachments {
+            self.emit(UiEvent::AttachFailed {
+                path,
+                reason: format!(
+                    "too many attachments (max {}) — send or clear pending attachments first",
+                    self.image_max_attachments
+                ),
+            })
+            .await;
+            return;
+        }
+
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(b) => b,
+            Err(e) => {
+                self.emit(UiEvent::AttachFailed {
+                    path,
+                    reason: format!("cannot read: {e}"),
+                })
+                .await;
+                return;
+            }
+        };
+
+        let encoded = match encode_image_bytes(&bytes, self.image_max_bytes) {
+            Ok(e) => e,
+            Err(reason) => {
+                self.emit(UiEvent::AttachFailed { path, reason }).await;
+                return;
+            }
+        };
+
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+
+        self.pending_attachments.push(AttachedImage {
+            name: name.clone(),
+            media_type: encoded.content.media_type.clone(),
+            data: encoded.content.data,
+            width: encoded.width,
+            height: encoded.height,
+            format_label: encoded.format_label.to_string(),
+        });
+
+        self.emit(UiEvent::ImageAttached {
+            path,
+            name,
+            media_type: encoded.content.media_type,
+            width: encoded.width,
+            height: encoded.height,
+            format_label: encoded.format_label.to_string(),
+            pending_count: self.pending_attachments.len(),
+        })
+        .await;
+    }
+
+    /// Build the outgoing user message, folding in any staged attachments
+    /// (FR-10, Design §4.14). A user-attached image is the identical
+    /// `ContentBlock::Image` a model-read image already produces (T-12) —
+    /// told apart structurally by which message carries it, never by a flag
+    /// (Tech Spec §4.1). On a model with no vision, the image is not sent;
+    /// instead a plain text note says so, per the same honesty clause P-11
+    /// already states for `read_image` (HC-6 — never a silent drop).
+    pub(super) fn build_user_message(
+        &self,
+        text: String,
+        attachments: Vec<AttachedImage>,
+    ) -> Message {
+        if attachments.is_empty() {
+            return Message::user_text(text);
+        }
+        let mut content = vec![ContentBlock::Text { text }];
+        if self.provider.client.model_info().vision {
+            for image in attachments {
+                content.push(ContentBlock::Image {
+                    media_type: image.media_type,
+                    data: image.data,
+                });
+            }
+        } else {
+            for image in attachments {
+                content.push(ContentBlock::Text {
+                    text: format!(
+                        "[Image '{}' was not sent — the active model has no vision support. \
+                         Switch models (/model) or describe the image.]",
+                        image.name
+                    ),
+                });
+            }
+        }
+        Message {
+            role: Role::User,
+            content,
+        }
+    }
+
     /// Push a message to the conversation and update the turn map (FR-3 turn
     /// numbering). `Role::User` messages start a new turn; assistant/tool
     /// messages inherit the current turn number.

@@ -78,6 +78,9 @@ pub struct ReloadedConfig {
     pub context: ContextConfig,
     /// Maximum image file size in bytes (Tech Spec §5.2).
     pub image_max_bytes: usize,
+    /// Maximum images attachable to one prompt via `/attach` (FR-10, Tech
+    /// Spec §8).
+    pub image_max_attachments: usize,
     /// Maximum document file size in bytes (Tech Spec §5.2).
     pub document_max_bytes: usize,
     /// Memory config (FR-6, Tech Spec §8.1). A changed value triggers a

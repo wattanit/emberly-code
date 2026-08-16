@@ -19,11 +19,11 @@ use emberly_providers::{
 };
 use emberly_sandbox::{Decision, Mode, Query, Rule, RuleEngine};
 use emberly_tools::{
-    reduce_output, truncate_output, AskUserGate, AskUserOutcome, PermissionGate, PermissionOutcome,
-    PermissionRequest, RecallOutcome, Reduction, Sandbox, SubagentEndOutcome, SubagentError,
-    SubagentListEntry, SubagentMessageOutcome, SubagentMessageRequest, SubagentSpawnBatch,
-    SubagentSpawnOutcome, SubagentSpawnResult, SubagentSpawnSpec, SubagentStatus, ToolCtx,
-    ToolRegistry, TruncateConfig,
+    encode_image_bytes, reduce_output, truncate_output, AskUserGate, AskUserOutcome,
+    PermissionGate, PermissionOutcome, PermissionRequest, RecallOutcome, Reduction, Sandbox,
+    SubagentEndOutcome, SubagentError, SubagentListEntry, SubagentMessageOutcome,
+    SubagentMessageRequest, SubagentSpawnBatch, SubagentSpawnOutcome, SubagentSpawnResult,
+    SubagentSpawnSpec, SubagentStatus, ToolCtx, ToolRegistry, TruncateConfig,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,8 @@ use crate::transcript::{
     TranscriptSink,
 };
 use crate::types::{
-    CheckResult, GateResolution, LoopResolution, PermissionRendering, SandboxStatus, TokenUsage,
+    AttachedImage, AttachedImageMeta, CheckResult, GateResolution, LoopResolution,
+    PermissionRendering, SandboxStatus, TokenUsage,
 };
 use crate::view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
 
@@ -336,6 +337,9 @@ pub struct EngineConfig {
     /// Maximum image file size in bytes for the `read_image` tool (Tech Spec
     /// §5.2, default 5 MiB).
     pub image_max_bytes: usize,
+    /// Maximum images attachable to one prompt via `Command::AttachImage`
+    /// (FR-10, Tech Spec §8, default 4).
+    pub image_max_attachments: usize,
     /// Maximum document file size in bytes for the `read_document` tool (Tech
     /// Spec §5.2, default 32 MiB).
     pub document_max_bytes: usize,
@@ -1001,6 +1005,14 @@ pub struct Engine {
     /// Maximum image file size in bytes (Tech Spec §5.2). Threaded to the
     /// `read_image` tool via `ToolCtx`.
     image_max_bytes: usize,
+    /// Maximum images attachable to one prompt via `Command::AttachImage`
+    /// (FR-10, Tech Spec §8).
+    image_max_attachments: usize,
+    /// Images staged by `Command::AttachImage` for the prompt currently being
+    /// composed (FR-10, Design §4.14), drained into the next
+    /// `Command::UserInput`'s content. Engine-owned staging state so the
+    /// `UserInput` command's shape never changed for this feature.
+    pending_attachments: Vec<AttachedImage>,
     /// Maximum document file size in bytes (Tech Spec §5.2). Threaded to the
     /// `read_document` tool via `ToolCtx`.
     document_max_bytes: usize,
@@ -1220,6 +1232,8 @@ impl Engine {
             config_reloader: config.config_reloader,
             task_list: Vec::new(),
             image_max_bytes: config.image_max_bytes,
+            image_max_attachments: config.image_max_attachments,
+            pending_attachments: Vec::new(),
             document_max_bytes: config.document_max_bytes,
             agents: AgentState {
                 config: config.agents,
@@ -1386,8 +1400,12 @@ impl Engine {
                             self.emit(UiEvent::TurnEnded).await;
                             continue;
                         }
-                        self.record_user_message(&text);
-                        self.push_conversation_message(Message::user_text(text));
+                        let attachments = std::mem::take(&mut self.pending_attachments);
+                        let images_meta: Vec<AttachedImageMeta> =
+                            attachments.iter().map(AttachedImageMeta::from).collect();
+                        self.record_user_message(&text, images_meta);
+                        let user_message = self.build_user_message(text, attachments);
+                        self.push_conversation_message(user_message);
                         self.emit_context_usage().await;
                         self.run_turn(&mut TurnChannels {
                             commands: &mut commands_rx,
@@ -1465,6 +1483,7 @@ impl Engine {
                     Command::MemoryView { scope, name } => self.emit_memory_body(scope, name).await,
                     Command::InspectSkill { name } => self.inspect_skill(name).await,
                     Command::InspectAgent { id } => self.inspect_agent(id).await,
+                    Command::AttachImage { path } => self.attach_image(path).await,
                 }
                 // The idle boundary is where the derived cache is reconciled with
                 // the log (FR-5, Tech Spec §3.2a): one flush covers a completed

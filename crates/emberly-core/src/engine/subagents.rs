@@ -653,6 +653,7 @@ impl Engine {
             provider_factory: None,
             config_reloader: None,
             image_max_bytes: self.image_max_bytes,
+            image_max_attachments: self.image_max_attachments,
             document_max_bytes: self.document_max_bytes,
             // Directory-shared, not Arc-shared: a subagent's own `MemoryStore`/
             // `SkillCatalog` instance is constructed from the same underlying

@@ -122,6 +122,20 @@ impl App {
                         // Echo the prompt into the timeline so the main pane is
                         // a single top-to-bottom transcript of both sides.
                         self.timeline.items.push(ConvItem::User(text.clone()));
+                        // Any images staged via `/attach` ride along on this
+                        // send (the engine drains its own copy of
+                        // `Engine::pending_attachments` on `UserInput`); the
+                        // chip lands in the timeline now that the message is
+                        // actually sent (Design §4.14), and the compose-area
+                        // staging list is cleared to match.
+                        for image in self.pending_attachments.drain(..) {
+                            self.timeline.items.push(ConvItem::Attachment {
+                                name: image.name,
+                                width: image.width,
+                                height: image.height,
+                                format_label: image.format_label,
+                            });
+                        }
                         // Enter the "working" state (Design §6.3); the spinner
                         // runs from frame 0 until TurnEnded.
                         self.anim.busy = true;

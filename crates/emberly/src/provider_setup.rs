@@ -275,6 +275,7 @@ impl emberly_core::ConfigReloader for ConfiguredReloader {
             truncate: resolved.truncate,
             context: resolved.context,
             image_max_bytes: resolved.image_max_bytes,
+            image_max_attachments: resolved.image_max_attachments,
             document_max_bytes: resolved.document_max_bytes,
             memory: resolved.memory.clone(),
             skills: resolved.skills.clone(),

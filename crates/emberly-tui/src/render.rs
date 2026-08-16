@@ -750,6 +750,23 @@ fn conversation_lines(
                     theme.primary(),
                 );
             }
+            // A chip on the user's own message (FR-10, Design §4.14) —
+            // content the user attached, never tool activity, so it earns
+            // its own styling rather than reusing the tool-line register.
+            ConvItem::Attachment {
+                name,
+                width,
+                height,
+                format_label,
+            } => {
+                out.push(Line::from(vec![Span::styled(
+                    format!(
+                        "  {} {name} · {width}×{height} · {format_label} attached",
+                        markers::ATTACHMENT
+                    ),
+                    theme.chrome(),
+                )]));
+            }
             ConvItem::Assistant(text) => {
                 // First-party markdown pass: fenced code (highlighted), bold,
                 // inline code, lists, headings; everything else plain (§4.1).

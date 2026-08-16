@@ -287,4 +287,27 @@ pub enum UiEvent {
         name: String,
         text: String,
     },
+
+    /// A `Command::AttachImage` (FR-10, Design §4.14) validated and encoded
+    /// successfully; it now rides staged in `Engine::pending_attachments`
+    /// until the next `Command::UserInput` drains it. The frontend uses this
+    /// to show the attachment chip in the compose area before the message is
+    /// sent. `pending_count` is the engine's own staged count *after* this
+    /// one, so the frontend can enforce the `image.max_attachments` UI
+    /// affordance (e.g. graying out further attach) without recomputing it.
+    ImageAttached {
+        path: String,
+        name: String,
+        media_type: String,
+        width: usize,
+        height: usize,
+        format_label: String,
+        pending_count: usize,
+    },
+
+    /// A `Command::AttachImage` failed validation (HC-6 — data, not a crash):
+    /// oversize, an unrecognized format, unreadable path, or over
+    /// `image.max_attachments`. Rendered as a plain input-time error (Design
+    /// §4.14), never a silent drop.
+    AttachFailed { path: String, reason: String },
 }

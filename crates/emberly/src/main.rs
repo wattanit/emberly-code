@@ -594,6 +594,7 @@ async fn run() -> anyhow::Result<()> {
         ))),
         config_reloader: Some(config_reloader),
         image_max_bytes: resolved.image_max_bytes,
+        image_max_attachments: resolved.image_max_attachments,
         document_max_bytes: resolved.document_max_bytes,
         memory: resolved.memory.clone(),
         user_memory_dir: config::memory_dir(),

@@ -62,6 +62,16 @@ pub const SETTLE_FRAMES: u8 = 5;
 pub enum ConvItem {
     /// A prompt the user submitted.
     User(String),
+    /// An image attached to the preceding `User` message (FR-10, Design
+    /// §4.14) — content on the user's own message, never tool activity, so
+    /// it is its own item rather than a `Tool` line. Metadata only, mirroring
+    /// `AttachedImageMeta` (no base64 bytes to render).
+    Attachment {
+        name: String,
+        width: usize,
+        height: usize,
+        format_label: String,
+    },
     /// Accumulated assistant text for one turn (deltas append to it).
     Assistant(String),
     /// The model's reasoning trail for one turn (P-10, Design §4.4), distinct
@@ -99,6 +109,18 @@ pub enum ConvItem {
     /// block; a completed list settles to an all-done block rather than
     /// vanishing.
     TaskList { items: Vec<TaskItem> },
+}
+
+/// An image staged (but not yet sent) for the prompt being composed (FR-10,
+/// Design §4.14) — the frontend's own compose-area record, built from
+/// `UiEvent::ImageAttached`. Distinct from `ConvItem::Attachment`, which is
+/// the same fact once it has actually landed in the sent timeline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingAttachment {
+    pub name: String,
+    pub width: usize,
+    pub height: usize,
+    pub format_label: String,
 }
 
 /// A dismissable, scrollable pane overlay (Design §4.2). Modal for navigation:
@@ -610,6 +632,13 @@ pub struct App {
     /// The grapheme-aware input editor (multi-line, history, Thai-correct
     /// cursor motion). See [`crate::editor`].
     pub(crate) editor: LineEditor,
+    /// Images staged for the prompt currently being composed (FR-10, Design
+    /// §4.14) — the frontend's own mirror of the engine's
+    /// `Engine::pending_attachments`, kept only so the compose area can
+    /// confirm what is staged; the engine remains the sole authority on what
+    /// actually gets sent. Drained into `ConvItem::Attachment` items and
+    /// cleared when the message is sent.
+    pub(crate) pending_attachments: Vec<PendingAttachment>,
     /// `None` until the engine reports confinement status (Phase 2).
     pub(crate) sandbox: Option<SandboxStatus>,
     pub(crate) mode: emberly_core::Mode,
@@ -726,6 +755,7 @@ impl App {
             effort: None,
             effort_levels: Vec::new(),
             editor: LineEditor::new(),
+            pending_attachments: Vec::new(),
             sandbox: None,
             mode: emberly_core::Mode::default(),
             tasks: Vec::new(),
