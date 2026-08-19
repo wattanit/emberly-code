@@ -564,6 +564,7 @@ dependencies = [
  "reqwest",
  "rustls-rustcrypto",
  "serde",
+ "serde_json",
  "time",
  "tokio",
  "toml",

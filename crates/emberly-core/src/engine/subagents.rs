@@ -655,6 +655,10 @@ impl Engine {
             image_max_bytes: self.image_max_bytes,
             image_max_attachments: self.image_max_attachments,
             document_max_bytes: self.document_max_bytes,
+            // A subagent inherits already-connected MCP tools via its
+            // filtered `ToolRegistry` (T-7); it has no sidebar of its own to
+            // report a connection to, so nothing to report here (FR-11).
+            mcp_connections: Vec::new(),
             // Directory-shared, not Arc-shared: a subagent's own `MemoryStore`/
             // `SkillCatalog` instance is constructed from the same underlying
             // directories as the parent's (Tech Spec §8.4), so it reads and

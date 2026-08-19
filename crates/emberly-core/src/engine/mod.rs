@@ -48,7 +48,7 @@ use crate::transcript::{
 };
 use crate::types::{
     AttachedImage, AttachedImageMeta, CheckResult, GateResolution, LoopResolution,
-    PermissionRendering, SandboxStatus, TokenUsage,
+    McpConnectionOutcome, PermissionRendering, SandboxStatus, TokenUsage,
 };
 use crate::view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
 
@@ -344,6 +344,13 @@ pub struct EngineConfig {
     /// Maximum document file size in bytes for the `read_document` tool (Tech
     /// Spec §5.2, default 32 MiB).
     pub document_max_bytes: usize,
+    /// The outcome of connecting to each configured MCP server (FR-11, Tech
+    /// Spec §5.6/§8.5) — connecting already happened (composition-root
+    /// logic, mirroring `web_search`, before this config is built); the
+    /// engine reports it once at session start via
+    /// `UiEvent::McpServerConnected`/`McpServerFailed` and a
+    /// `TranscriptEvent::McpConnection` (extends HC-7).
+    pub mcp_connections: Vec<McpConnectionOutcome>,
     /// Memory config (FR-6, Tech Spec §8.1).
     pub memory: MemoryConfig,
     /// User-global memory directory (`~/.config/emberly/memory/`). Always `Some`
@@ -1017,6 +1024,11 @@ pub struct Engine {
     /// Maximum document file size in bytes (Tech Spec §5.2). Threaded to the
     /// `read_document` tool via `ToolCtx`.
     document_max_bytes: usize,
+    /// MCP server connection outcomes awaiting their one-time startup report
+    /// (FR-11, Tech Spec §5.6/§8.5) — drained by `run()`'s first tick, never
+    /// touched again for the life of the session (connecting again only
+    /// happens on `/reload`, handled inline where that command is processed).
+    mcp_connections: Vec<McpConnectionOutcome>,
     /// The multi-agent subsystem's own state (FR-9, Tech Spec §8.4): every
     /// currently alive subagent, keyed by the id the model addresses it by.
     agents: AgentState,
@@ -1030,6 +1042,7 @@ pub struct Engine {
 mod asks;
 mod context;
 mod guardrail;
+mod mcp;
 mod memory;
 mod permissions;
 mod runtime_config;
@@ -1236,6 +1249,7 @@ impl Engine {
             image_max_attachments: config.image_max_attachments,
             pending_attachments: Vec::new(),
             document_max_bytes: config.document_max_bytes,
+            mcp_connections: config.mcp_connections,
             agents: AgentState {
                 config: config.agents,
                 instances: std::collections::HashMap::new(),
@@ -1356,6 +1370,11 @@ impl Engine {
                 })
                 .await;
             }
+            // Report MCP server connection outcomes that already happened
+            // before this config was built (FR-11, Tech Spec §5.6/§8.5) —
+            // the audit-visible half of a composition-root decision.
+            self.report_mcp_connections().await;
+
             // Surface the initial reasoning-effort state so the sidebar and picker
             // start correct (P-9).
             self.emit_effort().await;

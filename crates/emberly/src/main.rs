@@ -560,12 +560,23 @@ async fn run() -> anyhow::Result<()> {
         emberly_core::spawn::HostSandbox::new(sandbox.is_confined(), git_binary, path_env),
     );
 
+    // `trust_granted` above is `newly_trusted` (only true on a *fresh* grant
+    // this run — it gates the one-time `TrustDecision` transcript write).
+    // Reaching this line at all means `trust::gate` already returned
+    // `Proceed`, so the project *is* trusted for the rest of this session
+    // regardless of whether that happened just now or earlier — the same
+    // single decision project skills/memory already load under
+    // unconditionally once the engine exists. Project-scoped MCP servers
+    // (FR-11) use that same fact, not `newly_trusted`.
+    let workspace_trusted = true;
+
     // Re-resolves config + prompts on an in-app `/config` / `/prompt` edit (C-5).
     let config_reloader: Arc<dyn emberly_core::ConfigReloader> =
         Arc::new(provider_setup::ConfiguredReloader::new(
             project_root.clone(),
             &cli_overrides,
             resolved.sandbox_require,
+            workspace_trusted,
             resolved.providers.clone(),
         ));
 
@@ -575,10 +586,13 @@ async fn run() -> anyhow::Result<()> {
     let provider_writer: Arc<dyn emberly_core::ProviderProfileWriter> =
         Arc::new(provider_write::ConfigWriter::new(project_root.clone()));
 
-    // Build the tool registry: the built-in suite always, plus `web_search`
-    // only when `search.enabled` and an endpoint is configured (Tech Spec §5.5).
-    // Shared with the `/config` reload path (C-5) via `build_tool_registry`.
-    let (tools, tool_warnings) = provider_setup::build_tool_registry(&resolved)?;
+    // Build the tool registry: the built-in suite always, `web_search` when
+    // `search.enabled` and an endpoint is configured (Tech Spec §5.5), and
+    // MCP-discovered tools for each enabled, trust-permitted
+    // `[mcp.servers.<name>]` (FR-11, Tech Spec §5.6). Shared with the
+    // `/config` reload path (C-5) via `build_tool_registry`.
+    let (tools, tool_warnings, mcp_connections) =
+        provider_setup::build_tool_registry(&resolved, workspace_trusted)?;
     for warning in &tool_warnings {
         eprintln!("emberly: {warning}");
     }
@@ -629,6 +643,7 @@ async fn run() -> anyhow::Result<()> {
         image_max_bytes: resolved.image_max_bytes,
         image_max_attachments: resolved.image_max_attachments,
         document_max_bytes: resolved.document_max_bytes,
+        mcp_connections,
         memory: resolved.memory.clone(),
         user_memory_dir: config::memory_dir(),
         // The trust gate exits on decline (FR-1), so reaching this point means

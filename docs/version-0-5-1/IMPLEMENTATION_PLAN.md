@@ -260,38 +260,86 @@ exactly as planned.
 
 ---
 
-## Phase 4 — MCP engine machinery (`emberly-core`)
+## Phase 4 — MCP engine machinery — ✅ code-complete 2026-08-16
 
 **Goal:** Make Phase 3's contract real — connect to configured servers,
 discover their tools, register them into the tool registry, and route calls
 through the existing permission/sandbox/trust layers with no privileged
 path.
 
-**Scope**
-- `C-8` config: server profiles (name, transport, command/args or endpoint +
-  auth), two-tier-plus-project resolution (C-1), provenance (C-3).
-- **Workspace-trust gating.** A project-tier server profile is neither
-  connected to nor surfaced from an untrusted folder (FR-1), checked before
-  the harness spawns/dials anything — mirroring the skill-loading trust
-  check (FR-7) exactly.
-- **Connection + transport.** Per Phase 0's chosen transport(s): a
-  first-party client per this plan's "no vendor SDK" principle, or a named,
-  vetted dependency if Phase 3/4 discovers the first-party path is not
-  viable (flagged to the owner before adding it, per Dependency Policy §10).
-- **Tool registration.** Discovered tools enter the same `ToolRegistry` every
-  built-in and subagent-filtered registry already uses, namespaced per
-  Phase 3's convention, each still subject to the ordinary permission
-  gate (§6) — no new permission mechanism.
-- **Untrusted-content labeling.** A tool result from an MCP server is
-  labeled and treated as untrusted content, mirroring T-14's web-search
-  result handling exactly.
-- **Audit trail (extends HC-7).** Connection lifecycle, tool discovery, and
-  every call/result are transcript events, no exemption.
+**Architectural refinement from the original plan (disclosed, not silent):**
+the plan named this `emberly-core` alone. Following the exact precedent
+`web_search` already set (Tech Spec §5.5) — the *binary* conditionally builds
+the tool registry, not the engine — connecting/discovering/registering MCP
+servers landed the same way, in `emberly` (`provider_setup::build_tool_registry`/
+`connect_mcp_servers`), not inside `Engine`. `emberly-core` supplies the
+reusable pieces: `McpClient` (the transport) and the `mcp_connections`
+reporting path. This keeps one construction pattern for "a tool that needs
+external setup before it can be registered," rather than two.
 
-**Done when:** `cargo build/test/clippy/fmt -p emberly-core` clean; an
-integration test connects a fake local MCP server (stdio), discovers a tool,
-invokes it under a granted permission rule, and confirms an untrusted-folder
-project profile is refused pre-connection.
+**Landed as built:**
+- **`emberly-core::McpClient`** (`src/mcp_client.rs`) — a first-party,
+  newline-delimited JSON-RPC-over-stdio client (`tokio::process` +
+  `tokio::io` + `serde_json`, **no new dependency** beyond enabling the
+  already-present `tokio` crate's `io-util` feature). `spawn()` performs the
+  `initialize` handshake; `list_tools()` wraps `tools/list`; calls are
+  serialized behind one lock (correctness over throughput this version,
+  Requirements §13) with a 30s response timeout (S-4's "never hang"
+  principle, extended to an external process).
+- **`C-8` config** (`emberly/src/config.rs`): `[mcp]` + `[mcp.servers.<name>]`,
+  merged per-server-name exactly like `[providers.<name>]`; each resolved
+  server carries a `project_scoped` flag — `true` only when *that name*
+  appears in the project tier's own parsed file (global-tier servers are
+  never trust-gated), mirroring the project-skill trust distinction (FR-7).
+- **Workspace-trust gating** (`provider_setup::connect_mcp_servers`): a
+  project-scoped server is filtered out *before* any spawn is attempted when
+  the workspace isn't trusted — silent, correct absence, matching skills.
+- **Tool registration**: `emberly_tools::build_mcp_tools` results register
+  into the same `ToolRegistry` `default_registry()`/`web_search` already use
+  — no parallel registry, no new permission mechanism (an MCP tool call
+  flows through the ordinary `ToolCtx` gate, ordinary rule engine).
+- **Audit trail** (`emberly-core`): a new `TranscriptEvent::McpConnection`
+  (additive) plus `UiEvent::McpServerConnected`/`McpServerFailed`, emitted
+  once at session start (`Engine::report_mcp_connections`, reading
+  `EngineConfig.mcp_connections` — populated by connecting *before* the
+  engine exists, same timing as `web_search`) and again on every `/reload`
+  (`connect_mcp_servers` reconnects fresh, matching `web_search`'s own
+  fresh-client rebuild on reload — `ReloadedConfig.mcp_connections`).
+  MCP tool calls themselves need no special-casing: they're ordinary
+  `tool_call`/`tool_result` transcript events like any tool (HC-7, no
+  exemption needed because none was ever a gap).
+- **A real bug found and fixed while wiring this up**: `main.rs`'s local
+  `trust_granted` variable is actually `newly_trusted` (true only on a
+  *fresh* grant this run, used correctly elsewhere to gate the one-time
+  `TrustDecision` transcript write) — not "is this workspace trusted." Since
+  `build_tool_registry` only ever runs after the pre-engine trust gate
+  already returned `Proceed`, trust holds unconditionally by the time it's
+  called, whether newly granted or already on record — the same fact
+  project skills/memory already load under without re-checking. Passing
+  `newly_trusted` there silently skipped every project-scoped MCP server on
+  any session that didn't *just* trust the folder this run (caught by a
+  manual end-to-end smoke test, not by unit tests, since the unit tests
+  correctly exercised `connect_mcp_servers`'s own trust parameter in
+  isolation — the bug was one level up, at the call site). Fixed with an
+  explicit `workspace_trusted = true` binding at the call site, commented
+  with why reaching that line already proves it.
+
+**Done when:** `cargo build/test/clippy(-D warnings)/fmt --check` clean for
+the whole workspace — ✅ all green. New tests: 2 `McpClient` tests in
+`emberly-core` (one spawns a real local Python script speaking MCP JSON-RPC
+end to end: initialize → tools/list → tools/call; one confirms a
+nonexistent command is a structured connect error). 4 integration tests in
+`emberly`'s `provider_setup` (connect + register + **invoke the registered
+tool under a genuinely granted permission rule**; a project-scoped server
+refused with zero connection attempts when untrusted; the same server
+connecting once trust is granted; an unsupported transport as a structured
+failure). Beyond the automated suite: a full manual end-to-end smoke test
+of the real `emberly` binary — a temp project with `[mcp.servers.echo]`
+pointing at a real local Python MCP server, pre-trusted via
+`trust.trusted_dirs`, run non-interactively — confirmed the
+`mcp_connection` transcript record with the correctly namespaced
+`mcp__echo__echo` tool name appears in the real session transcript. This
+smoke test is what caught the `trust_granted` bug above.
 
 ---
 

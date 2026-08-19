@@ -253,6 +253,13 @@ impl Engine {
         if new_tool_names != old_tool_names {
             changed.push("tools");
         }
+        // MCP servers reconnect fresh on every reload (FR-11, mirroring
+        // `web_search`'s own fresh-client rebuild) — report each outcome the
+        // same way the startup report does, so `/reload` never silently
+        // changes what servers/tools are reachable (Design §8.10).
+        for outcome in reloaded.mcp_connections {
+            self.record_and_emit_mcp_outcome(outcome).await;
+        }
         if reloaded.rule_specs != self.safety.rule_specs {
             self.safety.rules.reload_config_rules(
                 reloaded.rule_specs.clone(),

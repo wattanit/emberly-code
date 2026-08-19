@@ -258,6 +258,19 @@ pub enum TranscriptEvent {
     /// Written by the supervisor on an abnormal exit when possible
     /// (Requirements HC-3, S-2).
     AbnormalExit { reason: String },
+
+    /// An MCP server connection attempt at session start or `/reload` (FR-11,
+    /// Tech Spec §5.6/§8.5) — the audit record pairing
+    /// `UiEvent::McpServerConnected`/`McpServerFailed`. `tools` is empty and
+    /// `error` is set on a failed attempt, and vice versa on success.
+    /// Additive — older readers warn-skip it, no `SCHEMA_VERSION` bump.
+    McpConnection {
+        server: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tools: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 /// Whether a compaction was started by the user or the automatic threshold

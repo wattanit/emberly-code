@@ -317,4 +317,16 @@ pub enum UiEvent {
     /// session did (Tech Spec §3.1). A failure surfaces as a plain
     /// [`Notice`](UiEvent::Notice) instead (HC-3 — never a crash).
     SessionExported { path: String },
+
+    /// An MCP server connected and advertised these (already-namespaced)
+    /// tools (FR-11, Tech Spec §5.6/§8.5), reported at session start and on
+    /// `/reload`. Connecting itself already happened (composition-root
+    /// logic, mirroring `web_search`) — this is the audit-visible report of
+    /// it, alongside the `TranscriptEvent::McpConnection` it pairs with.
+    McpServerConnected { name: String, tools: Vec<String> },
+
+    /// An MCP server could not be connected to, or its handshake/discovery
+    /// failed (HC-6 — data, never a crash; Design §8.10 — never fatal to the
+    /// session). Reported at session start and on `/reload`.
+    McpServerFailed { name: String, reason: String },
 }

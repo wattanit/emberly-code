@@ -181,3 +181,20 @@ impl From<&AttachedImage> for AttachedImageMeta {
         }
     }
 }
+
+/// The result of one MCP server's connection/discovery attempt at session
+/// start or `/reload` (FR-11, Tech Spec §5.6/§8.5). Connecting itself is
+/// composition-root logic (the `emberly` binary, mirroring how `web_search`
+/// is conditionally built, Tech Spec §5.5) — the engine only reports what
+/// already happened, as `UiEvent::McpServerConnected`/`McpServerFailed` plus
+/// a `TranscriptEvent::McpConnection` audit record (extends HC-7, no
+/// exemption for connection lifecycle).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum McpConnectionOutcome {
+    /// The server connected and advertised these (already-namespaced) tools.
+    Connected { server: String, tools: Vec<String> },
+    /// The server could not be connected to, or its handshake/discovery
+    /// failed. Never fatal to the session (Design §8.10 — the rest of the
+    /// harness stays usable).
+    Failed { server: String, reason: String },
+}
