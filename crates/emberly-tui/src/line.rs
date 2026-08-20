@@ -249,6 +249,17 @@ impl LineRenderer {
                 writeln!(out, "exported to {path}")?;
                 writeln!(out, "{}", crate::strings::export::SENSITIVE_CONTENT_NOTE)?;
             }
+            // Quiet on success — one dim line, no ceremony, matching how
+            // memory/skill catalogs already load without announcement
+            // (Design §8.10/§4.9).
+            UiEvent::McpServerConnected { name, tools } => {
+                writeln!(out, "mcp · {name} · connected · {} tools", tools.len())?;
+            }
+            // Harness-world (§6.1): what happened, never fatal to the session
+            // (Design §8.10) — the rest of the harness stays usable.
+            UiEvent::McpServerFailed { name, reason } => {
+                writeln!(out, "couldn't connect to MCP server '{name}': {reason}")?;
+            }
             // Unknown future events are ignored (non_exhaustive).
             _ => {}
         }
@@ -516,6 +527,54 @@ fn resolve_agent(query: &str, agents: &[crate::app::AgentSummary]) -> Option<Str
         .map(|a| a.id.clone())
 }
 
+/// This session's connected MCP servers in degraded form (FR-11, Design
+/// §4.15): `name (N tools)` per line — same no-round-trip shape as
+/// [`render_agent_list`], since the catalog is already cached state.
+fn render_mcp_server_list(
+    servers: &[crate::app::McpServerSummary],
+    out: &mut impl Write,
+) -> io::Result<()> {
+    use crate::strings::mcp as m;
+    writeln!(out)?;
+    if servers.is_empty() {
+        writeln!(out, "{}", m::EMPTY)?;
+        return Ok(());
+    }
+    for server in servers {
+        let count = server.tools.len();
+        writeln!(
+            out,
+            "  {} ({count} tool{})",
+            server.name,
+            if count == 1 { "" } else { "s" }
+        )?;
+    }
+    Ok(())
+}
+
+/// `/mcp <name>` — the named server's discovered tools, read-only, plain
+/// text. Unlike `/agents <name>`, this needs no engine round-trip either: a
+/// server's tool list is already fully known from `UiEvent::McpServerConnected`.
+fn render_mcp_server_tools(
+    name: &str,
+    servers: &[crate::app::McpServerSummary],
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let Some(server) = servers.iter().find(|s| s.name == name) else {
+        writeln!(out, "no MCP server named '{name}' — run /mcp to list")?;
+        return Ok(());
+    };
+    writeln!(out)?;
+    if server.tools.is_empty() {
+        writeln!(out, "(this server advertised no tools)")?;
+    } else {
+        for tool in &server.tools {
+            writeln!(out, "  {tool}")?;
+        }
+    }
+    Ok(())
+}
+
 /// Resolve a memory entry name to its scope from the last-listed entries (user
 /// first, then project). `None` when the name is unknown — the plain frontend
 /// asks the user to `/memory` first so the list is current.
@@ -650,6 +709,7 @@ struct LineState {
     mem_user: Vec<EntrySummary>,
     mem_project: Vec<EntrySummary>,
     agents: Vec<crate::app::AgentSummary>,
+    mcp_servers: Vec<crate::app::McpServerSummary>,
 }
 
 /// What the driver should do with a typed `/command`.
@@ -857,6 +917,17 @@ fn on_slash(input: &str, state: &LineState, out: &mut impl Write) -> io::Result<
                 }
             }
         }
+        // The connected-server list is standing state (cached from
+        // McpServerConnected/Failed), so listing and a named server's tool
+        // list both need no round trip at all (FR-11, Design §4.15).
+        AppCommand::Mcp => {
+            if args.is_empty() {
+                render_mcp_server_list(&state.mcp_servers, out)?;
+            } else {
+                render_mcp_server_tools(args, &state.mcp_servers, out)?;
+            }
+            LineAction::Done
+        }
         // Rich-only commands are refused by the `plain` check above; naming them
         // here keeps this match exhaustive, so a new command cannot be added
         // without deciding what line mode does with it.
@@ -914,6 +985,7 @@ pub async fn run(
         mem_user: Vec::new(),
         mem_project: Vec::new(),
         agents: Vec::new(),
+        mcp_servers: Vec::new(),
     };
     let mut renderer = LineRenderer::new(reasoning_view);
     let mut stdout = io::stdout();
@@ -986,6 +1058,24 @@ pub async fn run(
                             if let Some(agent) = state.agents.iter_mut().find(|a| a.id == id) {
                                 agent.ended = true;
                             }
+                        }
+                        // Mirrors the rich TUI's App.mcp_servers catalog:
+                        // upserted on connect, removed on failure — a failed
+                        // server was never connected, so it is never listed
+                        // (Design §4.15's no-empty-stub/quiet-absence rule).
+                        UiEvent::McpServerConnected { name, tools } => {
+                            if let Some(server) =
+                                state.mcp_servers.iter_mut().find(|s| s.name == name)
+                            {
+                                server.tools = tools;
+                            } else {
+                                state
+                                    .mcp_servers
+                                    .push(crate::app::McpServerSummary { name, tools });
+                            }
+                        }
+                        UiEvent::McpServerFailed { name, .. } => {
+                            state.mcp_servers.retain(|s| s.name != name);
                         }
                         _ => {}
                     }
@@ -1082,6 +1172,7 @@ mod tests {
             mem_user: Vec::new(),
             mem_project: Vec::new(),
             agents: Vec::new(),
+            mcp_servers: Vec::new(),
         }
     }
 
@@ -1984,6 +2075,98 @@ mod tests {
             LineAction::Send(Command::InspectAgent { id }) => assert_eq!(id, "agent-1"),
             _ => panic!("expected InspectAgent for an ended subagent"),
         }
+    }
+
+    fn mcp_server_summary(name: &str, tools: &[&str]) -> crate::app::McpServerSummary {
+        crate::app::McpServerSummary {
+            name: name.into(),
+            tools: tools.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn mcp_list_shows_each_servers_tool_count() {
+        let servers = vec![
+            mcp_server_summary("jira", &["mcp__jira__get_issue"]),
+            mcp_server_summary("github", &["mcp__github__list_prs", "mcp__github__get_pr"]),
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(render_mcp_server_list(&servers, &mut buf).is_ok());
+        let out = String::from_utf8(buf).unwrap_or_default();
+        assert!(out.contains("jira (1 tool)"), "{out:?}");
+        assert!(out.contains("github (2 tools)"), "{out:?}");
+    }
+
+    #[test]
+    fn mcp_list_empty_shows_the_empty_notice() {
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(render_mcp_server_list(&[], &mut buf).is_ok());
+        let out = String::from_utf8(buf).unwrap_or_default();
+        assert!(out.contains(crate::strings::mcp::EMPTY), "{out:?}");
+    }
+
+    #[test]
+    fn mcp_server_tools_lists_the_named_servers_tools() {
+        let servers = vec![mcp_server_summary(
+            "github",
+            &["mcp__github__list_prs", "mcp__github__get_pr"],
+        )];
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(render_mcp_server_tools("github", &servers, &mut buf).is_ok());
+        let out = String::from_utf8(buf).unwrap_or_default();
+        assert!(out.contains("mcp__github__list_prs"), "{out:?}");
+        assert!(out.contains("mcp__github__get_pr"), "{out:?}");
+    }
+
+    #[test]
+    fn mcp_server_tools_unknown_name_says_so() {
+        let servers = vec![mcp_server_summary("jira", &["mcp__jira__get_issue"])];
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(render_mcp_server_tools("nope", &servers, &mut buf).is_ok());
+        let out = String::from_utf8(buf).unwrap_or_default();
+        assert!(
+            out.contains("no MCP server named 'nope' — run /mcp to list"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn mcp_slash_lists_then_resolves_a_named_servers_tools() {
+        let mut state = state();
+        state.mcp_servers = vec![mcp_server_summary(
+            "github",
+            &["mcp__github__list_prs", "mcp__github__get_pr"],
+        )];
+        let (out, action) = slash_in(&state, "mcp");
+        assert!(out.contains("github (2 tools)"), "{out:?}");
+        assert!(matches!(action, LineAction::Done));
+
+        // Unlike `/agents <name>`, this never issues a Command — the tool
+        // list is already fully known from the cached catalog.
+        let (out, action) = slash_in(&state, "mcp github");
+        assert!(out.contains("mcp__github__list_prs"), "{out:?}");
+        assert!(matches!(action, LineAction::Done));
+    }
+
+    #[test]
+    fn mcp_connected_event_prints_a_notice() {
+        let out = render_to_string(&UiEvent::McpServerConnected {
+            name: "jira".into(),
+            tools: vec!["mcp__jira__get_issue".into()],
+        });
+        assert!(out.contains("mcp · jira · connected · 1 tools"), "{out:?}");
+    }
+
+    #[test]
+    fn mcp_failed_event_prints_the_reason() {
+        let out = render_to_string(&UiEvent::McpServerFailed {
+            name: "jira".into(),
+            reason: "command not found".into(),
+        });
+        assert!(
+            out.contains("couldn't connect to MCP server 'jira': command not found"),
+            "{out:?}"
+        );
     }
 
     #[test]

@@ -72,6 +72,7 @@ impl App {
         self.memory.project = 0;
         self.skills.clear();
         self.agents.clear();
+        self.mcp_servers.clear();
         self.completion_status.clear();
         // Staged-but-unsent attachments (FR-10) belong to the composing
         // message, not the session it was composed in; a switch drops them

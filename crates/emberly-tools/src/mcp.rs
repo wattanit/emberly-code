@@ -4,18 +4,19 @@
 //! Unlike the multi-agent tools (`spawn_agents`/`message_agent`/`list_agents`/
 //! `end_agent`), MCP tools are not a small fixed set behind a `*Gate` trait —
 //! a connected server can advertise any number of tools, discovered only once
-//! it is reached. So this module carries no `Drop*`-style fail-closed default:
-//! there is nothing to gate a *call* through until a tool actually exists, and
-//! a tool only exists once `emberly-core`'s connection/discovery machinery
-//! (Tech Spec §8.4/§8.5's Phase 4) constructs one with a real
-//! [`McpTransport`]. What Phase 3 fixes is the *contract* Phase 4 builds
-//! against: the transport shape, the namespacing/collision rule, and the
-//! proxy `Tool` impl itself — fully testable now against a fake transport.
+//! it is reached. So this module carries no `Drop*`-style fail-closed default
+//! for *construction*: there is no engine-owned state to stand a tool up
+//! against until a tool actually exists, and a tool only exists once
+//! `emberly-core`'s connection/discovery machinery (Tech Spec §8.4/§8.5's
+//! Phase 4) constructs one with a real [`McpTransport`]. What Phase 3 fixes
+//! is the *contract* Phase 4 builds against: the transport shape, the
+//! namespacing/collision rule, and the proxy `Tool` impl itself — fully
+//! testable now against a fake transport.
 //!
 //! No tool call here supplies a filesystem path or bypasses the permission/
-//! sandbox model: an MCP tool call flows through the ordinary `ToolCtx`
-//! permission gate exactly like a built-in tool's, with no proxy gate needed
-//! at this layer (Tech Spec §5.6) — this module only carries the RPC shape.
+//! sandbox model: an MCP tool call *is* permission-gated, through the exact
+//! same `ToolCtx::authorize` every built-in tool already calls (Tech Spec
+//! §5.6) — no new gate type, no proxy gate, just the ordinary rule engine.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -24,6 +25,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::ctx::ToolCtx;
+use crate::permission::PermissionRequest;
 use crate::tool::{Tool, ToolOutcome, ToolSpec};
 
 /// A transport-agnostic MCP client call — one JSON-RPC 2.0 request/response
@@ -129,7 +131,31 @@ impl Tool for McpTool {
         Some(format!("{} via {}", self.original_name, self.server))
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolCtx) -> ToolOutcome {
+    async fn execute(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
+        // Authorize first (Tech Spec §5.6/§6.1) — an MCP tool call is
+        // permission-gated exactly like a built-in's, ordinary band (Design
+        // §5.3): never the reserved outside-root styling on its own, since
+        // an external origin does not by itself make a call more dangerous.
+        // `tool` carries the namespaced name so the prompt/rule layer (and
+        // the TUI's provenance line) read the owning server directly from
+        // it — no separate payload field needed.
+        let request = PermissionRequest {
+            tool: self.namespaced_name.clone(),
+            summary: format!("{} (via MCP server {})", self.original_name, self.server),
+            detail: format!(
+                "MCP server: {}\ntool: {}\narguments: {args}",
+                self.server, self.original_name
+            ),
+            affected_paths: vec![],
+            outside_root: false,
+        };
+        if !ctx.authorize(request).await.is_allowed() {
+            return ToolOutcome::denied(&format!(
+                "{} via MCP server {}",
+                self.original_name, self.server
+            ));
+        }
+
         let params = json!({ "name": self.original_name, "arguments": args });
         match self.transport.call("tools/call", params).await {
             // Untrusted, like web_search (T-14, Design §4.10/§4.15): a
@@ -179,9 +205,21 @@ mod tests {
         }
     }
 
-    /// A minimal `ToolCtx` for these tests — `McpTool::execute` never reads
-    /// it (no permission gating happens at this layer, Tech Spec §5.6), so
-    /// its gate/sandbox are never actually exercised.
+    /// A `ToolCtx` whose gate always allows — for tests exercising an
+    /// `McpTool` call under a genuinely granted permission (Tech Spec §5.6:
+    /// an MCP call is permission-gated exactly like a built-in's).
+    struct AllowGate;
+    #[async_trait]
+    impl crate::permission::PermissionGate for AllowGate {
+        async fn authorize(
+            &self,
+            _req: crate::permission::PermissionRequest,
+        ) -> crate::permission::PermissionOutcome {
+            crate::permission::PermissionOutcome::Allow
+        }
+    }
+
+    /// A `ToolCtx` whose gate always denies — for the denial test.
     struct DenyGate;
     #[async_trait]
     impl crate::permission::PermissionGate for DenyGate {
@@ -193,7 +231,16 @@ mod tests {
         }
     }
 
-    fn drop_ctx() -> ToolCtx {
+    fn allow_ctx() -> ToolCtx {
+        ToolCtx::new(
+            std::path::PathBuf::from("/tmp"),
+            crate::ctx::TruncateConfig::default(),
+            Arc::new(AllowGate),
+            Arc::new(crate::sandbox::PlainSandbox),
+        )
+    }
+
+    fn deny_ctx() -> ToolCtx {
         ToolCtx::new(
             std::path::PathBuf::from("/tmp"),
             crate::ctx::TruncateConfig::default(),
@@ -270,7 +317,7 @@ mod tests {
         let dyn_transport: Arc<dyn McpTransport> = transport.clone();
         let tools = build_ok("jira", vec![spec("get_issue")], dyn_transport);
         let tool = &tools[0];
-        let outcome = tool.execute(json!({"id": "ISSUE-1"}), &drop_ctx()).await;
+        let outcome = tool.execute(json!({"id": "ISSUE-1"}), &allow_ctx()).await;
         assert!(outcome.ok);
         assert!(
             outcome.untrusted,
@@ -294,12 +341,37 @@ mod tests {
             "process exited".into(),
         )));
         let tools = build_ok("jira", vec![spec("get_issue")], transport);
-        let outcome = tools[0].execute(json!({}), &drop_ctx()).await;
+        let outcome = tools[0].execute(json!({}), &allow_ctx()).await;
         assert!(!outcome.ok);
         assert!(
             outcome.content.contains("process exited"),
             "{}",
             outcome.content
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_is_permission_gated_a_denial_is_structured_never_a_call() {
+        // Tech Spec §5.6: an MCP tool call is permission-gated exactly like a
+        // built-in's — a denial returns a structured failure and the
+        // transport is never reached at all (HC-6, no privileged path).
+        let transport = Arc::new(FakeTransport::ok(json!({"should": "never happen"})));
+        let dyn_transport: Arc<dyn McpTransport> = transport.clone();
+        let tools = build_ok("jira", vec![spec("get_issue")], dyn_transport);
+        let outcome = tools[0].execute(json!({}), &deny_ctx()).await;
+        assert!(!outcome.ok);
+        assert!(
+            outcome.content.to_lowercase().contains("denied"),
+            "{}",
+            outcome.content
+        );
+        assert!(
+            transport
+                .last_call
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none(),
+            "a denied call must never reach the transport"
         );
     }
 

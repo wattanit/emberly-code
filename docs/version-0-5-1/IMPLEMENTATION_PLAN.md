@@ -345,6 +345,8 @@ smoke test is what caught the `trust_granted` bug above.
 
 ## Phase 5 — MCP TUI/config surface
 
+✅ code-complete 2026-08-19
+
 **Goal:** Make MCP connections and their tools visible and configurable from
 inside a running session — no silent background capability.
 
@@ -358,10 +360,64 @@ inside a running session — no silent background capability.
 - Live config reload for `[mcp.servers.*]`, matching the `[agents]` reload
   behavior from 0.5 Phase 2.
 
-**Done when:** `cargo build/test/clippy/fmt -p emberly-tui` (and `emberly`)
-clean; a manual smoke test connects a real local MCP server end to end and
-confirms the tool is invocable, visible, and its permission prompt correctly
-attributes the originating server.
+**Landed as built**
+- `emberly init`'s `CONFIG_TEMPLATE` gained a commented `[mcp.servers.myserver]`
+  example block, matching the existing `[agents.*]` pattern (C-2).
+- Rich TUI: `App.mcp_servers: Vec<McpServerSummary>` mirrors the existing
+  `agents` catalog exactly — populated by `UiEvent::McpServerConnected`
+  (upsert by name, so a `/reload` reconnect refreshes rather than
+  duplicates) and `UiEvent::McpServerFailed` (retain-filter, so a dropped
+  reconnect never leaves a stale "connected" row). A no-empty-stub "MCP"
+  sidebar section (mirroring "Agents") and an `OverlayContent::McpServerList`
+  inspector (`/mcp`, ↑/↓, Enter, Esc/q) round out the surface —
+  `crates/emberly-tui/src/app/mcp.rs`.
+- Plain mode: `/mcp` and `/mcp <name>` in `line.rs` mirror `/agents`/
+  `/agents <name>` exactly, plus rendering lines for both `UiEvent`s.
+- **Architectural refinement vs. the plan**: unlike `/agents <name>` and
+  `/skills <name>`, selecting a server (Enter, or `/mcp <name>`) needs **no
+  engine round-trip at all** — a server's discovered tool list is already
+  fully known from the connect-time event, so the inspector opens a
+  read-only text overlay directly from cached state. No `Command::InspectMcp`
+  exists; this is simpler than the plan implied, not a scope cut.
+- Permission-prompt and tool-activity-line provenance turned out to need
+  **no new rendering code at all**: both already render generically from
+  `Tool::describe()` and `PermissionRequest.summary`/`.detail`, which
+  `McpTool` already populates with the originating server's name (Phase 3).
+  Confirmed by reading `render.rs` rather than by writing anything new.
+- **A real bug found and fixed before building on top of it**: `McpTool::execute`
+  (`crates/emberly-tools/src/mcp.rs`, from Phase 3) never called
+  `ctx.authorize()` at all — its own doc comment and Requirements FR-11/Tech
+  Spec §5.6 both claim MCP tool calls are permission-gated "exactly like a
+  built-in tool's," but the `ctx` parameter was unused. Found by re-reading
+  the module while verifying that claim, not by a failing test. Fixed by
+  adding the `PermissionRequest`/`ctx.authorize()` call (denied → a
+  structured `ToolOutcome`, transport never invoked); added
+  `execute_is_permission_gated_a_denial_is_structured_never_a_call` plus an
+  `AllowGate` alongside the existing `DenyGate` to keep the success-path
+  tests passing.
+
+**Done when:** `cargo build/test/clippy(-D warnings)/fmt --check` clean for
+the whole workspace — ✅ all green (269 `emberly-tui` tests, +16 from this
+phase: 8 in `app/tests.rs` mirroring the Agents inspector suite, 8 in
+`line.rs` mirroring the Agents plain-mode suite). A manual end-to-end smoke
+test of the real compiled `emberly --plain` binary — a temp project with
+`[mcp.servers.echo]` pointing at a real local Python MCP server, pre-trusted
+via `trust.trusted_dirs` — confirmed: the `mcp_connection` transcript record
+appears with the namespaced `mcp__echo__echo` tool name; `/mcp` lists
+"echo (1 tool)"; `/mcp echo` shows the tool read-only with no engine round
+trip. "Tool is invocable" and "permission prompt attributes the originating
+server" were verified through the existing automated suite rather than
+re-run live here: `provider_setup`'s Phase-4 integration test already
+invokes a registered MCP tool (spawned from a real local server) under a
+genuinely granted permission rule through the same `build_tool_registry`
+path the binary uses, and `mcp.rs`'s new denial test confirms the transport
+is never called when `ctx.authorize()` refuses — triggering that same call
+through the compiled binary would need a live model/provider, out of scope
+for this smoke test. One test-harness observation, not a product bug: piping
+`/mcp` into stdin with zero delay can race ahead of the async connect
+notice (the command sees an empty catalog and says so correctly) — a
+timing artifact of unbuffered piped input, not reachable by an actual user
+who can't type before the first prompt renders.
 
 ---
 

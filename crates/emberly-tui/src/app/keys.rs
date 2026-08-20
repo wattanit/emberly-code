@@ -280,6 +280,11 @@ impl App {
                 self.set_agent_selection(row);
                 self.on_agents_inspector_key(KeyEvent::from(KeyCode::Enter))
             }
+            ClickTarget::McpServerRow(row) => {
+                // Focus + Enter on the MCP inspector (read-only tool-list view).
+                self.set_mcp_selection(row);
+                self.on_mcp_inspector_key(KeyEvent::from(KeyCode::Enter))
+            }
             ClickTarget::ReasoningToggle => {
                 // Exactly the Ctrl+R action — toggle the most recent trail.
                 self.toggle_reasoning();
@@ -301,6 +306,10 @@ impl App {
             ClickTarget::OpenAgentsInspector => {
                 // Exactly the `/agents` action.
                 self.run_command(AppCommand::Agents)
+            }
+            ClickTarget::OpenMcpInspector => {
+                // Exactly the `/mcp` action.
+                self.run_command(AppCommand::Mcp)
             }
             ClickTarget::PermissionChoice(choice) => {
                 // Reuse `on_permission_key` EXACTLY (Design §3.4/§5): a click on
@@ -365,6 +374,12 @@ impl App {
             Some(OverlayContent::AgentList { .. })
         ) {
             return self.on_agents_inspector_key(key);
+        }
+        if matches!(
+            self.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::McpServerList { .. })
+        ) {
+            return self.on_mcp_inspector_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {

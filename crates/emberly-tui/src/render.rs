@@ -201,6 +201,7 @@ enum RowKind {
     Memory,
     Skill,
     Agent,
+    Mcp,
 }
 
 impl RowKind {
@@ -211,6 +212,7 @@ impl RowKind {
             RowKind::Memory => ClickTarget::MemoryRow(row),
             RowKind::Skill => ClickTarget::SkillRow(row),
             RowKind::Agent => ClickTarget::AgentRow(row),
+            RowKind::Mcp => ClickTarget::McpServerRow(row),
         }
     }
 }
@@ -345,6 +347,16 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect, hit
                 strings::agents::HINT.to_string(),
                 map,
                 Some(RowKind::Agent),
+            )
+        }
+        OverlayContent::McpServerList { servers, selected } => {
+            let (lines, sel_line, map) = mcp_server_list_lines(servers, *selected, theme);
+            (
+                lines,
+                Some(sel_line),
+                strings::mcp::HINT.to_string(),
+                map,
+                Some(RowKind::Mcp),
             )
         }
     };
@@ -651,6 +663,47 @@ fn agent_list_lines(
         lines.push(Line::from(vec![
             Span::styled(marker.to_string(), theme.accent()),
             Span::styled(agent.name.clone(), name_style),
+            Span::styled(suffix, theme.chrome()),
+        ]));
+        row_of_line.push(Some(i));
+    }
+    (lines, sel_line, row_of_line)
+}
+
+/// The MCP inspector's list of connected servers (FR-11, Design §4.15) —
+/// mirrors `agent_list_lines` exactly: name plus a plain fact (here, how
+/// many tools it discovered) never carried by color alone (§7).
+fn mcp_server_list_lines(
+    servers: &[crate::app::McpServerSummary],
+    selected: usize,
+    theme: &crate::theme::Theme,
+) -> PickerLines {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut row_of_line: Vec<Option<usize>> = Vec::new();
+    if servers.is_empty() {
+        lines.push(Line::from(Span::styled(
+            strings::mcp::EMPTY.to_string(),
+            theme.chrome(),
+        )));
+        row_of_line.push(None);
+        return (lines, 0, row_of_line);
+    }
+    let mut sel_line = 0;
+    for (i, server) in servers.iter().enumerate() {
+        if i == selected {
+            sel_line = lines.len();
+        }
+        let marker = if i == selected { "▶ " } else { "  " };
+        let name_style = if i == selected {
+            theme.strong()
+        } else {
+            theme.primary()
+        };
+        let count = server.tools.len();
+        let suffix = format!("  ({count} tool{})", if count == 1 { "" } else { "s" });
+        lines.push(Line::from(vec![
+            Span::styled(marker.to_string(), theme.accent()),
+            Span::styled(server.name.clone(), name_style),
             Span::styled(suffix, theme.chrome()),
         ]));
         row_of_line.push(Some(i));
@@ -983,6 +1036,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
     let mut memory_range: Option<(usize, usize)> = None;
     let mut skills_range: Option<(usize, usize)> = None;
     let mut agents_range: Option<(usize, usize)> = None;
+    let mut mcp_range: Option<(usize, usize)> = None;
 
     // Wordmark + version (Design §1.1): ember `emberly`, dimmed `code` + version.
     // While the model is working, the wordmark breathes — the ember glowing
@@ -1190,6 +1244,27 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
         agents_range = Some((start, lines.len())); // clickable → open /agents
     }
 
+    // Connected MCP servers (FR-11, Design §4.15): name + tool count per
+    // entry. Present only while at least one server is connected — the same
+    // no-empty-stub rule as Tasks/Memory/Skills/Agents; a project-scoped
+    // server withheld by workspace trust is simply absent, never shown as a
+    // pending/failed row (§4.9/§4.15 quiet-absence pattern).
+    if !app.mcp_servers.is_empty() {
+        lines.push(Line::from(""));
+        let start = lines.len();
+        lines.push(Line::from(Span::styled("MCP", theme.chrome())));
+        for server in &app.mcp_servers {
+            let desc = format!(
+                "{} ({} tool{})",
+                server.name,
+                server.tools.len(),
+                if server.tools.len() == 1 { "" } else { "s" }
+            );
+            lines.push(Line::from(Span::styled(fit(&desc, w), theme.primary())));
+        }
+        mcp_range = Some((start, lines.len())); // clickable → open /mcp
+    }
+
     // Render **without wrap** so each logical line is exactly one screen row
     // (ratatui truncates overflow) — this is what makes the sidebar's click
     // regions reliable (Design §3.4): line index `i` sits at screen row
@@ -1223,6 +1298,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
         push_section(memory_range, ClickTarget::OpenMemoryInspector);
         push_section(skills_range, ClickTarget::OpenSkillsInspector);
         push_section(agents_range, ClickTarget::OpenAgentsInspector);
+        push_section(mcp_range, ClickTarget::OpenMcpInspector);
     }
 }
 
@@ -2339,6 +2415,44 @@ mod tests {
             app.agents.len(),
             2,
             "the catalog itself retains both entries"
+        );
+    }
+
+    #[test]
+    fn mcp_section_is_absent_without_a_connected_server() {
+        // The no-empty-stub rule (Design §4.15): the section simply does not
+        // appear until at least one MCP server is connected.
+        let app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40).all(|y| (0..120).all(|x| hit.hit(x, y) != Some(ClickTarget::OpenMcpInspector))),
+            "no MCP section without a connected server"
+        );
+    }
+
+    #[test]
+    fn mcp_section_appears_once_a_server_is_connected() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.mcp_servers.push(crate::app::McpServerSummary {
+            name: "jira".into(),
+            tools: vec!["mcp__jira__get_issue".into()],
+        });
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40).any(|y| (0..120).any(|x| hit.hit(x, y) == Some(ClickTarget::OpenMcpInspector))),
+            "a connected server makes the MCP section visible"
         );
     }
 

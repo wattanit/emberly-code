@@ -59,6 +59,9 @@ pub enum AppCommand {
     /// List currently alive subagents and inspect one's activity read-only
     /// (FR-9, Design §3.1/§4.13).
     Agents,
+    /// List currently connected MCP servers and inspect one's discovered
+    /// tools read-only (FR-11, Design §4.15).
+    Mcp,
     /// Manually compact the conversation — summarize older turns into a
     /// summary at a clean boundary (Requirements §8.3, Tech Spec §7).
     Compact,
@@ -261,6 +264,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "List currently alive subagents and inspect one's activity",
         cmd: AppCommand::Agents,
+    },
+    CommandSpec {
+        name: "mcp",
+        plain: Plain::Same,
+        key: None,
+        desc: "List connected MCP servers and inspect a server's tools",
+        cmd: AppCommand::Mcp,
     },
     CommandSpec {
         name: "help",

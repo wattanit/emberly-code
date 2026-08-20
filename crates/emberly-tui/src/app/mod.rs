@@ -199,6 +199,19 @@ pub enum OverlayContent {
         name: String,
         text: String,
     },
+    /// The MCP inspector (`/mcp`, FR-11, Design §4.15): currently connected
+    /// servers as a selectable list; Enter shows the selected server's
+    /// discovered tools **read-only** — "what could this server make the
+    /// model do" is always inspectable before it is ever used, the same
+    /// commitment memory/skills/subagents already make. Unlike
+    /// `SkillList`/`AgentList`, there is no further engine round-trip on
+    /// Enter either: a server's tool list is already fully known from
+    /// `UiEvent::McpServerConnected`, so the "detail" view is just that same
+    /// data rendered as plain text (`open_text_overlay`).
+    McpServerList {
+        servers: Vec<McpServerSummary>,
+        selected: usize,
+    },
 }
 
 /// Whether an inspector body-fetch is for read-only viewing or for editing
@@ -300,6 +313,18 @@ pub struct AgentSummary {
     pub id: String,
     pub name: String,
     pub ended: bool,
+}
+
+/// One connected MCP server (sidebar MCP section + inspector, FR-11, Design
+/// §4.15). Built entirely from `UiEvent::McpServerConnected` — the tool list
+/// is already known at connection time, so opening the inspector needs no
+/// engine round-trip (mirrors `SkillList`/`AgentList`'s own no-round-trip
+/// list step, only simpler: there is no further fetch for the detail view
+/// either, since a server's tool list *is* its detail view).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerSummary {
+    pub name: String,
+    pub tools: Vec<String>,
 }
 
 /// Session identity for the sidebar/header (Design §3.1).
@@ -655,6 +680,13 @@ pub struct App {
     /// event. Present only while non-empty (the established no-empty-stub
     /// rule); cleared on a new session.
     pub(crate) agents: Vec<AgentSummary>,
+    /// Currently connected MCP servers for the sidebar MCP section (FR-11,
+    /// Design §4.15). Maintained incrementally like `agents`:
+    /// `UiEvent::McpServerConnected` upserts an entry, `McpServerFailed`
+    /// removes one (a failed connection is never shown as connected).
+    /// Present only while non-empty (the established no-empty-stub rule);
+    /// cleared on a new session.
+    pub(crate) mcp_servers: Vec<McpServerSummary>,
     /// The registered completion checks' most recent results, for the
     /// sidebar's gate-status line (S-6, Design §8.7, §3.1). Updated from
     /// `UiEvent::CompletionStatus`; empty (and so hidden — never a "None"
@@ -684,6 +716,7 @@ mod agents;
 mod anim;
 mod events;
 mod keys;
+mod mcp;
 mod memory;
 mod overlays;
 mod pickers;
@@ -761,6 +794,7 @@ impl App {
             tasks: Vec::new(),
             skills: Vec::new(),
             agents: Vec::new(),
+            mcp_servers: Vec::new(),
             completion_status: Vec::new(),
             sidebar_visible: true,
             overlays: Vec::new(),

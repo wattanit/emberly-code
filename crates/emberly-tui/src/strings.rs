@@ -200,6 +200,15 @@ pub mod agents {
     pub const ACTIVITY_HINT: &str = " Esc close · ↑↓ PgUp/PgDn scroll · updates live";
 }
 
+/// The MCP inspector (`/mcp`, FR-11, Design §4.15).
+pub mod mcp {
+    pub const TITLE: &str = "mcp";
+    /// Shown when no servers are currently connected.
+    pub const EMPTY: &str = "(no MCP servers are currently connected)";
+    /// The action hint at the foot of the inspector.
+    pub const HINT: &str = " Enter view tools · ↑↓ move · Esc close";
+}
+
 /// Session export (FR-12, Design §8.11): the calm, one-time disclosure line
 /// shared verbatim by both frontends, since export does not redact content
 /// (Requirements FR-12 honesty clause) — the disclosure is the mitigation.

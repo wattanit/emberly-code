@@ -314,6 +314,33 @@ impl App {
             UiEvent::AgentActivity { id, name, text } => {
                 self.apply_agent_activity(&id, &name, text);
             }
+            // Quiet on success — one dim line, no ceremony (Design §8.10),
+            // and the sidebar MCP section's catalog is updated (upsert by
+            // name, so a `/reload` reconnect refreshes an existing entry
+            // rather than duplicating it).
+            UiEvent::McpServerConnected { name, tools } => {
+                if let Some(server) = self.mcp_servers.iter_mut().find(|s| s.name == name) {
+                    server.tools = tools.clone();
+                } else {
+                    self.mcp_servers.push(McpServerSummary {
+                        name: name.clone(),
+                        tools: tools.clone(),
+                    });
+                }
+                self.timeline.items.push(ConvItem::Notice(format!(
+                    "mcp · {name} · connected · {} tools",
+                    tools.len()
+                )));
+            }
+            // Harness-world (§6.1): never fatal to the session (Design
+            // §8.10) — a server that was never connected (or dropped on
+            // reconnect failure) is removed from the sidebar catalog too.
+            UiEvent::McpServerFailed { name, reason } => {
+                self.mcp_servers.retain(|s| s.name != name);
+                self.timeline.items.push(ConvItem::Notice(format!(
+                    "couldn't connect to MCP server '{name}': {reason}"
+                )));
+            }
             // A staged attachment (FR-10, Design §4.14): mirror the engine's
             // own staging list so the compose area can confirm what's
             // pending; the chip itself only lands in the timeline once the
