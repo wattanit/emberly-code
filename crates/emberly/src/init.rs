@@ -46,6 +46,18 @@ pub const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/co
 # hidden). Default collapsed; hidden still records the trace to the transcript.
 # reasoning = "collapsed"
 
+# MCP servers: external tools the model can use, reached over stdio. Each
+# discovered tool registers as mcp__<name>__<tool> and is otherwise an
+# ordinary, permission-gated tool — nothing here bypasses the rule engine.
+# A server declared here (the project tier) only ever connects in a folder
+# you've trusted; a server you want available everywhere belongs in your
+# global ~/.config/emberly/config.toml instead, where it is never trust-gated.
+# [mcp.servers.myserver]
+# transport = "stdio"                # only "stdio" is supported currently
+# command   = "npx"
+# args      = ["-y", "@some/mcp-server"]
+# enabled   = true
+
 # [ui]
 # Tool-call explanations: a dim caption under non-obvious tool calls, authored
 # by the model. On by default. Set false to defeat it — the schema property and

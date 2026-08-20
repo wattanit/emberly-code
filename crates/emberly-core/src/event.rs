@@ -287,4 +287,46 @@ pub enum UiEvent {
         name: String,
         text: String,
     },
+
+    /// A `Command::AttachImage` (FR-10, Design §4.14) validated and encoded
+    /// successfully; it now rides staged in `Engine::pending_attachments`
+    /// until the next `Command::UserInput` drains it. The frontend uses this
+    /// to show the attachment chip in the compose area before the message is
+    /// sent. `pending_count` is the engine's own staged count *after* this
+    /// one, so the frontend can enforce the `image.max_attachments` UI
+    /// affordance (e.g. graying out further attach) without recomputing it.
+    ImageAttached {
+        path: String,
+        name: String,
+        media_type: String,
+        width: usize,
+        height: usize,
+        format_label: String,
+        pending_count: usize,
+    },
+
+    /// A `Command::AttachImage` failed validation (HC-6 — data, not a crash):
+    /// oversize, an unrecognized format, unreadable path, or over
+    /// `image.max_attachments`. Rendered as a plain input-time error (Design
+    /// §4.14), never a silent drop.
+    AttachFailed { path: String, reason: String },
+
+    /// An in-session `/export` command finished writing a session export
+    /// (FR-12, Tech Spec §8.6) to `path`. Not a transcript event — the export
+    /// is an action taken on the session's own record, not part of what the
+    /// session did (Tech Spec §3.1). A failure surfaces as a plain
+    /// [`Notice`](UiEvent::Notice) instead (HC-3 — never a crash).
+    SessionExported { path: String },
+
+    /// An MCP server connected and advertised these (already-namespaced)
+    /// tools (FR-11, Tech Spec §5.6/§8.5), reported at session start and on
+    /// `/reload`. Connecting itself already happened (composition-root
+    /// logic, mirroring `web_search`) — this is the audit-visible report of
+    /// it, alongside the `TranscriptEvent::McpConnection` it pairs with.
+    McpServerConnected { name: String, tools: Vec<String> },
+
+    /// An MCP server could not be connected to, or its handshake/discovery
+    /// failed (HC-6 — data, never a crash; Design §8.10 — never fatal to the
+    /// session). Reported at session start and on `/reload`.
+    McpServerFailed { name: String, reason: String },
 }

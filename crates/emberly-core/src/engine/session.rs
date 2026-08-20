@@ -154,6 +154,11 @@ impl Engine {
         self.next_permission_id = 0;
         self.completion.attempts = 0;
         self.task_list.clear();
+        // A staged-but-unsent attachment (FR-10) belongs to the composing
+        // message, not the session it was composed in — a switch drops it
+        // rather than silently attaching it to the first message of a
+        // different session.
+        self.pending_attachments.clear();
         // Reload memory indexes for the new session (user-global unchanged,
         // project re-pointed to the new root). The store reads from disk, so a
         // resumed session re-reads the current store (Tech Spec §8.1). Re-emit
@@ -186,18 +191,72 @@ impl Engine {
 
     /// Record a user message durably, tagging the first one as the pinned
     /// `original_task` and deriving the session title from it (Tech Spec §7,
-    /// §16).
-    pub(super) fn record_user_message(&mut self, text: &str) {
+    /// §16). `images` is the durable, byte-free record of any attachments
+    /// (FR-10) — always recorded regardless of whether the active model has
+    /// vision, since it states what the *user* attached, not what reached
+    /// the model.
+    pub(super) fn record_user_message(&mut self, text: &str, images: Vec<AttachedImageMeta>) {
         let original_task = !self.session.original_task_recorded;
         self.write_transcript(TranscriptEvent::UserMessage {
             text: text.to_string(),
             original_task,
+            images,
         });
         if original_task {
             self.session.original_task_recorded = true;
             self.write_transcript(TranscriptEvent::SessionTitle {
                 title: clip_title(text),
             });
+        }
+    }
+
+    /// Export this session — plus any subagents it spawned — to a
+    /// self-contained HTML file at `output_path` (FR-12, Design §8.11, Tech
+    /// Spec §8.6), issued at idle. Reads this session's own transcript (its
+    /// current `active_path`, always in sync with what has been written so
+    /// far) and its subagents directory read-only; writes nothing back to
+    /// either. `output_path` is whatever the user named directly — a
+    /// **user**-initiated write, not an agent-initiated one, so no
+    /// project-root confinement or permission prompt applies (mirrors
+    /// `Command::AttachImage`'s reasoning, FR-10/FR-12).
+    pub(super) async fn export_session(&mut self, output_path: String) {
+        // Scoped so the lock guard (not `Send`) is dropped before any `.await`.
+        let transcript_path: Option<PathBuf> = self
+            .session
+            .active_path
+            .read()
+            .ok()
+            .map(|guard| guard.clone());
+        let Some(transcript_path) = transcript_path else {
+            self.emit(UiEvent::Notice {
+                message: "export failed: session state is unavailable".into(),
+            })
+            .await;
+            return;
+        };
+        let loaded = match crate::resume::read_records(&transcript_path) {
+            Ok(l) => l,
+            Err(e) => {
+                self.emit(UiEvent::Notice {
+                    message: format!("export failed: cannot read this session's transcript: {e}"),
+                })
+                .await;
+                return;
+            }
+        };
+        let subagents = collect_subagent_transcripts(&self.subagents_dir(), &loaded.records);
+        let html = render_session_html(&transcript_path, &loaded.records, &subagents);
+        match tokio::fs::write(&output_path, html).await {
+            Ok(()) => {
+                self.emit(UiEvent::SessionExported { path: output_path })
+                    .await;
+            }
+            Err(e) => {
+                self.emit(UiEvent::Notice {
+                    message: format!("export failed: cannot write {output_path}: {e}"),
+                })
+                .await;
+            }
         }
     }
 

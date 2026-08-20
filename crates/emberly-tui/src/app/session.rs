@@ -72,7 +72,13 @@ impl App {
         self.memory.project = 0;
         self.skills.clear();
         self.agents.clear();
+        self.mcp_servers.clear();
         self.completion_status.clear();
+        // Staged-but-unsent attachments (FR-10) belong to the composing
+        // message, not the session it was composed in; a switch drops them
+        // exactly like the engine's own `Engine::pending_attachments` does
+        // (a fresh/resumed session starts with no staged image).
+        self.pending_attachments.clear();
         self.memory.fetch = None;
         self.memory.pending_edit = None;
         self.files.diffs.clear();

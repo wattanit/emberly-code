@@ -155,6 +155,7 @@ fn transcript_event_variants_roundtrip() -> serde_json::Result<()> {
         TranscriptEvent::UserMessage {
             text: "task".into(),
             original_task: true,
+            images: Vec::new(),
         },
         TranscriptEvent::AssistantMessage {
             text: "on it".into(),

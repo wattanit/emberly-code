@@ -1512,6 +1512,115 @@ fn enter_submits_user_input() {
 }
 
 #[test]
+fn slash_attach_sends_the_path() {
+    // FR-10: `/attach <path>` sends AttachImage verbatim; no path is a plain
+    // usage notice, not a silent no-op (Design §4.14).
+    let mut a = app();
+    assert_eq!(
+        a.run_slash("attach mockup.png"),
+        Action::Command(Command::AttachImage {
+            path: "mockup.png".into(),
+        })
+    );
+    let mut a = app();
+    assert_eq!(a.run_slash("attach"), Action::None);
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("usage: /attach"))));
+}
+
+#[test]
+fn slash_export_sends_the_path() {
+    // FR-12: `/export <path>` sends ExportSession verbatim; no path is a
+    // plain usage notice, not a silent no-op (Design §8.11).
+    let mut a = app();
+    assert_eq!(
+        a.run_slash("export session.html"),
+        Action::Command(Command::ExportSession {
+            path: "session.html".into(),
+        })
+    );
+    let mut a = app();
+    assert_eq!(a.run_slash("export"), Action::None);
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("usage: /export"))));
+}
+
+#[test]
+fn session_exported_event_shows_path_and_disclosure() {
+    let mut a = app();
+    a.apply_event(UiEvent::SessionExported {
+        path: "session.html".into(),
+    });
+    let notices: Vec<&str> = a
+        .timeline
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            ConvItem::Notice(m) => Some(m.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(notices
+        .iter()
+        .any(|m| m.contains("exported to session.html")));
+    assert!(notices.iter().any(|m| m.contains("review before sharing")));
+}
+
+#[test]
+fn image_attached_event_stages_then_send_turns_it_into_a_chip() {
+    // FR-10, Design §4.14: `ImageAttached` stages the image in the compose
+    // area; sending the message drains it into a chip right after the
+    // user's own message, never as tool activity.
+    let mut a = app();
+    a.apply_event(UiEvent::ImageAttached {
+        path: "/tmp/mockup.png".into(),
+        name: "mockup.png".into(),
+        media_type: "image/png".into(),
+        width: 800,
+        height: 600,
+        format_label: "PNG".into(),
+        pending_count: 1,
+    });
+    assert_eq!(a.pending_attachments.len(), 1);
+
+    a.on_key(KeyEvent::from(KeyCode::Char('h')));
+    a.on_key(KeyEvent::from(KeyCode::Char('i')));
+    a.on_key(KeyEvent::from(KeyCode::Enter));
+
+    assert!(a.pending_attachments.is_empty());
+    let last_two: Vec<_> = a.timeline.items.iter().rev().take(2).collect();
+    assert!(matches!(
+        last_two[1],
+        ConvItem::User(t) if t == "hi"
+    ));
+    assert!(matches!(
+        last_two[0],
+        ConvItem::Attachment { name, width: 800, height: 600, format_label }
+        if name == "mockup.png" && format_label == "PNG"
+    ));
+}
+
+#[test]
+fn attach_failed_event_is_a_plain_notice() {
+    let mut a = app();
+    a.apply_event(UiEvent::AttachFailed {
+        path: "data.bin".into(),
+        reason: "not a recognized image format".into(),
+    });
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("attach failed") && m.contains("data.bin"))));
+}
+
+#[test]
 fn slash_command_is_not_echoed_as_a_message() {
     let mut a = app();
     for c in "/help".chars() {
@@ -2314,6 +2423,128 @@ fn agents_inspector_esc_dismisses() {
     let mut a = app();
     a.agents = vec![agent_summary("agent-1", "reviewer", false)];
     a.run_command(AppCommand::Agents);
+    assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
+    assert!(a.overlays.is_empty());
+}
+
+// ---- MCP inspector (`/mcp`, FR-11, Design §4.15) ------------------------
+
+fn mcp_server(name: &str, tools: &[&str]) -> crate::app::McpServerSummary {
+    crate::app::McpServerSummary {
+        name: name.into(),
+        tools: tools.iter().map(|t| t.to_string()).collect(),
+    }
+}
+
+#[test]
+fn mcp_server_connected_upserts_the_sidebar_catalog_and_notices() {
+    let mut a = app();
+    a.apply_event(UiEvent::McpServerConnected {
+        name: "jira".into(),
+        tools: vec!["mcp__jira__get_issue".into()],
+    });
+    assert_eq!(a.mcp_servers.len(), 1);
+    assert_eq!(a.mcp_servers[0].tools.len(), 1);
+    assert!(a.timeline.items.iter().any(
+        |i| matches!(i, ConvItem::Notice(m) if m.contains("jira") && m.contains("connected"))
+    ));
+
+    // A second connect for the same name (e.g. a /reload reconnect) upserts
+    // rather than duplicating the entry.
+    a.apply_event(UiEvent::McpServerConnected {
+        name: "jira".into(),
+        tools: vec![
+            "mcp__jira__get_issue".into(),
+            "mcp__jira__create_issue".into(),
+        ],
+    });
+    assert_eq!(a.mcp_servers.len(), 1);
+    assert_eq!(a.mcp_servers[0].tools.len(), 2);
+}
+
+#[test]
+fn mcp_server_failed_is_never_shown_as_connected() {
+    let mut a = app();
+    a.apply_event(UiEvent::McpServerFailed {
+        name: "jira".into(),
+        reason: "command not found".into(),
+    });
+    assert!(a.mcp_servers.is_empty());
+    assert!(a.timeline.items.iter().any(
+        |i| matches!(i, ConvItem::Notice(m) if m.contains("jira") && m.contains("command not found"))
+    ));
+}
+
+#[test]
+fn mcp_server_failed_after_a_prior_connect_removes_it() {
+    // A reconnect (e.g. on /reload) that now fails must not leave a stale
+    // "connected" entry in the sidebar.
+    let mut a = app();
+    a.mcp_servers = vec![mcp_server("jira", &["mcp__jira__get_issue"])];
+    a.apply_event(UiEvent::McpServerFailed {
+        name: "jira".into(),
+        reason: "process exited".into(),
+    });
+    assert!(a.mcp_servers.is_empty());
+}
+
+#[test]
+fn mcp_command_opens_inspector_from_cached_list() {
+    let mut a = app();
+    a.mcp_servers = vec![
+        mcp_server("jira", &["mcp__jira__get_issue"]),
+        mcp_server("github", &["mcp__github__list_prs", "mcp__github__get_pr"]),
+    ];
+    // No engine round-trip — the connected-server list is already cached.
+    assert_eq!(a.run_slash("mcp"), Action::None);
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::McpServerList { servers, selected }) => {
+            assert_eq!(servers.len(), 2);
+            assert_eq!(servers[0].name, "jira");
+            assert_eq!(*selected, 0);
+        }
+        other => panic!("expected McpServerList overlay, got {other:?}"),
+    }
+    assert!(commands::COMMANDS.iter().any(|c| c.name == "mcp"));
+}
+
+#[test]
+fn mcp_empty_list_opens_an_empty_overlay() {
+    let mut a = app();
+    a.mcp_servers.clear();
+    a.run_command(AppCommand::Mcp);
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::McpServerList { servers, .. }) => assert!(servers.is_empty()),
+        other => panic!("expected an empty McpServerList overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn mcp_enter_opens_the_selected_servers_tool_list_read_only_no_round_trip() {
+    let mut a = app();
+    a.mcp_servers = vec![
+        mcp_server("jira", &["mcp__jira__get_issue"]),
+        mcp_server("github", &["mcp__github__list_prs", "mcp__github__get_pr"]),
+    ];
+    a.run_command(AppCommand::Mcp);
+    a.on_key(key(KeyCode::Down)); // select github
+                                  // Enter opens a plain read-only text overlay directly — never a Command,
+                                  // since a server's tool list is already fully known (Design §4.15).
+    assert_eq!(a.on_key(key(KeyCode::Enter)), Action::None);
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::Text(text)) => {
+            assert!(text.contains("mcp__github__list_prs"));
+            assert!(text.contains("mcp__github__get_pr"));
+        }
+        other => panic!("expected a read-only Text overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn mcp_inspector_esc_dismisses() {
+    let mut a = app();
+    a.mcp_servers = vec![mcp_server("jira", &["mcp__jira__get_issue"])];
+    a.run_command(AppCommand::Mcp);
     assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
     assert!(a.overlays.is_empty());
 }

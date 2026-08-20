@@ -14,7 +14,10 @@ emberly-tools = { path = "../emberly-tools" }
 emberly-sandbox = { path = "../emberly-sandbox" }
 
 # External.
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "process", "time", "macros"] }
+# `io-util` added for the first-party MCP stdio client (FR-11, Tech Spec
+# §5.6): AsyncBufReadExt/AsyncWriteExt over the spawned server's pipes — no
+# new dependency, an existing one's feature (Tech Spec §12).
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "process", "time", "macros", "io-util"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -200,6 +200,22 @@ pub mod agents {
     pub const ACTIVITY_HINT: &str = " Esc close · ↑↓ PgUp/PgDn scroll · updates live";
 }
 
+/// The MCP inspector (`/mcp`, FR-11, Design §4.15).
+pub mod mcp {
+    pub const TITLE: &str = "mcp";
+    /// Shown when no servers are currently connected.
+    pub const EMPTY: &str = "(no MCP servers are currently connected)";
+    /// The action hint at the foot of the inspector.
+    pub const HINT: &str = " Enter view tools · ↑↓ move · Esc close";
+}
+
+/// Session export (FR-12, Design §8.11): the calm, one-time disclosure line
+/// shared verbatim by both frontends, since export does not redact content
+/// (Requirements FR-12 honesty clause) — the disclosure is the mitigation.
+pub mod export {
+    pub const SENSITIVE_CONTENT_NOTE: &str = "This file may contain file contents, command output, and anything else this session touched — review before sharing.";
+}
+
 /// Keybinding hints for the status bar (Design §3.1, §6.2 — 2–5 words each).
 /// Hints change with state; the permission set is shown while a prompt is open.
 pub mod hints {
@@ -211,6 +227,10 @@ pub mod hints {
 /// these are the rich-mode glyphs.
 pub mod markers {
     pub const USER_PROMPT: &str = "›";
+    /// Leads a user-attached image's chip on the sent message (FR-10, Design
+    /// §4.14) — deliberately distinct from `NOTICE`/tool-activity styling,
+    /// since this is content on the user's own message, not tool activity.
+    pub const ATTACHMENT: &str = "📎";
     pub const NOTICE: &str = "·";
     pub const RUNNING: &str = "…";
     pub const OK: &str = "ok";

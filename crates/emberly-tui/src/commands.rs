@@ -59,9 +59,19 @@ pub enum AppCommand {
     /// List currently alive subagents and inspect one's activity read-only
     /// (FR-9, Design §3.1/§4.13).
     Agents,
+    /// List currently connected MCP servers and inspect one's discovered
+    /// tools read-only (FR-11, Design §4.15).
+    Mcp,
     /// Manually compact the conversation — summarize older turns into a
     /// summary at a clean boundary (Requirements §8.3, Tech Spec §7).
     Compact,
+    /// Attach an image to the prompt currently being composed (FR-10, Design
+    /// §4.14). `/attach <path>` validates and stages it immediately; the
+    /// engine replies with the attachment chip or a plain input-time error.
+    Attach,
+    /// Export this session — plus any subagents it spawned — to a
+    /// self-contained HTML file (FR-12, Design §8.11). `/export <path>`.
+    Export,
     /// Cancel the in-flight turn.
     Cancel,
     /// Exit emberly.
@@ -142,6 +152,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "Summarize older turns to reclaim context space",
         cmd: AppCommand::Compact,
+    },
+    CommandSpec {
+        name: "attach",
+        plain: Plain::Same,
+        key: None,
+        desc: "Attach an image to the prompt (/attach <path>)",
+        cmd: AppCommand::Attach,
+    },
+    CommandSpec {
+        name: "export",
+        plain: Plain::Same,
+        key: None,
+        desc: "Export this session to a shareable HTML file (/export <path>)",
+        cmd: AppCommand::Export,
     },
     CommandSpec {
         name: "model",
@@ -240,6 +264,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "List currently alive subagents and inspect one's activity",
         cmd: AppCommand::Agents,
+    },
+    CommandSpec {
+        name: "mcp",
+        plain: Plain::Same,
+        key: None,
+        desc: "List connected MCP servers and inspect a server's tools",
+        cmd: AppCommand::Mcp,
     },
     CommandSpec {
         name: "help",

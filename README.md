@@ -1,6 +1,6 @@
 # Emberly Code
 
-> **Currently on v0.4.5** — feature-complete for the milestone, install from source.
+> **Currently on v0.5.1** — feature-complete for the milestone, install from source.
 
 **An AI coding agent for your terminal — provider-agnostic, fully auditable, and
 built in pure Rust.**
@@ -175,6 +175,26 @@ files, so they don't get committed.
 **Project instructions:** an `AGENTS.md` (or `CLAUDE.md`) at your project root
 is picked up automatically as standing context.
 
+#### MCP servers
+
+Emberly can connect to [MCP](https://modelcontextprotocol.io) servers over
+stdio and register each one's tools alongside the built-ins — a first-party
+JSON-RPC client, no vendor SDK:
+
+```toml
+[mcp.servers.myserver]
+command = "npx"
+args    = ["-y", "@my/mcp-server"]
+```
+
+Each discovered tool registers as `mcp__myserver__<tool>`, so the connected
+server is always legible in the tool-activity line and the permission
+prompt. A server declared in **project** config is trust-gated exactly like
+a project skill — it is never even connected in an untrusted folder; a
+server declared in your **global** config connects unconditionally. Connect
+outcomes reconnect on `/reload`, and every MCP-sourced result is labeled
+untrusted external content, the same as a web search result.
+
 #### Config keys at a glance
 
 | Key | Default | What it controls |
@@ -194,6 +214,7 @@ is picked up automatically as standing context.
 | `[memory] enabled` | `true` | Persistent cross-session memory (+ `max_index_entries`) |
 | `[skills] enabled` | `true` | The skill system |
 | `[agents] enabled` | `true` | Multi-agent delegation (+ `max_concurrent` default `3`, `spawn_timeout_secs` default `600`, `idle_timeout_secs` default `1800`) |
+| `[mcp] enabled` | `true` | The MCP subsystem overall (+ per-server `[mcp.servers.<name>]`, each with its own `enabled`) |
 | `[search] enabled` | `true` | Register the `web_search` tool (needs `adapter`/`endpoint`/`auth` to work; `max_results` caps results) |
 | `[stream] first_chunk_secs` | `300` | Seconds to wait for a completion stream's first chunk (+ `idle_secs`, default `90`, for the gap between later chunks) — raise both for a slow local/cloud inference backend |
 | `[sandbox] require` | `false` | Refuse to start without active OS confinement |
@@ -254,6 +275,8 @@ agent's task list, changed files, and any currently alive subagents.
 | `/model` | | Switch the active provider/model (`/model <profile>` direct) |
 | `/mode` | `Shift-Tab` | Pick a permission mode (`Shift-Tab` cycles) |
 | `/effort` | | Set reasoning effort (`/effort low\|medium\|high\|max`) |
+| `/attach <path>` | | Attach an image to the prompt you're composing |
+| `/export <path>` | | Export this session to a self-contained HTML file |
 | `/view` | | View the last assistant message in full |
 | `/diff` | `Ctrl-O` | Open the latest file's diff |
 | `/files` | | List files changed this session |
@@ -265,6 +288,7 @@ agent's task list, changed files, and any currently alive subagents.
 | `/memory` | | Inspect, edit, and delete stored memory |
 | `/skills` | | List available skills and inspect a skill's instructions |
 | `/agents` | | List currently alive subagents and inspect one's activity |
+| `/mcp` | | List connected MCP servers and inspect a server's tools |
 | `/help` | `Ctrl-P` | List commands and keybindings |
 | `/quit` | `Ctrl-D` | Exit |
 
@@ -355,6 +379,18 @@ and the sidebar's **Agents** section (present only while at least one is
 alive) lets you open a read-only, live-updating inspector on any of them, past
 or present, via **`/agents`**.
 
+#### Using connected MCP servers
+
+Once a `[mcp.servers.*]` is configured (see [MCP servers](#mcp-servers)
+above), it connects at startup — a quiet, one-line confirmation, never
+ceremony — and its tools appear in the sidebar's **MCP** section (present
+only while at least one server is connected). **`/mcp`** opens a read-only
+inspector: pick a server to see its full discovered tool list, no round trip
+needed since it was all learned at connect time. A tool call still asks
+permission exactly like a built-in tool's, with the prompt naming the
+originating server; a connection that fails is reported plainly and never
+blocks the rest of the session.
+
 #### Web search & image/document input
 
 - **Web search.** The `web_search` tool is registered by default but does
@@ -362,9 +398,15 @@ or present, via **`/agents`**.
   (`brave` / `tavily` / `searxng` / `json`), `endpoint`, and `auth`. The agent
   then searches through your harness-owned endpoint (capped by `max_results`,
   default 5). Set `enabled = false` to remove the tool entirely.
-- **Image input.** For vision-capable models (`vision = true`), the agent can
-  read an image file inside your project into the conversation via the
-  `read_image` tool — point it at a screenshot or diagram and ask about it.
+- **Image input, model-initiated.** For vision-capable models
+  (`vision = true`), the agent can read an image file inside your project
+  into the conversation via the `read_image` tool — point it at a screenshot
+  or diagram and ask about it.
+- **Image input, you-initiated.** You can also hand the agent an image
+  directly with **`/attach <path>`** before sending your message — the same
+  vision path `read_image` uses, staged onto the next message you send. On a
+  model with no vision support, the image is never silently dropped; a plain
+  note takes its place saying so.
 - **Document input.** For document-capable models (`documents = true`), the
   agent can read a PDF file inside your project into the conversation via the
   `read_document` tool — the same pattern as image input, applied to
@@ -386,6 +428,12 @@ For long sessions the context-economy layer works automatically; use `/compact`
 to manually summarize the older part when the window fills. Recent messages are
 kept verbatim and the summary is recorded in the transcript, so resuming works.
 
+**Exporting a session.** **`/export <path>`** (or `emberly export <path>` from
+the shell, on any saved session) renders the full conversation — including
+any subagent it spawned — to one self-contained HTML file: read-only, never
+mutating the source transcript. It carries everything the transcript does,
+so review before sharing it — export never redacts.
+
 Each session also gets a disposable scratch directory
 (`.agents/scratch/<id>/`) the agent can stash temporary files in — a script,
 intermediate output, a working note — via the `scratch_write` tool. It's
@@ -400,6 +448,7 @@ emberly                     Start (or offer to resume) an interactive session
 emberly --plain             Run in plain line mode (no full-screen TUI)
 emberly resume [id]         Resume the latest session, or one by id
 emberly sessions            List saved sessions in this project
+emberly export <path>       Export a session (latest, or --session <id>) to HTML
 emberly init                Scaffold .agents/ (config, prompts, permissions)
 emberly config show         Show the resolved configuration and its sources
 emberly trust list          List trusted folders
@@ -421,10 +470,10 @@ minimal terminals.
 
 ### Project status
 
-Feature-complete for the **v0.4.5** milestone, installable from source.
+Feature-complete for the **v0.5.1** milestone, installable from source.
 The interactive TUI, live providers, session persistence, the permission rule
 engine, auto-accept modes, and OS confinement (Linux Landlock, macOS Seatbelt)
-all work today, alongside the full 0.2–0.4.5 stack described below. **Not yet
+all work today, alongside the full 0.2–0.5.1 stack described below. **Not yet
 shipped:** prebuilt binaries and Windows support (no Landlock/Seatbelt
 equivalent).
 
@@ -444,10 +493,13 @@ as it grows. _(Affectionate, not official.)_
 | **v0.4.3** | M11 | 🌲🔥 _Wildfire_ | Three externally-reported bug fixes (a stalled SSE stream could hang forever; an interrupted turn could commit a message no provider adapter accepts; the token estimate badly undercounted Thai/CJK text), plus session scratch space — a disposable per-session working directory (`scratch_write`, `emberly clean`). |
 | **v0.4.4** | — | 🌲🔥 _Wildfire_ | Correctness and internals, no new features. Three defects in the permission rule engine (a saved `always allow` could write a `permissions.toml` that no longer parsed, silently dropping every project rule including `deny`s; a `tool = "*"` rule could override a named-tool `deny`; `match = "*"` matched nothing instead of everything), three in the provider streaming seam, and a slow first token no longer trips the idle timeout (#15). Internally: the `Engine` and `App` god objects split by topic and their flat field lists grouped, one generic gate with a single fail-closed rule, and the unused outside-root grant path removed from the sandbox (Tech Spec v0.12). |
 | **v0.4.5** | — | 🌲🔥 _Wildfire_ | Another correctness pass. A session switch left the derived view cache stale, so returning to a session reported "0 in / 0 out" at $0.00 despite full history (#18). A tool call whose backend streamed no usable arguments (empty, the literal text `null`, or garbage) surfaced as a bare `invalid type: null` and could stall a session with no explanation — arguments now default to `{}`, and the model is told plainly which call was bad and to retry. Provider request failures and retries are now written to the session transcript instead of only flashing in the UI. Added: `--version` reports a build timestamp; the completion stream's first-chunk/idle timeouts are configurable (`[stream]`, closing the #15 config deferral) for slower local/cloud inference backends; `Ctrl-L` forces a full repaint as an interim escape hatch for display corruption reported on independent terminals (Ghostty, Termius, Termux), cause unconfirmed. |
+| **v0.5.0** | M12 | 🌲🔥 _Wildfire_ | Multi-agent delegation — the primary agent can spawn, message, list, and end subagents, each a real nested engine running under the exact same permission, sandbox, and workspace-trust posture as the primary agent, with its own selectable provider profile and a tool set that's never a superset of the primary agent's own. Concurrent by default, bounded to one level of depth (no recursive spawning), a configurable concurrency ceiling and idle reap, cost roll-up into the session total, and a per-agent inspector (sidebar Agents section, `/agents` command, permission-prompt provenance line) so no subagent is a silent background process. |
+| **v0.5.1** | M13 | 🌲🔥 _Wildfire_ | Three independent slices: **MCP client support** (`[mcp.servers.*]`, `/mcp`, a first-party stdio JSON-RPC client — no vendor SDK — with discovered tools permission-gated and provenance-labeled exactly like a built-in tool's); **user-attached images** (`/attach <path>`, reusing the existing vision content-block path `read_image` already produces); and **session export** (`/export <path>` / `emberly export`, a read-only, self-contained HTML render of a session and any subagent it spawned). |
 
 Prior as-built plans live under `docs/version-0-1/`, `docs/version-0-2/`,
-`docs/version-0-3/`, `docs/version-0-4/`, `docs/version-0-4-1/`, and
-`docs/version-0-4-2/`.
+`docs/version-0-3/`, `docs/version-0-4/`, `docs/version-0-4-1/`,
+`docs/version-0-4-2/`, `docs/version-0-4-3/`, `docs/version-0-5/`, and
+`docs/version-0-5-1/`.
 
 ### Architecture
 
@@ -495,10 +547,10 @@ Release targets (v1): `x86_64-unknown-linux-musl`,
 
 **Documents** (the SFD standard — Requirements → Design → Tech Spec):
 
-- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.10)
-- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.10)
-- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.12)
-- [`docs/version-0-4-3/IMPLEMENTATION_PLAN.md`](docs/version-0-4-3/IMPLEMENTATION_PLAN.md) — phased build plan (+ per-phase `PHASE*_TODO.md`)
+- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.12)
+- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.12)
+- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.14)
+- [`docs/version-0-5-1/IMPLEMENTATION_PLAN.md`](docs/version-0-5-1/IMPLEMENTATION_PLAN.md) — this release's phased build plan
 
 ## License
 

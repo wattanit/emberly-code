@@ -1,11 +1,11 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.13 
+**Version:** 0.14 
 **Status:** approved
-**Date:** 2026-08-15
+**Date:** 2026-08-16
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.11 (upstream contract),
-Design Guideline v0.11 (upstream for all UI/UX decisions)
+**Companion documents:** Requirements Document v0.12 (upstream contract),
+Design Guideline v0.12 (upstream for all UI/UX decisions)
 
 This document defines HOW Emberly Code is built. Requirements-level
 identifiers (HC-n, FR-n, P-n, T-n, C-n, S-n, A-n) refer to the Requirements
@@ -117,6 +117,17 @@ pair. The primary agent's own `spawn_agents`/`message_agent`/`list_agents`/
 `end_agent` calls are ordinary tool calls, so they already flow through the
 existing `ToolStarted`/`ToolFinished` events like any other tool — no
 separate event is needed for those.
+
+The 0.5.1 feature set adds `McpServerConnected{name, tools: Vec<String>}`
+(FR-11, §5.6/§8.5) when a server's handshake completes at session start (or
+reload), `McpServerFailed{name, reason}` when it does not (Design §8.10's
+harness-voice notice), and `SessionExported{path}` (FR-12, §8.6) when an
+in-session export command completes. An MCP tool call itself is an ordinary
+`ToolStarted`/`ToolFinished` pair like any tool (§5.6) — ordinary rendering,
+no per-call event. A user-attached image needs no new `UiEvent`: it rides
+the outgoing `user_message` the TUI already constructs and sends (§4.1),
+rendered from that message's own content blocks (Design §4.14) rather than
+a separate notification.
 
 Workspace trust (FR-1) is **not** a `UiEvent`: it is a pre-engine gate in the
 binary (§6.7), resolved before the engine loop starts and before any project
@@ -260,6 +271,17 @@ cannot, never dropping the document. Each adapter maps the block to the
 provider's native document shape (§4.2); no wire type crosses the boundary
 (P-1). The harness never parses the document — it forwards the bytes — so no
 PDF-parsing dependency enters the tree (HC-2, §12).
+
+**User-attached images reuse the same block, no new variant (FR-10).** A
+`ContentBlock::Image` inside a `user_message` transcript event's own content
+list is a user attachment (Design §4.14); the identical block inside a
+`tool_result` event is `read_image`'s output (T-12, Design §4.8). The two
+are told apart structurally, by which event carries the block, never by a
+flag — the TUI (§9) renders the former as a chip on the sent message and the
+latter as a tool-activity line purely from which event it is reading. The
+same `image.max_bytes`/format checks (§5.2) and the same
+unsupported-capability result (HC-6) on a non-`vision` model apply to both
+paths identically, since both ultimately produce the same block.
 
 `CompletionStream` yields normalized `StreamEvent`s: `TextDelta`,
 `ReasoningDelta` (model thinking, distinct from the answer — P-10),
@@ -500,6 +522,66 @@ command. When `search.enabled = false` the tool is not registered at all.
 labels it as fetched web content (Design §4.10); the engine never interprets
 a result as an instruction. Result count is capped by `max_results` and long
 snippets pass through the §5.3 size backstop, so search cannot flood context.
+
+### 5.6 MCP client (FR-11)
+
+**No vendor SDK crate (P-4's own rule, extended here).** MCP's stdio
+transport is newline-delimited JSON-RPC 2.0 over a child process's
+stdin/stdout — exactly the shape `tokio::process::Command` (already a direct
+dependency, §2) plus `tokio::io::AsyncBufReadExt::lines()` and `serde_json`
+(already locked) already handle with no framing complexity beyond
+`Content` \n `Content` \n. A first-party `McpClient` (`emberly-core`,
+alongside `engine/subagents.rs`) is therefore the default and, per §12,
+needs **no new dependency**; a remote transport (SSE/HTTP), if ever added,
+is a second `McpTransport` impl behind the same trait, not a rewrite.
+
+```rust
+#[async_trait]
+trait McpTransport: Send + Sync {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, McpError>;
+}
+```
+
+- **Connection lifecycle.** At session start (and on `/reload`, C-5), the
+engine spawns one `McpTransport` per enabled `[mcp.servers.<name>]` profile
+(§8.5) whose trust gate (below) passes, sends the MCP `initialize` +
+`tools/list` handshake, and builds one `Tool` impl per discovered tool by
+implementing §5.1's trait as a thin proxy that serializes `args` into an
+MCP `tools/call` request and maps the JSON-RPC response/error into a
+`ToolOutcome` (HC-6 — a transport error or a tool-side error both become a
+structured failure, never a panic or a bare harness error). This is T-7's
+door, opened for real: the tool trait's transport-agnostic contract means
+no engine change was needed, only this one new `Tool` implementation.
+- **Namespacing (Requirements §13 resolved here: initial convention).** Each
+discovered tool registers as `mcp__<server>__<tool>`, so the server that
+owns a tool is legible directly from its name — the same fact the
+permission-prompt provenance line (Design §5.3) and tool-activity line
+(Design §4.15) read to name the server. A name collision within one
+server's own tool list is that server's own bug, surfaced as a structured
+connection-time failure (HC-6) naming both tools; collision with a
+built-in tool name cannot occur by construction, since the namespace always
+carries the `mcp__` prefix no built-in uses.
+- **Registration through the existing `ToolRegistry`, not a parallel one.**
+Discovered tools are inserted into the same registry every built-in tool
+lives in (§5.1) — a subagent's filtered registry (§8.4) simply may or may
+not include them like any other name; no separate "external tools" registry
+or dispatch path exists.
+- **Permission gating is the ordinary rule engine, no proxy needed at this
+layer.** Unlike a subagent's calls (§8.4), an MCP tool call is made by the
+*root* engine itself (or a subagent's, proxied exactly as any of its other
+tool calls already are, §8.4) — so it flows through `ToolCtx`'s existing
+permission gate with no new gate type. The rendering (Design §5.3) reads the
+server name from the tool's own namespaced identifier, needing no new
+payload field.
+- **Untrusted-content tagging.** An MCP tool result is tagged exactly as
+`web_search`'s is (§5.5) so the TUI labels it as external, untrusted
+content (Design §4.15) — one shared tagging mechanism, two tools using it.
+- **Workspace-trust gate on project-declared servers (extends §6.7).** A
+server declared in project-tier config (§8.5) is checked against the
+session's trust decision *before* the engine spawns its transport or dials
+its endpoint — mirroring the project-skill check (§8.2) exactly, including
+its "neither cataloged nor invocable" outcome on an untrusted root. A
+user-global server is never trust-gated (it is not project-resident).
 
 ## 6. Sandbox & Permissions (`emberly-sandbox`)
 
@@ -868,6 +950,14 @@ gate (§7, S-6); `document.max_bytes` (**default `32 MiB`**) caps a
 - **Trust:** store at `~/.config/emberly/trust.toml`, `0600`, global only;
 optional `trust.trusted_dirs` pre-trust allowlist in global config
 (§6.7) — neither is ever a project key (Requirements FR-1).
+- **New config keys, 0.5.1 feature set** (initial; tune with use):
+`[mcp] enabled` (**default `true`**) and `[mcp.servers.<name>]` — `transport`
+(**initial: `"stdio"` only**), `command`/`args` (stdio) — (§5.6/§8.5, FR-11,
+C-8); `image.max_attachments` (**default `4`**) bounds attachments on one
+prompt (§8's image caps, extended to FR-10) — reuses the existing
+`image.max_bytes`/format checks (§5.2) per-attachment, no separate cap
+needed there. Session export (FR-12, §8.6) introduces no config key — its
+output path is a command argument, not a setting.
 
 ### 8.1 Persistent memory (FR-6)
 
@@ -1084,6 +1174,73 @@ never a side channel (Requirements FR-9). Per-subagent detail remains
 available via the inspector; whether it also shows inline in the sidebar
 entry is a Design choice (Design Guideline §13, open).
 
+### 8.5 MCP servers (FR-11, C-8)
+
+- **Layout.** Server profiles resolve through the ordinary two-tier-plus-
+project config (C-1): `[mcp.servers.<name>]` in global or project
+`config.toml`, project winning per name like any other config table.
+
+```toml
+[mcp.servers.<name>]
+transport = "stdio"          # initial supported transport (Requirements §13)
+command   = "npx"
+args      = ["-y", "@some/mcp-server"]
+enabled   = true              # per-server off switch, no code change (Requirements FR-11)
+```
+
+- **Connection is engine startup logic** (§5.6), driven off this table
+exactly as `[providers.*]` drives provider profiles (§4.5) — a genuinely new
+transport is new code, a new server is configuration alone.
+- **Workspace-trust gate.** A project-tier server entry is checked against
+the session's trust decision before the engine ever spawns its transport —
+mirroring the skill-catalog check (§8.2) line for line: an untrusted root
+means the server is neither connected, cataloged, nor offered to the model
+(Requirements FR-1/FR-11). A user-global server entry is never trust-gated.
+- **Live reload.** `[mcp.servers.*]` participates in `reload_config` (§8) —
+adding, removing, or disabling a server on save reconnects/disconnects it
+without a restart, the same guarantee every other 0.2+ config surface
+already gives.
+- **Config:** `mcp.enabled` (default `true`, a global kill switch alongside
+per-server `enabled`).
+
+### 8.6 Session export (FR-12)
+
+- **A read-only renderer over existing state, not a new store.** The
+exporter reads the derived conversation-state view (§3.2a) — already the
+product of truncation/reduction/windowing/compaction — plus the raw
+transcript (§3.2) for anything the view has dropped but the export should
+still surface in full (full tool-result bodies via their `full_output_ref`
+sidecar, §5.3), and, when present, each subagent's own nested transcript
+(§8.4) under `.agents/sessions/<id>/subagents/*.jsonl`. It performs no write
+back into either (FR-12's "never mutates the transcript" honesty clause) —
+`emberly export`/the in-session command is the only new code path, and it
+opens files strictly read-only.
+- **Format: static, self-contained HTML (Requirements §13 resolved:
+initial format).** First-party string building over the already-normalized
+message/tool-event types (A-3's `serde`-derived structs are the same data
+this renders from) — **no templating-engine dependency** (§12): a
+`fn render_session_html(&DerivedView, &[SubagentTranscript]) -> String`
+producing one `.html` file with inlined CSS, no external assets, matching
+this project's own "self-contained artifact" bar. A raw-JSONL export needs
+no code — the transcript file is already a plain file the user can copy.
+- **Surface.** `emberly export [--session <id>] <output-path>` (CLI,
+binary composition root, §10) and an in-session `/export <path>` command
+(TUI, §9) sharing the same renderer function — no divergent logic between
+the two entry points. Output path is a plain filesystem path argument, may
+be outside the project root (Requirements FR-12 — user-initiated, HC-4 does
+not apply); the renderer refuses only on an ordinary I/O error (unwritable
+path, disk full), returned as a plain CLI/command error, never a panic
+(HC-3).
+- **No redaction (Requirements FR-12 honesty clause).** The renderer copies
+content verbatim, including anything a truncation/reduction marker already
+names as present in the sidecar; it performs no scanning for secrets or
+sensitive text. Design §8.11's one-time disclosure line is the sole
+mitigation this feature ships with.
+- **No new `TranscriptEvent` or `SCHEMA_VERSION` bump.** Export reads
+existing event types only; the in-session command emits `SessionExported`
+(§3.1) as a `UiEvent`, not a transcript event — the export itself is not
+part of what the session did, only an action taken on its record afterward.
+
 ## 9. TUI (`emberly-tui`)
 
 - `ratatui` + `crossterm`. Layout per Design §3: main pane, collapsible
@@ -1170,6 +1327,31 @@ assistant text and tool activity, never streamed into the main pane.
 name (Design §4.13); a permission prompt raised by a subagent's own tool
 call carries its `PermissionRendering`'s new optional `on_behalf_of: Option<String>` field (§8.4) as one dimmed line, with no other change to the
 prompt (Design §5).
+- **Image attach (Design §4.14):** `/attach <path>` (always available) and a
+file-picker overlay reusing the existing `Overlay`/`Choices` machinery
+(§4.6/§4.6-wizard pattern above), filtered to image extensions and rooted at
+the project. A bracketed-paste event (already handled for text input, §9
+top) whose payload resolves to an existing image file path is intercepted
+before insertion into the line editor and offered as an attach instead of
+literal text. On send, the resolved file is read exactly as `read_image`
+(§5.2) validates and encodes it, and the resulting `ContentBlock::Image` is
+attached to the outgoing `user_message` (§4.1) — rendered as the Design
+§4.14 chip on that message once sent, never as a tool-activity line.
+`image.max_attachments` (§8) caps how many ride one message; over the cap is
+a plain input-time error, not a truncated silent send.
+- **MCP (Design §3.1/§4.15/§5.3):** sidebar MCP section lists connected
+servers from `McpServerConnected`/`McpServerFailed` (§3.1/§5.6), present
+only while at least one server is connected or has a failure to show;
+selecting a server opens a read-only overlay (§4.2 pattern) listing its
+discovered tools. An `mcp__<server>__<tool>` call's tool-activity line and
+permission prompt both parse the server name back out of the tool's own
+namespaced identifier (§5.6) — no extra payload field to thread through.
+- **Session export (Design §8.11):** `/export <path>` calls the same
+`render_session_html` (§8.6) the `emberly export` CLI command uses; shows
+the existing animation-ticker spinner (Design §6.3/§6.4, above) with an
+"exporting" verb phrase only while the write is visibly in flight, then the
+Design §8.11 finished line and sensitive-content disclosure. No new
+overlay — this is a command, not a picker.
 - **Mouse (Design §3.4):** `crossterm` `EnableMouseCapture` gated on
 `ui.mouse` and rich mode — a single control point (like the §6.4 animation
 ticker) so capture is off whenever `ui.mouse = false`, degraded mode, or
@@ -1279,6 +1461,18 @@ against `futures`, already a direct `emberly-core` dependency (used by
 subagent's tool calls run under the same confinement as the primary agent's,
 proxied through the same root-owned rule engine (§8.4), never a second
 sandbox configuration.
+
+The 0.5.1 feature set adds **no new dependencies**: MCP client support
+(FR-11, §5.6) is a first-party newline-delimited JSON-RPC client over
+`tokio::process`/`tokio::io` and `serde_json`, all already locked — the
+same "thin first-party client, no vendor SDK" rule P-4 states for providers,
+extended here; user-attached images (FR-10, §4.1/§9) reuse the existing
+`base64`/`imagesize` (§12, 0.4) encode/decode path with no new crate; and
+session export (FR-12, §8.6) is first-party string building over already-
+`serde`-derived types, deliberately avoiding a templating-engine dependency.
+`emberly-sandbox` is untouched — an MCP tool call runs under the exact same
+rule engine and sandbox confinement as any other tool call (§5.6/§6), never
+a second permission mechanism.
 
 Policy (Requirements §10): additions require `cargo vet` acceptance;
 `cargo deny` (licenses, duplicates, advisories) + `cargo geiger` report
@@ -1465,8 +1659,73 @@ bounded, independent, fully-audited work to subagents — in parallel where
 it fans out, addressable across turns where it doesn't — without a second
 implementation of the engine loop, a second safety model, or a single new
 dependency.*
+M13 — 0.5.1 feature set: MCP client support (FR-11) — a first-party
+JSON-RPC-over-stdio client discovering and registering external tools
+through the existing transport-agnostic `Tool` trait (T-7), namespaced,
+trust-gated per server (C-8), and permission-gated identically to any
+built-in tool; user-attached image input (FR-10) — an attach surface over
+the existing multimodal content path (P-11/T-12), rendered as message
+content rather than tool activity; and session export (FR-12) — a
+read-only, self-contained HTML rendering of a complete session, including
+its subagents, over the existing transcript and derived-view state. *Proves
+the 0.5.1 scope: three usability gaps close without a privileged path
+around the safety model, a second persistence mechanism, or a single new
+dependency (§12).*
 
 ## 16. Open Items
+
+**v0.14 (2026-08-16, 0.5.1 feature set).** Three capabilities graduated
+together from Requirements §2.2/new scope land as `emberly-core`/
+`emberly-tools`/`emberly-tui` composition with **no new dependencies**
+(§12). MCP client support (FR-11) is a first-party newline-delimited
+JSON-RPC-over-stdio client (`McpClient`, §5.6) discovering external tools
+and registering them into the existing `ToolRegistry` through T-7's
+already-transport-agnostic `Tool` trait, namespaced `mcp__<server>__<tool>`,
+gated by the same workspace-trust check project skills already use (§8.2)
+and the same permission gate every tool already flows through — no proxy
+gate was needed here, unlike a subagent's (§8.4), because these calls are
+made by the engine that already owns the rule engine. User-attached image
+input (FR-10) needed no new `ContentBlock` variant: a user attachment and a
+model-read image are the identical `ContentBlock::Image` (P-11), told apart
+structurally by which transcript event carries it (`user_message` vs.
+`tool_result`, §4.1) rather than a flag. Session export (FR-12) is a
+read-only renderer (`render_session_html`, §8.6) over already-existing
+state — the derived view (§3.2a), the raw transcript (§3.2), and subagent
+transcripts (§8.4) — producing self-contained HTML with no templating
+dependency and no new persistence mechanism. New IDs realized: FR-10 (§4.1,
+§9), FR-11 + C-8 (§5.6, §8.5), FR-12 (§8.6). New `UiEvent` variants
+`McpServerConnected`/`McpServerFailed`/`SessionExported` (§3.1) are additive;
+no new `TranscriptEvent` variant and no `SCHEMA_VERSION` bump — an MCP tool
+call is an ordinary `tool_call`/`tool_result` pair, an attached image is an
+ordinary `user_message` content block, and export reads without writing.
+Minor, additive bump; Requirements bumped to v0.12 and Design to v0.12 in
+lockstep (pins refreshed) — all three still `draft`, pending owner review
+(§0 of the 0.5.1 Implementation Plan gates Phase 1 on their approval).
+
+Open items introduced by the 0.5.1 scope:
+
+- **MCP transport scope (FR-11, §5.6, Requirements §13 open question).**
+Stdio-launched local servers only, this version; a remote transport
+(SSE/HTTP) is a second `McpTransport` impl behind the same trait when a
+real need appears, not a redesign.
+- **MCP per-server/per-tool permission defaults (FR-11, §5.6, Requirements
+§13 open question).** Every MCP-sourced tool call defaults to the ordinary
+per-tool `ask` posture (§6.1) this version; whether a server-level
+allow-listing convenience (rather than per-tool-name rules) is worth adding
+is a tune-with-use question once real servers are in daily use.
+- **Image attach caps (FR-10, §8, Requirements §13 open question).**
+`image.max_attachments = 4` is a placeholder; tune with real use once a
+file-picker and drag-drop are exercised against real terminals.
+- **True clipboard-image-byte paste (FR-10, Requirements §2.2 new
+deferral).** No cross-terminal API delivers clipboard image bytes (only
+pasted text); revisit only if a specific terminal's extended protocol
+becomes worth special-casing.
+- **Session export format scope (FR-12, §8.6, Requirements §13 open
+question).** Self-contained HTML is the only format this version; whether
+a second format (e.g. Markdown) is worth the added renderer is deferred
+until real export use appears. No size/streaming handling exists yet for a
+very large session's HTML — confirmed acceptable or revisited once a
+real oversized session is exported.
 
 **v0.13 (2026-08-15, 0.5 feature set).** The multi-agent subsystem, absorbed
 as FR-9/T-18–T-21, lands as `emberly-core`/`emberly-tools` composition with

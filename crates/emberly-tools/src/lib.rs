@@ -15,6 +15,8 @@ pub mod ask_user;
 pub mod builtin;
 pub mod ctx;
 pub mod diff;
+pub mod image;
+pub mod mcp;
 pub mod memory;
 pub mod path;
 pub mod permission;
@@ -38,6 +40,10 @@ pub use builtin::{
     WriteFileTool, DEFAULT_ENV_ALLOWLIST, DEFAULT_TIMEOUT_SECS,
 };
 pub use ctx::{ToolCtx, TruncateConfig};
+pub use image::{encode_image_bytes, EncodedImage};
+pub use mcp::{
+    build_mcp_tools, namespaced_tool_name, McpError, McpTool, McpToolSpec, McpTransport,
+};
 pub use memory::{
     slug, MemoryError, MemoryGate, MemoryOp, MemoryOutcome, MemoryRequest, MemoryScope,
 };

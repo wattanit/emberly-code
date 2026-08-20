@@ -333,6 +333,7 @@ mod tests {
             rec(TranscriptEvent::UserMessage {
                 text: "do it".into(),
                 original_task: true,
+                images: Vec::new(),
             }),
             rec(TranscriptEvent::AssistantMessage {
                 text: "on it".into(),
@@ -371,6 +372,7 @@ mod tests {
             rec(TranscriptEvent::UserMessage {
                 text: "task".into(),
                 original_task: true,
+                images: Vec::new(),
             }),
             rec(TranscriptEvent::AssistantMessage {
                 text: "a".into(),
@@ -394,6 +396,7 @@ mod tests {
             rec(TranscriptEvent::UserMessage {
                 text: "continue".into(),
                 original_task: false,
+                images: Vec::new(),
             }),
         ];
         let messages = rebuild_conversation(&records);
@@ -493,6 +496,7 @@ mod tests {
         let mid = vec![rec(TranscriptEvent::UserMessage {
             text: "x".into(),
             original_task: true,
+            images: Vec::new(),
         })];
         assert!(interrupted(&mid));
 

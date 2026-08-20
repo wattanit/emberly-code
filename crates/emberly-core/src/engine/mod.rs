@@ -19,11 +19,11 @@ use emberly_providers::{
 };
 use emberly_sandbox::{Decision, Mode, Query, Rule, RuleEngine};
 use emberly_tools::{
-    reduce_output, truncate_output, AskUserGate, AskUserOutcome, PermissionGate, PermissionOutcome,
-    PermissionRequest, RecallOutcome, Reduction, Sandbox, SubagentEndOutcome, SubagentError,
-    SubagentListEntry, SubagentMessageOutcome, SubagentMessageRequest, SubagentSpawnBatch,
-    SubagentSpawnOutcome, SubagentSpawnResult, SubagentSpawnSpec, SubagentStatus, ToolCtx,
-    ToolRegistry, TruncateConfig,
+    encode_image_bytes, reduce_output, truncate_output, AskUserGate, AskUserOutcome,
+    PermissionGate, PermissionOutcome, PermissionRequest, RecallOutcome, Reduction, Sandbox,
+    SubagentEndOutcome, SubagentError, SubagentListEntry, SubagentMessageOutcome,
+    SubagentMessageRequest, SubagentSpawnBatch, SubagentSpawnOutcome, SubagentSpawnResult,
+    SubagentSpawnSpec, SubagentStatus, ToolCtx, ToolRegistry, TruncateConfig,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,7 @@ use tokio::sync::mpsc;
 
 use crate::command::Command;
 use crate::event::UiEvent;
+use crate::export::{collect_subagent_transcripts, render_session_html};
 use crate::factory::{ConfigReloader, ProviderFactory};
 use crate::gate::{
     AskUserAsk, Gate, MemoryAsk, PermissionAsk, RecallAsk, SkillAsk, SubagentAsk,
@@ -46,7 +47,8 @@ use crate::transcript::{
     TranscriptSink,
 };
 use crate::types::{
-    CheckResult, GateResolution, LoopResolution, PermissionRendering, SandboxStatus, TokenUsage,
+    AttachedImage, AttachedImageMeta, CheckResult, GateResolution, LoopResolution,
+    McpConnectionOutcome, PermissionRendering, SandboxStatus, TokenUsage,
 };
 use crate::view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
 
@@ -336,9 +338,19 @@ pub struct EngineConfig {
     /// Maximum image file size in bytes for the `read_image` tool (Tech Spec
     /// §5.2, default 5 MiB).
     pub image_max_bytes: usize,
+    /// Maximum images attachable to one prompt via `Command::AttachImage`
+    /// (FR-10, Tech Spec §8, default 4).
+    pub image_max_attachments: usize,
     /// Maximum document file size in bytes for the `read_document` tool (Tech
     /// Spec §5.2, default 32 MiB).
     pub document_max_bytes: usize,
+    /// The outcome of connecting to each configured MCP server (FR-11, Tech
+    /// Spec §5.6/§8.5) — connecting already happened (composition-root
+    /// logic, mirroring `web_search`, before this config is built); the
+    /// engine reports it once at session start via
+    /// `UiEvent::McpServerConnected`/`McpServerFailed` and a
+    /// `TranscriptEvent::McpConnection` (extends HC-7).
+    pub mcp_connections: Vec<McpConnectionOutcome>,
     /// Memory config (FR-6, Tech Spec §8.1).
     pub memory: MemoryConfig,
     /// User-global memory directory (`~/.config/emberly/memory/`). Always `Some`
@@ -1001,9 +1013,22 @@ pub struct Engine {
     /// Maximum image file size in bytes (Tech Spec §5.2). Threaded to the
     /// `read_image` tool via `ToolCtx`.
     image_max_bytes: usize,
+    /// Maximum images attachable to one prompt via `Command::AttachImage`
+    /// (FR-10, Tech Spec §8).
+    image_max_attachments: usize,
+    /// Images staged by `Command::AttachImage` for the prompt currently being
+    /// composed (FR-10, Design §4.14), drained into the next
+    /// `Command::UserInput`'s content. Engine-owned staging state so the
+    /// `UserInput` command's shape never changed for this feature.
+    pending_attachments: Vec<AttachedImage>,
     /// Maximum document file size in bytes (Tech Spec §5.2). Threaded to the
     /// `read_document` tool via `ToolCtx`.
     document_max_bytes: usize,
+    /// MCP server connection outcomes awaiting their one-time startup report
+    /// (FR-11, Tech Spec §5.6/§8.5) — drained by `run()`'s first tick, never
+    /// touched again for the life of the session (connecting again only
+    /// happens on `/reload`, handled inline where that command is processed).
+    mcp_connections: Vec<McpConnectionOutcome>,
     /// The multi-agent subsystem's own state (FR-9, Tech Spec §8.4): every
     /// currently alive subagent, keyed by the id the model addresses it by.
     agents: AgentState,
@@ -1017,6 +1042,7 @@ pub struct Engine {
 mod asks;
 mod context;
 mod guardrail;
+mod mcp;
 mod memory;
 mod permissions;
 mod runtime_config;
@@ -1220,7 +1246,10 @@ impl Engine {
             config_reloader: config.config_reloader,
             task_list: Vec::new(),
             image_max_bytes: config.image_max_bytes,
+            image_max_attachments: config.image_max_attachments,
+            pending_attachments: Vec::new(),
             document_max_bytes: config.document_max_bytes,
+            mcp_connections: config.mcp_connections,
             agents: AgentState {
                 config: config.agents,
                 instances: std::collections::HashMap::new(),
@@ -1341,6 +1370,11 @@ impl Engine {
                 })
                 .await;
             }
+            // Report MCP server connection outcomes that already happened
+            // before this config was built (FR-11, Tech Spec §5.6/§8.5) —
+            // the audit-visible half of a composition-root decision.
+            self.report_mcp_connections().await;
+
             // Surface the initial reasoning-effort state so the sidebar and picker
             // start correct (P-9).
             self.emit_effort().await;
@@ -1386,8 +1420,12 @@ impl Engine {
                             self.emit(UiEvent::TurnEnded).await;
                             continue;
                         }
-                        self.record_user_message(&text);
-                        self.push_conversation_message(Message::user_text(text));
+                        let attachments = std::mem::take(&mut self.pending_attachments);
+                        let images_meta: Vec<AttachedImageMeta> =
+                            attachments.iter().map(AttachedImageMeta::from).collect();
+                        self.record_user_message(&text, images_meta);
+                        let user_message = self.build_user_message(text, attachments);
+                        self.push_conversation_message(user_message);
                         self.emit_context_usage().await;
                         self.run_turn(&mut TurnChannels {
                             commands: &mut commands_rx,
@@ -1465,6 +1503,8 @@ impl Engine {
                     Command::MemoryView { scope, name } => self.emit_memory_body(scope, name).await,
                     Command::InspectSkill { name } => self.inspect_skill(name).await,
                     Command::InspectAgent { id } => self.inspect_agent(id).await,
+                    Command::AttachImage { path } => self.attach_image(path).await,
+                    Command::ExportSession { path } => self.export_session(path).await,
                 }
                 // The idle boundary is where the derived cache is reconciled with
                 // the log (FR-5, Tech Spec §3.2a): one flush covers a completed

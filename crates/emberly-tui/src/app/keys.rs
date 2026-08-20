@@ -122,6 +122,20 @@ impl App {
                         // Echo the prompt into the timeline so the main pane is
                         // a single top-to-bottom transcript of both sides.
                         self.timeline.items.push(ConvItem::User(text.clone()));
+                        // Any images staged via `/attach` ride along on this
+                        // send (the engine drains its own copy of
+                        // `Engine::pending_attachments` on `UserInput`); the
+                        // chip lands in the timeline now that the message is
+                        // actually sent (Design §4.14), and the compose-area
+                        // staging list is cleared to match.
+                        for image in self.pending_attachments.drain(..) {
+                            self.timeline.items.push(ConvItem::Attachment {
+                                name: image.name,
+                                width: image.width,
+                                height: image.height,
+                                format_label: image.format_label,
+                            });
+                        }
                         // Enter the "working" state (Design §6.3); the spinner
                         // runs from frame 0 until TurnEnded.
                         self.anim.busy = true;
@@ -266,6 +280,11 @@ impl App {
                 self.set_agent_selection(row);
                 self.on_agents_inspector_key(KeyEvent::from(KeyCode::Enter))
             }
+            ClickTarget::McpServerRow(row) => {
+                // Focus + Enter on the MCP inspector (read-only tool-list view).
+                self.set_mcp_selection(row);
+                self.on_mcp_inspector_key(KeyEvent::from(KeyCode::Enter))
+            }
             ClickTarget::ReasoningToggle => {
                 // Exactly the Ctrl+R action — toggle the most recent trail.
                 self.toggle_reasoning();
@@ -287,6 +306,10 @@ impl App {
             ClickTarget::OpenAgentsInspector => {
                 // Exactly the `/agents` action.
                 self.run_command(AppCommand::Agents)
+            }
+            ClickTarget::OpenMcpInspector => {
+                // Exactly the `/mcp` action.
+                self.run_command(AppCommand::Mcp)
             }
             ClickTarget::PermissionChoice(choice) => {
                 // Reuse `on_permission_key` EXACTLY (Design §3.4/§5): a click on
@@ -351,6 +374,12 @@ impl App {
             Some(OverlayContent::AgentList { .. })
         ) {
             return self.on_agents_inspector_key(key);
+        }
+        if matches!(
+            self.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::McpServerList { .. })
+        ) {
+            return self.on_mcp_inspector_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {

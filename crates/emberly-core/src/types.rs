@@ -137,3 +137,64 @@ pub use emberly_providers::TokenUsage;
 /// `emberly-providers` (it rides on `CompletionRequest`/`ModelInfo`) and
 /// re-exported so commands, events, and the transcript share one type.
 pub use emberly_providers::Effort;
+
+/// An image attached to a prompt by the user (FR-10, Tech Spec §4.1/§9),
+/// already validated and base64-encoded at attach time (`Command::AttachImage`,
+/// via the shared `emberly_tools::image::encode_image_bytes` path). Rides on
+/// `Command::UserInput`; the engine turns it into a `ContentBlock::Image` on
+/// the outgoing message, told apart from a model-read image structurally (by
+/// which message carries it), never by a flag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachedImage {
+    /// Display name for the chip and transcript record (Design §4.14) — the
+    /// original file's name, not a full path.
+    pub name: String,
+    pub media_type: String,
+    pub data: String,
+    pub width: usize,
+    pub height: usize,
+    pub format_label: String,
+}
+
+/// The durable, byte-free record of an attached image (Tech Spec §4.1): the
+/// same choice T-12's own `ToolResult` already makes for a model-read image —
+/// metadata only, never the base64 bytes, so a resumed session's attachment
+/// chip is a durable fact even though the pixels are not replayed to the
+/// model on resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachedImageMeta {
+    pub name: String,
+    pub media_type: String,
+    pub width: usize,
+    pub height: usize,
+    pub format_label: String,
+}
+
+impl From<&AttachedImage> for AttachedImageMeta {
+    fn from(img: &AttachedImage) -> Self {
+        Self {
+            name: img.name.clone(),
+            media_type: img.media_type.clone(),
+            width: img.width,
+            height: img.height,
+            format_label: img.format_label.clone(),
+        }
+    }
+}
+
+/// The result of one MCP server's connection/discovery attempt at session
+/// start or `/reload` (FR-11, Tech Spec §5.6/§8.5). Connecting itself is
+/// composition-root logic (the `emberly` binary, mirroring how `web_search`
+/// is conditionally built, Tech Spec §5.5) — the engine only reports what
+/// already happened, as `UiEvent::McpServerConnected`/`McpServerFailed` plus
+/// a `TranscriptEvent::McpConnection` audit record (extends HC-7, no
+/// exemption for connection lifecycle).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum McpConnectionOutcome {
+    /// The server connected and advertised these (already-namespaced) tools.
+    Connected { server: String, tools: Vec<String> },
+    /// The server could not be connected to, or its handshake/discovery
+    /// failed. Never fatal to the session (Design §8.10 — the rest of the
+    /// harness stays usable).
+    Failed { server: String, reason: String },
+}

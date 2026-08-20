@@ -48,7 +48,7 @@ impl Engine {
                             LoopResolution::Stop => return,
                             LoopResolution::Steer(text) => {
                                 self.reset_loop_window();
-                                self.record_user_message(&text);
+                                self.record_user_message(&text, Vec::new());
                                 self.push_conversation_message(Message::user_text(text));
                                 self.emit_context_usage().await;
                             }

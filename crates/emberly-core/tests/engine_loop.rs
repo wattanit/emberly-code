@@ -104,7 +104,9 @@ fn make_config(
         provider_factory: None,
         config_reloader: None,
         image_max_bytes: 5 * 1024 * 1024,
+        image_max_attachments: 4,
         document_max_bytes: 32 * 1024 * 1024,
+        mcp_connections: Vec::new(),
         memory: emberly_core::MemoryConfig::default(),
         user_memory_dir: None,
         project_memory_dir: None,
@@ -1255,7 +1257,9 @@ impl emberly_core::ConfigReloader for FakeReloader {
             },
             context: ContextConfig::default(),
             image_max_bytes: 5 * 1024 * 1024,
+            image_max_attachments: 4,
             document_max_bytes: 32 * 1024 * 1024,
+            mcp_connections: Vec::new(),
             memory: emberly_core::MemoryConfig::default(),
             skills: emberly_core::SkillsConfig::default(),
             agents: emberly_core::AgentsConfig::default(),
@@ -1333,7 +1337,9 @@ impl emberly_core::ConfigReloader for ContentOnlyReloader {
             truncate: TruncateConfig::default(),
             context: ContextConfig::default(),
             image_max_bytes: 5 * 1024 * 1024,
+            image_max_attachments: 4,
             document_max_bytes: 32 * 1024 * 1024,
+            mcp_connections: Vec::new(),
             memory: emberly_core::MemoryConfig::default(),
             skills: emberly_core::SkillsConfig::default(),
             agents: emberly_core::AgentsConfig::default(),
@@ -1403,7 +1409,9 @@ impl emberly_core::ConfigReloader for SelectionOnlyReloader {
             truncate: TruncateConfig::default(),
             context: ContextConfig::default(),
             image_max_bytes: 5 * 1024 * 1024,
+            image_max_attachments: 4,
             document_max_bytes: 32 * 1024 * 1024,
+            mcp_connections: Vec::new(),
             memory: emberly_core::MemoryConfig::default(),
             skills: emberly_core::SkillsConfig::default(),
             agents: emberly_core::AgentsConfig::default(),
@@ -6898,5 +6906,362 @@ async fn a_subagent_id_from_before_a_restart_is_unknown_to_the_new_process() {
     assert!(
         debug_text.contains("no such agent"),
         "a pre-restart id is unknown to the new process: {debug_text}"
+    );
+}
+
+// ---- user-attached images (FR-10, Design §4.14) ----------------------------
+
+#[tokio::test]
+async fn attach_then_send_appends_image_block_matching_read_image() {
+    // FR-10: `Command::AttachImage` stages a validated image; the next
+    // `Command::UserInput` folds it into the outgoing message as the exact
+    // same `ContentBlock::Image` T-12's `read_image` tool already produces.
+    let root = temp_project();
+    let img_path = root.join("mockup.png");
+    let _ = std::fs::write(&img_path, tiny_png());
+    let fake = Arc::new(
+        FakeProvider::new(vec![ScriptedResponse::text("I see it.")])
+            .with_model_info(vision_model_info()),
+    );
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = make_config(provider, root, EngineConfig::no_transcript());
+    let mut h = spawn(config);
+
+    h.send(Command::AttachImage {
+        path: img_path.to_string_lossy().into_owned(),
+    })
+    .await;
+    let attach_events = h.collect(None).await;
+    assert!(
+        attach_events.iter().any(|e| matches!(e,
+            UiEvent::ImageAttached { name, width: 1, height: 1, pending_count: 1, .. }
+            if name == "mockup.png")),
+        "expected ImageAttached with the staged image's metadata: {attach_events:?}"
+    );
+
+    h.send(Command::UserInput {
+        text: "what is this?".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert_eq!(deltas(&events), "I see it.");
+
+    let req = fake.last_request().expect("at least one request was sent");
+    let has_image = req.messages.iter().any(|m| {
+        m.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. }))
+    });
+    assert!(has_image, "the attached image reached the provider request");
+}
+
+#[tokio::test]
+async fn attach_on_non_vision_model_sends_a_note_never_a_silent_drop() {
+    // FR-10 honesty clause: on a model with no vision, the image is not
+    // sent, but the user is never left guessing — a plain text note takes
+    // its place, mirroring read_image's own HC-6 unsupported-capability
+    // result.
+    let root = temp_project();
+    let img_path = root.join("mockup.png");
+    let _ = std::fs::write(&img_path, tiny_png());
+    // Default FakeProvider model info has vision: false.
+    let fake = Arc::new(FakeProvider::new(vec![ScriptedResponse::text("noted.")]));
+    let provider: Arc<dyn Provider> = fake.clone();
+    let config = make_config(provider, root, EngineConfig::no_transcript());
+    let mut h = spawn(config);
+
+    h.send(Command::AttachImage {
+        path: img_path.to_string_lossy().into_owned(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    h.send(Command::UserInput {
+        text: "what is this?".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let req = fake.last_request().expect("at least one request was sent");
+    let has_image = req.messages.iter().any(|m| {
+        m.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. }))
+    });
+    assert!(!has_image, "no Image block sent to a non-vision model");
+    let has_note = req.messages.iter().any(|m| {
+        m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("mockup.png") && text.contains("no vision support")))
+    });
+    assert!(
+        has_note,
+        "a plain note replaces the image, never a silent drop"
+    );
+}
+
+#[tokio::test]
+async fn attach_rejects_oversize_and_unrecognized_format() {
+    let root = temp_project();
+    let png_path = root.join("big.png");
+    let _ = std::fs::write(&png_path, tiny_png());
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    config.image_max_bytes = 1; // smaller than the tiny fixture PNG
+    let mut h = spawn(config);
+
+    h.send(Command::AttachImage {
+        path: png_path.to_string_lossy().into_owned(),
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert!(
+        events.iter().any(
+            |e| matches!(e, UiEvent::AttachFailed { reason, .. } if reason.contains("exceeds"))
+        ),
+        "oversize attach reported as a plain failure: {events:?}"
+    );
+
+    let root = temp_project();
+    let bogus_path = root.join("data.bin");
+    let _ = std::fs::write(&bogus_path, b"not an image");
+    let config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    let mut h = spawn(config);
+
+    h.send(Command::AttachImage {
+        path: bogus_path.to_string_lossy().into_owned(),
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert!(
+        events.iter().any(
+            |e| matches!(e, UiEvent::AttachFailed { reason, .. } if reason.contains("not a recognized"))
+        ),
+        "unrecognized format reported as a plain failure: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn attach_enforces_max_attachments_cap() {
+    let root = temp_project();
+    let img_path = root.join("mockup.png");
+    let _ = std::fs::write(&img_path, tiny_png());
+
+    let mut config = make_config(
+        Arc::new(FakeProvider::new(Vec::new())),
+        root,
+        EngineConfig::no_transcript(),
+    );
+    config.image_max_attachments = 1;
+    let mut h = spawn(config);
+
+    h.send(Command::AttachImage {
+        path: img_path.to_string_lossy().into_owned(),
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, UiEvent::ImageAttached { .. })));
+
+    h.send(Command::AttachImage {
+        path: img_path.to_string_lossy().into_owned(),
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert!(
+        events.iter().any(
+            |e| matches!(e, UiEvent::AttachFailed { reason, .. } if reason.contains("too many attachments"))
+        ),
+        "over the cap is a plain failure, never a silent drop: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn attach_transcript_records_metadata_not_bytes() {
+    // HC-7/FR-10: the transcript's user_message event carries the
+    // attachment's metadata (name, dimensions, format) but never the base64
+    // bytes — the same choice T-12's ToolResult already makes.
+    let root = temp_project();
+    let img_path = root.join("mockup.png");
+    let _ = std::fs::write(&img_path, tiny_png());
+    let sink = CaptureSink::new();
+    let fake = Arc::new(
+        FakeProvider::new(vec![ScriptedResponse::text("ok")]).with_model_info(vision_model_info()),
+    );
+    let provider: Arc<dyn Provider> = fake;
+    let config = make_config(provider, root, Box::new(sink.clone()));
+    let mut h = spawn(config);
+
+    h.send(Command::AttachImage {
+        path: img_path.to_string_lossy().into_owned(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+    h.send(Command::UserInput {
+        text: "look at this".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let records = sink.records();
+    let user_message = records
+        .iter()
+        .find(|r| matches!(&r.event, TranscriptEvent::UserMessage { .. }));
+    let images = match user_message.map(|r| &r.event) {
+        Some(TranscriptEvent::UserMessage { images, .. }) => images,
+        _ => panic!("expected a recorded user_message"),
+    };
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].name, "mockup.png");
+    assert_eq!(images[0].width, 1);
+    assert_eq!(images[0].height, 1);
+    assert_eq!(images[0].format_label, "PNG");
+
+    let all_text: String = records.iter().map(|r| format!("{:?}", r.event)).collect();
+    assert!(
+        !all_text.contains("iVBOR"),
+        "image bytes must not appear in the transcript (HC-7)"
+    );
+}
+
+// ---- session export (FR-12, Design §8.11) ----------------------------------
+
+#[tokio::test]
+async fn export_writes_html_and_never_mutates_the_transcript() {
+    let root = temp_project();
+    let sessions_dir = temp_project(); // a distinct dir, not the project root
+    let session_id = SessionId::new();
+    let mut h = start_in_sessions_dir(
+        vec![ScriptedResponse::text("hi there")],
+        root,
+        sessions_dir.clone(),
+        session_id,
+    );
+    h.send(Command::UserInput {
+        text: "hello export".into(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let transcript_path = sessions_dir.join(format!("{session_id}.jsonl"));
+    let before = std::fs::read(&transcript_path).expect("transcript exists");
+
+    let output_path = sessions_dir.join("export.html");
+    h.send(Command::ExportSession {
+        path: output_path.to_string_lossy().into_owned(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(
+            |e| matches!(e, UiEvent::SessionExported { path } if path == &output_path.to_string_lossy())
+        ),
+        "expected SessionExported: {events:?}"
+    );
+
+    let after = std::fs::read(&transcript_path).expect("transcript still exists");
+    assert_eq!(
+        before, after,
+        "export must never mutate the source transcript (HC-7)"
+    );
+
+    let html = std::fs::read_to_string(&output_path).expect("export file was written");
+    assert!(html.contains("hello export"));
+    assert!(html.contains("hi there"));
+    assert!(html.starts_with("<!doctype html>"));
+}
+
+#[tokio::test]
+async fn export_preserves_truncation_markers_never_claiming_false_completeness() {
+    let root = temp_project();
+    let sessions_dir = temp_project();
+    let session_id = SessionId::new();
+    let mut h = start_in_sessions_dir(
+        vec![
+            ScriptedResponse::tool_call("c1", "bash", r#"{"command":"echo hi"}"#),
+            ScriptedResponse::text("done"),
+        ],
+        root,
+        sessions_dir.clone(),
+        session_id,
+    );
+    h.send(Command::UserInput {
+        text: "run it".into(),
+    })
+    .await;
+    let _ = h.collect(Some(PermissionDecision::AllowOnce)).await;
+
+    let output_path = sessions_dir.join("export.html");
+    h.send(Command::ExportSession {
+        path: output_path.to_string_lossy().into_owned(),
+    })
+    .await;
+    let _ = h.collect(None).await;
+
+    let html = std::fs::read_to_string(&output_path).expect("export file was written");
+    // Whatever the tool actually recorded (truncated or not) is what the
+    // export shows — it never claims completeness the transcript didn't.
+    let records =
+        emberly_core::resume::read_records(&sessions_dir.join(format!("{session_id}.jsonl")))
+            .expect("read back the transcript")
+            .records;
+    let recorded_truncated = records.iter().any(|r| {
+        matches!(
+            &r.event,
+            TranscriptEvent::ToolResult {
+                truncated: true,
+                ..
+            }
+        )
+    });
+    if recorded_truncated {
+        assert!(
+            html.contains("truncated at ingestion"),
+            "a truncated tool result must say so in the export, not read as complete"
+        );
+    }
+}
+
+#[tokio::test]
+async fn export_to_an_unwritable_path_is_a_plain_notice_not_a_crash() {
+    let root = temp_project();
+    let sessions_dir = temp_project();
+    let session_id = SessionId::new();
+    let mut h = start_in_sessions_dir(
+        vec![ScriptedResponse::text("hi")],
+        root,
+        sessions_dir.clone(),
+        session_id,
+    );
+    h.send(Command::UserInput { text: "hi".into() }).await;
+    let _ = h.collect(None).await;
+
+    // A parent directory that does not exist — an ordinary I/O failure.
+    let bad_path = sessions_dir.join("no/such/dir/export.html");
+    h.send(Command::ExportSession {
+        path: bad_path.to_string_lossy().into_owned(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Notice { message } if message.contains("export failed"))),
+        "expected a plain export-failed notice: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, UiEvent::SessionExported { .. })),
+        "no SessionExported on a failed write"
     );
 }

@@ -1,11 +1,11 @@
 # Emberly Code — Design Guideline
 
-**Version:** 0.11 
+**Version:** 0.12 
 **Status:** approved
-**Date:** 2026-08-15
+**Date:** 2026-08-16
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.11 (upstream), Technical
-Specification v0.13 (downstream — this document constrains it)
+**Companion documents:** Requirements Document v0.12 (upstream), Technical
+Specification v0.14 (downstream — this document constrains it)
 
 This document defines how Emberly Code looks, feels, and speaks. It is the
 second of three project documents. Where a decision here has technical
@@ -469,6 +469,67 @@ via `message_agent`/`list_agents`.
 memory/skill/scratch lines already degrade; the inspector overlay falls
 back the same way any overlay does in plain mode.
 
+### 4.14 Attaching an image to a prompt
+
+A user-attached image (Requirements FR-10) is the opposite direction of
+§4.8's read-image tool: there, the *model* looks at a project file; here, the
+*user* shows the model something. The two are never rendered the same way —
+an attachment is content in the **user's own message**, not a tool call, so
+it never wears tool-activity styling.
+
+- **A small attachment chip on the sent message**, not a tool line — reading
+like `📎 mockup.png · 800×600 · PNG attached` under the user's turn
+(illustrative; exact wording is free). It says the image went into this
+message, mirroring §4.8's honesty about where content actually goes.
+- **Two gestures, one honest limitation.** An explicit `/attach <path>`
+command (or a file-picker reusing the §4.6 overlay machinery) always works,
+any terminal. Drag-and-drop works where the terminal delivers a dropped
+file's path as pasted text — Emberly recognizes a pasted string that
+resolves to an existing image file and offers to attach it rather than
+insert it as typed text. **True clipboard-image-byte paste (a screenshot
+copied without a backing file) is not supported this version** — terminal
+paste delivers text, not image bytes, with no cross-terminal API for the
+latter; this pairs with the existing sixel/kitty/iTerm deferral (§4.8, §10)
+as the same class of terminal-capability gap, not a harness oversight.
+- **Same unsupported-vision honesty as §4.8.** If the model active at send
+time has no vision (Requirements P-11), the attachment produces the same
+calm unsupported-capability note as a read-image call (§4.8, HC-6) — never
+a silent drop and never a harness error.
+- Degraded mode (§7): the chip renders as a plain ASCII line; the file-picker
+is not offered (same fallback pattern as guided setup, §4.6/§7) — `/attach
+<path>` remains the always-available path.
+
+### 4.15 MCP tools in the flow
+
+An MCP-sourced tool (Requirements FR-11) earns no special drama for coming
+from outside the harness — it renders as **quiet, ordinary tool activity**,
+the same register as memory, skills, scratch writes, and subagents
+(§4.9, §4.12, §4.13).
+
+- **The owning server is always on the line**, exactly as origin is always on
+a memory or skill line (§4.9) — e.g. `mcp · jira · get_issue` — because
+which server is acting is exactly the kind of thing a user reads trust from.
+May carry a §4.5 explanation when the model supplied one.
+- **A sidebar MCP section, inspectors not black boxes (extends §4.9).**
+Lists currently connected servers; selecting one opens a read-only overlay
+(§4.2 pattern) listing that server's discovered tools — "what can this
+server make the model do" is always inspectable before it is ever used,
+the same commitment memory/skills/subagents already make. Present only
+while at least one server is connected, like Tasks/Agents (§4.7/§4.13) —
+never an empty "MCP (0)" stub.
+- **Trust is visible, not just enforced (extends §4.9).** A project-declared
+server withheld by workspace trust (Requirements FR-1, FR-11) is simply
+**not shown and not connected** — the same quiet, correct absence already
+established for project memory and skills (§4.9, §8.4), and, per §8.10,
+gated by the very same trust prompt, never a second one.
+- **Untrusted content, like web search (extends §4.10).** A tool result
+returned by an MCP server renders labeled as external, untrusted content the
+model reads — quoted data, never harness or assistant voice — mirroring how
+a web-search hit is labeled (§4.10) rather than the harness's own words.
+- Degraded mode (§7): plain ASCII tool-activity lines and a plain-text
+server/tool list; the inspector overlay degrades the same way any overlay
+does in plain mode.
+
 ## 5. The Permission Prompt
 
 The most important screen in the product. It is where the safety model
@@ -548,6 +609,32 @@ once.
 timeout-to-approve, no click/Enter-through). It reuses the calm neutral
 treatment of a normal prompt; only the outside-root escalation earns the
 reserved band.
+
+### 5.3 The MCP tool-call prompt (an external server acting)
+
+An MCP-sourced tool call (Requirements FR-11) is permission-gated exactly
+like a built-in tool call, and its prompt is the ordinary permission prompt
+(§5) with one addition, mirroring how a subagent's request adds a provenance
+line (§4.13, §5) rather than becoming a new prompt type.
+
+- **What it adds:** one dimmed line naming which server the call belongs
+to — e.g. "via MCP server jira" — shown *before* approval, never after, so
+the user always knows which external process is asking. Because the tool
+itself can be arbitrary (an MCP server may do anything its own code does),
+the ordinary **full-content-always** rule (§5) applies without exception:
+complete arguments shown, never summarized.
+- **Ordinary band, not reserved (mirrors §5.2's reasoning for web search).**
+A routine MCP tool call keeps the plain permission treatment; only an
+action that itself touches outside the project root (Requirements HC-4)
+earns the reserved escalation band, exactly as any tool would — an
+external origin does not, by itself, make a call more dangerous than a
+built-in one doing the same thing.
+- **Choices and default** are the ordinary permission prompt's (§5): Deny
+default, Allow once, Allow for this session where the rule layer permits —
+rule-allowlistable per tool name like bash or web search (Requirements
+§6.6).
+- All §5 forbidden patterns apply unchanged (no timeout-to-approve, no
+auto-scroll, no batching).
 
 ## 6. Voice and Language
 
@@ -661,6 +748,15 @@ guarantees with the subagent's name in the same plain dimmed line, and the
 per-agent inspector overlay degrades the same way any overlay does in plain
 mode. No 0.5 feature relies on color, motion, or the pointer to carry
 meaning.
+- The 0.5.1 surfaces degrade the same way: an attached image renders as a
+plain ASCII attachment line under the user's own message (§4.14), with no
+file-picker offered (`/attach <path>` remains available); MCP tool-activity
+lines, the sidebar MCP section, and a connection-failure notice are all
+plain text with full capitalized permission-prompt guarantees where one
+appears (§4.15, §5.3, §8.10); and `emberly export`'s output and its
+sensitive-content line (§8.11) are plain text by construction, since the
+command's own output is never a rich-mode-only surface. No 0.5.1 feature
+relies on color, motion, or the pointer to carry meaning.
 - Degraded mode is a supported, tested configuration, not a best-effort
 fallback.
 
@@ -872,6 +968,45 @@ labeled (§5) — the user is never asked to context-switch into "now I'm
 approving for a delegate" versus "now I'm approving for the main agent";
 it is one continuous safety model with one added fact per prompt.
 
+### 8.10 Connecting to an MCP server
+
+A project-declared MCP server (Requirements FR-11, C-8) is reached through
+the same trust gate that already governs project memory and skills (§8.4),
+never a second prompt — the user is not asked twice to trust the same
+folder.
+
+- **Trust withheld is silent, not an error.** In an untrusted folder the
+server is simply not connected and not shown (§4.15) — the correct, quiet
+absence, exactly matching §4.9/§8.4's existing pattern.
+- **A successful connection is quiet.** One dim line at session start —
+e.g. `mcp · jira · connected · 4 tools` — no splashy banner, matching how
+memory and skill catalogs already load without ceremony (§4.9).
+- **A failed connection is a harness-world moment (§6.1)**, in the harness's
+own voice: what happened, why if known, and what to do — e.g. "Couldn't
+connect to MCP server 'jira': command not found — check
+`[mcp.servers.jira]`." Never a stack trace as the primary surface. A broken
+server does not stop the session from starting — the rest of the harness
+stays usable, the same "make the risk clear, stay usable" principle the
+sandbox-degradation policy already holds (Requirements §6.7).
+- Degraded mode (§7): the same lines, plain text.
+
+### 8.11 Exporting a session
+
+`emberly export` (Requirements FR-12) follows the same voice as `init` and
+`clean` (§8.1, §8.8): it prints exactly what it wrote and where — no walls
+of text, no installer-wizard ceremony.
+
+- **One calm, factual line about sensitive content**, shown once at export
+— e.g. "This file may contain file contents, command output, and anything
+else this session touched — review before sharing." Never alarm styling
+(§6.1's no-blame, no-alarm voice): export does not redact (Requirements
+FR-12), so the honest disclosure *is* the safeguard, not a dialog the user
+must click through. It is not a confirmation gate — export mutates nothing,
+so it carries none of the trust-gate/`clean`-command "are you sure" weight.
+- A large session shows the §6.3 spinner with a dull, truthful verb phrase
+("exporting") if the write takes visible time; the finished line names the
+output path, exactly like a clean exit's session summary (§8.3).
+
 ## 9. Design-Driven Requirements Feedback
 
 Decisions in this document that add to or refine the Requirements doc,
@@ -975,6 +1110,34 @@ absorbs the provenance field on the permission-rendering payload.
 - **The sidebar Agents section is present only while a subagent is alive**
 (§3.1, §8.9) — extends the established "no empty stub" rule (Tasks, Memory,
 Skills, the completion gate) to Requirements FR-9.
+- **An attached image is content on the user's own message, never tool
+activity** (§4.14) — refines Requirements FR-10: rendering lives on the
+sent-message payload, distinct from the §4.8 tool-result line, because the
+two are opposite directions of the same capability. The Tech Spec absorbs
+this as a structural distinction (which transcript event carries the
+image block), needing no new content-block flag.
+- **True clipboard-image-byte paste is declined, not silently unsupported**
+(§4.14) — a new explicit deferral for Requirements §2.2, alongside the
+existing sixel/kitty/iTerm terminal-image-protocol door: both wait on the
+same missing cross-terminal capability.
+- **MCP tools render with server provenance on the line and a sidebar
+inspector** (§4.15) — refines Requirements FR-11 the same way §4.9 already
+established for memory/skills: origin visible, nothing a black box. The
+Tech Spec absorbs a server-name field on the relevant tool events.
+- **MCP connection is trust-gated by the existing gate, never a second
+prompt** (§8.10) — refines Requirements FR-11/FR-1: a project-declared
+server reuses the one workspace-trust decision rather than asking again.
+- **MCP tool-call prompt uses the ordinary band, not reserved** (§5.3) —
+refines Requirements FR-11 the same way §5.2 refined T-14: an external
+origin does not, by itself, escalate a prompt's styling.
+- **A broken MCP server connection is harness-world and non-fatal** (§8.10)
+— refines Requirements FR-11: the halt/notice pattern of §6.1 applies, and
+the session still starts, consistent with the sandbox-degradation "stay
+usable" principle (Requirements §6.7).
+- **Session export warns once, calmly, and never blocks** (§8.11) — realizes
+Requirements FR-12's "Design Guideline concern, not a filtering guarantee"
+honesty clause as a specific, non-blocking disclosure line shown at export
+time.
 
 ## 10. Open Questions
 
@@ -1010,6 +1173,17 @@ are examples; tune against real multi-agent sessions.
 - Whether the Agents sidebar entry shows a subagent's own token/cost usage
 inline, or only on opening its inspector (§4.13, Requirements §13 — Design
 resolves this one). Tune with use once real sessions exist.
+- Whether the attach gesture needs an explicit confirm step ("attach
+mockup.png?") or attaches immediately on a recognized drag-drop path
+(§4.14). Tune with use once real terminals are tested.
+- Whether the sidebar MCP section shows per-tool status/last-call detail or
+only the connected-server list at a glance (§4.15). Tune with use.
+- Exact wording of the MCP connection-failure line, and whether a
+repeatedly-failing server across sessions should elevate to a more visible
+notice than the quiet §8.10 line. Tune with use.
+- Exact wording of the export sensitive-content line, and whether a very
+large session's export should show byte/turn progress rather than only
+the §6.3 spinner (§8.11). Tune with use.
 
 Resolved since v0.4: reasoning-trail default view — `collapsed` (§4.4,
 owner); tool-call explanation line — on by default, config-defeatable
@@ -1063,3 +1237,26 @@ safety band, matching how web-search (§5.2) and completion checks already
 avoid diluting that band. The sidebar Agents section follows the
 established no-empty-stub rule. Degrades to plain, tested, meaning-
 preserving output (§7).
+
+Resolved since v0.12 (0.5.1 feature set): the three 0.5.1 capabilities are
+given feel under the same calm-and-honest rules established for the 0.4 and
+0.5 sets. An attached image (§4.14) renders as a small chip on the user's
+own sent message, deliberately distinct from the §4.8 tool-activity
+reference line, because the two are opposite directions of the same
+capability — the user showing the model something, versus the model
+looking at something already there; true clipboard-image-byte paste joins
+the terminal-image-protocol door as a new explicit deferral (§2.2), since
+both wait on the same missing cross-terminal capability. MCP-sourced tools
+(§4.15) render as quiet tool activity with the owning server named on the
+line, mirroring §4.9's origin visibility, plus a sidebar inspector listing
+connected servers and their tools; a project-declared server is trust-gated
+by the existing workspace-trust prompt (§8.10), never a second one, and a
+connection failure is a harness-voice moment (§6.1) that never blocks the
+session from starting. The MCP tool-call permission prompt (§5.3) reuses
+the ordinary band, not the reserved safety styling, matching how the
+web-search prompt (§5.2) already avoids diluting that band. Session export
+(§8.11) follows the `init`/`clean` voice — exactly what was written and
+where — plus one calm, non-blocking line naming that the exported file may
+carry sensitive content already in the transcript, since redaction is
+explicitly not attempted (Requirements FR-12). All three degrade to plain,
+tested, meaning-preserving output (§7).
