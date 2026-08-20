@@ -62,6 +62,16 @@ pub const SETTLE_FRAMES: u8 = 5;
 pub enum ConvItem {
     /// A prompt the user submitted.
     User(String),
+    /// An image attached to the preceding `User` message (FR-10, Design
+    /// §4.14) — content on the user's own message, never tool activity, so
+    /// it is its own item rather than a `Tool` line. Metadata only, mirroring
+    /// `AttachedImageMeta` (no base64 bytes to render).
+    Attachment {
+        name: String,
+        width: usize,
+        height: usize,
+        format_label: String,
+    },
     /// Accumulated assistant text for one turn (deltas append to it).
     Assistant(String),
     /// The model's reasoning trail for one turn (P-10, Design §4.4), distinct
@@ -99,6 +109,18 @@ pub enum ConvItem {
     /// block; a completed list settles to an all-done block rather than
     /// vanishing.
     TaskList { items: Vec<TaskItem> },
+}
+
+/// An image staged (but not yet sent) for the prompt being composed (FR-10,
+/// Design §4.14) — the frontend's own compose-area record, built from
+/// `UiEvent::ImageAttached`. Distinct from `ConvItem::Attachment`, which is
+/// the same fact once it has actually landed in the sent timeline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingAttachment {
+    pub name: String,
+    pub width: usize,
+    pub height: usize,
+    pub format_label: String,
 }
 
 /// A dismissable, scrollable pane overlay (Design §4.2). Modal for navigation:
@@ -153,6 +175,41 @@ pub enum OverlayContent {
     /// in `App::skills`, so this needs no engine round-trip to open.
     SkillList {
         skills: Vec<SkillMeta>,
+        selected: usize,
+    },
+    /// The Agents inspector (`/agents`, FR-9, Design §3.1/§4.13): currently
+    /// alive subagents as a selectable list; Enter fetches the selected
+    /// subagent's own activity to view **read-only** (`Command::InspectAgent`).
+    /// Mirrors `SkillList` exactly — the list is already cached in
+    /// `App::agents`, so opening it needs no engine round-trip; only a
+    /// selected entry's activity is fetched on demand.
+    AgentList {
+        agents: Vec<AgentSummary>,
+        selected: usize,
+    },
+    /// A subagent's own activity, read-only (Design §4.13). Unlike the plain
+    /// `Text` overlay this names which subagent it shows, so the rich TUI's
+    /// periodic refresh (`tui::run`, [`App::watched_agent_id`]) can re-fetch
+    /// and update it **in place** while it stays open — the "live-updating...
+    /// as it happens" behaviour Design §4.13 asks for, built on the existing
+    /// one-shot `Command::InspectAgent`/`UiEvent::AgentActivity` round trip
+    /// rather than a new streaming channel.
+    AgentActivity {
+        id: String,
+        name: String,
+        text: String,
+    },
+    /// The MCP inspector (`/mcp`, FR-11, Design §4.15): currently connected
+    /// servers as a selectable list; Enter shows the selected server's
+    /// discovered tools **read-only** — "what could this server make the
+    /// model do" is always inspectable before it is ever used, the same
+    /// commitment memory/skills/subagents already make. Unlike
+    /// `SkillList`/`AgentList`, there is no further engine round-trip on
+    /// Enter either: a server's tool list is already fully known from
+    /// `UiEvent::McpServerConnected`, so the "detail" view is just that same
+    /// data rendered as plain text (`open_text_overlay`).
+    McpServerList {
+        servers: Vec<McpServerSummary>,
         selected: usize,
     },
 }
@@ -244,6 +301,30 @@ pub struct ModifiedFile {
     pub path: String,
     pub adds: u32,
     pub dels: u32,
+}
+
+/// One subagent this session has spawned (sidebar Agents section + inspector
+/// catalog, FR-9, Design §3.1/§4.13). Kept after it ends (`ended`) so its
+/// activity stays reviewable for the rest of the session (§4.13) — the
+/// sidebar section filters this catalog down to alive entries only, but the
+/// `/agents` inspector list shows the whole thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSummary {
+    pub id: String,
+    pub name: String,
+    pub ended: bool,
+}
+
+/// One connected MCP server (sidebar MCP section + inspector, FR-11, Design
+/// §4.15). Built entirely from `UiEvent::McpServerConnected` — the tool list
+/// is already known at connection time, so opening the inspector needs no
+/// engine round-trip (mirrors `SkillList`/`AgentList`'s own no-round-trip
+/// list step, only simpler: there is no further fetch for the detail view
+/// either, since a server's tool list *is* its detail view).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerSummary {
+    pub name: String,
+    pub tools: Vec<String>,
 }
 
 /// Session identity for the sidebar/header (Design §3.1).
@@ -576,6 +657,13 @@ pub struct App {
     /// The grapheme-aware input editor (multi-line, history, Thai-correct
     /// cursor motion). See [`crate::editor`].
     pub(crate) editor: LineEditor,
+    /// Images staged for the prompt currently being composed (FR-10, Design
+    /// §4.14) — the frontend's own mirror of the engine's
+    /// `Engine::pending_attachments`, kept only so the compose area can
+    /// confirm what is staged; the engine remains the sole authority on what
+    /// actually gets sent. Drained into `ConvItem::Attachment` items and
+    /// cleared when the message is sent.
+    pub(crate) pending_attachments: Vec<PendingAttachment>,
     /// `None` until the engine reports confinement status (Phase 2).
     pub(crate) sandbox: Option<SandboxStatus>,
     pub(crate) mode: emberly_core::Mode,
@@ -585,6 +673,20 @@ pub struct App {
     /// The skill catalog for the sidebar (T-15, FR-7, Design §4.9). Updated
     /// from `UiEvent::SkillsAvailable`; cleared on a new session.
     pub(crate) skills: Vec<SkillMeta>,
+    /// Currently alive subagents for the sidebar Agents section (FR-9, Design
+    /// §3.1/§4.13). Unlike `skills` (a full-replace catalog snapshot), this is
+    /// maintained incrementally: `UiEvent::SubagentSpawned` pushes an entry,
+    /// `UiEvent::SubagentEnded` removes it — there is no bulk "all agents"
+    /// event. Present only while non-empty (the established no-empty-stub
+    /// rule); cleared on a new session.
+    pub(crate) agents: Vec<AgentSummary>,
+    /// Currently connected MCP servers for the sidebar MCP section (FR-11,
+    /// Design §4.15). Maintained incrementally like `agents`:
+    /// `UiEvent::McpServerConnected` upserts an entry, `McpServerFailed`
+    /// removes one (a failed connection is never shown as connected).
+    /// Present only while non-empty (the established no-empty-stub rule);
+    /// cleared on a new session.
+    pub(crate) mcp_servers: Vec<McpServerSummary>,
     /// The registered completion checks' most recent results, for the
     /// sidebar's gate-status line (S-6, Design §8.7, §3.1). Updated from
     /// `UiEvent::CompletionStatus`; empty (and so hidden — never a "None"
@@ -610,9 +712,11 @@ pub struct App {
 // sibling's, so a method called from another of these modules is marked
 // `pub(super)`.
 mod actions;
+mod agents;
 mod anim;
 mod events;
 mod keys;
+mod mcp;
 mod memory;
 mod overlays;
 mod pickers;
@@ -684,10 +788,13 @@ impl App {
             effort: None,
             effort_levels: Vec::new(),
             editor: LineEditor::new(),
+            pending_attachments: Vec::new(),
             sandbox: None,
             mode: emberly_core::Mode::default(),
             tasks: Vec::new(),
             skills: Vec::new(),
+            agents: Vec::new(),
+            mcp_servers: Vec::new(),
             completion_status: Vec::new(),
             sidebar_visible: true,
             overlays: Vec::new(),

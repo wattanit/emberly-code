@@ -37,6 +37,7 @@ fn sample_rendering() -> PermissionRendering {
         affected_paths: vec!["/proj".into()],
         outside_root: false,
         reason: "matched rule: bash ask".into(),
+        on_behalf_of: None,
     }
 }
 
@@ -154,6 +155,7 @@ fn transcript_event_variants_roundtrip() -> serde_json::Result<()> {
         TranscriptEvent::UserMessage {
             text: "task".into(),
             original_task: true,
+            images: Vec::new(),
         },
         TranscriptEvent::AssistantMessage {
             text: "on it".into(),

@@ -193,6 +193,16 @@ impl LineRenderer {
             } => {
                 self.render_skill_body(name, *origin, body, resources, out)?;
             }
+            // Agents inspector activity, degraded form (FR-9, §4.13): the same
+            // read-only inline text as a skill body — a snapshot as of the
+            // subagent's last transcript flush, never a black box.
+            UiEvent::AgentActivity { name, text, .. } => {
+                writeln!(out, "\n--- agent: {name} ---")?;
+                for line in text.lines() {
+                    writeln!(out, "{line}")?;
+                }
+                writeln!(out, "---")?;
+            }
             UiEvent::CompactionStatus { message } => {
                 // Same harness voice as `Notice` (Design §8.2) — plain mode
                 // has no sidebar/status line, so this is the only surface
@@ -217,6 +227,39 @@ impl LineRenderer {
                     writeln!(out, "  {mark} {}", item.text)?;
                 }
             }
+            // A staged attachment (FR-10, Design §4.14) — the plain-mode
+            // equivalent of the compose-area chip: a one-line confirmation
+            // naming the file and its dimensions/format, exactly as an
+            // attached image renders once sent (§4.14's ASCII degradation).
+            UiEvent::ImageAttached {
+                name,
+                width,
+                height,
+                format_label,
+                ..
+            } => {
+                writeln!(out, "attached {name} · {width}x{height} · {format_label}")?;
+            }
+            UiEvent::AttachFailed { path, reason } => {
+                writeln!(out, "attach failed: {path}: {reason}")?;
+            }
+            // `init`/`clean` voice: exactly what was written and where, plus
+            // the one calm, non-blocking disclosure line (FR-12, Design §8.11).
+            UiEvent::SessionExported { path } => {
+                writeln!(out, "exported to {path}")?;
+                writeln!(out, "{}", crate::strings::export::SENSITIVE_CONTENT_NOTE)?;
+            }
+            // Quiet on success — one dim line, no ceremony, matching how
+            // memory/skill catalogs already load without announcement
+            // (Design §8.10/§4.9).
+            UiEvent::McpServerConnected { name, tools } => {
+                writeln!(out, "mcp · {name} · connected · {} tools", tools.len())?;
+            }
+            // Harness-world (§6.1): what happened, never fatal to the session
+            // (Design §8.10) — the rest of the harness stays usable.
+            UiEvent::McpServerFailed { name, reason } => {
+                writeln!(out, "couldn't connect to MCP server '{name}': {reason}")?;
+            }
             // Unknown future events are ignored (non_exhaustive).
             _ => {}
         }
@@ -240,6 +283,9 @@ impl LineRenderer {
         }
         writeln!(out, "{}: {}", p::HEADING, rendering.summary)?;
         writeln!(out, "  {}: {}", p::WHY_LABEL, rendering.reason)?;
+        if let Some(name) = &rendering.on_behalf_of {
+            writeln!(out, "  {} {name}", p::ON_BEHALF_OF_LABEL)?;
+        }
         if !rendering.affected_paths.is_empty() {
             writeln!(
                 out,
@@ -447,6 +493,88 @@ fn render_skill_list(skills: &[SkillMeta], out: &mut impl Write) -> io::Result<(
     Ok(())
 }
 
+/// This session's subagents in degraded form (FR-9, Design §3.1/§4.13):
+/// `name (id)` per line, read-only inline text — same no-round-trip shape as
+/// [`render_skill_list`], since the list is cached state, not an event. Shows
+/// the whole catalog (not just the alive ones) so an ended subagent's
+/// activity stays reachable via `/agents <name>` for the rest of the session
+/// (§4.13) — an ended entry is marked so the two are never confused.
+fn render_agent_list(agents: &[crate::app::AgentSummary], out: &mut impl Write) -> io::Result<()> {
+    use crate::strings::agents as a;
+    writeln!(out)?;
+    if agents.is_empty() {
+        writeln!(out, "{}", a::EMPTY)?;
+        return Ok(());
+    }
+    for agent in agents {
+        if agent.ended {
+            writeln!(out, "  {} ({}, ended)", agent.name, agent.id)?;
+        } else {
+            writeln!(out, "  {} ({})", agent.name, agent.id)?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve `/agents <name-or-id>` against the cached catalog — by name first,
+/// then by id, so either the human label or the exact `agent-N` works; an
+/// ended subagent resolves exactly like a live one (§4.13).
+fn resolve_agent(query: &str, agents: &[crate::app::AgentSummary]) -> Option<String> {
+    agents
+        .iter()
+        .find(|a| a.name == query)
+        .or_else(|| agents.iter().find(|a| a.id == query))
+        .map(|a| a.id.clone())
+}
+
+/// This session's connected MCP servers in degraded form (FR-11, Design
+/// §4.15): `name (N tools)` per line — same no-round-trip shape as
+/// [`render_agent_list`], since the catalog is already cached state.
+fn render_mcp_server_list(
+    servers: &[crate::app::McpServerSummary],
+    out: &mut impl Write,
+) -> io::Result<()> {
+    use crate::strings::mcp as m;
+    writeln!(out)?;
+    if servers.is_empty() {
+        writeln!(out, "{}", m::EMPTY)?;
+        return Ok(());
+    }
+    for server in servers {
+        let count = server.tools.len();
+        writeln!(
+            out,
+            "  {} ({count} tool{})",
+            server.name,
+            if count == 1 { "" } else { "s" }
+        )?;
+    }
+    Ok(())
+}
+
+/// `/mcp <name>` — the named server's discovered tools, read-only, plain
+/// text. Unlike `/agents <name>`, this needs no engine round-trip either: a
+/// server's tool list is already fully known from `UiEvent::McpServerConnected`.
+fn render_mcp_server_tools(
+    name: &str,
+    servers: &[crate::app::McpServerSummary],
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let Some(server) = servers.iter().find(|s| s.name == name) else {
+        writeln!(out, "no MCP server named '{name}' — run /mcp to list")?;
+        return Ok(());
+    };
+    writeln!(out)?;
+    if server.tools.is_empty() {
+        writeln!(out, "(this server advertised no tools)")?;
+    } else {
+        for tool in &server.tools {
+            writeln!(out, "  {tool}")?;
+        }
+    }
+    Ok(())
+}
+
 /// Resolve a memory entry name to its scope from the last-listed entries (user
 /// first, then project). `None` when the name is unknown — the plain frontend
 /// asks the user to `/memory` first so the list is current.
@@ -580,6 +708,8 @@ struct LineState {
     skills: Vec<SkillMeta>,
     mem_user: Vec<EntrySummary>,
     mem_project: Vec<EntrySummary>,
+    agents: Vec<crate::app::AgentSummary>,
+    mcp_servers: Vec<crate::app::McpServerSummary>,
 }
 
 /// What the driver should do with a typed `/command`.
@@ -651,6 +781,33 @@ fn on_slash(input: &str, state: &LineState, out: &mut impl Write) -> io::Result<
                     writeln!(out, "usage: /model <profile> [model]")?;
                     LineAction::Done
                 }
+            }
+        }
+        // Plain mode has no drag-and-drop or file-picker (Design §4.14) — the
+        // path argument is the only surface, exactly as `/model` needs one
+        // without a picker.
+        AppCommand::Attach => {
+            let path = args.trim();
+            if path.is_empty() {
+                writeln!(out, "usage: /attach <path>")?;
+                LineAction::Done
+            } else {
+                LineAction::Send(Command::AttachImage {
+                    path: path.to_string(),
+                })
+            }
+        }
+        // No output-location picker in plain mode either (Design §8.11) —
+        // an explicit path is the only surface, same as `/attach`.
+        AppCommand::Export => {
+            let path = args.trim();
+            if path.is_empty() {
+                writeln!(out, "usage: /export <path>")?;
+                LineAction::Done
+            } else {
+                LineAction::Send(Command::ExportSession {
+                    path: path.to_string(),
+                })
             }
         }
         AppCommand::Effort => match emberly_core::Effort::parse(args) {
@@ -739,6 +896,38 @@ fn on_slash(input: &str, state: &LineState, out: &mut impl Write) -> io::Result<
                 })
             }
         }
+        // The alive-subagent list is standing state (cached from
+        // SubagentSpawned/SubagentEnded), so listing needs no round trip; a
+        // named subagent's activity is fetched read-only (§4.13), same shape
+        // as `/skills`.
+        AppCommand::Agents => {
+            if args.is_empty() {
+                render_agent_list(&state.agents, out)?;
+                LineAction::Done
+            } else {
+                match resolve_agent(args, &state.agents) {
+                    Some(id) => LineAction::Send(Command::InspectAgent { id }),
+                    None => {
+                        writeln!(
+                            out,
+                            "no subagent named or id '{args}' — run /agents to list"
+                        )?;
+                        LineAction::Done
+                    }
+                }
+            }
+        }
+        // The connected-server list is standing state (cached from
+        // McpServerConnected/Failed), so listing and a named server's tool
+        // list both need no round trip at all (FR-11, Design §4.15).
+        AppCommand::Mcp => {
+            if args.is_empty() {
+                render_mcp_server_list(&state.mcp_servers, out)?;
+            } else {
+                render_mcp_server_tools(args, &state.mcp_servers, out)?;
+            }
+            LineAction::Done
+        }
         // Rich-only commands are refused by the `plain` check above; naming them
         // here keeps this match exhaustive, so a new command cannot be added
         // without deciding what line mode does with it.
@@ -795,6 +984,8 @@ pub async fn run(
         skills: Vec::new(),
         mem_user: Vec::new(),
         mem_project: Vec::new(),
+        agents: Vec::new(),
+        mcp_servers: Vec::new(),
     };
     let mut renderer = LineRenderer::new(reasoning_view);
     let mut stdout = io::stdout();
@@ -849,6 +1040,42 @@ pub async fn run(
                         UiEvent::MemoryEntries { user, project } => {
                             state.mem_user = user;
                             state.mem_project = project;
+                        }
+                        // Mirrors the rich TUI's App.agents catalog: pushed
+                        // incrementally (no "AgentsAvailable" snapshot event,
+                        // Tech Spec §8.4) and marked ended rather than
+                        // removed, so `/agents <name>` still resolves an
+                        // ended subagent for the rest of the session
+                        // (Design §4.13).
+                        UiEvent::SubagentSpawned { id, name, .. } => {
+                            state.agents.push(crate::app::AgentSummary {
+                                id,
+                                name,
+                                ended: false,
+                            });
+                        }
+                        UiEvent::SubagentEnded { id, .. } => {
+                            if let Some(agent) = state.agents.iter_mut().find(|a| a.id == id) {
+                                agent.ended = true;
+                            }
+                        }
+                        // Mirrors the rich TUI's App.mcp_servers catalog:
+                        // upserted on connect, removed on failure — a failed
+                        // server was never connected, so it is never listed
+                        // (Design §4.15's no-empty-stub/quiet-absence rule).
+                        UiEvent::McpServerConnected { name, tools } => {
+                            if let Some(server) =
+                                state.mcp_servers.iter_mut().find(|s| s.name == name)
+                            {
+                                server.tools = tools;
+                            } else {
+                                state
+                                    .mcp_servers
+                                    .push(crate::app::McpServerSummary { name, tools });
+                            }
+                        }
+                        UiEvent::McpServerFailed { name, .. } => {
+                            state.mcp_servers.retain(|s| s.name != name);
                         }
                         _ => {}
                     }
@@ -944,6 +1171,8 @@ mod tests {
             skills: Vec::new(),
             mem_user: Vec::new(),
             mem_project: Vec::new(),
+            agents: Vec::new(),
+            mcp_servers: Vec::new(),
         }
     }
 
@@ -1058,6 +1287,50 @@ mod tests {
             }
             _ => panic!("expected a SetEffort"),
         }
+    }
+
+    #[test]
+    fn attach_needs_a_path_and_sends_it_verbatim() {
+        // FR-10: no file-picker in plain mode, so a bare `/attach` is a usage
+        // line rather than silence (Design §4.14/§7).
+        let (out, action) = slash("attach");
+        assert!(out.contains("usage: /attach <path>"), "{out}");
+        assert!(matches!(action, LineAction::Done));
+
+        match slash("attach mockup.png").1 {
+            LineAction::Send(Command::AttachImage { path }) => {
+                assert_eq!(path, "mockup.png");
+            }
+            _ => panic!("expected an AttachImage"),
+        }
+    }
+
+    #[test]
+    fn export_needs_a_path_and_sends_it_verbatim() {
+        // FR-12: no output-location picker in plain mode, so a bare
+        // `/export` is a usage line rather than silence (Design §8.11/§7).
+        let (out, action) = slash("export");
+        assert!(out.contains("usage: /export <path>"), "{out}");
+        assert!(matches!(action, LineAction::Done));
+
+        match slash("export session.html").1 {
+            LineAction::Send(Command::ExportSession { path }) => {
+                assert_eq!(path, "session.html");
+            }
+            _ => panic!("expected an ExportSession"),
+        }
+    }
+
+    #[test]
+    fn session_exported_event_prints_the_path_and_disclosure() {
+        let out = render_to_string(&UiEvent::SessionExported {
+            path: "session.html".into(),
+        });
+        assert!(out.contains("exported to session.html"), "{out}");
+        assert!(
+            out.contains("review before sharing"),
+            "the sensitive-content disclosure must always print: {out}"
+        );
     }
 
     #[test]
@@ -1463,6 +1736,7 @@ mod tests {
             affected_paths: vec![],
             outside_root: false,
             reason: "bash requires your approval".into(),
+            on_behalf_of: None,
         };
         let out = render_to_string(&UiEvent::PermissionRequest {
             id: PermissionId(1),
@@ -1471,6 +1745,25 @@ mod tests {
         assert!(out.contains("PERMISSION REQUIRED"));
         assert!(out.contains("rm -rf build"), "full command must be shown");
         assert!(out.contains("[Enter] DENY"), "deny is the default");
+    }
+
+    /// Degraded mode keeps the same provenance line, plain (Design §7).
+    #[test]
+    fn permission_prompt_names_the_subagent_in_degraded_mode() {
+        let rendering = PermissionRendering {
+            tool: "bash".into(),
+            summary: "run: make build".into(),
+            detail: "make build".into(),
+            affected_paths: vec![],
+            outside_root: false,
+            reason: "bash requires your approval".into(),
+            on_behalf_of: Some("db-migration".into()),
+        };
+        let out = render_to_string(&UiEvent::PermissionRequest {
+            id: PermissionId(1),
+            rendering,
+        });
+        assert!(out.contains("on behalf of subagent db-migration"));
     }
 
     #[test]
@@ -1482,6 +1775,7 @@ mod tests {
             affected_paths: vec!["/etc/x".into()],
             outside_root: true,
             reason: "this action affects files OUTSIDE the project root".into(),
+            on_behalf_of: None,
         };
         let out = render_to_string(&UiEvent::PermissionRequest {
             id: PermissionId(2),
@@ -1680,6 +1974,199 @@ mod tests {
         assert!(String::from_utf8(empty)
             .unwrap_or_default()
             .contains("no skills available"));
+    }
+
+    #[test]
+    fn agent_activity_renders_inline_read_only() {
+        let out = render_to_string(&UiEvent::AgentActivity {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            text: "user: review this diff\nassistant: looks good".into(),
+        });
+        assert!(out.contains("agent: reviewer"), "header: {out:?}");
+        assert!(out.contains("looks good"));
+        assert!(!out.contains('\u{1b}'));
+    }
+
+    fn agent_summary(id: &str, name: &str, ended: bool) -> crate::app::AgentSummary {
+        crate::app::AgentSummary {
+            id: id.into(),
+            name: name.into(),
+            ended,
+        }
+    }
+
+    #[test]
+    fn agent_list_renders_name_id_and_empty() {
+        let agents = vec![
+            agent_summary("agent-1", "reviewer", false),
+            agent_summary("agent-2", "tester", false),
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(render_agent_list(&agents, &mut buf).is_ok());
+        let out = String::from_utf8(buf).unwrap_or_default();
+        assert!(out.contains("reviewer (agent-1)"), "{out:?}");
+        assert!(out.contains("tester (agent-2)"), "{out:?}");
+        assert!(!out.contains('\u{1b}'));
+
+        let mut empty: Vec<u8> = Vec::new();
+        assert!(render_agent_list(&[], &mut empty).is_ok());
+        assert!(String::from_utf8(empty)
+            .unwrap_or_default()
+            .contains("no subagents are currently alive"));
+    }
+
+    #[test]
+    fn agent_list_marks_an_ended_entry() {
+        // Design §4.13: the catalog keeps an ended subagent reachable; the
+        // plain-mode list marks it so it is never confused with a live one.
+        let agents = vec![agent_summary("agent-1", "reviewer", true)];
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(render_agent_list(&agents, &mut buf).is_ok());
+        let out = String::from_utf8(buf).unwrap_or_default();
+        assert!(out.contains("reviewer (agent-1, ended)"), "{out:?}");
+    }
+
+    #[test]
+    fn resolve_agent_matches_by_name_then_id() {
+        let agents = vec![
+            agent_summary("agent-1", "reviewer", false),
+            agent_summary("agent-2", "tester", false),
+        ];
+        assert_eq!(resolve_agent("reviewer", &agents), Some("agent-1".into()));
+        assert_eq!(resolve_agent("agent-2", &agents), Some("agent-2".into()));
+        assert_eq!(resolve_agent("nope", &agents), None);
+    }
+
+    #[test]
+    fn resolve_agent_still_resolves_an_ended_entry() {
+        let agents = vec![agent_summary("agent-1", "reviewer", true)];
+        assert_eq!(resolve_agent("reviewer", &agents), Some("agent-1".into()));
+    }
+
+    #[test]
+    fn agents_slash_lists_then_resolves_a_name() {
+        let mut state = state();
+        state.agents = vec![agent_summary("agent-1", "reviewer", false)];
+        let (out, action) = slash_in(&state, "agents");
+        assert!(out.contains("reviewer (agent-1)"));
+        assert!(matches!(action, LineAction::Done));
+
+        let (_, action) = slash_in(&state, "agents reviewer");
+        match action {
+            LineAction::Send(Command::InspectAgent { id }) => assert_eq!(id, "agent-1"),
+            _ => panic!("expected InspectAgent"),
+        }
+
+        let (out, action) = slash_in(&state, "agents nope");
+        assert!(out.contains("no subagent named or id 'nope'"));
+        assert!(matches!(action, LineAction::Done));
+    }
+
+    #[test]
+    fn agents_slash_still_lists_and_resolves_an_ended_agent() {
+        let mut state = state();
+        state.agents = vec![agent_summary("agent-1", "reviewer", true)];
+        let (out, _) = slash_in(&state, "agents");
+        assert!(out.contains("reviewer (agent-1, ended)"));
+
+        let (_, action) = slash_in(&state, "agents reviewer");
+        match action {
+            LineAction::Send(Command::InspectAgent { id }) => assert_eq!(id, "agent-1"),
+            _ => panic!("expected InspectAgent for an ended subagent"),
+        }
+    }
+
+    fn mcp_server_summary(name: &str, tools: &[&str]) -> crate::app::McpServerSummary {
+        crate::app::McpServerSummary {
+            name: name.into(),
+            tools: tools.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn mcp_list_shows_each_servers_tool_count() {
+        let servers = vec![
+            mcp_server_summary("jira", &["mcp__jira__get_issue"]),
+            mcp_server_summary("github", &["mcp__github__list_prs", "mcp__github__get_pr"]),
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(render_mcp_server_list(&servers, &mut buf).is_ok());
+        let out = String::from_utf8(buf).unwrap_or_default();
+        assert!(out.contains("jira (1 tool)"), "{out:?}");
+        assert!(out.contains("github (2 tools)"), "{out:?}");
+    }
+
+    #[test]
+    fn mcp_list_empty_shows_the_empty_notice() {
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(render_mcp_server_list(&[], &mut buf).is_ok());
+        let out = String::from_utf8(buf).unwrap_or_default();
+        assert!(out.contains(crate::strings::mcp::EMPTY), "{out:?}");
+    }
+
+    #[test]
+    fn mcp_server_tools_lists_the_named_servers_tools() {
+        let servers = vec![mcp_server_summary(
+            "github",
+            &["mcp__github__list_prs", "mcp__github__get_pr"],
+        )];
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(render_mcp_server_tools("github", &servers, &mut buf).is_ok());
+        let out = String::from_utf8(buf).unwrap_or_default();
+        assert!(out.contains("mcp__github__list_prs"), "{out:?}");
+        assert!(out.contains("mcp__github__get_pr"), "{out:?}");
+    }
+
+    #[test]
+    fn mcp_server_tools_unknown_name_says_so() {
+        let servers = vec![mcp_server_summary("jira", &["mcp__jira__get_issue"])];
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(render_mcp_server_tools("nope", &servers, &mut buf).is_ok());
+        let out = String::from_utf8(buf).unwrap_or_default();
+        assert!(
+            out.contains("no MCP server named 'nope' — run /mcp to list"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn mcp_slash_lists_then_resolves_a_named_servers_tools() {
+        let mut state = state();
+        state.mcp_servers = vec![mcp_server_summary(
+            "github",
+            &["mcp__github__list_prs", "mcp__github__get_pr"],
+        )];
+        let (out, action) = slash_in(&state, "mcp");
+        assert!(out.contains("github (2 tools)"), "{out:?}");
+        assert!(matches!(action, LineAction::Done));
+
+        // Unlike `/agents <name>`, this never issues a Command — the tool
+        // list is already fully known from the cached catalog.
+        let (out, action) = slash_in(&state, "mcp github");
+        assert!(out.contains("mcp__github__list_prs"), "{out:?}");
+        assert!(matches!(action, LineAction::Done));
+    }
+
+    #[test]
+    fn mcp_connected_event_prints_a_notice() {
+        let out = render_to_string(&UiEvent::McpServerConnected {
+            name: "jira".into(),
+            tools: vec!["mcp__jira__get_issue".into()],
+        });
+        assert!(out.contains("mcp · jira · connected · 1 tools"), "{out:?}");
+    }
+
+    #[test]
+    fn mcp_failed_event_prints_the_reason() {
+        let out = render_to_string(&UiEvent::McpServerFailed {
+            name: "jira".into(),
+            reason: "command not found".into(),
+        });
+        assert!(
+            out.contains("couldn't connect to MCP server 'jira': command not found"),
+            "{out:?}"
+        );
     }
 
     #[test]

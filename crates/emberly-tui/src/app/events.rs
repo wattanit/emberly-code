@@ -13,8 +13,16 @@ impl App {
     pub fn seed_history(&mut self, records: &[TranscriptRecord]) {
         for record in records {
             match &record.event {
-                TranscriptEvent::UserMessage { text, .. } => {
+                TranscriptEvent::UserMessage { text, images, .. } => {
                     self.timeline.items.push(ConvItem::User(text.clone()));
+                    for image in images {
+                        self.timeline.items.push(ConvItem::Attachment {
+                            name: image.name.clone(),
+                            width: image.width,
+                            height: image.height,
+                            format_label: image.format_label.clone(),
+                        });
+                    }
                 }
                 TranscriptEvent::AssistantMessage { text, reasoning } => {
                     // Replay a recorded reasoning trail (collapsed) unless the
@@ -287,6 +295,87 @@ impl App {
             }
             UiEvent::SkillsAvailable { skills } => {
                 self.skills = skills;
+            }
+            UiEvent::SubagentSpawned { id, name, .. } => {
+                self.agents.push(AgentSummary {
+                    id,
+                    name,
+                    ended: false,
+                });
+            }
+            // Marked ended rather than removed, so the entry survives in the
+            // `/agents` inspector catalog for the rest of the session (Design
+            // §4.13); only the sidebar section filters it back out (§3.1).
+            UiEvent::SubagentEnded { id, .. } => {
+                if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
+                    agent.ended = true;
+                }
+            }
+            UiEvent::AgentActivity { id, name, text } => {
+                self.apply_agent_activity(&id, &name, text);
+            }
+            // Quiet on success — one dim line, no ceremony (Design §8.10),
+            // and the sidebar MCP section's catalog is updated (upsert by
+            // name, so a `/reload` reconnect refreshes an existing entry
+            // rather than duplicating it).
+            UiEvent::McpServerConnected { name, tools } => {
+                if let Some(server) = self.mcp_servers.iter_mut().find(|s| s.name == name) {
+                    server.tools = tools.clone();
+                } else {
+                    self.mcp_servers.push(McpServerSummary {
+                        name: name.clone(),
+                        tools: tools.clone(),
+                    });
+                }
+                self.timeline.items.push(ConvItem::Notice(format!(
+                    "mcp · {name} · connected · {} tools",
+                    tools.len()
+                )));
+            }
+            // Harness-world (§6.1): never fatal to the session (Design
+            // §8.10) — a server that was never connected (or dropped on
+            // reconnect failure) is removed from the sidebar catalog too.
+            UiEvent::McpServerFailed { name, reason } => {
+                self.mcp_servers.retain(|s| s.name != name);
+                self.timeline.items.push(ConvItem::Notice(format!(
+                    "couldn't connect to MCP server '{name}': {reason}"
+                )));
+            }
+            // A staged attachment (FR-10, Design §4.14): mirror the engine's
+            // own staging list so the compose area can confirm what's
+            // pending; the chip itself only lands in the timeline once the
+            // message is actually sent (`send_prompt`).
+            UiEvent::ImageAttached {
+                name,
+                width,
+                height,
+                format_label,
+                ..
+            } => {
+                self.pending_attachments.push(PendingAttachment {
+                    name: name.clone(),
+                    width,
+                    height,
+                    format_label: format_label.clone(),
+                });
+                self.timeline.items.push(ConvItem::Notice(format!(
+                    "attached {name} · {width}×{height} · {format_label}"
+                )));
+            }
+            UiEvent::AttachFailed { path, reason } => {
+                self.timeline
+                    .items
+                    .push(ConvItem::Notice(format!("attach failed: {path}: {reason}")));
+            }
+            // `init`/`clean` voice: exactly what was written and where, plus
+            // the one calm, non-blocking disclosure line (FR-12, Design §8.11).
+            UiEvent::SessionExported { path } => {
+                self.timeline
+                    .items
+                    .push(ConvItem::Notice(format!("exported to {path}")));
+                self.timeline.items.push(ConvItem::Notice(
+                    crate::strings::export::SENSITIVE_CONTENT_NOTE.to_string(),
+                ));
             }
             UiEvent::MemoryEntries { user, project } => {
                 self.apply_memory_entries(user, project);

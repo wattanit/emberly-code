@@ -263,7 +263,7 @@ impl Engine {
             }
             GateResolution::Steer(text) => {
                 self.completion.attempts = 0;
-                self.record_user_message(&text);
+                self.record_user_message(&text, Vec::new());
                 self.push_conversation_message(Message::user_text(text));
                 self.emit_context_usage().await;
                 CompletionGateOutcome::ReOpen

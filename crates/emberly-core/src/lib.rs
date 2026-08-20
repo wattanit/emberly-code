@@ -18,9 +18,11 @@ pub mod channels;
 pub mod command;
 pub mod engine;
 pub mod event;
+pub mod export;
 pub mod factory;
 pub mod gate;
 pub mod id;
+pub mod mcp_client;
 pub mod memory;
 pub mod prompts;
 pub mod provider_writer;
@@ -40,13 +42,15 @@ pub use emberly_tools::{MemoryOp, MemoryScope};
 pub use emberly_tools::{SkillMeta, SkillOrigin};
 pub use emberly_tools::{TaskItem, TaskStatus};
 pub use engine::{
-    CompletionCheck, CompletionConfig, ContextConfig, Engine, EngineConfig, LoopConfig,
-    MemoryConfig, SkillsConfig,
+    AgentsConfig, CompletionCheck, CompletionConfig, ContextConfig, Engine, EngineConfig,
+    LoopConfig, MemoryConfig, SkillsConfig,
 };
 pub use event::UiEvent;
+pub use export::{collect_subagent_transcripts, render_session_html, SubagentTranscript};
 pub use factory::{ConfigReloader, ProviderChoice, ProviderFactory, ReloadedConfig};
 pub use gate::{AskUserAsk, MemoryAsk, PermissionAsk, SkillAsk, TaskListAsk};
 pub use id::{AskId, PermissionId, SessionId, ToolCallId};
+pub use mcp_client::McpClient;
 pub use memory::EntrySummary;
 pub use provider_writer::{NewProviderProfile, ProviderProfileWriter};
 pub use transcript::{
@@ -54,8 +58,9 @@ pub use transcript::{
     TranscriptEvent, TranscriptRecord, TranscriptSink, SCHEMA_VERSION,
 };
 pub use types::{
-    AskAnswer, CheckResult, Effort, GateResolution, LoopResolution, Mode, PermissionDecision,
-    PermissionRendering, SandboxStatus, TokenUsage,
+    AskAnswer, AttachedImage, AttachedImageMeta, CheckResult, Effort, GateResolution,
+    LoopResolution, McpConnectionOutcome, Mode, PermissionDecision, PermissionRendering,
+    SandboxStatus, TokenUsage,
 };
 pub use view_cache::{view_cache_path, ViewCache, VIEW_CACHE_VERSION};
 // The rule engine and confinement probe live in the security crate; re-export

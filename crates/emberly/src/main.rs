@@ -28,6 +28,7 @@ use emberly_tui::{frontend, SessionInfo};
 
 mod clean;
 mod config;
+mod export;
 mod init;
 mod placeholder;
 mod provider_setup;
@@ -233,6 +234,10 @@ enum Cli {
     TrustList,
     TrustRevoke(String),
     Clean(Option<String>),
+    Export {
+        session_id: Option<String>,
+        output_path: String,
+    },
     Run(RunOpts),
 }
 
@@ -285,6 +290,26 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
                     }
                 }
                 return Ok(Cli::Clean(clean_id));
+            }
+            // `export [--session <id>] <output-path>` (FR-12, Tech Spec §10).
+            "export" => {
+                let mut session_id = None;
+                let mut output_path = None;
+                while let Some(next) = args.peek() {
+                    if next == "--session" {
+                        args.next();
+                        session_id = Some(args.next().context("--session needs a value")?);
+                    } else if output_path.is_none() {
+                        output_path = args.next();
+                    } else {
+                        break;
+                    }
+                }
+                let output_path = output_path.context("export needs an <output-path>")?;
+                return Ok(Cli::Export {
+                    session_id,
+                    output_path,
+                });
             }
             // Force degraded/line mode (Design §7); also implied by `NO_COLOR`,
             // `TERM=dumb`, and a non-tty stdout — see `frontend::detect`.
@@ -345,6 +370,14 @@ async fn run() -> anyhow::Result<()> {
         Cli::Clean(session_id) => {
             let scratch_root = std::env::current_dir()?.join(".agents").join("scratch");
             clean::clean(&scratch_root, session_id.as_deref())?;
+            return Ok(());
+        }
+        Cli::Export {
+            session_id,
+            output_path,
+        } => {
+            let sessions_dir = std::env::current_dir()?.join(".agents").join("sessions");
+            export::export(&sessions_dir, session_id.as_deref(), &output_path)?;
             return Ok(());
         }
         Cli::Run(opts) => opts,
@@ -527,12 +560,23 @@ async fn run() -> anyhow::Result<()> {
         emberly_core::spawn::HostSandbox::new(sandbox.is_confined(), git_binary, path_env),
     );
 
+    // `trust_granted` above is `newly_trusted` (only true on a *fresh* grant
+    // this run — it gates the one-time `TrustDecision` transcript write).
+    // Reaching this line at all means `trust::gate` already returned
+    // `Proceed`, so the project *is* trusted for the rest of this session
+    // regardless of whether that happened just now or earlier — the same
+    // single decision project skills/memory already load under
+    // unconditionally once the engine exists. Project-scoped MCP servers
+    // (FR-11) use that same fact, not `newly_trusted`.
+    let workspace_trusted = true;
+
     // Re-resolves config + prompts on an in-app `/config` / `/prompt` edit (C-5).
     let config_reloader: Arc<dyn emberly_core::ConfigReloader> =
         Arc::new(provider_setup::ConfiguredReloader::new(
             project_root.clone(),
             &cli_overrides,
             resolved.sandbox_require,
+            workspace_trusted,
             resolved.providers.clone(),
         ));
 
@@ -542,10 +586,13 @@ async fn run() -> anyhow::Result<()> {
     let provider_writer: Arc<dyn emberly_core::ProviderProfileWriter> =
         Arc::new(provider_write::ConfigWriter::new(project_root.clone()));
 
-    // Build the tool registry: the built-in suite always, plus `web_search`
-    // only when `search.enabled` and an endpoint is configured (Tech Spec §5.5).
-    // Shared with the `/config` reload path (C-5) via `build_tool_registry`.
-    let (tools, tool_warnings) = provider_setup::build_tool_registry(&resolved)?;
+    // Build the tool registry: the built-in suite always, `web_search` when
+    // `search.enabled` and an endpoint is configured (Tech Spec §5.5), and
+    // MCP-discovered tools for each enabled, trust-permitted
+    // `[mcp.servers.<name>]` (FR-11, Tech Spec §5.6). Shared with the
+    // `/config` reload path (C-5) via `build_tool_registry`.
+    let (tools, tool_warnings, mcp_connections) =
+        provider_setup::build_tool_registry(&resolved, workspace_trusted)?;
     for warning in &tool_warnings {
         eprintln!("emberly: {warning}");
     }
@@ -594,7 +641,9 @@ async fn run() -> anyhow::Result<()> {
         ))),
         config_reloader: Some(config_reloader),
         image_max_bytes: resolved.image_max_bytes,
+        image_max_attachments: resolved.image_max_attachments,
         document_max_bytes: resolved.document_max_bytes,
+        mcp_connections,
         memory: resolved.memory.clone(),
         user_memory_dir: config::memory_dir(),
         // The trust gate exits on decline (FR-1), so reaching this point means
@@ -605,10 +654,16 @@ async fn run() -> anyhow::Result<()> {
         skills: resolved.skills.clone(),
         user_skills_dir: config::skills_dir(),
         project_skills_dir: Some(project_skills_dir),
+        agents: resolved.agents,
+        // Both `None`: this is a top-level session, which owns its own
+        // permission/ask-user state (the production path). Only a
+        // subagent's derived config overrides these (Tech Spec §8.4).
+        external_permission_gate: None,
+        external_ask_gate: None,
     };
 
     let (engine_ports, frontend_ports) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx) =
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx, subagent_rx) =
         Engine::new(config, engine_ports.events_tx);
     let engine_task = tokio::spawn(engine.run(
         engine_ports.commands_rx,
@@ -618,6 +673,7 @@ async fn run() -> anyhow::Result<()> {
         task_rx,
         memory_rx,
         skill_rx,
+        subagent_rx,
     ));
 
     // Drive the session until the user quits or the engine closes its events.
