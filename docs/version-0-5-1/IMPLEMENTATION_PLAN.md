@@ -1,8 +1,8 @@
 # Emberly Code — Implementation Plan (0.5.1 feature set)
 
-**Status:** 📝 **Phase 0 closed (2026-08-16) — Phase 1 may begin.** All three
+**Status:** ✅ **All six phases code-complete (2026-08-19).** All three
 foundation documents below are `approved` (owner, 2026-08-16); this plan's
-G-14 pin is no longer provisional.
+G-14 pin is no longer provisional. Release not yet tagged.
 **Date:** 2026-08-16
 **Owner:** Wattanit
 **Source documents** (G-14 as-built pin):
@@ -423,6 +423,8 @@ who can't type before the first prompt renders.
 
 ## Phase 6 — Hardening, docs, and verification
 
+✅ code-complete 2026-08-19
+
 **Goal:** Close the Tech Spec M13 checklist, document all three capabilities,
 and leave the workspace green end to end — the same closing shape as 0.5's
 own Phase 4.
@@ -442,4 +444,61 @@ own Phase 4.
   (already current from Phase 0, reconfirmed here as the release's as-built
   record, per G-14).
 
-**Done when:** all of the above are green and the release is tagged.
+**Landed as built**
+- **Three of the four end-to-end tests already existed** from earlier
+  phases and were re-verified rather than duplicated: `provider_setup.rs`'s
+  `mcp_server_connects_and_registers_its_tool` (Phase 4 — a real spawned
+  MCP server, its tool invoked through the ordinary `ToolCtx::authorize`
+  permission gate) and its project-scoped-trust siblings (Phase 4) cover
+  the MCP/permission and untrusted-folder cases; `engine_loop.rs`'s
+  `attach_then_send_appends_image_block_matching_read_image` (Phase 1)
+  already round-trips a real attached image through a `FakeProvider` and
+  asserts the outgoing request carries the image block. Only the fourth was
+  a genuine gap: existing export tests checked subagent inclusion and
+  non-mutation as two *separate*, in-memory (`Vec`-equality) checks against
+  `render_session_html` directly. Added
+  `export_includes_a_real_subagent_and_never_mutates_either_source_file`
+  (`crates/emberly/src/export.rs`) — real parent + subagent `.jsonl` files
+  on disk, run through the actual `emberly export` CLI path, asserting the
+  output HTML contains both and that each source file's raw bytes are
+  byte-for-byte unchanged afterward.
+- **No sandbox-specific MCP test was added.** Re-reading Tech Spec §5.6's
+  own claim ("no tool call here supplies a filesystem path or bypasses the
+  permission/sandbox model") clarified this is a *structural* fact, not a
+  behavior to exercise: `McpTool::execute` never touches a path or the
+  `Sandbox` trait at all — it only calls `ctx.authorize()` then the
+  transport — so there is nothing sandbox-specific for an MCP test to
+  cover beyond what Phase 4/5's permission tests already do. §12's phrase
+  "the exact same rule engine and sandbox confinement as any other tool
+  call" holds vacuously, by construction, not by a new integration path.
+- README: version banner and Project status bumped to v0.5.1; a new
+  Release history row (M13, all three FRs); an **MCP servers** config
+  subsection (`[mcp.servers.*]`) and a companion **Using connected MCP
+  servers** features subsection; `/attach`/`/export`/`/mcp` added to the
+  Commands table; an **Exporting a session** paragraph and `emberly export`
+  in the command-line reference; image-input split into **model-initiated**
+  (`read_image`) vs **you-initiated** (`/attach`) to keep the existing
+  paragraph honest about which is which; Documents section version pins
+  corrected from stale v0.10 (Requirements/Design) to the current v0.12/
+  v0.12/v0.14, and its phased-build-plan link repointed from a stale
+  `version-0-4-3` reference to this release's own plan.
+- Full workspace pass: `cargo build`, `cargo fmt --all -- --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, and
+  `cargo test --workspace --all-features` — all green (`emberly` binary
+  tests 62→63; `emberly-tui` unchanged at 269, no TUI changes this phase).
+  `cargo vet` was not run: Phase 4 added no new dependency (confirmed by
+  diffing `Cargo.lock` against the pre-M13 commit — zero added/removed
+  package entries; the one Phase 4 change was enabling tokio's existing
+  `io-util` feature), so there is nothing new to vet. `cargo deny check`
+  was run as an extra check beyond scope and does fail on two pre-existing
+  transitive advisories (a `rustls-webpki` CRL-parsing panic via
+  `rustls-rustcrypto`, and unmaintained `yaml-rust` via `syntect`) — both
+  confirmed present identically at the pre-M13 commit (`a87f728`), so
+  neither is a regression from this feature set; left unresolved as
+  out-of-scope for a release that added zero dependencies.
+- Requirements v0.12 / Design v0.12 / Tech Spec v0.14 remain the pins this
+  plan's header names (Phase 0) — reconfirmed current, no further bump
+  needed for M13's as-built record (G-14).
+
+**Done when:** all of the above are green — ✅. The release is **not yet
+tagged**; tagging is a release action reserved for explicit instruction.

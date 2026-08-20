@@ -88,4 +88,58 @@ mod tests {
         let html = std::fs::read_to_string(&output).expect("export file written");
         assert!(html.contains("hi"));
     }
+
+    /// End-to-end (FR-12, Design §8.11): export a real session that spawned a
+    /// real subagent, through the same real files this command reads in
+    /// production (not the in-memory `render_session_html` unit tests in
+    /// `emberly-core`), and confirm both source transcripts are read-only —
+    /// byte-for-byte unchanged on disk after export, never a mutation.
+    #[test]
+    fn export_includes_a_real_subagent_and_never_mutates_either_source_file() {
+        let dir = temp_dir("subagent");
+        let session_id = "s1";
+        let transcript = dir.join(format!("{session_id}.jsonl"));
+        let parent_lines = concat!(
+            "{\"v\":2,\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"user_message\",",
+            "\"text\":\"migrate the db\",\"original_task\":true}\n",
+            "{\"v\":2,\"ts\":\"2026-01-01T00:00:01Z\",\"type\":\"tool_result\",",
+            "\"call_id\":\"call_1\",\"ok\":true,",
+            "\"output\":\"abc-123 (db-migration): done\",\"truncated\":false}\n",
+        );
+        std::fs::write(&transcript, parent_lines).expect("parent transcript written");
+
+        let subagents_dir = dir.join(session_id).join("subagents");
+        std::fs::create_dir_all(&subagents_dir).expect("subagents dir created");
+        let subagent_transcript = subagents_dir.join("abc-123.jsonl");
+        let subagent_lines = concat!(
+            "{\"v\":2,\"ts\":\"2026-01-01T00:00:02Z\",\"type\":\"user_message\",",
+            "\"text\":\"run the pending migrations\",\"original_task\":true}\n",
+        );
+        std::fs::write(&subagent_transcript, subagent_lines).expect("subagent transcript written");
+
+        let parent_before = std::fs::read(&transcript).expect("parent readable before export");
+        let subagent_before =
+            std::fs::read(&subagent_transcript).expect("subagent readable before export");
+
+        let output = dir.join("out.html");
+        let result = export(&dir, Some(session_id), output.to_str().expect("utf8 path"));
+        assert!(result.is_ok(), "{result:?}");
+
+        let html = std::fs::read_to_string(&output).expect("export file written");
+        assert!(html.contains("migrate the db"), "{html}");
+        assert!(html.contains("subagent: db-migration"), "{html}");
+        assert!(html.contains("run the pending migrations"), "{html}");
+
+        let parent_after = std::fs::read(&transcript).expect("parent readable after export");
+        let subagent_after =
+            std::fs::read(&subagent_transcript).expect("subagent readable after export");
+        assert_eq!(
+            parent_before, parent_after,
+            "export must never mutate the source session transcript"
+        );
+        assert_eq!(
+            subagent_before, subagent_after,
+            "export must never mutate the source subagent transcript"
+        );
+    }
 }
