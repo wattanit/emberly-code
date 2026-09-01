@@ -262,6 +262,7 @@ agent's task list, changed files, and any currently alive subagents.
 | `↑` `↓` `PgUp` `PgDn` / mouse wheel | Scroll the conversation or an overlay |
 | `Ctrl-R` | Toggle the reasoning trail open/closed |
 | `Ctrl-P` | Open the command palette |
+| `Tab` | Complete a partially typed `/command` name, when unambiguous |
 | `Ctrl-L` | Force a full repaint (clears display corruption without resizing) |
 | Mouse click | Select an interactive row / affordance (never approves a permission) |
 

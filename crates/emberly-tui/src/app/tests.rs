@@ -1635,6 +1635,38 @@ fn slash_command_is_not_echoed_as_a_message() {
         .any(|i| matches!(i, ConvItem::User(_))));
 }
 
+#[test]
+fn tab_completes_an_unambiguous_slash_command() {
+    let mut a = app();
+    for c in "/qui".chars() {
+        a.on_key(KeyEvent::from(KeyCode::Char(c)));
+    }
+    a.on_key(KeyEvent::from(KeyCode::Tab));
+    // Completed to the sole match, with a trailing space ready for args.
+    assert_eq!(a.editor.text(), "/quit ");
+}
+
+#[test]
+fn tab_is_a_no_op_on_an_ambiguous_prefix() {
+    let mut a = app();
+    // "model" and "mode" both start with "mo" — Tab must not guess.
+    for c in "/mo".chars() {
+        a.on_key(KeyEvent::from(KeyCode::Char(c)));
+    }
+    a.on_key(KeyEvent::from(KeyCode::Tab));
+    assert_eq!(a.editor.text(), "/mo");
+}
+
+#[test]
+fn tab_is_a_no_op_outside_a_slash_command() {
+    let mut a = app();
+    for c in "hello".chars() {
+        a.on_key(KeyEvent::from(KeyCode::Char(c)));
+    }
+    a.on_key(KeyEvent::from(KeyCode::Tab));
+    assert_eq!(a.editor.text(), "hello");
+}
+
 fn picker(a: &mut App, rows: Vec<SessionRow>) {
     a.push_overlay(Overlay {
         title: "sessions".into(),

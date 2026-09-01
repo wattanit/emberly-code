@@ -350,6 +350,18 @@ pub fn matches(query: &str) -> Vec<usize> {
     scored.into_iter().map(|(_, i)| i).collect()
 }
 
+/// Tab-completion for a partially typed `/name`: the sole registry name that
+/// starts with `prefix` (case-sensitive — command names are lowercase), or
+/// `None` when no name matches or more than one still does. Completion only
+/// ever resolves an unambiguous prefix; ties are left for the user to keep
+/// typing or open the palette (Ctrl+P) to disambiguate (Design §3.3).
+#[must_use]
+pub fn complete(prefix: &str) -> Option<&'static str> {
+    let mut hits = COMMANDS.iter().filter(|c| c.name.starts_with(prefix));
+    let only = hits.next()?;
+    hits.next().is_none().then_some(only.name)
+}
+
 /// A small fuzzy subsequence score (case-insensitive). `None` if `query` is not
 /// a subsequence of `candidate`. Contiguous runs and early matches score
 /// higher — plenty for a handful of short command names.
@@ -398,6 +410,21 @@ mod tests {
         // A prefix ranks its command first.
         let m = matches("sid");
         assert_eq!(COMMANDS[m[0]].name, "sidebar");
+    }
+
+    #[test]
+    fn complete_resolves_an_unambiguous_prefix() {
+        assert_eq!(complete("qui"), Some("quit"));
+        // An exact match is a (trivially unambiguous) match on itself.
+        assert_eq!(complete("quit"), Some("quit"));
+    }
+
+    #[test]
+    fn complete_refuses_ambiguous_or_unknown_prefixes() {
+        // "model" and "mode" both start with "mo".
+        assert_eq!(complete("mo"), None);
+        assert_eq!(complete("zzz"), None);
+        assert_eq!(complete(""), None);
     }
 
     #[test]
