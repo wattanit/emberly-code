@@ -12,71 +12,139 @@ use anyhow::Context;
 /// A commented `config.toml` — everything works without it, so the template is
 /// mostly guidance (Requirements C-1).
 pub const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/config.toml)
-# Everything here is optional — emberly ships baked-in provider profiles:
-#   anthropic  (Anthropic Messages API)
-#   openai     (OpenAI Chat Completions)
-#   zai        (Z.ai coding plan — OpenAI-compatible)
-#   local      (http://localhost:11434/v1 — Ollama/vLLM, keyless)
-# Values here override the global config; EMBERLY_* env vars override these.
+#
+# You don't need this file. emberly ships four ready-to-use provider
+# profiles, and any one of them works as soon as it has a key. Everything
+# below is commented out — uncomment only the lines you want to change.
+# Leaving a line commented keeps emberly's built-in default; it does not
+# turn that setting off.
+#
+#   anthropic  →  Anthropic Messages API       (needs ANTHROPIC_API_KEY)
+#   openai     →  OpenAI Chat Completions API  (needs OPENAI_API_KEY)
+#   zai        →  Z.ai coding plan             (needs ZAI_API_KEY)
+#   local      →  http://localhost:11434/v1 — Ollama/vLLM (keyless)
+#
+# When a setting is given more than one place, this order decides which
+# value wins (later beats earlier): your global config at
+# ~/.config/emberly/config.toml, then this file, then any EMBERLY_*
+# environment variable, then --provider/--model on the command line.
 
-# Pick the active profile and model. Keys are never stored here — put them in
-# ~/.config/emberly/keys.toml (a flat `ref = "secret"` table) or the
-# <REF>_API_KEY env var, e.g. ZAI_API_KEY for the `zai` profile.
+# ── Choose your provider and model ────────────────────────────────────────
+# Set these to pick which profile emberly uses by default — one of the four
+# built-in ones below, or one of your own further down this file.
 # provider = "zai"
 # model    = "glm-4.6"
 
-# Adding your own provider is configuration, not code: pick an `adapter` (the
-# wire format — "anthropic" or "openai"), an endpoint, and a key *reference*.
-# [providers.myserver]
-# adapter  = "openai"
-# base_url = "https://my-endpoint.example/v1"
-# auth     = { scheme = "bearer", key = "myserver" }   # needs MYSERVER_API_KEY
+# How the model's reasoning is shown while it works. This setting applies
+# everywhere, so it lives up here rather than inside [ui] further down.
+# reasoning = "collapsed"   # collapsed | expanded | hidden
 
-# Optional per-model metadata (context window, max output, pricing → cost est.):
-# Set `effort` to enable the reasoning-effort control (/effort, low|medium|
-# high|max); it maps to the provider's native knob or is ignored if none.
+# ── Anthropic ──────────────────────────────────────────────────────────────
+# Already set up for you: adapter "anthropic", endpoint
+# https://api.anthropic.com, and a key read from your ANTHROPIC_API_KEY
+# environment variable. You only need this section to change the endpoint,
+# or to describe a model as shown below.
+# [providers.anthropic]
+# base_url = "https://api.anthropic.com"
+# auth     = { scheme = "x-api-key", key = "anthropic" }   # reads ANTHROPIC_API_KEY
+#
+# Describing a model is optional. Without it, emberly assumes a 200,000-token
+# context window and a 4,096-token output limit, and there's nothing for the
+# /effort command to control. Here's what you can tell emberly about a model:
 # [providers.anthropic.models."claude-sonnet-5"]
 # context_window = 200000
 # max_output     = 8192
-# pricing = { input = 3.0, output = 15.0 }   # USD per million tokens
-# effort  = "medium"                         # default level; enables /effort
-# effort_levels = ["low", "medium", "high"]  # optional subset (default: all)
+# pricing        = { input = 3.0, output = 15.0 }    # dollars per million tokens — check your plan for the current rate
+# effort         = "medium"                          # the default reasoning-effort level; setting this turns on /effort
+# effort_levels  = ["low", "medium", "high", "max"]   # which levels /effort offers; leave this out to offer all four
+# vision         = true                               # this model can read images you attach
+# documents      = true                               # this model can read PDFs and other documents you attach
 
-# Reasoning-trail view: how the model's thinking is shown (collapsed|expanded|
-# hidden). Default collapsed; hidden still records the trace to the transcript.
-# reasoning = "collapsed"
+# ── OpenAI ───────────────────────────────────────────────────────────────
+# Already set up for you: adapter "openai", endpoint
+# https://api.openai.com/v1, and a key read from your OPENAI_API_KEY
+# environment variable.
+# [providers.openai]
+# base_url = "https://api.openai.com/v1"
+# auth     = { scheme = "bearer", key = "openai" }   # reads OPENAI_API_KEY
+#
+# See the anthropic section above for what each of these fields means.
+# [providers.openai.models."gpt-5.1"]
+# context_window = 400000
+# max_output     = 128000
+# pricing        = { input = 1.25, output = 10.0 }   # dollars per million tokens — check your plan for the current rate
+# effort         = "medium"
+# effort_levels  = ["low", "medium", "high"]
 
-# MCP servers: external tools the model can use, reached over stdio. Each
-# discovered tool registers as mcp__<name>__<tool> and is otherwise an
-# ordinary, permission-gated tool — nothing here bypasses the rule engine.
-# A server declared here (the project tier) only ever connects in a folder
-# you've trusted; a server you want available everywhere belongs in your
-# global ~/.config/emberly/config.toml instead, where it is never trust-gated.
+# ── Z.ai ─────────────────────────────────────────────────────────────────
+# Already set up for you: adapter "openai" (Z.ai speaks the same wire
+# format), endpoint https://api.z.ai/api/paas/v4, and a key read from your
+# ZAI_API_KEY environment variable.
+# [providers.zai]
+# base_url = "https://api.z.ai/api/paas/v4"
+# auth     = { scheme = "bearer", key = "zai" }   # reads ZAI_API_KEY
+#
+# [providers.zai.models."glm-4.6"]
+# context_window = 200000
+# max_output     = 128000
+# pricing        = { input = 0.6, output = 2.2 }   # dollars per million tokens — check your plan for the current rate
+
+# ── Local (Ollama, vLLM, or anything else OpenAI-compatible) ─────────────
+# Already set up for you: adapter "openai", endpoint
+# http://localhost:11434/v1, and no key required.
+# [providers.local]
+# base_url = "http://localhost:11434/v1"
+#
+# [providers.local.models."llama3"]
+# context_window = 128000
+# max_output     = 8192
+
+# ── MCP servers ────────────────────────────────────────────────────────────
+# Connect an external tool server over stdio. Every tool it exposes shows up
+# as mcp__<name>__<tool> and asks for permission the same way any other tool
+# does — nothing here bypasses that. A server listed here only ever connects
+# in a project you've trusted; list it in your global config instead if you
+# want it available everywhere, where it is never trust-gated.
 # [mcp.servers.myserver]
-# transport = "stdio"                # only "stdio" is supported currently
+# transport = "stdio"                # the only transport this version supports
 # command   = "npx"
 # args      = ["-y", "@some/mcp-server"]
 # enabled   = true
 
+# ── Interface ──────────────────────────────────────────────────────────────
 # [ui]
-# Tool-call explanations: a dim caption under non-obvious tool calls, authored
-# by the model. On by default. Set false to defeat it — the schema property and
-# the prompt instruction are both dropped, so no tokens are spent on it.
+# Whether a tool call gets a short, dim explanation of what it's doing,
+# written by the model. On by default. Turn it off and you spend no tokens
+# on it — the prompt instruction and the schema property are both dropped.
 # tool_explanations = true
 #
-# Pointer (mouse) interaction in the rich TUI (Design §3.4): wheel scroll and
-# click-to-select, additive to the keyboard and never the sole path to anything.
-# On by default. Set false to release the mouse entirely — the terminal keeps
-# its native click-drag selection everywhere. Degraded mode (--plain/NO_COLOR/
-# TERM=dumb) never captures the mouse regardless. With capture on, hold your
-# terminal's selection modifier (usually Shift) to drag-select and copy as usual.
+# Whether the rich TUI responds to your mouse: wheel scroll and
+# click-to-select. This is always in addition to the keyboard, never a
+# replacement for it. On by default. A degraded terminal (plain mode, no
+# color, or a dumb terminal type) never uses the mouse regardless of this
+# setting.
 # mouse = true
+
+# ── Using a provider that isn't one of the four above ─────────────────────
+# Any endpoint that speaks the OpenAI or Anthropic wire format works here.
+# Give it an `adapter` matching which one it speaks, its `base_url`, and a
+# name for its key — emberly reads that key from an environment variable
+# named after it, in capitals, with _API_KEY on the end.
+# [providers.myserver]
+# adapter  = "openai"                                  # or "anthropic"
+# base_url = "https://my-endpoint.example/v1"
+# auth     = { scheme = "bearer", key = "myserver" }   # reads MYSERVER_API_KEY
+#
+# Other ways to send that key, if bearer isn't what the endpoint expects:
+#   { scheme = "x-api-key", key = "myserver" }                        # sends it in an x-api-key header, same as Anthropic
+#   { scheme = "header", header = "X-Custom-Auth", key = "myserver" } # sends it under a header name you choose
+#   { scheme = "none" }                                               # no key needed
 "#;
 
 /// A documented `permissions.toml` seeded with an example (commented out) —
 /// the rule engine is fully implemented (`emberly-sandbox::rules`); this file
 /// is empty of active rules by default so a fresh project starts conservative.
-const PERMISSIONS_TEMPLATE: &str = r#"# emberly permission rules (.agents/permissions.toml)
+pub const PERMISSIONS_TEMPLATE: &str = r#"# emberly permission rules (.agents/permissions.toml)
 # A small built-in allowlist (read-only commands like `ls`, `cat`, `git
 # status`/`diff`/`log`) already runs without prompting; everything else asks
 # until you add rules here to pre-approve matching tool actions:
@@ -89,7 +157,7 @@ const PERMISSIONS_TEMPLATE: &str = r#"# emberly permission rules (.agents/permis
 
 /// Keep transcripts (and their sidecars) out of version control; config and
 /// prompts are shareable.
-const GITIGNORE_TEMPLATE: &str =
+pub const GITIGNORE_TEMPLATE: &str =
     "# emberly: session transcripts are local, not shared\nsessions/\n";
 
 /// Materialize `.agents/` defaults for `project_root` (C-2).

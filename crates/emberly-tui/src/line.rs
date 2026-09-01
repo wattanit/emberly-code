@@ -703,6 +703,8 @@ struct LineState {
     /// `.agents/`, where `/config` and `/prompt` resolve their targets (C-5).
     agents_dir: PathBuf,
     config_template: String,
+    permissions_template: String,
+    gitignore_template: String,
     /// The current tier, so `/mode` proposes the next one.
     mode: Mode,
     skills: Vec<SkillMeta>,
@@ -817,6 +819,40 @@ fn on_slash(input: &str, state: &LineState, out: &mut impl Write) -> io::Result<
                 LineAction::Done
             }
         },
+        // `/init` never needs `$EDITOR` in either frontend — it only creates
+        // files and reports — so plain mode runs the identical scaffold as
+        // the rich TUI (C-2).
+        AppCommand::Init => {
+            match crate::edit::init_agents_dir(
+                &state.agents_dir,
+                &state.config_template,
+                &state.permissions_template,
+                &state.gitignore_template,
+            ) {
+                Ok(created) if created.is_empty() => {
+                    writeln!(out, ".agents/ is already set up")?;
+                }
+                Ok(created) => {
+                    let list = created
+                        .iter()
+                        .map(|p| {
+                            p.strip_prefix(&state.agents_dir)
+                                .unwrap_or(p)
+                                .display()
+                                .to_string()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    writeln!(
+                        out,
+                        "created in .agents/: {list} — set your provider/model in \
+                         .agents/config.toml, then /reload (or restart emberly) to apply"
+                    )?;
+                }
+                Err(e) => writeln!(out, "could not initialize .agents/: {e}")?,
+            }
+            LineAction::Done
+        }
         // Plain mode never launches $EDITOR — its stdin is the line reader — so
         // `/config` and `/prompt` seed the file, name it, and leave the edit to
         // the user, who then runs /reload (C-5, Design §7).
@@ -972,6 +1008,8 @@ pub async fn run(
     ports: FrontendPorts,
     sessions_dir: PathBuf,
     config_template: String,
+    permissions_template: String,
+    gitignore_template: String,
     reasoning_view: ReasoningView,
 ) -> io::Result<()> {
     // `.agents/` is the parent of the sessions dir (C-5).
@@ -980,6 +1018,8 @@ pub async fn run(
             .parent()
             .map_or(sessions_dir.clone(), Path::to_path_buf),
         config_template,
+        permissions_template,
+        gitignore_template,
         mode: Mode::default(),
         skills: Vec::new(),
         mem_user: Vec::new(),
@@ -1167,6 +1207,8 @@ mod tests {
         LineState {
             agents_dir: dir,
             config_template: "# template\n".into(),
+            permissions_template: "# permissions template\n".into(),
+            gitignore_template: "sessions/\n".into(),
             mode: Mode::default(),
             skills: Vec::new(),
             mem_user: Vec::new(),
@@ -1203,6 +1245,22 @@ mod tests {
         // `/modelx` is a typo, not `/model` with a mangled argument.
         let (out, _) = slash("modelx");
         assert!(out.contains("unknown command: /modelx"), "{out}");
+    }
+
+    #[test]
+    fn init_scaffolds_agents_dir_without_an_editor() {
+        let state = state();
+        let (out, action) = slash_in(&state, "init");
+        assert!(out.contains("created in .agents/"), "{out}");
+        assert!(out.contains("/reload"), "{out}");
+        assert!(matches!(action, LineAction::Done));
+        assert!(state.agents_dir.join("config.toml").exists());
+        assert!(state.agents_dir.join("permissions.toml").exists());
+        assert!(state.agents_dir.join(".gitignore").exists());
+
+        // Everything now present: a second run says so and creates nothing.
+        let (out, _) = slash_in(&state, "init");
+        assert!(out.contains("already set up"), "{out}");
     }
 
     #[test]

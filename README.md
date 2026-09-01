@@ -127,11 +127,12 @@ this order, later winning over earlier:
 4. `EMBERLY_*` environment variables
 5. `--provider` / `--model` command-line flags
 
-Run **`emberly init`** to scaffold `.agents/` with a commented `config.toml`,
-the default prompts (editable, under `.agents/prompts/`), a `permissions.toml`
-template, and a `.gitignore` that keeps session transcripts out of version
-control. Existing files are never overwritten. Run **`emberly config show`** to
-see the resolved settings and where each value came from.
+Run **`emberly init`** (from the shell) or **`/init`** (from inside a running
+session) to scaffold `.agents/` with a commented `config.toml`, the default
+prompts (editable, under `.agents/prompts/`), a `permissions.toml` template,
+and a `.gitignore` that keeps session transcripts out of version control.
+Existing files are never overwritten. Run **`emberly config show`** to see
+the resolved settings and where each value came from.
 
 #### Providers, models, and keys
 
@@ -262,6 +263,7 @@ agent's task list, changed files, and any currently alive subagents.
 | `↑` `↓` `PgUp` `PgDn` / mouse wheel | Scroll the conversation or an overlay |
 | `Ctrl-R` | Toggle the reasoning trail open/closed |
 | `Ctrl-P` | Open the command palette |
+| `Tab` | Complete a partially typed `/command` name, when unambiguous |
 | `Ctrl-L` | Force a full repaint (clears display corruption without resizing) |
 | Mouse click | Select an interactive row / affordance (never approves a permission) |
 
@@ -282,6 +284,7 @@ agent's task list, changed files, and any currently alive subagents.
 | `/files` | | List files changed this session |
 | `/sidebar` | `Ctrl-B` | Toggle the sidebar |
 | `/cancel` | | Cancel the in-flight turn |
+| `/init` | | Create `.agents/` (config, prompts, permissions) if missing |
 | `/config` | | Edit `.agents/config.toml` in `$EDITOR` |
 | `/prompt` | | Edit a prompt file (`/prompt system\|compact`) |
 | `/reload` | | Re-read config & prompts from disk and apply them |
@@ -455,6 +458,7 @@ emberly trust list          List trusted folders
 emberly trust revoke <path> Revoke trust for a folder
 emberly clean [<id>]        Reclaim scratch-space disk usage (all, or one session)
 emberly --version           Print the version
+emberly --help, -h          Show this help
 
   --provider <name>         Select the active provider profile for this run
   --model <name>            Override the model for this run
@@ -462,7 +466,8 @@ emberly --version           Print the version
 
 Plain mode is selected automatically when output isn't a terminal or
 `NO_COLOR`/`TERM=dumb` are set — so Emberly degrades gracefully over pipes and
-minimal terminals.
+minimal terminals. Any subcommand with its own options — `config`, `trust`,
+`export`, `clean` — also takes `--help`/`-h` for more on just that one.
 
 ---
 
