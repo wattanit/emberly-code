@@ -155,12 +155,22 @@ impl ToolOutcome {
         self
     }
 
-    /// A failure produced because the user denied the action (Requirements
-    /// §6.6). Returned to the model as data so it can route around it.
+    /// A failure produced because the user (or the rule engine on their
+    /// behalf) denied the action (Requirements §6.6). Returned to the model
+    /// as data, not a crash — but this project's sandbox is deliberately
+    /// strict, and a denial is a decision, not an obstacle. The nudge
+    /// against retrying or working around it is the general form of the
+    /// same idea as `chained_git_hint` in `bash.rs`: point the model at the
+    /// harness's actual intent instead of letting it spend the turn hunting
+    /// for a way through.
     #[must_use]
     pub fn denied(what: &str) -> Self {
         Self::failure(
-            format!("The user denied permission to {what}."),
+            format!(
+                "The user denied permission to {what}. Don't keep trying to work \
+                 around this — tell the user what you needed to do and why, and \
+                 ask them to do it themselves if it's still necessary."
+            ),
             "denied by user",
         )
     }
@@ -223,5 +233,21 @@ mod tests {
         assert!(!outcome.ok);
         assert!(outcome.content.contains("read_file"));
         assert!(outcome.content.contains("Call `read_file` again"));
+    }
+
+    #[test]
+    fn denied_names_what_was_refused_and_points_at_the_user_not_a_workaround() {
+        // A bare "permission denied" invites the model to spend the turn
+        // hunting for another way in; this must name what was refused and
+        // steer it toward asking the user instead of retrying or routing
+        // around the block (the general form of `chained_git_hint`).
+        let outcome = ToolOutcome::denied("write config.toml");
+        assert!(!outcome.ok);
+        assert_eq!(outcome.summary, "denied by user");
+        assert!(outcome.content.contains("write config.toml"));
+        assert!(outcome
+            .content
+            .contains("Don't keep trying to work around this"));
+        assert!(outcome.content.contains("ask them to do it themselves"));
     }
 }
