@@ -1,6 +1,6 @@
 # Emberly Code
 
-> **Currently on v0.5.1** — feature-complete for the milestone, install from source.
+> **Currently on v0.5.2** — feature-complete for the milestone, install from source.
 
 **An AI coding agent for your terminal — provider-agnostic, fully auditable, and
 built in pure Rust.**
@@ -250,7 +250,9 @@ plain mode).
 
 The screen is a conversation timeline — your messages and the agent's, tool
 calls, and diffs — with a sidebar showing the model, context usage, cost, the
-agent's task list, changed files, and any currently alive subagents.
+agent's task list, changed files, and any currently alive subagents. A fresh
+session opens with a short pointer to the essentials (the command palette,
+`/init`, `/model`, `/compact`, `/help`) instead of a blank pane.
 
 **Input & keybindings**
 
@@ -267,7 +269,9 @@ agent's task list, changed files, and any currently alive subagents.
 | `Ctrl-L` | Force a full repaint (clears display corruption without resizing) |
 | Mouse click | Select an interactive row / affordance (never approves a permission) |
 
-**Commands** — open the palette with **`Ctrl-P`**, or type any `/name`:
+**Commands** — open the palette with **`Ctrl-P`**, or type any `/name`. It's
+colored live as you type: recognized once it matches a real command, dim
+while it's still a plausible prefix, and flagged if nothing could ever match:
 
 | Command | Key | What it does |
 |---|---|---|
@@ -475,10 +479,10 @@ minimal terminals. Any subcommand with its own options — `config`, `trust`,
 
 ### Project status
 
-Feature-complete for the **v0.5.1** milestone, installable from source.
+Feature-complete for the **v0.5.2** milestone, installable from source.
 The interactive TUI, live providers, session persistence, the permission rule
 engine, auto-accept modes, and OS confinement (Linux Landlock, macOS Seatbelt)
-all work today, alongside the full 0.2–0.5.1 stack described below. **Not yet
+all work today, alongside the full 0.2–0.5.2 stack described below. **Not yet
 shipped:** prebuilt binaries and Windows support (no Landlock/Seatbelt
 equivalent).
 
@@ -498,8 +502,9 @@ as it grows. _(Affectionate, not official.)_
 | **v0.4.3** | M11 | 🌲🔥 _Wildfire_ | Three externally-reported bug fixes (a stalled SSE stream could hang forever; an interrupted turn could commit a message no provider adapter accepts; the token estimate badly undercounted Thai/CJK text), plus session scratch space — a disposable per-session working directory (`scratch_write`, `emberly clean`). |
 | **v0.4.4** | — | 🌲🔥 _Wildfire_ | Correctness and internals, no new features. Three defects in the permission rule engine (a saved `always allow` could write a `permissions.toml` that no longer parsed, silently dropping every project rule including `deny`s; a `tool = "*"` rule could override a named-tool `deny`; `match = "*"` matched nothing instead of everything), three in the provider streaming seam, and a slow first token no longer trips the idle timeout (#15). Internally: the `Engine` and `App` god objects split by topic and their flat field lists grouped, one generic gate with a single fail-closed rule, and the unused outside-root grant path removed from the sandbox (Tech Spec v0.12). |
 | **v0.4.5** | — | 🌲🔥 _Wildfire_ | Another correctness pass. A session switch left the derived view cache stale, so returning to a session reported "0 in / 0 out" at $0.00 despite full history (#18). A tool call whose backend streamed no usable arguments (empty, the literal text `null`, or garbage) surfaced as a bare `invalid type: null` and could stall a session with no explanation — arguments now default to `{}`, and the model is told plainly which call was bad and to retry. Provider request failures and retries are now written to the session transcript instead of only flashing in the UI. Added: `--version` reports a build timestamp; the completion stream's first-chunk/idle timeouts are configurable (`[stream]`, closing the #15 config deferral) for slower local/cloud inference backends; `Ctrl-L` forces a full repaint as an interim escape hatch for display corruption reported on independent terminals (Ghostty, Termius, Termux), cause unconfirmed. |
-| **v0.5.0** | M12 | 🌲🔥 _Wildfire_ | Multi-agent delegation — the primary agent can spawn, message, list, and end subagents, each a real nested engine running under the exact same permission, sandbox, and workspace-trust posture as the primary agent, with its own selectable provider profile and a tool set that's never a superset of the primary agent's own. Concurrent by default, bounded to one level of depth (no recursive spawning), a configurable concurrency ceiling and idle reap, cost roll-up into the session total, and a per-agent inspector (sidebar Agents section, `/agents` command, permission-prompt provenance line) so no subagent is a silent background process. |
-| **v0.5.1** | M13 | 🌲🔥 _Wildfire_ | Three independent slices: **MCP client support** (`[mcp.servers.*]`, `/mcp`, a first-party stdio JSON-RPC client — no vendor SDK — with discovered tools permission-gated and provenance-labeled exactly like a built-in tool's); **user-attached images** (`/attach <path>`, reusing the existing vision content-block path `read_image` already produces); and **session export** (`/export <path>` / `emberly export`, a read-only, self-contained HTML render of a session and any subagent it spawned). |
+| **v0.5.0** | M12 | 🔥 _Bonfire_ | Multi-agent delegation — the primary agent can spawn, message, list, and end subagents, each a real nested engine running under the exact same permission, sandbox, and workspace-trust posture as the primary agent, with its own selectable provider profile and a tool set that's never a superset of the primary agent's own. Concurrent by default, bounded to one level of depth (no recursive spawning), a configurable concurrency ceiling and idle reap, cost roll-up into the session total, and a per-agent inspector (sidebar Agents section, `/agents` command, permission-prompt provenance line) so no subagent is a silent background process. |
+| **v0.5.1** | M13 | 🔥 _Bonfire_ | Three independent slices: **MCP client support** (`[mcp.servers.*]`, `/mcp`, a first-party stdio JSON-RPC client — no vendor SDK — with discovered tools permission-gated and provenance-labeled exactly like a built-in tool's); **user-attached images** (`/attach <path>`, reusing the existing vision content-block path `read_image` already produces); and **session export** (`/export <path>` / `emberly export`, a read-only, self-contained HTML render of a session and any subagent it spawned). |
+| **v0.5.2** | — | 🔥 _Bonfire_ | A usability pass on the terminal and the CLI, no new capability. The chat and input panels keep only their top/bottom rule now, so a terminal-selected transcript copies cleanly instead of picking up border glyphs; a typed `/command` is colored live as you type it (recognized, still-ambiguous, or unresolvable) and Tab-completes when exactly one command matches; a fresh session opens with a short orientation instead of a blank pane; `/init` brings the CLI's `.agents/` scaffolding in-session; the `.agents/config.toml` template is now a clearly divided, fully-commented section per built-in provider instead of one flat block; a denied tool call now tells the model to ask you rather than spend the turn hunting for a workaround; and `emberly --help`/`-h`, plus per-subcommand help (`init`, `sessions`, `resume`, `config`, `trust`, `clean`, `export`), finally document the CLI's own surface. |
 
 Prior as-built plans live under `docs/version-0-1/`, `docs/version-0-2/`,
 `docs/version-0-3/`, `docs/version-0-4/`, `docs/version-0-4-1/`,
@@ -509,8 +514,10 @@ Prior as-built plans live under `docs/version-0-1/`, `docs/version-0-2/`,
 ### Architecture
 
 Cargo workspace, six crates, strictly one-way dependency flow
-(`emberly` → {`tui`, `core`}; `tui` → `core`; `core` → {`providers`, `tools`,
-`sandbox`}):
+(`emberly` → {`tui`, `core`, `providers`, `tools`, `sandbox`} — the
+composition root wires the live providers/tools and drives the self-exec
+sandbox shim, so it depends on all five directly; `tui` → `core` only;
+`core` → {`providers`, `tools`, `sandbox`}):
 
 | Crate | Responsibility |
 |---|---|
@@ -555,7 +562,7 @@ Release targets (v1): `x86_64-unknown-linux-musl`,
 - [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.12)
 - [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.12)
 - [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.14)
-- [`docs/version-0-5-1/IMPLEMENTATION_PLAN.md`](docs/version-0-5-1/IMPLEMENTATION_PLAN.md) — this release's phased build plan
+- [`docs/version-0-5-1/IMPLEMENTATION_PLAN.md`](docs/version-0-5-1/IMPLEMENTATION_PLAN.md) — v0.5.1's phased build plan (v0.5.2 was a smaller, informal polish pass with no foundation-document revision)
 
 ## License
 
