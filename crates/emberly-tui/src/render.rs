@@ -728,9 +728,11 @@ fn render_conversation(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
     let theme = &app.theme;
 
     // No pane title — the wordmark lives in the sidebar. The conversation is a
-    // plain bordered transcript of both sides, top to bottom.
+    // plain bordered transcript of both sides, top to bottom. Only the top and
+    // bottom edges are drawn (no left/right verticals) so a terminal-selected
+    // copy of the transcript doesn't pick up border glyphs on every line.
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(theme.chrome());
     let inner = block.inner(area);
     let width = usize::from(inner.width);
@@ -1376,8 +1378,10 @@ fn context_style(theme: &Theme, pct: u8) -> ratatui::style::Style {
 
 fn render_input(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
+    // Top/bottom only (see render_conversation) so pasted terminal selections
+    // stay clean instead of picking up left/right border glyphs.
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(theme.chrome());
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -2779,6 +2783,40 @@ mod tests {
         let screen = draw(&app, 120, 20);
         assert!(screen.contains("ที่"), "stacked Thai cluster rendered");
         assert!(screen.contains("สวัสดี"), "Thai word rendered");
+    }
+
+    #[test]
+    fn conversation_and_input_panels_have_no_side_borders() {
+        // Only the top/bottom edges are drawn on the chat and input panels, so
+        // a terminal-selected transcript line doesn't sweep up border glyphs
+        // on copy-paste (unlike the sidebar's own left divider, which is a
+        // different, still-full-height element).
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.apply_event(UiEvent::AssistantDelta {
+            text: "hello world".into(),
+        });
+        app.apply_event(UiEvent::AssistantDone);
+        // Narrower than the sidebar's collapse threshold, so the whole row
+        // width belongs to the chat/input column.
+        let screen = draw(&app, 80, 20);
+        let content_row = screen
+            .lines()
+            .find(|r| r.contains("hello world"))
+            .expect("assistant text rendered");
+        assert!(
+            !content_row.starts_with('│'),
+            "no left border on content row: {content_row:?}"
+        );
+        assert!(
+            !content_row.trim_end().ends_with('│'),
+            "no right border on content row: {content_row:?}"
+        );
     }
 
     #[test]
