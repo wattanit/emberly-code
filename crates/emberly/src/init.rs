@@ -155,10 +155,10 @@ pub const PERMISSIONS_TEMPLATE: &str = r#"# emberly permission rules (.agents/pe
 #   action = "allow"      # allow | ask | deny
 "#;
 
-/// Keep transcripts (and their sidecars) out of version control; config and
-/// prompts are shareable.
+/// Keep transcripts (and their sidecars) and scratch files out of version
+/// control; config and prompts are shareable.
 pub const GITIGNORE_TEMPLATE: &str =
-    "# emberly: session transcripts are local, not shared\nsessions/\n";
+    "# emberly: session transcripts and scratch files are local, not shared\nsessions/\nscratch/\n";
 
 /// Materialize `.agents/` defaults for `project_root` (C-2).
 pub fn init(project_root: &Path) -> anyhow::Result<()> {
@@ -243,6 +243,12 @@ mod tests {
         // The materialized system prompt is the baked-in default.
         let system = std::fs::read_to_string(root.join(".agents/prompts/system.md")).unwrap();
         assert!(system.contains("Emberly Code"));
+        // Both local-only directories are excluded — a session's scratch
+        // files are as disposable as its transcript and must never get
+        // staged into the project by an unqualified `git add .agents/`.
+        let gitignore = std::fs::read_to_string(root.join(".agents/.gitignore")).unwrap();
+        assert!(gitignore.contains("sessions/"));
+        assert!(gitignore.contains("scratch/"));
     }
 
     #[test]
