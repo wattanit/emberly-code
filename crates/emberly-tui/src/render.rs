@@ -20,6 +20,7 @@ use ratatui::Frame;
 use crate::app::{
     App, ChoiceRow, ConvItem, Overlay, OverlayContent, SessionRow, WizardStep, WIZARD_ADAPTERS,
 };
+use crate::commands;
 use crate::hit::{ClickTarget, HitMap, PermissionChoice};
 use crate::text;
 use crate::theme::Theme;
@@ -1398,12 +1399,18 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
     let top = cursor_row.saturating_sub(rows.saturating_sub(1));
     let h_scroll = cursor_col.saturating_sub(text_width.saturating_sub(1));
 
+    // A leading '/' on the first line is a slash command (Design §3.3):
+    // colored live so it's obvious whether what's typed will resolve, rather
+    // than only finding out after Enter.
+    let slash_token = lines
+        .first()
+        .and_then(|first| slash_token_style(theme, first));
+
     for (screen_row, line_idx) in (top..top + rows).enumerate() {
         let Some(line) = lines.get(line_idx) else {
             break;
         };
         let start_col = if line_idx == cursor_row { h_scroll } else { 0 };
-        let visible = text::slice_cols(line, start_col, text_width);
         let y = inner.y + u16::try_from(screen_row).unwrap_or(0);
         let gutter = if line_idx == 0 {
             Span::styled(format!("{} ", markers::USER_PROMPT), theme.accent())
@@ -1416,13 +1423,43 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
             width: inner.width,
             height: 1,
         };
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                gutter,
-                Span::styled(visible, theme.primary()),
-            ])),
-            row_area,
-        );
+        let text_spans = if line_idx == 0 {
+            if let Some((token_end_byte, style)) = slash_token {
+                let token_end_col = text::col_at(line, token_end_byte);
+                let win_end = start_col + text_width;
+                let cmd_end = token_end_col.min(win_end);
+                let cmd_width = cmd_end.saturating_sub(start_col);
+                let rest_start = token_end_col.max(start_col);
+                let rest_width = win_end.saturating_sub(rest_start);
+                let mut spans = Vec::with_capacity(2);
+                if cmd_width > 0 {
+                    spans.push(Span::styled(
+                        text::slice_cols(line, start_col, cmd_width),
+                        style,
+                    ));
+                }
+                if rest_width > 0 {
+                    spans.push(Span::styled(
+                        text::slice_cols(line, rest_start, rest_width),
+                        theme.primary(),
+                    ));
+                }
+                spans
+            } else {
+                vec![Span::styled(
+                    text::slice_cols(line, start_col, text_width),
+                    theme.primary(),
+                )]
+            }
+        } else {
+            vec![Span::styled(
+                text::slice_cols(line, start_col, text_width),
+                theme.primary(),
+            )]
+        };
+        let mut spans = vec![gutter];
+        spans.extend(text_spans);
+        f.render_widget(Paragraph::new(Line::from(spans)), row_area);
     }
 
     if cursor_row >= top && cursor_row < top + rows {
@@ -1431,6 +1468,28 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
         let x = inner.x + GUTTER + u16::try_from(col_in_view).unwrap_or(0);
         f.set_cursor_position((x.min(inner.x + inner.width - 1), inner.y + screen_row));
     }
+}
+
+/// If `line` opens with `/`, the byte length of its `/name` token (leading
+/// slash included) and the style to paint it — resolved against the same
+/// registry [`commands::parse_slash`] uses on submit, so what lights up green
+/// here is exactly what runs on Enter. `None` when the line isn't a command.
+fn slash_token_style(theme: &Theme, line: &str) -> Option<(usize, ratatui::style::Style)> {
+    let rest = line.strip_prefix('/')?;
+    let name_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let name = &rest[..name_end];
+    let token_end_byte = 1 + name_end;
+    let style = if name.is_empty() {
+        // Just the slash so far — no verdict yet.
+        theme.dim_accent()
+    } else if commands::by_name(name).is_some() {
+        theme.success()
+    } else if commands::matches(name).is_empty() {
+        theme.warning()
+    } else {
+        theme.dim_accent()
+    };
+    Some((token_end_byte, style))
 }
 
 fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
@@ -2201,6 +2260,16 @@ mod tests {
             .join("\n")
     }
 
+    /// Render a full frame to an off-screen buffer, for tests that need a
+    /// cell's actual style (e.g. slash-command colouring) rather than just
+    /// its symbol.
+    fn draw_buf(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("backend");
+        let mut hit = HitMap::new();
+        term.draw(|f| frame(f, app, &mut hit)).expect("draw");
+        term.backend().buffer().clone()
+    }
+
     /// Render a full frame and return the click hit-map it built, so tests can
     /// assert which screen positions resolve to which targets (Design §3.4).
     fn hit_map_of(app: &App, w: u16, h: u16) -> HitMap {
@@ -2816,6 +2885,89 @@ mod tests {
         assert!(
             !content_row.trim_end().ends_with('│'),
             "no right border on content row: {content_row:?}"
+        );
+    }
+
+    #[test]
+    fn slash_token_style_matches_registry_recognition() {
+        let theme = Theme::rich();
+        // No leading slash — not a command line at all.
+        assert!(slash_token_style(&theme, "hello world").is_none());
+        // Bare slash — no verdict yet.
+        let (len, style) = slash_token_style(&theme, "/").expect("bare slash");
+        assert_eq!(len, 1);
+        assert_eq!(style, theme.dim_accent());
+        // A known command name (and its byte length up to the first space).
+        let (len, style) = slash_token_style(&theme, "/quit now").expect("quit");
+        assert_eq!(len, "/quit".len());
+        assert_eq!(style, theme.success());
+        // A prefix of a real command that hasn't fully resolved yet.
+        let (_, style) = slash_token_style(&theme, "/qu").expect("qu prefix");
+        assert_eq!(style, theme.dim_accent());
+        // Nothing in the registry could ever match this.
+        let (_, style) = slash_token_style(&theme, "/zzz").expect("zzz");
+        assert_eq!(style, theme.warning());
+    }
+
+    #[test]
+    fn slash_command_input_is_colored_live_by_recognition() {
+        // The input box colors the `/name` token as you type it — matching
+        // registry recognition, not waiting for Enter (Design §3.3).
+        let mut recognized = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        recognized.editor.insert_str("/quit");
+        let theme = recognized.theme;
+        let screen = draw(&recognized, 80, 20);
+        let row = screen
+            .lines()
+            .position(|r| r.contains("/quit"))
+            .expect("command line rendered");
+        let buf = draw_buf(&recognized, 80, 20);
+        let col = screen
+            .lines()
+            .nth(row)
+            .and_then(|line| line.find('/'))
+            .expect("slash present");
+        let cell = buf
+            .cell((u16::try_from(col).unwrap(), u16::try_from(row).unwrap()))
+            .expect("cell in bounds");
+        assert_eq!(
+            cell.style().fg,
+            theme.success().fg,
+            "known command → success"
+        );
+
+        let mut unknown = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        unknown.editor.insert_str("/zzz");
+        let screen = draw(&unknown, 80, 20);
+        let row = screen
+            .lines()
+            .position(|r| r.contains("/zzz"))
+            .expect("command line rendered");
+        let buf = draw_buf(&unknown, 80, 20);
+        let col = screen
+            .lines()
+            .nth(row)
+            .and_then(|line| line.find('/'))
+            .expect("slash present");
+        let cell = buf
+            .cell((u16::try_from(col).unwrap(), u16::try_from(row).unwrap()))
+            .expect("cell in bounds");
+        assert_eq!(
+            cell.style().fg,
+            theme.warning().fg,
+            "unresolvable → warning"
         );
     }
 
