@@ -648,6 +648,13 @@ pub struct App {
     /// has none yet — same content `emberly init` materializes (C-5, single
     /// source in the binary).
     config_template: String,
+    /// The `.agents/permissions.toml` and `.agents/.gitignore` starters
+    /// `/init` writes when missing — same content `emberly init` materializes
+    /// (C-2, single source in the binary, threaded down for the same reason
+    /// as `config_template`: `emberly-tui` cannot depend on the `emberly`
+    /// binary crate).
+    permissions_template: String,
+    gitignore_template: String,
     /// The active reasoning-effort level, for the sidebar (P-9). `None` when the
     /// model has no effort control (the line is hidden). Set by `EffortChanged`.
     pub(crate) effort: Option<Effort>,
@@ -735,6 +742,8 @@ impl App {
         sessions_dir: PathBuf,
         profiles: Vec<String>,
         config_template: String,
+        permissions_template: String,
+        gitignore_template: String,
         provider_writer: Arc<dyn ProviderProfileWriter>,
     ) -> Self {
         Self {
@@ -785,6 +794,8 @@ impl App {
             sessions_dir,
             profiles,
             config_template,
+            permissions_template,
+            gitignore_template,
             effort: None,
             effort_levels: Vec::new(),
             editor: LineEditor::new(),

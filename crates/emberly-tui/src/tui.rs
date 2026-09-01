@@ -37,6 +37,8 @@ pub async fn run(
     sessions_dir: PathBuf,
     profiles: Vec<String>,
     config_template: String,
+    permissions_template: String,
+    gitignore_template: String,
     reasoning_view: crate::app::ReasoningView,
     mouse: bool,
     provider_writer: Arc<dyn emberly_core::ProviderProfileWriter>,
@@ -52,6 +54,8 @@ pub async fn run(
         sessions_dir,
         profiles,
         config_template,
+        permissions_template,
+        gitignore_template,
         provider_writer,
     );
     // Set the trail view before seeding history so resumed reasoning items

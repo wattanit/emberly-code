@@ -127,11 +127,12 @@ this order, later winning over earlier:
 4. `EMBERLY_*` environment variables
 5. `--provider` / `--model` command-line flags
 
-Run **`emberly init`** to scaffold `.agents/` with a commented `config.toml`,
-the default prompts (editable, under `.agents/prompts/`), a `permissions.toml`
-template, and a `.gitignore` that keeps session transcripts out of version
-control. Existing files are never overwritten. Run **`emberly config show`** to
-see the resolved settings and where each value came from.
+Run **`emberly init`** (from the shell) or **`/init`** (from inside a running
+session) to scaffold `.agents/` with a commented `config.toml`, the default
+prompts (editable, under `.agents/prompts/`), a `permissions.toml` template,
+and a `.gitignore` that keeps session transcripts out of version control.
+Existing files are never overwritten. Run **`emberly config show`** to see
+the resolved settings and where each value came from.
 
 #### Providers, models, and keys
 
@@ -283,6 +284,7 @@ agent's task list, changed files, and any currently alive subagents.
 | `/files` | | List files changed this session |
 | `/sidebar` | `Ctrl-B` | Toggle the sidebar |
 | `/cancel` | | Cancel the in-flight turn |
+| `/init` | | Create `.agents/` (config, prompts, permissions) if missing |
 | `/config` | | Edit `.agents/config.toml` in `$EDITOR` |
 | `/prompt` | | Edit a prompt file (`/prompt system\|compact`) |
 | `/reload` | | Re-read config & prompts from disk and apply them |

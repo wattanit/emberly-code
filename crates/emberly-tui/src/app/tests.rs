@@ -9,6 +9,8 @@ fn app() -> App {
         std::env::temp_dir(),
         vec!["anthropic".into(), "openai".into(), "zai".into()],
         "# test config\n".to_string(),
+        String::new(),
+        String::new(),
         test_provider_writer(),
     )
 }
@@ -81,6 +83,8 @@ fn model_picker_offers_add_provider_even_with_no_profiles() {
         std::env::temp_dir(),
         Vec::new(),
         String::new(),
+        String::new(),
+        String::new(),
         test_provider_writer(),
     );
     a.open_model_picker();
@@ -108,6 +112,8 @@ fn provider_wizard_happy_path_writes_and_fires_reload() {
         SessionInfo::default(),
         std::env::temp_dir(),
         vec!["anthropic".into()],
+        String::new(),
+        String::new(),
         String::new(),
         test_provider_writer(),
     );
@@ -143,6 +149,8 @@ fn provider_wizard_rejects_empty_name_and_stays_on_step() {
         std::env::temp_dir(),
         Vec::new(),
         String::new(),
+        String::new(),
+        String::new(),
         test_provider_writer(),
     );
     a.open_model_picker();
@@ -161,6 +169,8 @@ fn provider_wizard_esc_steps_back_without_losing_the_value() {
         SessionInfo::default(),
         std::env::temp_dir(),
         Vec::new(),
+        String::new(),
+        String::new(),
         String::new(),
         test_provider_writer(),
     );
@@ -186,6 +196,8 @@ fn provider_wizard_rejects_a_name_already_in_use() {
         SessionInfo::default(),
         std::env::temp_dir(),
         vec!["anthropic".into()],
+        String::new(),
+        String::new(),
         String::new(),
         test_provider_writer(),
     );
@@ -354,6 +366,8 @@ fn slash_config_seeds_then_edits_without_clobbering() {
         sessions,
         Vec::new(),
         "# seeded config\n".to_string(),
+        String::new(),
+        String::new(),
         test_provider_writer(),
     );
 
@@ -379,6 +393,8 @@ fn slash_prompt_seeds_from_default_and_rejects_unknown() {
         sessions,
         Vec::new(),
         String::new(),
+        String::new(),
+        String::new(),
         test_provider_writer(),
     );
 
@@ -398,6 +414,49 @@ fn slash_prompt_seeds_from_default_and_rejects_unknown() {
 }
 
 #[test]
+fn slash_init_scaffolds_agents_dir_then_says_already_set_up() {
+    let root = std::env::temp_dir().join(format!("emberly-app-init-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let sessions = root.join(".agents").join("sessions");
+    std::fs::create_dir_all(&sessions).expect("mkdir");
+    let mut a = App::new(
+        SessionInfo::default(),
+        sessions,
+        Vec::new(),
+        "# config template\n".to_string(),
+        "# permissions template\n".to_string(),
+        "sessions/\n".to_string(),
+        test_provider_writer(),
+    );
+
+    let agents = root.join(".agents");
+    assert_eq!(a.run_slash("init"), Action::None);
+    assert!(agents.join("config.toml").exists());
+    assert!(agents.join("prompts/system.md").exists());
+    assert!(agents.join("prompts/compact.md").exists());
+    assert!(agents.join("permissions.toml").exists());
+    assert!(agents.join(".gitignore").exists());
+    assert!(a.timeline.items.iter().any(
+        |i| matches!(i, ConvItem::Notice(n) if n.contains("created in .agents/") && n.contains("/reload"))
+    ));
+
+    // Running it again with everything already present says so, and touches
+    // nothing (never clobbers, C-2).
+    a.timeline.items.clear();
+    std::fs::write(agents.join("config.toml"), "user edits").expect("write");
+    assert_eq!(a.run_slash("init"), Action::None);
+    assert_eq!(
+        std::fs::read_to_string(agents.join("config.toml")).expect("read"),
+        "user edits"
+    );
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("already set up"))));
+}
+
+#[test]
 fn edit_provenance_distinguishes_new_override_from_existing() {
     let root = std::env::temp_dir().join(format!("emberly-prov-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -408,6 +467,8 @@ fn edit_provenance_distinguishes_new_override_from_existing() {
         sessions,
         Vec::new(),
         "# t\n".to_string(),
+        String::new(),
+        String::new(),
         test_provider_writer(),
     );
 

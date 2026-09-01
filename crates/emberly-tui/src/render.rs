@@ -2286,6 +2286,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.palette = Some(crate::app::PaletteState::default());
@@ -2307,6 +2309,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2341,6 +2345,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2382,6 +2388,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.apply_event(emberly_core::UiEvent::ReasoningDelta { text: "why".into() });
@@ -2398,6 +2406,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2436,6 +2446,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         let hit = hit_map_of(&app, 120, 40);
@@ -2457,6 +2469,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2500,6 +2514,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         let hit = hit_map_of(&app, 120, 40);
@@ -2515,6 +2531,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2536,6 +2554,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.memory.user = 1;
@@ -2556,6 +2576,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2589,6 +2611,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         // A body with content below the fold, so the "more below" notice shows.
@@ -2620,6 +2644,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         pending(&mut app, false, "rm -rf build");
@@ -2638,6 +2664,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2658,6 +2686,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2688,6 +2718,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
@@ -2706,6 +2738,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2739,6 +2773,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.apply_event(UiEvent::ToolStarted {
@@ -2765,6 +2801,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.apply_event(UiEvent::ToolStarted {
@@ -2786,6 +2824,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2813,6 +2853,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2843,6 +2885,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.apply_event(UiEvent::AssistantDelta {
@@ -2864,6 +2908,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2918,6 +2964,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         recognized.editor.insert_str("/quit");
@@ -2946,6 +2994,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2978,6 +3028,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         // Sidebar-only chrome present when wide, absent when narrow.
@@ -2991,6 +3043,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -3019,6 +3073,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.apply_event(UiEvent::ContextUsage {
@@ -3045,6 +3101,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         pending(
@@ -3065,6 +3123,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -3122,6 +3182,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.apply_event(emberly_core::UiEvent::AssistantDelta {
@@ -3142,6 +3204,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -3173,6 +3237,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );

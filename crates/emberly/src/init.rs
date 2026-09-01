@@ -76,7 +76,7 @@ pub const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/co
 /// A documented `permissions.toml` seeded with an example (commented out) —
 /// the rule engine is fully implemented (`emberly-sandbox::rules`); this file
 /// is empty of active rules by default so a fresh project starts conservative.
-const PERMISSIONS_TEMPLATE: &str = r#"# emberly permission rules (.agents/permissions.toml)
+pub const PERMISSIONS_TEMPLATE: &str = r#"# emberly permission rules (.agents/permissions.toml)
 # A small built-in allowlist (read-only commands like `ls`, `cat`, `git
 # status`/`diff`/`log`) already runs without prompting; everything else asks
 # until you add rules here to pre-approve matching tool actions:
@@ -89,7 +89,7 @@ const PERMISSIONS_TEMPLATE: &str = r#"# emberly permission rules (.agents/permis
 
 /// Keep transcripts (and their sidecars) out of version control; config and
 /// prompts are shareable.
-const GITIGNORE_TEMPLATE: &str =
+pub const GITIGNORE_TEMPLATE: &str =
     "# emberly: session transcripts are local, not shared\nsessions/\n";
 
 /// Materialize `.agents/` defaults for `project_root` (C-2).

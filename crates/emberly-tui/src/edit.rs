@@ -51,6 +51,56 @@ pub fn prompt_target(agents_dir: &Path, name: &str) -> Result<(PathBuf, bool), S
     Ok((path, existed))
 }
 
+/// Resolve `.agents/permissions.toml` under `agents_dir`, seeding it from
+/// `template` when absent (C-1/C-2). Mirrors [`config_target`].
+pub fn permissions_target(agents_dir: &Path, template: &str) -> io::Result<(PathBuf, bool)> {
+    let path = agents_dir.join("permissions.toml");
+    let existed = path.exists();
+    if !existed {
+        write_new(&path, template)?;
+    }
+    Ok((path, existed))
+}
+
+/// Resolve `.agents/.gitignore` under `agents_dir`, seeding it from
+/// `template` when absent (C-1/C-2). Mirrors [`config_target`].
+pub fn gitignore_target(agents_dir: &Path, template: &str) -> io::Result<(PathBuf, bool)> {
+    let path = agents_dir.join(".gitignore");
+    let existed = path.exists();
+    if !existed {
+        write_new(&path, template)?;
+    }
+    Ok((path, existed))
+}
+
+/// `/init` (C-2): materialize the full `.agents/` scaffold — config, both
+/// prompts, permissions, and `.gitignore` — creating only what's missing.
+/// Mirrors the CLI `emberly init` file set exactly; the two commands share no
+/// code (`emberly-tui` cannot depend on the `emberly` binary crate), so keep
+/// them in lockstep by hand if the tree ever changes. Returns the paths
+/// actually created — empty when everything already existed.
+pub fn init_agents_dir(
+    agents_dir: &Path,
+    config_template: &str,
+    permissions_template: &str,
+    gitignore_template: &str,
+) -> Result<Vec<PathBuf>, String> {
+    let mut created = Vec::new();
+    let mut seed = |result: Result<(PathBuf, bool), String>| -> Result<(), String> {
+        let (path, existed) = result?;
+        if !existed {
+            created.push(path);
+        }
+        Ok(())
+    };
+    seed(config_target(agents_dir, config_template).map_err(|e| e.to_string()))?;
+    seed(prompt_target(agents_dir, "system"))?;
+    seed(prompt_target(agents_dir, "compact"))?;
+    seed(permissions_target(agents_dir, permissions_template).map_err(|e| e.to_string()))?;
+    seed(gitignore_target(agents_dir, gitignore_template).map_err(|e| e.to_string()))?;
+    Ok(created)
+}
+
 /// Create a file (and any missing parent dirs) with `contents`.
 fn write_new(path: &Path, contents: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -173,6 +223,45 @@ mod tests {
         assert!(!std::fs::read_to_string(&path).expect("read").is_empty());
         // Unknown name is an error, no file created.
         assert!(prompt_target(&dir, "bogus").is_err());
+    }
+
+    #[test]
+    fn init_agents_dir_materializes_everything_missing() {
+        let dir = std::env::temp_dir().join(format!("emberly-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let created =
+            init_agents_dir(&dir, "# cfg\n", "# perms\n", "sessions/\n").expect("scaffold");
+        assert_eq!(
+            created.len(),
+            5,
+            "config, 2 prompts, permissions, gitignore"
+        );
+        assert!(dir.join("config.toml").exists());
+        assert!(dir.join("prompts/system.md").exists());
+        assert!(dir.join("prompts/compact.md").exists());
+        assert!(dir.join("permissions.toml").exists());
+        assert!(dir.join(".gitignore").exists());
+    }
+
+    #[test]
+    fn init_agents_dir_never_clobbers_and_reports_nothing_new() {
+        let dir = std::env::temp_dir().join(format!("emberly-init2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("config.toml"), "provider = \"mine\"\n").expect("seed");
+        let created =
+            init_agents_dir(&dir, "# cfg\n", "# perms\n", "sessions/\n").expect("first scaffold");
+        assert_eq!(created.len(), 4, "everything but the pre-existing config");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).expect("read"),
+            "provider = \"mine\"\n",
+            "the user's file is preserved"
+        );
+        // Running again with everything now present creates nothing.
+        let created =
+            init_agents_dir(&dir, "# cfg\n", "# perms\n", "sessions/\n").expect("second scaffold");
+        assert!(created.is_empty());
     }
 
     #[cfg(unix)]

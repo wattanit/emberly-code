@@ -42,6 +42,10 @@ pub enum AppCommand {
     /// Open the reasoning-effort picker (P-9). `/effort <level>` sets it
     /// directly; with no argument (or from the palette) it opens the picker.
     Effort,
+    /// Materialize the project's `.agents/` scaffold — config, prompts,
+    /// permissions, `.gitignore` — creating only what's missing (C-2). The
+    /// in-session twin of `emberly init`; same content, never clobbers.
+    Init,
     /// Edit the project `.agents/config.toml` in `$EDITOR` (C-5).
     Config,
     /// Edit a prompt file in `$EDITOR` (C-5). `/prompt [system|compact]`.
@@ -222,6 +226,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "Cancel the current turn",
         cmd: AppCommand::Cancel,
+    },
+    CommandSpec {
+        name: "init",
+        plain: Plain::Same,
+        key: None,
+        desc: "Create .agents/ (config, prompts, permissions) if missing",
+        cmd: AppCommand::Init,
     },
     CommandSpec {
         name: "config",

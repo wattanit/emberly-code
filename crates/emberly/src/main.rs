@@ -694,6 +694,8 @@ async fn run() -> anyhow::Result<()> {
         sessions_dir.clone(),
         profiles,
         init::CONFIG_TEMPLATE.to_string(),
+        init::PERMISSIONS_TEMPLATE.to_string(),
+        init::GITIGNORE_TEMPLATE.to_string(),
         resolved.reasoning.clone(),
         resolved.mouse,
         provider_writer,
