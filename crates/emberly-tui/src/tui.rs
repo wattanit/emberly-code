@@ -62,6 +62,13 @@ pub async fn run(
     // render with the configured default (Design §4.4).
     app.timeline.reasoning = reasoning_view;
     app.seed_history(&history);
+    // An empty `history` means this is a genuinely fresh session (never a
+    // resumed one — resuming always replays at least its `SessionStart`
+    // record) — the conversation pane would otherwise stay blank until the
+    // user's first message, with no hint of what to try.
+    if history.is_empty() {
+        app.notice(crate::strings::welcome::TEXT);
+    }
     app.anim.active = motion_enabled();
 
     // Shared with the input reader so an `$EDITOR` handoff can pause it (C-5).

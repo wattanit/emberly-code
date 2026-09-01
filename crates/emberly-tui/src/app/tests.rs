@@ -1823,6 +1823,13 @@ fn begin_new_session_resets_the_timeline_and_identity() {
         .items
         .iter()
         .any(|i| matches!(i, ConvItem::User(t) if t == "old")));
+    // A fresh session in place is not left blank either — same orientation as
+    // a brand-new process launch gets (tui::run).
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(n) if n == crate::strings::welcome::TEXT)));
 }
 
 #[test]
@@ -1838,6 +1845,15 @@ fn begin_resumed_session_adopts_title_and_clears_prior_timeline() {
         .items
         .iter()
         .any(|i| matches!(i, ConvItem::User(t) if t == "old")));
+    // A resume — even a degenerate empty-records one — never shows the
+    // fresh-session welcome; that decision belongs to the caller (tui::run),
+    // not to seed_history, precisely so a resume can never be mistaken for
+    // fresh just because its records happen to be empty.
+    assert!(!a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(n) if n == crate::strings::welcome::TEXT)));
 }
 
 #[test]

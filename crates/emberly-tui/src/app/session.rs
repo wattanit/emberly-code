@@ -37,6 +37,9 @@ impl App {
         self.timeline
             .items
             .push(ConvItem::Notice("started a new session".into()));
+        self.timeline
+            .items
+            .push(ConvItem::Notice(crate::strings::welcome::TEXT.into()));
     }
 
     /// Reset and reseed the timeline for a resumed session (`/resume` from the

@@ -223,6 +223,17 @@ pub mod hints {
     pub const PERMISSION: &str = "y allow · s session · Enter deny";
 }
 
+/// The one-time orientation shown in an otherwise-empty conversation pane at
+/// the start of a fresh session (never a resumed one) — the blank pane's own
+/// answer to "how do I do anything here" (owner's call: shown every fresh
+/// session, not just an uninitialized project — see [`crate::app::App::seed_history`]
+/// and `begin_new_session`). Rendered as a `ConvItem::Notice`, so it carries
+/// the same terse, dim harness voice as every other notice — a pointer, not a
+/// tutorial.
+pub mod welcome {
+    pub const TEXT: &str = "Ctrl-P opens the command palette — a few commands worth knowing:\n  /init      scaffold .agents/ for this project\n  /model     pick a provider and model\n  /compact   reclaim context by summarizing older turns\n  /help      the full command list";
+}
+
 /// Conversation-flow markers. ASCII-safe fallbacks live in the line frontend;
 /// these are the rich-mode glyphs.
 pub mod markers {
