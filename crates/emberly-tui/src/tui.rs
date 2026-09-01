@@ -37,6 +37,8 @@ pub async fn run(
     sessions_dir: PathBuf,
     profiles: Vec<String>,
     config_template: String,
+    permissions_template: String,
+    gitignore_template: String,
     reasoning_view: crate::app::ReasoningView,
     mouse: bool,
     provider_writer: Arc<dyn emberly_core::ProviderProfileWriter>,
@@ -52,12 +54,21 @@ pub async fn run(
         sessions_dir,
         profiles,
         config_template,
+        permissions_template,
+        gitignore_template,
         provider_writer,
     );
     // Set the trail view before seeding history so resumed reasoning items
     // render with the configured default (Design §4.4).
     app.timeline.reasoning = reasoning_view;
     app.seed_history(&history);
+    // An empty `history` means this is a genuinely fresh session (never a
+    // resumed one — resuming always replays at least its `SessionStart`
+    // record) — the conversation pane would otherwise stay blank until the
+    // user's first message, with no hint of what to try.
+    if history.is_empty() {
+        app.notice(crate::strings::welcome::TEXT);
+    }
     app.anim.active = motion_enabled();
 
     // Shared with the input reader so an `$EDITOR` handoff can pause it (C-5).
@@ -68,6 +79,14 @@ pub async fn run(
     // redraw while something is animating, so an idle screen stays quiet.
     let frame_ms = 1000 / u64::try_from(crate::app::ANIM_FPS).unwrap_or(12);
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(frame_ms));
+    // The Agents-inspector activity overlay's live-refresh ticker (Design
+    // §4.13 — "live-updating... as it happens"): while that overlay is the
+    // top one, re-issue the same `Command::InspectAgent` its first Enter
+    // did, so the read-only snapshot re-reads the subagent's transcript on a
+    // cadence a person reads comfortably, rather than only once. A separate,
+    // much coarser ticker than the animation one above — this is a network/
+    // disk round trip, not a repaint.
+    let mut agent_watch_ticker = tokio::time::interval(std::time::Duration::from_millis(1500));
     // Dropped when this function returns (on quit or engine close), which
     // closes the command channel — the engine then finishes and closes its
     // events. No hard cancel: an in-flight reply is still allowed to complete.
@@ -84,6 +103,11 @@ pub async fn run(
                 if app.is_animating() {
                     app.tick();
                     redraw(&mut guard, &mut app)?;
+                }
+            },
+            _ = agent_watch_ticker.tick() => {
+                if let Some(id) = app.watched_agent_id() {
+                    let _ = commands_tx.send(Command::InspectAgent { id }).await;
                 }
             },
             event = events_rx.recv() => match event {

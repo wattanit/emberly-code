@@ -257,4 +257,76 @@ pub enum UiEvent {
         body: String,
         resources: Vec<String>,
     },
+
+    /// A subagent was created (T-18, Tech Spec §8.4), for the sidebar Agents
+    /// section (Design §3.1/§4.13): present only while at least one subagent
+    /// is alive, following the established no-empty-stub rule (Tasks/Memory/
+    /// Skills). Additive — older frontends warn-skip it.
+    SubagentSpawned {
+        id: String,
+        name: String,
+        profile: String,
+        model: String,
+    },
+
+    /// A subagent was ended (T-21, Tech Spec §8.4) — explicitly, or as part
+    /// of the owning session ending. Additive — older frontends warn-skip
+    /// it.
+    SubagentEnded { id: String, reason: String },
+
+    /// A subagent's own activity, read from its nested transcript (Tech Spec
+    /// §8.4), sent in reply to
+    /// [`Command::InspectAgent`](crate::command::Command::InspectAgent). A
+    /// read-only snapshot as of the last flush (Design §4.13) — `text` is
+    /// already formatted for display, so the frontend renders it exactly like
+    /// any other text overlay (`SkillBody`'s pattern). An unknown/ended id
+    /// still gets a reply, with `text` saying so. Additive — older frontends
+    /// warn-skip it.
+    AgentActivity {
+        id: String,
+        name: String,
+        text: String,
+    },
+
+    /// A `Command::AttachImage` (FR-10, Design §4.14) validated and encoded
+    /// successfully; it now rides staged in `Engine::pending_attachments`
+    /// until the next `Command::UserInput` drains it. The frontend uses this
+    /// to show the attachment chip in the compose area before the message is
+    /// sent. `pending_count` is the engine's own staged count *after* this
+    /// one, so the frontend can enforce the `image.max_attachments` UI
+    /// affordance (e.g. graying out further attach) without recomputing it.
+    ImageAttached {
+        path: String,
+        name: String,
+        media_type: String,
+        width: usize,
+        height: usize,
+        format_label: String,
+        pending_count: usize,
+    },
+
+    /// A `Command::AttachImage` failed validation (HC-6 — data, not a crash):
+    /// oversize, an unrecognized format, unreadable path, or over
+    /// `image.max_attachments`. Rendered as a plain input-time error (Design
+    /// §4.14), never a silent drop.
+    AttachFailed { path: String, reason: String },
+
+    /// An in-session `/export` command finished writing a session export
+    /// (FR-12, Tech Spec §8.6) to `path`. Not a transcript event — the export
+    /// is an action taken on the session's own record, not part of what the
+    /// session did (Tech Spec §3.1). A failure surfaces as a plain
+    /// [`Notice`](UiEvent::Notice) instead (HC-3 — never a crash).
+    SessionExported { path: String },
+
+    /// An MCP server connected and advertised these (already-namespaced)
+    /// tools (FR-11, Tech Spec §5.6/§8.5), reported at session start and on
+    /// `/reload`. Connecting itself already happened (composition-root
+    /// logic, mirroring `web_search`) — this is the audit-visible report of
+    /// it, alongside the `TranscriptEvent::McpConnection` it pairs with.
+    McpServerConnected { name: String, tools: Vec<String> },
+
+    /// An MCP server could not be connected to, or its handshake/discovery
+    /// failed (HC-6 — data, never a crash; Design §8.10 — never fatal to the
+    /// session). Reported at session start and on `/reload`.
+    McpServerFailed { name: String, reason: String },
 }

@@ -88,13 +88,20 @@ pub fn resolve_in_root(root: &Path, requested: &str) -> Result<ResolvedPath, Str
     })
 }
 
-/// Whether the resolved path has any `.git` component — file tools hard-refuse
-/// these (HC-5), at the tool layer, independent of the OS sandbox.
+/// Whether the resolved path lies under the project's own `.git/` — file tools
+/// hard-refuse these (HC-5), at the tool layer, independent of the OS sandbox.
+///
+/// Scoped to `root`'s `.git/` specifically, matching the OS-sandbox profiles in
+/// `emberly-sandbox::confine` (which only ever carve out `spec.root.join(".git")`).
+/// A `.git` component elsewhere on the filesystem — e.g. a vendored checkout
+/// under `~/.cargo/git/checkouts/…/.git` — is not the project's history and
+/// must not trip this refusal; `root` is not always canonical yet when this is
+/// called from tests, so it is canonicalized here too (cheap: `resolve_in_root`
+/// already did the same lookup and it will resolve identically).
 #[must_use]
-pub fn is_under_git_dir(resolved: &Path) -> bool {
-    resolved
-        .components()
-        .any(|c| matches!(c, Component::Normal(name) if name == ".git"))
+pub fn is_under_git_dir(root: &Path, resolved: &Path) -> bool {
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    resolved.starts_with(canonical_root.join(".git"))
 }
 
 /// Display a resolved path relative to the root when possible, for summaries.

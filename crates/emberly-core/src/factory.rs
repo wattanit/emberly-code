@@ -11,8 +11,10 @@ use emberly_sandbox::Rule;
 use emberly_tools::{ToolRegistry, TruncateConfig};
 
 use crate::engine::{
-    CompletionCheck, CompletionConfig, ContextConfig, LoopConfig, MemoryConfig, SkillsConfig,
+    AgentsConfig, CompletionCheck, CompletionConfig, ContextConfig, LoopConfig, MemoryConfig,
+    SkillsConfig,
 };
+use crate::types::McpConnectionOutcome;
 
 /// A provider chosen for the active profile: the client, the resolved model id,
 /// and the profile name used as the display/transcript label.
@@ -77,14 +79,25 @@ pub struct ReloadedConfig {
     pub context: ContextConfig,
     /// Maximum image file size in bytes (Tech Spec §5.2).
     pub image_max_bytes: usize,
+    /// Maximum images attachable to one prompt via `/attach` (FR-10, Tech
+    /// Spec §8).
+    pub image_max_attachments: usize,
     /// Maximum document file size in bytes (Tech Spec §5.2).
     pub document_max_bytes: usize,
+    /// Fresh MCP server connection outcomes from this reload (FR-11, Tech
+    /// Spec §5.6/§8.5) — reconnecting is composition-root logic run again by
+    /// [`ConfigReloader::reload`], mirroring `web_search`'s own fresh-client
+    /// rebuild on every reload; the engine reports each outcome exactly as
+    /// it does at session start.
+    pub mcp_connections: Vec<McpConnectionOutcome>,
     /// Memory config (FR-6, Tech Spec §8.1). A changed value triggers a
     /// memory-store rebuild, not just a struct swap.
     pub memory: MemoryConfig,
     /// Skills config (FR-7, Tech Spec §8.2). A changed value triggers a
     /// skill-catalog rebuild, not just a struct swap.
     pub skills: SkillsConfig,
+    /// Multi-agent subsystem config (FR-9, Tech Spec §8.4).
+    pub agents: AgentsConfig,
     /// The rebuilt tool registry (default suite plus e.g. `web_search` when
     /// `[search]` is enabled and configured).
     pub tools: ToolRegistry,

@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "emberly"
-version = "0.4.5"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -564,6 +564,7 @@ dependencies = [
  "reqwest",
  "rustls-rustcrypto",
  "serde",
+ "serde_json",
  "time",
  "tokio",
  "toml",
@@ -571,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "emberly-core"
-version = "0.4.5"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -591,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "emberly-providers"
-version = "0.4.5"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -608,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "emberly-sandbox"
-version = "0.4.5"
+version = "0.5.2"
 dependencies = [
  "landlock",
  "serde",
@@ -619,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "emberly-tools"
-version = "0.4.5"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -641,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "emberly-tui"
-version = "0.4.5"
+version = "0.5.2"
 dependencies = [
  "crossterm",
  "emberly-core",

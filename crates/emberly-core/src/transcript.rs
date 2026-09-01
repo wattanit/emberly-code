@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::id::{PermissionId, SessionId, ToolCallId};
-use crate::types::{Effort, Mode, PermissionDecision, PermissionRendering, SandboxStatus};
+use crate::types::{
+    AttachedImageMeta, Effort, Mode, PermissionDecision, PermissionRendering, SandboxStatus,
+};
 
 /// Current transcript schema version. Present on every record from day one so
 /// a reader can detect and warn on newer schemas rather than crash (Tech Spec
@@ -84,6 +86,13 @@ pub enum TranscriptEvent {
         text: String,
         #[serde(default, skip_serializing_if = "is_false")]
         original_task: bool,
+        /// Images attached to this message (FR-10, Design §4.14) —
+        /// metadata only (name, media type, dimensions), never the base64
+        /// bytes: the same choice `ToolResult` already makes for a
+        /// model-read image (T-12). Additive — older readers warn-skip it,
+        /// no `SCHEMA_VERSION` bump.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<AttachedImageMeta>,
     },
 
     /// A complete assistant message (post-stream). `reasoning` holds the
@@ -249,6 +258,19 @@ pub enum TranscriptEvent {
     /// Written by the supervisor on an abnormal exit when possible
     /// (Requirements HC-3, S-2).
     AbnormalExit { reason: String },
+
+    /// An MCP server connection attempt at session start or `/reload` (FR-11,
+    /// Tech Spec §5.6/§8.5) — the audit record pairing
+    /// `UiEvent::McpServerConnected`/`McpServerFailed`. `tools` is empty and
+    /// `error` is set on a failed attempt, and vice versa on success.
+    /// Additive — older readers warn-skip it, no `SCHEMA_VERSION` bump.
+    McpConnection {
+        server: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tools: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 /// Whether a compaction was started by the user or the automatic threshold
@@ -461,6 +483,7 @@ mod tests {
             TranscriptEvent::UserMessage {
                 text: "hello".into(),
                 original_task: true,
+                images: Vec::new(),
             },
         );
         sink.record(&rec);

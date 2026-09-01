@@ -213,6 +213,10 @@ impl Engine {
             self.image_max_bytes = reloaded.image_max_bytes;
             changed.push("image size limit");
         }
+        if reloaded.image_max_attachments != self.image_max_attachments {
+            self.image_max_attachments = reloaded.image_max_attachments;
+            changed.push("image attachment limit");
+        }
         if reloaded.document_max_bytes != self.document_max_bytes {
             self.document_max_bytes = reloaded.document_max_bytes;
             changed.push("document size limit");
@@ -237,6 +241,10 @@ impl Engine {
             self.refresh_skill_catalog();
             changed.push("skills");
         }
+        if reloaded.agents != self.agents.config {
+            self.agents.config = reloaded.agents;
+            changed.push("multi-agent subsystem");
+        }
         let mut old_tool_names = self.tools.names();
         old_tool_names.sort();
         self.tools = reloaded.tools;
@@ -244,6 +252,13 @@ impl Engine {
         new_tool_names.sort();
         if new_tool_names != old_tool_names {
             changed.push("tools");
+        }
+        // MCP servers reconnect fresh on every reload (FR-11, mirroring
+        // `web_search`'s own fresh-client rebuild) — report each outcome the
+        // same way the startup report does, so `/reload` never silently
+        // changes what servers/tools are reachable (Design §8.10).
+        for outcome in reloaded.mcp_connections {
+            self.record_and_emit_mcp_outcome(outcome).await;
         }
         if reloaded.rule_specs != self.safety.rule_specs {
             self.safety.rules.reload_config_rules(

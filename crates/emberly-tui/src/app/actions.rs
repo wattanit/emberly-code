@@ -98,6 +98,41 @@ impl App {
             .map_or_else(|| self.sessions_dir.clone(), Path::to_path_buf)
     }
 
+    /// `/init` — materialize the project's `.agents/` scaffold in place: same
+    /// content, same never-clobber rule as `emberly init` from the CLI
+    /// (C-1/C-2). No `$EDITOR` handoff, just files created plus a report —
+    /// provenance before the fact the same way `edit_config` reports it (C-3).
+    fn init_project(&mut self) -> Action {
+        let agents_dir = self.agents_dir();
+        let message = match crate::edit::init_agents_dir(
+            &agents_dir,
+            &self.config_template,
+            &self.permissions_template,
+            &self.gitignore_template,
+        ) {
+            Ok(created) if created.is_empty() => ".agents/ is already set up".to_string(),
+            Ok(created) => {
+                let list = created
+                    .iter()
+                    .map(|p| {
+                        p.strip_prefix(&agents_dir)
+                            .unwrap_or(p)
+                            .display()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "created in .agents/: {list} — set your provider/model in \
+                     .agents/config.toml, then /reload (or restart emberly) to apply"
+                )
+            }
+            Err(e) => format!("could not initialize .agents/: {e}"),
+        };
+        self.timeline.items.push(ConvItem::Notice(message));
+        Action::None
+    }
+
     /// `/config` — edit the project `.agents/config.toml` in `$EDITOR` (C-5).
     /// Seeds it from the init template (same content `emberly init` writes) if
     /// the project has none yet (C-1/C-2); the write lands in the project tier.
@@ -181,6 +216,8 @@ impl App {
                 AppCommand::Prompt => self.edit_prompt(args),
                 AppCommand::Effort => self.effort_command(args),
                 AppCommand::CycleMode => self.mode_command(args),
+                AppCommand::Attach => self.attach_command(args),
+                AppCommand::Export => self.export_command(args),
                 cmd => self.run_command(cmd),
             },
             Slash::Unknown(name) => {
@@ -212,6 +249,43 @@ impl App {
         Action::Command(Command::SwitchModel {
             profile: profile.to_string(),
             model,
+        })
+    }
+
+    /// `/attach <path>` — stage an image for the prompt being composed
+    /// (FR-10, Design §4.14). No file-picker overlay in this pass (a known,
+    /// tune-with-use scope cut, Requirements §13) — an explicit path is
+    /// always available and works identically in plain mode (`line.rs`).
+    /// Validation and encoding happen engine-side (`Command::AttachImage`);
+    /// the reply (`UiEvent::ImageAttached`/`AttachFailed`) lands via the
+    /// normal event loop.
+    fn attach_command(&mut self, args: &str) -> Action {
+        let path = args.trim();
+        if path.is_empty() {
+            self.timeline
+                .items
+                .push(ConvItem::Notice("usage: /attach <path>".into()));
+            return Action::None;
+        }
+        Action::Command(Command::AttachImage {
+            path: path.to_string(),
+        })
+    }
+
+    /// `/export <path>` — export this session to a self-contained HTML file
+    /// (FR-12, Design §8.11). No output-location picker in this pass (same
+    /// scope cut as `/attach`'s missing file-picker) — an explicit path is
+    /// always available and works identically in plain mode (`line.rs`).
+    fn export_command(&mut self, args: &str) -> Action {
+        let path = args.trim();
+        if path.is_empty() {
+            self.timeline
+                .items
+                .push(ConvItem::Notice("usage: /export <path>".into()));
+            return Action::None;
+        }
+        Action::Command(Command::ExportSession {
+            path: path.to_string(),
         })
     }
 
@@ -285,10 +359,28 @@ impl App {
             }
             AppCommand::Memory => self.open_memory_inspector(),
             AppCommand::Skills => self.open_skills_inspector(),
+            AppCommand::Agents => self.open_agents_inspector(),
+            AppCommand::Mcp => self.open_mcp_inspector(),
+            AppCommand::Init => self.init_project(),
             AppCommand::Config => self.edit_config(),
             AppCommand::Prompt => self.edit_prompt("system"),
             AppCommand::Reload => Action::Command(Command::ReloadConfig),
             AppCommand::Compact => Action::Command(Command::Compact),
+            // No-argument palette/keybinding path: there is no file-picker
+            // overlay in this pass, so the only way to attach is the
+            // argument-taking `/attach <path>` slash form (Design §4.14).
+            AppCommand::Attach => {
+                self.timeline
+                    .items
+                    .push(ConvItem::Notice("usage: /attach <path>".into()));
+                Action::None
+            }
+            AppCommand::Export => {
+                self.timeline
+                    .items
+                    .push(ConvItem::Notice("usage: /export <path>".into()));
+                Action::None
+            }
             AppCommand::Cancel => Action::Command(Command::Cancel),
             AppCommand::Quit => Action::Quit,
         }

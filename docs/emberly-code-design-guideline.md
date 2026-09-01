@@ -1,11 +1,11 @@
 # Emberly Code — Design Guideline
 
-**Version:** 0.10 
+**Version:** 0.12 
 **Status:** approved
-**Date:** 2026-07-30
+**Date:** 2026-08-16
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.10 (upstream), Technical
-Specification v0.12 (downstream — this document constrains it)
+**Companion documents:** Requirements Document v0.12 (upstream), Technical
+Specification v0.14 (downstream — this document constrains it)
 
 This document defines how Emberly Code looks, feels, and speaks. It is the
 second of three project documents. Where a decision here has technical
@@ -124,13 +124,16 @@ activity, diffs, permission prompts. This pane owns scrollback.
     exists: each item on its own line with a status glyph (§4.7), the
      in-progress item lightly accented. Absent when the model has not opened
      a list; never an empty stub.
-  7. Extension sections — **Memory**, **Skills**, MCP, LSP — each rendered
-    only when its subsystem exists and has content. Memory (Requirements
-     FR-6) and Skills (Requirements FR-7) become real in this version:
-     Memory shows a count and opens an entry inspector (§4.9); Skills lists
-     the available skills by name and origin (§4.9). MCP and LSP remain
-     absent, not shown as empty "None" stubs. The layout reserves the
-     pattern, not the pixels.
+  7. Extension sections — **Memory**, **Skills**, **Agents**, MCP, LSP — each
+    rendered only when its subsystem exists and has content. Memory
+     (Requirements FR-6) and Skills (Requirements FR-7) became real in the 0.4
+     feature set: Memory shows a count and opens an entry inspector (§4.9);
+     Skills lists the available skills by name and origin (§4.9). **Agents**
+     (Requirements FR-9) becomes real in this version: it lists currently
+     alive subagents by name and status, absent entirely when none are alive
+     — never an empty "Agents (0)" stub — and each entry opens a per-agent
+     inspector (§4.13). MCP and LSP remain absent, not shown as empty "None"
+     stubs. The layout reserves the pattern, not the pixels.
 - **Status line** (bottom, one line): current mode (normal /
 auto-accept-edits / auto), context %, and 3–5 contextual keybinding
 hints in dimmed text. Hints change with state (e.g. during a permission
@@ -419,6 +422,114 @@ gate the write. It is otherwise ordinary tool activity: it may carry a §4.5
 explanation when the model supplied one, and degraded mode (§7) renders it
 ASCII-only like any other tool line.
 
+### 4.13 Subagents in the flow
+
+A subagent (Requirements FR-9, T-18–T-21) is delegated work, not a second
+voice in the room: its activity surfaces as **quiet, ordinary tool
+activity**, the same register as memory, skills, and scratch writes (§4.9,
+§4.12) — never a second live-streamed conversation competing with the
+primary agent's own text for the user's attention. Calm under load (§1.2)
+applies most exactly when several subagents are running at once.
+
+- **Spawn, message, and end read as one-line events.** `spawn_agents` reads
+like `agents · spawned "db-migration", "test-writer" · running`; a reply
+from `message_agent` reads like `agent · db-migration · replied`; `end_agent`
+reads like `agent · db-migration · ended`. Each may carry a §4.5 explanation
+when the model supplied one. None of these is a harness-voice moment — the
+model is using its own delegated workers, shown without weight, exactly as
+§4.9 already establishes for memory and skills.
+- **No raw concurrent streaming.** When several subagents run at once
+(a batch spawn, §5), their individual assistant text does *not* stream into
+the main pane — that would turn the conversation into an illegible braid of
+interleaved voices. The main pane shows only the one-line events above; a
+subagent's full turn-by-turn activity is available on demand.
+- **Inspectors, not black boxes (extends §4.9).** The sidebar's Agents
+section (§3.1) lists every currently alive subagent; selecting one opens a
+read-only, live-updating overlay (the §4.2 pattern) showing that subagent's
+own conversation as it happens — its assistant text, its tool calls, and
+its own tool-activity lines — so "what is this delegate actually doing" is
+always inspectable, never assumed. A subagent that has ended keeps its
+inspector reachable for the rest of the session so its work is reviewable
+after the fact, not just while live.
+- **Permission prompts name their subagent.** When a subagent's own tool
+call raises a permission prompt (Requirements FR-9 — the same rule/sandbox
+model as the primary agent, §5), the prompt carries one additional dimmed
+line naming which subagent is asking — e.g. "on behalf of subagent
+db-migration" — so the user is never asked to approve an action without
+knowing who it's for. This is an addition to, never a dilution of, the
+ordinary permission prompt: no new styling, no reserved-band treatment,
+the same Deny-default and forbidden patterns as §5 apply unchanged.
+- **A timed-out or still-running spawn is a calm, one-line fact.** When
+`spawn_agents` returns with one or more subagents still running past the
+per-call timeout (Requirements T-18), the tool-result line for that
+subagent reads like `agent · test-writer · still running` rather than an
+error — a slower delegate is normal, not a failure, and it stays reachable
+via `message_agent`/`list_agents`.
+- Degraded mode (§7): the same one-line events, ASCII-only, exactly as
+memory/skill/scratch lines already degrade; the inspector overlay falls
+back the same way any overlay does in plain mode.
+
+### 4.14 Attaching an image to a prompt
+
+A user-attached image (Requirements FR-10) is the opposite direction of
+§4.8's read-image tool: there, the *model* looks at a project file; here, the
+*user* shows the model something. The two are never rendered the same way —
+an attachment is content in the **user's own message**, not a tool call, so
+it never wears tool-activity styling.
+
+- **A small attachment chip on the sent message**, not a tool line — reading
+like `📎 mockup.png · 800×600 · PNG attached` under the user's turn
+(illustrative; exact wording is free). It says the image went into this
+message, mirroring §4.8's honesty about where content actually goes.
+- **Two gestures, one honest limitation.** An explicit `/attach <path>`
+command (or a file-picker reusing the §4.6 overlay machinery) always works,
+any terminal. Drag-and-drop works where the terminal delivers a dropped
+file's path as pasted text — Emberly recognizes a pasted string that
+resolves to an existing image file and offers to attach it rather than
+insert it as typed text. **True clipboard-image-byte paste (a screenshot
+copied without a backing file) is not supported this version** — terminal
+paste delivers text, not image bytes, with no cross-terminal API for the
+latter; this pairs with the existing sixel/kitty/iTerm deferral (§4.8, §10)
+as the same class of terminal-capability gap, not a harness oversight.
+- **Same unsupported-vision honesty as §4.8.** If the model active at send
+time has no vision (Requirements P-11), the attachment produces the same
+calm unsupported-capability note as a read-image call (§4.8, HC-6) — never
+a silent drop and never a harness error.
+- Degraded mode (§7): the chip renders as a plain ASCII line; the file-picker
+is not offered (same fallback pattern as guided setup, §4.6/§7) — `/attach
+<path>` remains the always-available path.
+
+### 4.15 MCP tools in the flow
+
+An MCP-sourced tool (Requirements FR-11) earns no special drama for coming
+from outside the harness — it renders as **quiet, ordinary tool activity**,
+the same register as memory, skills, scratch writes, and subagents
+(§4.9, §4.12, §4.13).
+
+- **The owning server is always on the line**, exactly as origin is always on
+a memory or skill line (§4.9) — e.g. `mcp · jira · get_issue` — because
+which server is acting is exactly the kind of thing a user reads trust from.
+May carry a §4.5 explanation when the model supplied one.
+- **A sidebar MCP section, inspectors not black boxes (extends §4.9).**
+Lists currently connected servers; selecting one opens a read-only overlay
+(§4.2 pattern) listing that server's discovered tools — "what can this
+server make the model do" is always inspectable before it is ever used,
+the same commitment memory/skills/subagents already make. Present only
+while at least one server is connected, like Tasks/Agents (§4.7/§4.13) —
+never an empty "MCP (0)" stub.
+- **Trust is visible, not just enforced (extends §4.9).** A project-declared
+server withheld by workspace trust (Requirements FR-1, FR-11) is simply
+**not shown and not connected** — the same quiet, correct absence already
+established for project memory and skills (§4.9, §8.4), and, per §8.10,
+gated by the very same trust prompt, never a second one.
+- **Untrusted content, like web search (extends §4.10).** A tool result
+returned by an MCP server renders labeled as external, untrusted content the
+model reads — quoted data, never harness or assistant voice — mirroring how
+a web-search hit is labeled (§4.10) rather than the harness's own words.
+- Degraded mode (§7): plain ASCII tool-activity lines and a plain-text
+server/tool list; the inspector overlay degrades the same way any overlay
+does in plain mode.
+
 ## 5. The Permission Prompt
 
 The most important screen in the product. It is where the safety model
@@ -447,6 +558,12 @@ always a deliberate, distinct key.
 - Every prompt shows *why* it appeared (which rule matched, or "outside
 project root") in one dimmed line — this teaches the permission model
 in situ.
+- **A subagent's request names the subagent (Requirements FR-9, §4.13).**
+When the action belongs to a subagent's own tool call rather than the
+primary agent's, the prompt carries one additional dimmed line naming which
+subagent is asking. Every other guarantee on this page — Deny default,
+full content, the forbidden patterns — holds exactly as if the primary
+agent had asked; a subagent earns no different treatment, easier or harder.
 
 ### 5.1 The question prompt (the model asking your opinion)
 
@@ -492,6 +609,32 @@ once.
 timeout-to-approve, no click/Enter-through). It reuses the calm neutral
 treatment of a normal prompt; only the outside-root escalation earns the
 reserved band.
+
+### 5.3 The MCP tool-call prompt (an external server acting)
+
+An MCP-sourced tool call (Requirements FR-11) is permission-gated exactly
+like a built-in tool call, and its prompt is the ordinary permission prompt
+(§5) with one addition, mirroring how a subagent's request adds a provenance
+line (§4.13, §5) rather than becoming a new prompt type.
+
+- **What it adds:** one dimmed line naming which server the call belongs
+to — e.g. "via MCP server jira" — shown *before* approval, never after, so
+the user always knows which external process is asking. Because the tool
+itself can be arbitrary (an MCP server may do anything its own code does),
+the ordinary **full-content-always** rule (§5) applies without exception:
+complete arguments shown, never summarized.
+- **Ordinary band, not reserved (mirrors §5.2's reasoning for web search).**
+A routine MCP tool call keeps the plain permission treatment; only an
+action that itself touches outside the project root (Requirements HC-4)
+earns the reserved escalation band, exactly as any tool would — an
+external origin does not, by itself, make a call more dangerous than a
+built-in one doing the same thing.
+- **Choices and default** are the ordinary permission prompt's (§5): Deny
+default, Allow once, Allow for this session where the rule layer permits —
+rule-allowlistable per tool name like bash or web search (Requirements
+§6.6).
+- All §5 forbidden patterns apply unchanged (no timeout-to-approve, no
+auto-scroll, no batching).
 
 ## 6. Voice and Language
 
@@ -598,6 +741,22 @@ Neither relies on color, motion, or the pointer.
 provider setup (§4.6) is not offered in degraded mode; the same
 print-the-path-and-`/reload` pattern `/config`/`/prompt` already use there
 covers the same ground.
+- The 0.5 surface degrades like memory/skills/scratch before it: subagent
+spawn/message/end lines (§4.13) are plain ASCII tool-activity lines, a
+permission prompt raised on a subagent's behalf keeps its full capitalized
+guarantees with the subagent's name in the same plain dimmed line, and the
+per-agent inspector overlay degrades the same way any overlay does in plain
+mode. No 0.5 feature relies on color, motion, or the pointer to carry
+meaning.
+- The 0.5.1 surfaces degrade the same way: an attached image renders as a
+plain ASCII attachment line under the user's own message (§4.14), with no
+file-picker offered (`/attach <path>` remains available); MCP tool-activity
+lines, the sidebar MCP section, and a connection-failure notice are all
+plain text with full capitalized permission-prompt guarantees where one
+appears (§4.15, §5.3, §8.10); and `emberly export`'s output and its
+sensitive-content line (§8.11) are plain text by construction, since the
+command's own output is never a rich-mode-only surface. No 0.5.1 feature
+relies on color, motion, or the pointer to carry meaning.
 - Degraded mode is a supported, tested configuration, not a best-effort
 fallback.
 
@@ -784,6 +943,70 @@ that confirmation is a plain question with a plain `y`/`n` answer, matching
 the trust prompt's tone (§8.4) — not a scary dialog for what is, after all,
 disposable working space.
 
+### 8.9 Delegating to a subagent
+
+Spawning and conversing with a subagent (Requirements FR-9, §4.13) is the
+one 0.5 moment that could, mishandled, feel like losing sight of what the
+agent is doing — so it stays legible at every step, in keeping with §1.2's
+transparency.
+
+- **A batch spawn is one calm block, not a wall of chatter.** When the
+primary agent spawns several subagents in one call (T-18), the main pane
+shows one line per subagent as each reaches its own first stop — "running,"
+then a result or "still running" — never a flood of interleaved streaming
+text (§4.13).
+- **The sidebar Agents count is the at-a-glance answer to "what's still
+going."** Exactly like Tasks (§4.7) and the completion-gate status (§8.7),
+it is present only while at least one subagent is alive and disappears
+quietly when the last one ends — never a lingering "Agents (0)."
+- **Ending a subagent is quiet, not a confirmation dialog.** `end_agent`
+(T-21) reads as an ordinary one-line tool event (§4.13); a session ending
+with subagents still alive ends them silently along with it — this is
+expected cleanup, not a moment the user is interrupted to confirm.
+- **A subagent's own permission prompts feel like the session's own**, just
+labeled (§5) — the user is never asked to context-switch into "now I'm
+approving for a delegate" versus "now I'm approving for the main agent";
+it is one continuous safety model with one added fact per prompt.
+
+### 8.10 Connecting to an MCP server
+
+A project-declared MCP server (Requirements FR-11, C-8) is reached through
+the same trust gate that already governs project memory and skills (§8.4),
+never a second prompt — the user is not asked twice to trust the same
+folder.
+
+- **Trust withheld is silent, not an error.** In an untrusted folder the
+server is simply not connected and not shown (§4.15) — the correct, quiet
+absence, exactly matching §4.9/§8.4's existing pattern.
+- **A successful connection is quiet.** One dim line at session start —
+e.g. `mcp · jira · connected · 4 tools` — no splashy banner, matching how
+memory and skill catalogs already load without ceremony (§4.9).
+- **A failed connection is a harness-world moment (§6.1)**, in the harness's
+own voice: what happened, why if known, and what to do — e.g. "Couldn't
+connect to MCP server 'jira': command not found — check
+`[mcp.servers.jira]`." Never a stack trace as the primary surface. A broken
+server does not stop the session from starting — the rest of the harness
+stays usable, the same "make the risk clear, stay usable" principle the
+sandbox-degradation policy already holds (Requirements §6.7).
+- Degraded mode (§7): the same lines, plain text.
+
+### 8.11 Exporting a session
+
+`emberly export` (Requirements FR-12) follows the same voice as `init` and
+`clean` (§8.1, §8.8): it prints exactly what it wrote and where — no walls
+of text, no installer-wizard ceremony.
+
+- **One calm, factual line about sensitive content**, shown once at export
+— e.g. "This file may contain file contents, command output, and anything
+else this session touched — review before sharing." Never alarm styling
+(§6.1's no-blame, no-alarm voice): export does not redact (Requirements
+FR-12), so the honest disclosure *is* the safeguard, not a dialog the user
+must click through. It is not a confirmation gate — export mutates nothing,
+so it carries none of the trust-gate/`clean`-command "are you sure" weight.
+- A large session shows the §6.3 spinner with a dull, truthful verb phrase
+("exporting") if the write takes visible time; the finished line names the
+output path, exactly like a clean exit's session summary (§8.3).
+
 ## 9. Design-Driven Requirements Feedback
 
 Decisions in this document that add to or refine the Requirements doc,
@@ -873,6 +1096,48 @@ a labeled reference line (file · size · format), never in-terminal rendering a
 never a page count or extracted text, since the harness passes the document
 unparsed. The Tech Spec absorbs the read-document surface as a reference, not
 content.
+- **Subagent activity is quiet tool activity, never live-concurrent streaming**
+(§4.13) — realizes Requirements FR-9 as one-line spawn/message/end events
+matching the memory/skill/scratch register (§4.9/§4.12), with a per-agent
+inspector overlay carrying the full turn-by-turn detail on demand. The Tech
+Spec absorbs "no raw text streaming from a subagent to the main pane" as an
+event-routing decision, not just a rendering choice.
+- **Permission prompts gain a subagent-provenance line, never a new prompt type**
+(§5, §4.13) — refines Requirements FR-9: a subagent's action is asked for
+through the exact same prompt, guarantees, and defaults as the primary
+agent's, with one added dimmed line naming the subagent. The Tech Spec
+absorbs the provenance field on the permission-rendering payload.
+- **The sidebar Agents section is present only while a subagent is alive**
+(§3.1, §8.9) — extends the established "no empty stub" rule (Tasks, Memory,
+Skills, the completion gate) to Requirements FR-9.
+- **An attached image is content on the user's own message, never tool
+activity** (§4.14) — refines Requirements FR-10: rendering lives on the
+sent-message payload, distinct from the §4.8 tool-result line, because the
+two are opposite directions of the same capability. The Tech Spec absorbs
+this as a structural distinction (which transcript event carries the
+image block), needing no new content-block flag.
+- **True clipboard-image-byte paste is declined, not silently unsupported**
+(§4.14) — a new explicit deferral for Requirements §2.2, alongside the
+existing sixel/kitty/iTerm terminal-image-protocol door: both wait on the
+same missing cross-terminal capability.
+- **MCP tools render with server provenance on the line and a sidebar
+inspector** (§4.15) — refines Requirements FR-11 the same way §4.9 already
+established for memory/skills: origin visible, nothing a black box. The
+Tech Spec absorbs a server-name field on the relevant tool events.
+- **MCP connection is trust-gated by the existing gate, never a second
+prompt** (§8.10) — refines Requirements FR-11/FR-1: a project-declared
+server reuses the one workspace-trust decision rather than asking again.
+- **MCP tool-call prompt uses the ordinary band, not reserved** (§5.3) —
+refines Requirements FR-11 the same way §5.2 refined T-14: an external
+origin does not, by itself, escalate a prompt's styling.
+- **A broken MCP server connection is harness-world and non-fatal** (§8.10)
+— refines Requirements FR-11: the halt/notice pattern of §6.1 applies, and
+the session still starts, consistent with the sandbox-degradation "stay
+usable" principle (Requirements §6.7).
+- **Session export warns once, calmly, and never blocks** (§8.11) — realizes
+Requirements FR-12's "Design Guideline concern, not a filtering guarantee"
+honesty clause as a specific, non-blocking disclosure line shown at export
+time.
 
 ## 10. Open Questions
 
@@ -902,6 +1167,23 @@ modifier (§3.4). Lean to the latter until a real need appears.
 - Completion-gate halt wording and how the registered-checks status reads in the
 sidebar (§8.7) — candidate lines are examples; tune against real gated sessions
 so the halt informs without nagging when a check fails repeatedly.
+- Exact wording for the spawn/message/end tool-activity lines and the
+"still running" note past a spawn timeout (§4.13, §8.9) — candidate lines
+are examples; tune against real multi-agent sessions.
+- Whether the Agents sidebar entry shows a subagent's own token/cost usage
+inline, or only on opening its inspector (§4.13, Requirements §13 — Design
+resolves this one). Tune with use once real sessions exist.
+- Whether the attach gesture needs an explicit confirm step ("attach
+mockup.png?") or attaches immediately on a recognized drag-drop path
+(§4.14). Tune with use once real terminals are tested.
+- Whether the sidebar MCP section shows per-tool status/last-call detail or
+only the connected-server list at a glance (§4.15). Tune with use.
+- Exact wording of the MCP connection-failure line, and whether a
+repeatedly-failing server across sessions should elevate to a more visible
+notice than the quiet §8.10 line. Tune with use.
+- Exact wording of the export sensitive-content line, and whether a very
+large session's export should show byte/turn progress rather than only
+the §6.3 spinner (§8.11). Tune with use.
 
 Resolved since v0.4: reasoning-trail default view — `collapsed` (§4.4,
 owner); tool-call explanation line — on by default, config-defeatable
@@ -938,3 +1220,43 @@ agent-world content the model reacts to, and the bounded-attempt halt is a
 harness-voice moment offering keep-going / steer / stop / finish-anyway, where
 "finish anyway" is a deliberate, transcript-recorded user override of a red gate
 (§8.7). Both degrade to plain, tested, meaning-preserving output (§7).
+
+Resolved since v0.11 (0.5 feature set): the multi-agent subsystem is given
+feel under the same calm-and-honest rules as memory, skills, and scratch
+writes before it. Subagent spawn/message/end events render as one-line
+quiet tool activity (§4.13), never raw concurrent text streamed into the
+main pane — chosen deliberately over a multi-pane live view (which the
+Requirements deferred, §2.2) because interleaving several assistants'
+streaming text in one pane would break "calm under load" (§1.2) long before
+it became genuinely useful. A subagent's own full activity is always
+available via a per-agent inspector overlay, the same "inspectors, not
+black boxes" pattern already established for memory and skills (§4.9). A
+subagent's permission prompts reuse the ordinary prompt verbatim with one
+added provenance line — deliberately not a new prompt type or the reserved
+safety band, matching how web-search (§5.2) and completion checks already
+avoid diluting that band. The sidebar Agents section follows the
+established no-empty-stub rule. Degrades to plain, tested, meaning-
+preserving output (§7).
+
+Resolved since v0.12 (0.5.1 feature set): the three 0.5.1 capabilities are
+given feel under the same calm-and-honest rules established for the 0.4 and
+0.5 sets. An attached image (§4.14) renders as a small chip on the user's
+own sent message, deliberately distinct from the §4.8 tool-activity
+reference line, because the two are opposite directions of the same
+capability — the user showing the model something, versus the model
+looking at something already there; true clipboard-image-byte paste joins
+the terminal-image-protocol door as a new explicit deferral (§2.2), since
+both wait on the same missing cross-terminal capability. MCP-sourced tools
+(§4.15) render as quiet tool activity with the owning server named on the
+line, mirroring §4.9's origin visibility, plus a sidebar inspector listing
+connected servers and their tools; a project-declared server is trust-gated
+by the existing workspace-trust prompt (§8.10), never a second one, and a
+connection failure is a harness-voice moment (§6.1) that never blocks the
+session from starting. The MCP tool-call permission prompt (§5.3) reuses
+the ordinary band, not the reserved safety styling, matching how the
+web-search prompt (§5.2) already avoids diluting that band. Session export
+(§8.11) follows the `init`/`clean` voice — exactly what was written and
+where — plus one calm, non-blocking line naming that the exported file may
+carry sensitive content already in the transcript, since redaction is
+explicitly not attempted (Requirements FR-12). All three degrade to plain,
+tested, meaning-preserving output (§7).

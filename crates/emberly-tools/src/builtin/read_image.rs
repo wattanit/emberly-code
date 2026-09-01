@@ -10,14 +10,14 @@
 //! error.
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose, Engine as _};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::ctx::ToolCtx;
+use crate::image::encode_image_bytes;
 use crate::path::{display_relative, resolve_in_root};
 use crate::permission::PermissionRequest;
-use crate::tool::{ImageContent, Tool, ToolOutcome, ToolSpec};
+use crate::tool::{Tool, ToolOutcome, ToolSpec};
 
 #[derive(Deserialize)]
 struct ReadImageArgs {
@@ -106,97 +106,25 @@ impl Tool for ReadImageTool {
             }
         };
 
-        // Enforce the size cap before encoding (HC-6 precise failure).
-        let max = ctx.image_max_bytes();
-        if bytes.len() > max {
-            return ToolOutcome::failure(
-                format!(
-                    "{} is {} bytes — exceeds the image size limit of {} bytes",
-                    args.path,
-                    bytes.len(),
-                    max
-                ),
-                "oversize",
-            );
-        }
-
-        // Detect format + dimensions header-only (no codec tree).
-        let dim = match imagesize::blob_size(&bytes) {
-            Ok(d) => d,
-            Err(_) => {
-                return ToolOutcome::failure(
-                    format!(
-                        "{} is not a recognized image format (accepted: PNG, JPEG, GIF, WebP)",
-                        args.path
-                    ),
-                    "format unknown",
-                );
-            }
+        // Validate + encode (size cap, format sniff, base64) via the shared
+        // T-12/FR-10 path (HC-6 precise failure).
+        let encoded = match encode_image_bytes(&bytes, ctx.image_max_bytes()) {
+            Ok(e) => e,
+            Err(e) => return ToolOutcome::failure(format!("{}: {e}", args.path), "invalid image"),
         };
-        let img_type = match imagesize::image_type(&bytes) {
-            Ok(t) => t,
-            Err(_) => {
-                return ToolOutcome::failure(
-                    format!(
-                        "{} is not a recognized image format (accepted: PNG, JPEG, GIF, WebP)",
-                        args.path
-                    ),
-                    "format unknown",
-                );
-            }
-        };
-        let media_type = match media_type_for_type(img_type) {
-            Some(mt) => mt,
-            None => {
-                return ToolOutcome::failure(
-                    format!(
-                        "{} is not a supported image format (accepted: PNG, JPEG, GIF, WebP)",
-                        args.path
-                    ),
-                    "format unsupported",
-                );
-            }
-        };
-        let width = dim.width;
-        let height = dim.height;
 
         let rel = display_relative(ctx.project_root(), &resolved.path);
-        let format_name = format_label(media_type);
-
-        // Base64-encode and hand the image block to the engine.
-        let data = general_purpose::STANDARD.encode(&bytes);
-        let summary = format!("read image {rel} · {width}×{height} · {format_name}");
+        let summary = format!(
+            "read image {rel} · {}×{} · {}",
+            encoded.width, encoded.height, encoded.format_label
+        );
         ToolOutcome::success(
             format!(
-                "Image loaded: {rel} ({width}×{height}, {format_name}). It has been added to the conversation as an image content block."
+                "Image loaded: {rel} ({}×{}, {}). It has been added to the conversation as an image content block.",
+                encoded.width, encoded.height, encoded.format_label
             ),
             summary,
         )
-        .with_image(ImageContent {
-            media_type: media_type.to_string(),
-            data,
-        })
-    }
-}
-
-/// Map an `imagesize::ImageType` to its MIME type, or `None` if unsupported.
-fn media_type_for_type(ty: imagesize::ImageType) -> Option<&'static str> {
-    match ty {
-        imagesize::ImageType::Png => Some("image/png"),
-        imagesize::ImageType::Jpeg => Some("image/jpeg"),
-        imagesize::ImageType::Gif => Some("image/gif"),
-        imagesize::ImageType::Webp => Some("image/webp"),
-        _ => None,
-    }
-}
-
-/// A short uppercase label for the reference line (Design §4.8).
-fn format_label(media_type: &str) -> &'static str {
-    match media_type {
-        "image/png" => "PNG",
-        "image/jpeg" => "JPEG",
-        "image/gif" => "GIF",
-        "image/webp" => "WebP",
-        _ => "IMAGE",
+        .with_image(encoded.content)
     }
 }

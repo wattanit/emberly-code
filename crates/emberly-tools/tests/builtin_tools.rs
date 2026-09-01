@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use emberly_tools::{
-    AskUserGate, AskUserOutcome, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool,
-    PermissionGate, PermissionOutcome, PermissionRequest, PlainSandbox, ReadDocumentTool,
-    ReadFileTool, ReadImageTool, Sandbox, Tool, ToolCtx, TruncateConfig, WriteFileTool,
+    AskUserGate, AskUserOutcome, AskUserTool, BashTool, EditFileTool, EndAgentTool, GlobTool,
+    GrepTool, ListAgentsTool, MessageAgentTool, PermissionGate, PermissionOutcome,
+    PermissionRequest, PlainSandbox, ReadDocumentTool, ReadFileTool, ReadImageTool, Sandbox,
+    SpawnAgentsTool, Tool, ToolCtx, TruncateConfig, WriteFileTool,
 };
 use serde_json::json;
 
@@ -254,6 +255,34 @@ async fn write_refuses_git_directory() {
 }
 
 #[tokio::test]
+async fn write_allows_a_git_dir_outside_the_project_root() {
+    // A `.git/` outside the project root (e.g. a vendored checkout under
+    // `~/.cargo/git/checkouts/…/.git/`) is not the project's own history —
+    // HC-5 must not catch it. It still goes through the ordinary outside-root
+    // Allow/Deny path, exactly like any other path outside the root.
+    let root = temp_project();
+    let outside = std::env::temp_dir().join(format!(
+        "emberly-outside-git-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::create_dir_all(outside.join(".git"));
+    let abs = outside.join(".git").join("config").display().to_string();
+
+    let outcome = WriteFileTool
+        .execute(
+            json!({ "path": abs, "content": "[core]\n" }),
+            &ctx(&root, true),
+        )
+        .await;
+    assert!(
+        outcome.ok,
+        "a .git/ outside the root must not be tool-layer refused: {}",
+        outcome.content
+    );
+}
+
+#[tokio::test]
 async fn write_denied_by_gate_returns_denied() {
     let root = temp_project();
     let outcome = WriteFileTool
@@ -435,6 +464,33 @@ async fn bash_denied_by_gate() {
         .await;
     assert!(!outcome.ok);
     assert!(outcome.content.contains("denied"));
+}
+
+#[tokio::test]
+async fn bash_denied_chained_git_gets_hint() {
+    let root = temp_project();
+    let outcome = BashTool::default()
+        .execute(
+            json!({ "command": "git add . && git commit -m 'wip'" }),
+            &ctx(&root, false),
+        )
+        .await;
+    assert!(!outcome.ok);
+    assert!(
+        outcome.content.contains("Hint:") && outcome.content.contains("one at a time"),
+        "expected a chained-git hint: {}",
+        outcome.content
+    );
+}
+
+#[tokio::test]
+async fn bash_denied_plain_command_gets_no_hint() {
+    let root = temp_project();
+    let outcome = BashTool::default()
+        .execute(json!({ "command": "echo hi" }), &ctx(&root, false))
+        .await;
+    assert!(!outcome.ok);
+    assert!(!outcome.content.contains("Hint:"));
 }
 
 /// Tiny helper so a `None` file_change fails loudly without `.unwrap()`.
@@ -915,4 +971,119 @@ async fn read_document_git_dir_requests_permission_like_any_outside_path() {
         outcome.content
     );
     assert!(outcome.document.is_some());
+}
+
+// ---- multi-agent tools (T-18–T-21, Phase 1: tool-layer contract) ----------
+//
+// This phase ships only the tool layer against the fail-closed
+// `DropSubagentGate` (Tech Spec §8.4 Phase 1) — a `ctx()` here never installs
+// a subagent gate, so every call below is expected to fail structured (HC-6),
+// never panic. Phase 2 replaces the default gate with a real, nested-`Engine`-
+// backed one and adds the functional round-trip coverage.
+
+#[tokio::test]
+async fn spawn_agents_schema_round_trip_and_default_gate_fails_closed() {
+    let root = temp_project();
+    let outcome = SpawnAgentsTool
+        .execute(
+            json!({
+                "agents": [
+                    { "name": "helper", "system_prompt": "Investigate the bug." }
+                ]
+            }),
+            &ctx(&root, true),
+        )
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("not available"));
+}
+
+#[tokio::test]
+async fn spawn_agents_rejects_missing_required_fields_as_invalid_args() {
+    let root = temp_project();
+    // `agents` present but an entry missing `system_prompt` — a schema
+    // mismatch, not a gate call.
+    let outcome = SpawnAgentsTool
+        .execute(
+            json!({ "agents": [ { "name": "helper" } ] }),
+            &ctx(&root, true),
+        )
+        .await;
+    assert!(!outcome.ok);
+    assert_eq!(outcome.summary, "bad args");
+}
+
+#[tokio::test]
+async fn spawn_agents_rejects_an_empty_agent_list() {
+    let root = temp_project();
+    let outcome = SpawnAgentsTool
+        .execute(json!({ "agents": [] }), &ctx(&root, true))
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("must not be empty"));
+}
+
+#[tokio::test]
+async fn spawn_agents_describe_lists_the_names() {
+    let describe = SpawnAgentsTool.describe(&json!({
+        "agents": [
+            { "name": "helper-a", "system_prompt": "..." },
+            { "name": "helper-b", "system_prompt": "..." }
+        ]
+    }));
+    assert_eq!(
+        describe,
+        Some("spawn_agents · helper-a, helper-b".to_string())
+    );
+}
+
+#[tokio::test]
+async fn message_agent_default_gate_fails_closed() {
+    let root = temp_project();
+    let outcome = MessageAgentTool
+        .execute(
+            json!({ "id": "agent-1", "message": "keep going" }),
+            &ctx(&root, true),
+        )
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("not available"));
+}
+
+#[tokio::test]
+async fn message_agent_describe_names_the_id() {
+    let describe = MessageAgentTool.describe(&json!({ "id": "agent-1", "message": "hi" }));
+    assert_eq!(describe, Some("message_agent · agent-1".to_string()));
+}
+
+#[tokio::test]
+async fn list_agents_default_gate_fails_closed() {
+    let root = temp_project();
+    let outcome = ListAgentsTool.execute(json!({}), &ctx(&root, true)).await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("not available"));
+}
+
+#[tokio::test]
+async fn list_agents_describe_is_constant() {
+    assert_eq!(
+        ListAgentsTool.describe(&json!({})),
+        Some("list_agents".to_string())
+    );
+}
+
+#[tokio::test]
+async fn end_agent_default_gate_fails_closed() {
+    let root = temp_project();
+    let outcome = EndAgentTool
+        .execute(json!({ "id": "agent-1" }), &ctx(&root, true))
+        .await;
+    assert!(!outcome.ok);
+    assert!(outcome.content.contains("not available"));
+}
+
+#[tokio::test]
+async fn end_agent_describe_names_the_id() {
+    let describe = EndAgentTool.describe(&json!({ "id": "agent-1" }));
+    assert_eq!(describe, Some("end_agent · agent-1".to_string()));
 }

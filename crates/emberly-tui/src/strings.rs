@@ -27,6 +27,10 @@ pub mod permission {
     pub const HEADING: &str = "PERMISSION REQUIRED";
     pub const WHY_LABEL: &str = "why";
     pub const PATHS_LABEL: &str = "paths";
+    /// Provenance line when the action is a subagent's own, not the primary
+    /// agent's (FR-9, Design §4.13/§5) — every other guarantee on this prompt
+    /// holds unchanged; this is the only addition.
+    pub const ON_BEHALF_OF_LABEL: &str = "on behalf of subagent";
     /// The choices. Deny is the safe default and the meaning of Enter/Esc.
     pub const ALLOW_ONCE: &str = "allow once";
     pub const ALLOW_SESSION: &str = "allow this session";
@@ -180,6 +184,38 @@ pub mod skills {
     pub const HINT: &str = " Enter view · ↑↓ move · Esc close";
 }
 
+/// The Agents inspector (FR-9, Design §4.13) — mirrors `skills`'s shape: a
+/// selectable list, Enter opens a read-only body on top (a subagent's own
+/// activity, not an instruction to inspect before it runs, but the same
+/// "inspectors, not black boxes" pattern).
+pub mod agents {
+    pub const TITLE: &str = "agents";
+    /// Shown when no subagents are currently alive.
+    pub const EMPTY: &str = "(no subagents are currently alive)";
+    /// The action hint at the foot of the inspector.
+    pub const HINT: &str = " Enter view activity · ↑↓ move · Esc close";
+    /// The foot hint on the activity overlay itself — names the live refresh
+    /// (Design §4.13) so the text changing under the user's eyes reads as
+    /// expected, not as a glitch.
+    pub const ACTIVITY_HINT: &str = " Esc close · ↑↓ PgUp/PgDn scroll · updates live";
+}
+
+/// The MCP inspector (`/mcp`, FR-11, Design §4.15).
+pub mod mcp {
+    pub const TITLE: &str = "mcp";
+    /// Shown when no servers are currently connected.
+    pub const EMPTY: &str = "(no MCP servers are currently connected)";
+    /// The action hint at the foot of the inspector.
+    pub const HINT: &str = " Enter view tools · ↑↓ move · Esc close";
+}
+
+/// Session export (FR-12, Design §8.11): the calm, one-time disclosure line
+/// shared verbatim by both frontends, since export does not redact content
+/// (Requirements FR-12 honesty clause) — the disclosure is the mitigation.
+pub mod export {
+    pub const SENSITIVE_CONTENT_NOTE: &str = "This file may contain file contents, command output, and anything else this session touched — review before sharing.";
+}
+
 /// Keybinding hints for the status bar (Design §3.1, §6.2 — 2–5 words each).
 /// Hints change with state; the permission set is shown while a prompt is open.
 pub mod hints {
@@ -187,10 +223,25 @@ pub mod hints {
     pub const PERMISSION: &str = "y allow · s session · Enter deny";
 }
 
+/// The one-time orientation shown in an otherwise-empty conversation pane at
+/// the start of a fresh session (never a resumed one) — the blank pane's own
+/// answer to "how do I do anything here" (owner's call: shown every fresh
+/// session, not just an uninitialized project — see [`crate::app::App::seed_history`]
+/// and `begin_new_session`). Rendered as a `ConvItem::Notice`, so it carries
+/// the same terse, dim harness voice as every other notice — a pointer, not a
+/// tutorial.
+pub mod welcome {
+    pub const TEXT: &str = "Ctrl-P opens the command palette — a few commands worth knowing:\n  /init      scaffold .agents/ for this project\n  /model     pick a provider and model\n  /compact   reclaim context by summarizing older turns\n  /help      the full command list";
+}
+
 /// Conversation-flow markers. ASCII-safe fallbacks live in the line frontend;
 /// these are the rich-mode glyphs.
 pub mod markers {
     pub const USER_PROMPT: &str = "›";
+    /// Leads a user-attached image's chip on the sent message (FR-10, Design
+    /// §4.14) — deliberately distinct from `NOTICE`/tool-activity styling,
+    /// since this is content on the user's own message, not tool activity.
+    pub const ATTACHMENT: &str = "📎";
     pub const NOTICE: &str = "·";
     pub const RUNNING: &str = "…";
     pub const OK: &str = "ok";

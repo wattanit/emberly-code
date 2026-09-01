@@ -9,6 +9,8 @@ fn app() -> App {
         std::env::temp_dir(),
         vec!["anthropic".into(), "openai".into(), "zai".into()],
         "# test config\n".to_string(),
+        String::new(),
+        String::new(),
         test_provider_writer(),
     )
 }
@@ -81,6 +83,8 @@ fn model_picker_offers_add_provider_even_with_no_profiles() {
         std::env::temp_dir(),
         Vec::new(),
         String::new(),
+        String::new(),
+        String::new(),
         test_provider_writer(),
     );
     a.open_model_picker();
@@ -108,6 +112,8 @@ fn provider_wizard_happy_path_writes_and_fires_reload() {
         SessionInfo::default(),
         std::env::temp_dir(),
         vec!["anthropic".into()],
+        String::new(),
+        String::new(),
         String::new(),
         test_provider_writer(),
     );
@@ -143,6 +149,8 @@ fn provider_wizard_rejects_empty_name_and_stays_on_step() {
         std::env::temp_dir(),
         Vec::new(),
         String::new(),
+        String::new(),
+        String::new(),
         test_provider_writer(),
     );
     a.open_model_picker();
@@ -161,6 +169,8 @@ fn provider_wizard_esc_steps_back_without_losing_the_value() {
         SessionInfo::default(),
         std::env::temp_dir(),
         Vec::new(),
+        String::new(),
+        String::new(),
         String::new(),
         test_provider_writer(),
     );
@@ -186,6 +196,8 @@ fn provider_wizard_rejects_a_name_already_in_use() {
         SessionInfo::default(),
         std::env::temp_dir(),
         vec!["anthropic".into()],
+        String::new(),
+        String::new(),
         String::new(),
         test_provider_writer(),
     );
@@ -354,6 +366,8 @@ fn slash_config_seeds_then_edits_without_clobbering() {
         sessions,
         Vec::new(),
         "# seeded config\n".to_string(),
+        String::new(),
+        String::new(),
         test_provider_writer(),
     );
 
@@ -379,6 +393,8 @@ fn slash_prompt_seeds_from_default_and_rejects_unknown() {
         sessions,
         Vec::new(),
         String::new(),
+        String::new(),
+        String::new(),
         test_provider_writer(),
     );
 
@@ -398,6 +414,49 @@ fn slash_prompt_seeds_from_default_and_rejects_unknown() {
 }
 
 #[test]
+fn slash_init_scaffolds_agents_dir_then_says_already_set_up() {
+    let root = std::env::temp_dir().join(format!("emberly-app-init-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let sessions = root.join(".agents").join("sessions");
+    std::fs::create_dir_all(&sessions).expect("mkdir");
+    let mut a = App::new(
+        SessionInfo::default(),
+        sessions,
+        Vec::new(),
+        "# config template\n".to_string(),
+        "# permissions template\n".to_string(),
+        "sessions/\n".to_string(),
+        test_provider_writer(),
+    );
+
+    let agents = root.join(".agents");
+    assert_eq!(a.run_slash("init"), Action::None);
+    assert!(agents.join("config.toml").exists());
+    assert!(agents.join("prompts/system.md").exists());
+    assert!(agents.join("prompts/compact.md").exists());
+    assert!(agents.join("permissions.toml").exists());
+    assert!(agents.join(".gitignore").exists());
+    assert!(a.timeline.items.iter().any(
+        |i| matches!(i, ConvItem::Notice(n) if n.contains("created in .agents/") && n.contains("/reload"))
+    ));
+
+    // Running it again with everything already present says so, and touches
+    // nothing (never clobbers, C-2).
+    a.timeline.items.clear();
+    std::fs::write(agents.join("config.toml"), "user edits").expect("write");
+    assert_eq!(a.run_slash("init"), Action::None);
+    assert_eq!(
+        std::fs::read_to_string(agents.join("config.toml")).expect("read"),
+        "user edits"
+    );
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(n) if n.contains("already set up"))));
+}
+
+#[test]
 fn edit_provenance_distinguishes_new_override_from_existing() {
     let root = std::env::temp_dir().join(format!("emberly-prov-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -408,6 +467,8 @@ fn edit_provenance_distinguishes_new_override_from_existing() {
         sessions,
         Vec::new(),
         "# t\n".to_string(),
+        String::new(),
+        String::new(),
         test_provider_writer(),
     );
 
@@ -563,6 +624,7 @@ fn busy_spinner_spans_the_turn_and_respects_gates() {
             affected_paths: vec![],
             outside_root: false,
             reason: "asks".into(),
+            on_behalf_of: None,
         },
     });
     assert!(!a.is_animating(), "no motion during a permission prompt");
@@ -947,6 +1009,7 @@ fn pending_permission_app() -> App {
             affected_paths: vec![],
             outside_root: false,
             reason: "bash asks".into(),
+            on_behalf_of: None,
         },
     });
     a
@@ -1084,6 +1147,7 @@ fn permission_defaults_to_deny_on_enter() {
             affected_paths: vec![],
             outside_root: false,
             reason: "bash asks".into(),
+            on_behalf_of: None,
         },
     });
     let action = a.on_key(KeyEvent::from(KeyCode::Enter));
@@ -1421,6 +1485,7 @@ fn permission_scroll_keys_review_without_deciding() {
             affected_paths: vec![],
             outside_root: false,
             reason: "bash asks".into(),
+            on_behalf_of: None,
         },
     });
     // Scrolling and Space page-down must NOT decide.
@@ -1449,6 +1514,7 @@ fn wheel_scrolls_a_permission_prompt_without_deciding() {
             affected_paths: vec![],
             outside_root: false,
             reason: "bash asks".into(),
+            on_behalf_of: None,
         },
     });
     // The wheel reviews the prompt body (permission_scroll), never the
@@ -1477,6 +1543,7 @@ fn permission_allows_only_on_deliberate_key() {
             affected_paths: vec![],
             outside_root: false,
             reason: "bash asks".into(),
+            on_behalf_of: None,
         },
     });
     let action = a.on_key(KeyEvent::from(KeyCode::Char('y')));
@@ -1506,6 +1573,115 @@ fn enter_submits_user_input() {
 }
 
 #[test]
+fn slash_attach_sends_the_path() {
+    // FR-10: `/attach <path>` sends AttachImage verbatim; no path is a plain
+    // usage notice, not a silent no-op (Design §4.14).
+    let mut a = app();
+    assert_eq!(
+        a.run_slash("attach mockup.png"),
+        Action::Command(Command::AttachImage {
+            path: "mockup.png".into(),
+        })
+    );
+    let mut a = app();
+    assert_eq!(a.run_slash("attach"), Action::None);
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("usage: /attach"))));
+}
+
+#[test]
+fn slash_export_sends_the_path() {
+    // FR-12: `/export <path>` sends ExportSession verbatim; no path is a
+    // plain usage notice, not a silent no-op (Design §8.11).
+    let mut a = app();
+    assert_eq!(
+        a.run_slash("export session.html"),
+        Action::Command(Command::ExportSession {
+            path: "session.html".into(),
+        })
+    );
+    let mut a = app();
+    assert_eq!(a.run_slash("export"), Action::None);
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("usage: /export"))));
+}
+
+#[test]
+fn session_exported_event_shows_path_and_disclosure() {
+    let mut a = app();
+    a.apply_event(UiEvent::SessionExported {
+        path: "session.html".into(),
+    });
+    let notices: Vec<&str> = a
+        .timeline
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            ConvItem::Notice(m) => Some(m.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(notices
+        .iter()
+        .any(|m| m.contains("exported to session.html")));
+    assert!(notices.iter().any(|m| m.contains("review before sharing")));
+}
+
+#[test]
+fn image_attached_event_stages_then_send_turns_it_into_a_chip() {
+    // FR-10, Design §4.14: `ImageAttached` stages the image in the compose
+    // area; sending the message drains it into a chip right after the
+    // user's own message, never as tool activity.
+    let mut a = app();
+    a.apply_event(UiEvent::ImageAttached {
+        path: "/tmp/mockup.png".into(),
+        name: "mockup.png".into(),
+        media_type: "image/png".into(),
+        width: 800,
+        height: 600,
+        format_label: "PNG".into(),
+        pending_count: 1,
+    });
+    assert_eq!(a.pending_attachments.len(), 1);
+
+    a.on_key(KeyEvent::from(KeyCode::Char('h')));
+    a.on_key(KeyEvent::from(KeyCode::Char('i')));
+    a.on_key(KeyEvent::from(KeyCode::Enter));
+
+    assert!(a.pending_attachments.is_empty());
+    let last_two: Vec<_> = a.timeline.items.iter().rev().take(2).collect();
+    assert!(matches!(
+        last_two[1],
+        ConvItem::User(t) if t == "hi"
+    ));
+    assert!(matches!(
+        last_two[0],
+        ConvItem::Attachment { name, width: 800, height: 600, format_label }
+        if name == "mockup.png" && format_label == "PNG"
+    ));
+}
+
+#[test]
+fn attach_failed_event_is_a_plain_notice() {
+    let mut a = app();
+    a.apply_event(UiEvent::AttachFailed {
+        path: "data.bin".into(),
+        reason: "not a recognized image format".into(),
+    });
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(m) if m.contains("attach failed") && m.contains("data.bin"))));
+}
+
+#[test]
 fn slash_command_is_not_echoed_as_a_message() {
     let mut a = app();
     for c in "/help".chars() {
@@ -1518,6 +1694,38 @@ fn slash_command_is_not_echoed_as_a_message() {
         .items
         .iter()
         .any(|i| matches!(i, ConvItem::User(_))));
+}
+
+#[test]
+fn tab_completes_an_unambiguous_slash_command() {
+    let mut a = app();
+    for c in "/qui".chars() {
+        a.on_key(KeyEvent::from(KeyCode::Char(c)));
+    }
+    a.on_key(KeyEvent::from(KeyCode::Tab));
+    // Completed to the sole match, with a trailing space ready for args.
+    assert_eq!(a.editor.text(), "/quit ");
+}
+
+#[test]
+fn tab_is_a_no_op_on_an_ambiguous_prefix() {
+    let mut a = app();
+    // "model" and "mode" both start with "mo" — Tab must not guess.
+    for c in "/mo".chars() {
+        a.on_key(KeyEvent::from(KeyCode::Char(c)));
+    }
+    a.on_key(KeyEvent::from(KeyCode::Tab));
+    assert_eq!(a.editor.text(), "/mo");
+}
+
+#[test]
+fn tab_is_a_no_op_outside_a_slash_command() {
+    let mut a = app();
+    for c in "hello".chars() {
+        a.on_key(KeyEvent::from(KeyCode::Char(c)));
+    }
+    a.on_key(KeyEvent::from(KeyCode::Tab));
+    assert_eq!(a.editor.text(), "hello");
 }
 
 fn picker(a: &mut App, rows: Vec<SessionRow>) {
@@ -1615,6 +1823,13 @@ fn begin_new_session_resets_the_timeline_and_identity() {
         .items
         .iter()
         .any(|i| matches!(i, ConvItem::User(t) if t == "old")));
+    // A fresh session in place is not left blank either — same orientation as
+    // a brand-new process launch gets (tui::run).
+    assert!(a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(n) if n == crate::strings::welcome::TEXT)));
 }
 
 #[test]
@@ -1630,6 +1845,15 @@ fn begin_resumed_session_adopts_title_and_clears_prior_timeline() {
         .items
         .iter()
         .any(|i| matches!(i, ConvItem::User(t) if t == "old")));
+    // A resume — even a degenerate empty-records one — never shows the
+    // fresh-session welcome; that decision belongs to the caller (tui::run),
+    // not to seed_history, precisely so a resume can never be mistaken for
+    // fresh just because its records happen to be empty.
+    assert!(!a
+        .timeline
+        .items
+        .iter()
+        .any(|i| matches!(i, ConvItem::Notice(n) if n == crate::strings::welcome::TEXT)));
 }
 
 #[test]
@@ -2099,6 +2323,337 @@ fn skills_inspector_esc_dismisses() {
     let mut a = app();
     a.skills = vec![skill_meta("pdf-fill", "Fill PDF forms", SkillOrigin::User)];
     a.run_command(AppCommand::Skills);
+    assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
+    assert!(a.overlays.is_empty());
+}
+
+// ---- Agents inspector (`/agents`, FR-9, Design §3.1/§4.13) -------------
+
+fn agent_summary(id: &str, name: &str, ended: bool) -> crate::app::AgentSummary {
+    crate::app::AgentSummary {
+        id: id.into(),
+        name: name.into(),
+        ended,
+    }
+}
+
+#[test]
+fn subagent_spawned_and_ended_events_mark_ended_rather_than_remove() {
+    // Design §4.13: an ended subagent stays reachable from `/agents` for the
+    // rest of the session, so `SubagentEnded` marks the entry rather than
+    // dropping it — only the sidebar section (rendering) filters ended ones
+    // back out.
+    let mut a = app();
+    a.apply_event(UiEvent::SubagentSpawned {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        profile: "default".into(),
+        model: "m".into(),
+    });
+    assert_eq!(a.agents.len(), 1);
+    assert_eq!(a.agents[0].id, "agent-1");
+    assert_eq!(a.agents[0].name, "reviewer");
+    assert!(!a.agents[0].ended);
+    a.apply_event(UiEvent::SubagentEnded {
+        id: "agent-1".into(),
+        reason: "done".into(),
+    });
+    assert_eq!(
+        a.agents.len(),
+        1,
+        "ended subagent stays in the catalog, not removed"
+    );
+    assert!(a.agents[0].ended);
+}
+
+#[test]
+fn agents_command_opens_inspector_from_cached_list() {
+    let mut a = app();
+    a.agents = vec![
+        agent_summary("agent-1", "reviewer", false),
+        agent_summary("agent-2", "tester", false),
+    ];
+    // No engine round-trip — the alive list is already cached.
+    assert_eq!(a.run_slash("agents"), Action::None);
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentList { agents, selected }) => {
+            assert_eq!(agents.len(), 2);
+            assert_eq!(agents[0].id, "agent-1");
+            assert_eq!(*selected, 0);
+        }
+        other => panic!("expected AgentList overlay, got {other:?}"),
+    }
+    assert_eq!(a.run_command(AppCommand::Agents), Action::None);
+    assert!(commands::COMMANDS.iter().any(|c| c.name == "agents"));
+}
+
+#[test]
+fn agents_enter_issues_inspect_for_the_selected_agent() {
+    let mut a = app();
+    a.agents = vec![
+        agent_summary("agent-1", "reviewer", false),
+        agent_summary("agent-2", "tester", false),
+    ];
+    a.run_command(AppCommand::Agents);
+    a.on_key(key(KeyCode::Down)); // select agent-2
+    assert_eq!(
+        a.on_key(key(KeyCode::Enter)),
+        Action::Command(Command::InspectAgent {
+            id: "agent-2".into(),
+        })
+    );
+}
+
+#[test]
+fn agents_enter_on_an_ended_entry_still_inspects_it() {
+    // Design §4.13: "a subagent that has ended keeps its inspector
+    // reachable for the rest of the session" — Enter on an ended row issues
+    // the same InspectAgent command as a live one.
+    let mut a = app();
+    a.agents = vec![agent_summary("agent-1", "reviewer", true)];
+    a.run_command(AppCommand::Agents);
+    assert_eq!(
+        a.on_key(key(KeyCode::Enter)),
+        Action::Command(Command::InspectAgent {
+            id: "agent-1".into(),
+        })
+    );
+}
+
+#[test]
+fn agent_activity_opens_a_read_only_overlay() {
+    let mut a = app();
+    a.agents = vec![agent_summary("agent-1", "reviewer", false)];
+    a.run_command(AppCommand::Agents);
+    a.on_key(key(KeyCode::Enter));
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        text: "user: review this diff\nassistant: looks good".into(),
+    });
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentActivity { id, name, text }) => {
+            assert_eq!(id, "agent-1");
+            assert_eq!(name, "reviewer");
+            assert!(text.contains("looks good"));
+        }
+        other => panic!("expected an AgentActivity overlay, got {other:?}"),
+    }
+    assert_eq!(
+        a.watched_agent_id(),
+        Some("agent-1".into()),
+        "the open activity overlay is the one the periodic refresh polls"
+    );
+}
+
+#[test]
+fn agent_activity_refresh_updates_the_open_overlay_in_place() {
+    // Design §4.13's "live-updating... as it happens": a second reply for
+    // the *same* id (what the periodic refresh ticker in `tui::run` sends)
+    // updates the existing overlay's text rather than stacking a new one.
+    let mut a = app();
+    a.agents = vec![agent_summary("agent-1", "reviewer", false)];
+    a.run_command(AppCommand::Agents);
+    a.on_key(key(KeyCode::Enter));
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        text: "user: start".into(),
+    });
+    let depth_before = a.overlays.len();
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        text: "user: start\nassistant: still working".into(),
+    });
+    assert_eq!(a.overlays.len(), depth_before, "no new overlay is stacked");
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentActivity { text, .. }) => {
+            assert!(text.contains("still working"));
+        }
+        other => panic!("expected an AgentActivity overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn agent_activity_reply_for_an_abandoned_id_is_dropped() {
+    // A stale reply for an id the user is no longer looking at must not
+    // silently replace what is currently on screen.
+    let mut a = app();
+    a.agents = vec![
+        agent_summary("agent-1", "reviewer", false),
+        agent_summary("agent-2", "tester", false),
+    ];
+    a.run_command(AppCommand::Agents);
+    a.on_key(key(KeyCode::Enter)); // opens agent-1's activity
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-1".into(),
+        name: "reviewer".into(),
+        text: "reviewer's activity".into(),
+    });
+    // A late reply for a different subagent arrives (e.g. a stale periodic
+    // refresh from before the user moved on).
+    a.apply_event(UiEvent::AgentActivity {
+        id: "agent-2".into(),
+        name: "tester".into(),
+        text: "tester's activity".into(),
+    });
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentActivity { id, text, .. }) => {
+            assert_eq!(id, "agent-1", "the shown subagent did not silently change");
+            assert!(text.contains("reviewer's activity"));
+        }
+        other => panic!("expected an AgentActivity overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn watched_agent_id_is_none_without_an_open_activity_overlay() {
+    let mut a = app();
+    assert_eq!(a.watched_agent_id(), None);
+    a.agents = vec![agent_summary("agent-1", "reviewer", false)];
+    a.run_command(AppCommand::Agents); // AgentList, not AgentActivity, is open
+    assert_eq!(a.watched_agent_id(), None);
+}
+
+#[test]
+fn agents_empty_list_opens_an_empty_overlay() {
+    let mut a = app();
+    a.agents.clear();
+    a.run_command(AppCommand::Agents);
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::AgentList { agents, .. }) => assert!(agents.is_empty()),
+        other => panic!("expected an empty AgentList overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn agents_inspector_esc_dismisses() {
+    let mut a = app();
+    a.agents = vec![agent_summary("agent-1", "reviewer", false)];
+    a.run_command(AppCommand::Agents);
+    assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
+    assert!(a.overlays.is_empty());
+}
+
+// ---- MCP inspector (`/mcp`, FR-11, Design §4.15) ------------------------
+
+fn mcp_server(name: &str, tools: &[&str]) -> crate::app::McpServerSummary {
+    crate::app::McpServerSummary {
+        name: name.into(),
+        tools: tools.iter().map(|t| t.to_string()).collect(),
+    }
+}
+
+#[test]
+fn mcp_server_connected_upserts_the_sidebar_catalog_and_notices() {
+    let mut a = app();
+    a.apply_event(UiEvent::McpServerConnected {
+        name: "jira".into(),
+        tools: vec!["mcp__jira__get_issue".into()],
+    });
+    assert_eq!(a.mcp_servers.len(), 1);
+    assert_eq!(a.mcp_servers[0].tools.len(), 1);
+    assert!(a.timeline.items.iter().any(
+        |i| matches!(i, ConvItem::Notice(m) if m.contains("jira") && m.contains("connected"))
+    ));
+
+    // A second connect for the same name (e.g. a /reload reconnect) upserts
+    // rather than duplicating the entry.
+    a.apply_event(UiEvent::McpServerConnected {
+        name: "jira".into(),
+        tools: vec![
+            "mcp__jira__get_issue".into(),
+            "mcp__jira__create_issue".into(),
+        ],
+    });
+    assert_eq!(a.mcp_servers.len(), 1);
+    assert_eq!(a.mcp_servers[0].tools.len(), 2);
+}
+
+#[test]
+fn mcp_server_failed_is_never_shown_as_connected() {
+    let mut a = app();
+    a.apply_event(UiEvent::McpServerFailed {
+        name: "jira".into(),
+        reason: "command not found".into(),
+    });
+    assert!(a.mcp_servers.is_empty());
+    assert!(a.timeline.items.iter().any(
+        |i| matches!(i, ConvItem::Notice(m) if m.contains("jira") && m.contains("command not found"))
+    ));
+}
+
+#[test]
+fn mcp_server_failed_after_a_prior_connect_removes_it() {
+    // A reconnect (e.g. on /reload) that now fails must not leave a stale
+    // "connected" entry in the sidebar.
+    let mut a = app();
+    a.mcp_servers = vec![mcp_server("jira", &["mcp__jira__get_issue"])];
+    a.apply_event(UiEvent::McpServerFailed {
+        name: "jira".into(),
+        reason: "process exited".into(),
+    });
+    assert!(a.mcp_servers.is_empty());
+}
+
+#[test]
+fn mcp_command_opens_inspector_from_cached_list() {
+    let mut a = app();
+    a.mcp_servers = vec![
+        mcp_server("jira", &["mcp__jira__get_issue"]),
+        mcp_server("github", &["mcp__github__list_prs", "mcp__github__get_pr"]),
+    ];
+    // No engine round-trip — the connected-server list is already cached.
+    assert_eq!(a.run_slash("mcp"), Action::None);
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::McpServerList { servers, selected }) => {
+            assert_eq!(servers.len(), 2);
+            assert_eq!(servers[0].name, "jira");
+            assert_eq!(*selected, 0);
+        }
+        other => panic!("expected McpServerList overlay, got {other:?}"),
+    }
+    assert!(commands::COMMANDS.iter().any(|c| c.name == "mcp"));
+}
+
+#[test]
+fn mcp_empty_list_opens_an_empty_overlay() {
+    let mut a = app();
+    a.mcp_servers.clear();
+    a.run_command(AppCommand::Mcp);
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::McpServerList { servers, .. }) => assert!(servers.is_empty()),
+        other => panic!("expected an empty McpServerList overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn mcp_enter_opens_the_selected_servers_tool_list_read_only_no_round_trip() {
+    let mut a = app();
+    a.mcp_servers = vec![
+        mcp_server("jira", &["mcp__jira__get_issue"]),
+        mcp_server("github", &["mcp__github__list_prs", "mcp__github__get_pr"]),
+    ];
+    a.run_command(AppCommand::Mcp);
+    a.on_key(key(KeyCode::Down)); // select github
+                                  // Enter opens a plain read-only text overlay directly — never a Command,
+                                  // since a server's tool list is already fully known (Design §4.15).
+    assert_eq!(a.on_key(key(KeyCode::Enter)), Action::None);
+    match a.overlays.last().map(|o| &o.content) {
+        Some(OverlayContent::Text(text)) => {
+            assert!(text.contains("mcp__github__list_prs"));
+            assert!(text.contains("mcp__github__get_pr"));
+        }
+        other => panic!("expected a read-only Text overlay, got {other:?}"),
+    }
+}
+
+#[test]
+fn mcp_inspector_esc_dismisses() {
+    let mut a = app();
+    a.mcp_servers = vec![mcp_server("jira", &["mcp__jira__get_issue"])];
+    a.run_command(AppCommand::Mcp);
     assert_eq!(a.on_key(key(KeyCode::Esc)), Action::None);
     assert!(a.overlays.is_empty());
 }

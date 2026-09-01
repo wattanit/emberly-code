@@ -1,6 +1,7 @@
 //! `write_file` (T-2): create or replace a file within the project root.
-//! Refuses any path under `.git/` at the tool layer (HC-5), independent of the
-//! OS sandbox. Creates parent directories only inside the root. Always asks
+//! Refuses any path under the project's own `.git/` at the tool layer (HC-5),
+//! independent of the OS sandbox. Creates parent directories only inside the
+//! root. Always asks
 //! for permission (writes inside the root: ask, per Requirements §6.2).
 
 use async_trait::async_trait;
@@ -59,7 +60,7 @@ impl Tool for WriteFileTool {
         };
 
         // HC-5: hard refusal, no ask option.
-        if is_under_git_dir(&resolved.path) {
+        if is_under_git_dir(ctx.project_root(), &resolved.path) {
             return ToolOutcome::failure(
                 format!(
                     "refusing to write under .git/: {} (only git may modify git data)",

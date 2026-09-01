@@ -136,7 +136,7 @@ impl Engine {
             .rules
             .evaluate(&make_query(&request), self.safety.mode);
         let id = self.take_permission_id();
-        let rendering = build_rendering(&request, outcome.reason.clone());
+        let rendering = build_rendering(&request, outcome.reason.clone(), ask.on_behalf_of.clone());
 
         match outcome.decision {
             Decision::Allow => {

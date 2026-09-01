@@ -28,6 +28,7 @@ use emberly_tui::{frontend, SessionInfo};
 
 mod clean;
 mod config;
+mod export;
 mod init;
 mod placeholder;
 mod provider_setup;
@@ -227,13 +228,42 @@ fn offer_resume(sessions_dir: &Path) -> Option<PathBuf> {
 #[derive(Debug, PartialEq, Eq)]
 enum Cli {
     Version,
+    Help(HelpTopic),
     Init,
     ConfigShow,
     Sessions,
     TrustList,
     TrustRevoke(String),
     Clean(Option<String>),
+    Export {
+        session_id: Option<String>,
+        output_path: String,
+    },
     Run(RunOpts),
+}
+
+/// What `--help`/`-h`/`help` was asked about — the bare command line, or one
+/// specific subcommand's own syntax.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelpTopic {
+    General,
+    Init,
+    Sessions,
+    Resume,
+    Config,
+    Trust,
+    Clean,
+    Export,
+}
+
+/// Whether `token` is one of the ways to ask for help. `help` (no dashes) is
+/// only checked where the caller knows the slot can't legitimately hold
+/// anything else (a fixed sub-subcommand keyword, e.g. `config help`) — free
+/// positionals like `clean`'s session id or `export`'s output path only ever
+/// treat the dashed forms as a help request, so a value that happens to be
+/// spelled "help" still works.
+fn is_help_flag(token: &str) -> bool {
+    matches!(token, "--help" | "-h")
 }
 
 /// Options for a session run.
@@ -254,10 +284,24 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--version" => return Ok(Cli::Version),
-            "init" => return Ok(Cli::Init),
-            "sessions" => return Ok(Cli::Sessions),
+            "--help" | "-h" | "help" => return Ok(Cli::Help(HelpTopic::General)),
+            "init" => {
+                if args.peek().is_some_and(|n| is_help_flag(n) || n == "help") {
+                    return Ok(Cli::Help(HelpTopic::Init));
+                }
+                return Ok(Cli::Init);
+            }
+            "sessions" => {
+                if args.peek().is_some_and(|n| is_help_flag(n) || n == "help") {
+                    return Ok(Cli::Help(HelpTopic::Sessions));
+                }
+                return Ok(Cli::Sessions);
+            }
             "config" => match args.next().as_deref() {
                 Some("show") => return Ok(Cli::ConfigShow),
+                Some(t) if is_help_flag(t) || t == "help" => {
+                    return Ok(Cli::Help(HelpTopic::Config))
+                }
                 other => anyhow::bail!(
                     "unknown config subcommand: {} (try `config show`)",
                     other.unwrap_or("(none)")
@@ -270,14 +314,22 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
                     let path = args.next().context("trust revoke needs a <path>")?;
                     return Ok(Cli::TrustRevoke(path));
                 }
+                Some(t) if is_help_flag(t) || t == "help" => {
+                    return Ok(Cli::Help(HelpTopic::Trust))
+                }
                 other => anyhow::bail!(
                     "unknown trust subcommand: {} (try `trust list` or `trust revoke <path>`)",
                     other.unwrap_or("(none)")
                 ),
             },
             // `clean [<session-id>]` — reclaim scratch disk space (FR-8, T-17).
-            // An id may follow, exactly like `resume [id]`.
+            // An id may follow, exactly like `resume [id]`. Only the dashed
+            // help forms short-circuit here — a session id spelled "help"
+            // (unlikely, but not impossible) still works as a positional.
             "clean" => {
+                if args.peek().is_some_and(|n| is_help_flag(n)) {
+                    return Ok(Cli::Help(HelpTopic::Clean));
+                }
                 let mut clean_id = None;
                 if let Some(next) = args.peek() {
                     if !next.starts_with('-') {
@@ -286,11 +338,38 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
                 }
                 return Ok(Cli::Clean(clean_id));
             }
+            // `export [--session <id>] <output-path>` (FR-12, Tech Spec §10).
+            "export" => {
+                if args.peek().is_some_and(|n| is_help_flag(n)) {
+                    return Ok(Cli::Help(HelpTopic::Export));
+                }
+                let mut session_id = None;
+                let mut output_path = None;
+                while let Some(next) = args.peek() {
+                    if next == "--session" {
+                        args.next();
+                        session_id = Some(args.next().context("--session needs a value")?);
+                    } else if output_path.is_none() {
+                        output_path = args.next();
+                    } else {
+                        break;
+                    }
+                }
+                let output_path = output_path.context("export needs an <output-path>")?;
+                return Ok(Cli::Export {
+                    session_id,
+                    output_path,
+                });
+            }
             // Force degraded/line mode (Design §7); also implied by `NO_COLOR`,
             // `TERM=dumb`, and a non-tty stdout — see `frontend::detect`.
             "--plain" => opts.force_plain = true,
-            // `resume [id]` — an id may follow (Tech Spec §3.3).
+            // `resume [id]` — an id may follow (Tech Spec §3.3). Only the
+            // dashed help forms short-circuit, for the same reason as `clean`.
             "resume" => {
+                if args.peek().is_some_and(|n| is_help_flag(n)) {
+                    return Ok(Cli::Help(HelpTopic::Resume));
+                }
                 opts.resume = true;
                 if let Some(next) = args.peek() {
                     if !next.starts_with('-') {
@@ -310,6 +389,100 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
     Ok(Cli::Run(opts))
 }
 
+/// `--help`/`-h`/`help` text for `topic`, mirroring the README's own
+/// command-line reference (README.md § Command-line reference) so there is
+/// one accurate description of the CLI surface, not two that can drift.
+fn help_text(topic: HelpTopic) -> &'static str {
+    match topic {
+        HelpTopic::General => {
+            "\
+emberly — an AI coding agent for your terminal
+
+Usage: emberly [command] [flags]
+
+Commands:
+  emberly                     Start (or offer to resume) an interactive session
+  emberly resume [id]         Resume the latest session, or one by id
+  emberly sessions            List saved sessions in this project
+  emberly export <path>       Export a session (latest, or --session <id>) to HTML
+  emberly init                Scaffold .agents/ (config, prompts, permissions)
+  emberly config show         Show the resolved configuration and its sources
+  emberly trust list          List trusted folders
+  emberly trust revoke <path> Revoke trust for a folder
+  emberly clean [<id>]        Reclaim scratch-space disk usage (all, or one session)
+
+Flags:
+  --plain              Run in plain line mode (no full-screen TUI)
+  --provider <name>    Select the active provider profile for this run
+  --model <name>       Override the model for this run
+  --version            Print the version
+  --help, -h           Show this help
+
+Plain mode is also selected automatically when output isn't a terminal, or
+NO_COLOR/TERM=dumb are set.
+
+Run `emberly <command> --help` for more on config, trust, export, or clean."
+        }
+        HelpTopic::Init => {
+            "\
+emberly init
+
+Scaffold .agents/ in the current project: a commented config.toml, the
+default system/compact prompts, a permissions.toml template, and a
+.gitignore that keeps session transcripts out of version control. Never
+overwrites a file that already exists — safe to run again."
+        }
+        HelpTopic::Sessions => {
+            "\
+emberly sessions
+
+List this project's saved sessions (.agents/sessions), newest first, with
+title, id, provider/model, how long ago, and the `emberly resume <id>`
+command to continue one."
+        }
+        HelpTopic::Resume => {
+            "\
+emberly resume [id]
+
+Resume the latest session, or a specific one by id, then start. Combine
+with --plain, --provider, or --model like any other run."
+        }
+        HelpTopic::Config => {
+            "\
+emberly config show
+
+Show the fully resolved configuration — provider profiles and prompts —
+and where each value came from: global config, project config, or an
+EMBERLY_* environment variable."
+        }
+        HelpTopic::Trust => {
+            "\
+emberly trust list
+emberly trust revoke <path>
+
+List the folders you've trusted, or revoke trust for one. Emberly only
+reads, edits, or runs commands in a folder after you've trusted it."
+        }
+        HelpTopic::Clean => {
+            "\
+emberly clean [<session-id>]
+
+Reclaim disk space used by session scratch directories (.agents/scratch).
+With no id, every session's scratch data is a candidate; with an id, just
+that one. Reports the total size and asks for confirmation before
+deleting."
+        }
+        HelpTopic::Export => {
+            "\
+emberly export [--session <id>] <output-path>
+
+Export a session's full conversation — and any subagent it spawned — to a
+single self-contained, read-only HTML file. Defaults to the latest
+session; --session <id> exports a specific one instead."
+        }
+    }
+}
+
 async fn run() -> anyhow::Result<()> {
     let started = Instant::now();
     let opts = match parse_args(std::env::args().skip(1))? {
@@ -319,6 +492,10 @@ async fn run() -> anyhow::Result<()> {
                 env!("CARGO_PKG_VERSION"),
                 env!("EMBERLY_BUILD_TIMESTAMP")
             );
+            return Ok(());
+        }
+        Cli::Help(topic) => {
+            println!("{}", help_text(topic));
             return Ok(());
         }
         Cli::Init => {
@@ -345,6 +522,14 @@ async fn run() -> anyhow::Result<()> {
         Cli::Clean(session_id) => {
             let scratch_root = std::env::current_dir()?.join(".agents").join("scratch");
             clean::clean(&scratch_root, session_id.as_deref())?;
+            return Ok(());
+        }
+        Cli::Export {
+            session_id,
+            output_path,
+        } => {
+            let sessions_dir = std::env::current_dir()?.join(".agents").join("sessions");
+            export::export(&sessions_dir, session_id.as_deref(), &output_path)?;
             return Ok(());
         }
         Cli::Run(opts) => opts,
@@ -527,12 +712,23 @@ async fn run() -> anyhow::Result<()> {
         emberly_core::spawn::HostSandbox::new(sandbox.is_confined(), git_binary, path_env),
     );
 
+    // `trust_granted` above is `newly_trusted` (only true on a *fresh* grant
+    // this run — it gates the one-time `TrustDecision` transcript write).
+    // Reaching this line at all means `trust::gate` already returned
+    // `Proceed`, so the project *is* trusted for the rest of this session
+    // regardless of whether that happened just now or earlier — the same
+    // single decision project skills/memory already load under
+    // unconditionally once the engine exists. Project-scoped MCP servers
+    // (FR-11) use that same fact, not `newly_trusted`.
+    let workspace_trusted = true;
+
     // Re-resolves config + prompts on an in-app `/config` / `/prompt` edit (C-5).
     let config_reloader: Arc<dyn emberly_core::ConfigReloader> =
         Arc::new(provider_setup::ConfiguredReloader::new(
             project_root.clone(),
             &cli_overrides,
             resolved.sandbox_require,
+            workspace_trusted,
             resolved.providers.clone(),
         ));
 
@@ -542,10 +738,13 @@ async fn run() -> anyhow::Result<()> {
     let provider_writer: Arc<dyn emberly_core::ProviderProfileWriter> =
         Arc::new(provider_write::ConfigWriter::new(project_root.clone()));
 
-    // Build the tool registry: the built-in suite always, plus `web_search`
-    // only when `search.enabled` and an endpoint is configured (Tech Spec §5.5).
-    // Shared with the `/config` reload path (C-5) via `build_tool_registry`.
-    let (tools, tool_warnings) = provider_setup::build_tool_registry(&resolved)?;
+    // Build the tool registry: the built-in suite always, `web_search` when
+    // `search.enabled` and an endpoint is configured (Tech Spec §5.5), and
+    // MCP-discovered tools for each enabled, trust-permitted
+    // `[mcp.servers.<name>]` (FR-11, Tech Spec §5.6). Shared with the
+    // `/config` reload path (C-5) via `build_tool_registry`.
+    let (tools, tool_warnings, mcp_connections) =
+        provider_setup::build_tool_registry(&resolved, workspace_trusted)?;
     for warning in &tool_warnings {
         eprintln!("emberly: {warning}");
     }
@@ -594,7 +793,9 @@ async fn run() -> anyhow::Result<()> {
         ))),
         config_reloader: Some(config_reloader),
         image_max_bytes: resolved.image_max_bytes,
+        image_max_attachments: resolved.image_max_attachments,
         document_max_bytes: resolved.document_max_bytes,
+        mcp_connections,
         memory: resolved.memory.clone(),
         user_memory_dir: config::memory_dir(),
         // The trust gate exits on decline (FR-1), so reaching this point means
@@ -605,10 +806,16 @@ async fn run() -> anyhow::Result<()> {
         skills: resolved.skills.clone(),
         user_skills_dir: config::skills_dir(),
         project_skills_dir: Some(project_skills_dir),
+        agents: resolved.agents,
+        // Both `None`: this is a top-level session, which owns its own
+        // permission/ask-user state (the production path). Only a
+        // subagent's derived config overrides these (Tech Spec §8.4).
+        external_permission_gate: None,
+        external_ask_gate: None,
     };
 
     let (engine_ports, frontend_ports) = channel();
-    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx) =
+    let (engine, asks_rx, user_asks_rx, recall_rx, task_rx, memory_rx, skill_rx, subagent_rx) =
         Engine::new(config, engine_ports.events_tx);
     let engine_task = tokio::spawn(engine.run(
         engine_ports.commands_rx,
@@ -618,6 +825,7 @@ async fn run() -> anyhow::Result<()> {
         task_rx,
         memory_rx,
         skill_rx,
+        subagent_rx,
     ));
 
     // Drive the session until the user quits or the engine closes its events.
@@ -638,6 +846,8 @@ async fn run() -> anyhow::Result<()> {
         sessions_dir.clone(),
         profiles,
         init::CONFIG_TEMPLATE.to_string(),
+        init::PERMISSIONS_TEMPLATE.to_string(),
+        init::GITIGNORE_TEMPLATE.to_string(),
         resolved.reasoning.clone(),
         resolved.mouse,
         provider_writer,
@@ -745,5 +955,94 @@ mod tests {
             parse(&["clean", "abc123"]).unwrap(),
             Cli::Clean(Some("abc123".into()))
         );
+    }
+
+    #[test]
+    fn help_is_reachable_at_the_top_level_three_ways() {
+        assert_eq!(parse(&["--help"]).unwrap(), Cli::Help(HelpTopic::General));
+        assert_eq!(parse(&["-h"]).unwrap(), Cli::Help(HelpTopic::General));
+        assert_eq!(parse(&["help"]).unwrap(), Cli::Help(HelpTopic::General));
+    }
+
+    #[test]
+    fn help_is_reachable_per_subcommand() {
+        assert_eq!(
+            parse(&["init", "--help"]).unwrap(),
+            Cli::Help(HelpTopic::Init)
+        );
+        assert_eq!(
+            parse(&["sessions", "-h"]).unwrap(),
+            Cli::Help(HelpTopic::Sessions)
+        );
+        assert_eq!(
+            parse(&["resume", "--help"]).unwrap(),
+            Cli::Help(HelpTopic::Resume)
+        );
+        assert_eq!(
+            parse(&["config", "--help"]).unwrap(),
+            Cli::Help(HelpTopic::Config)
+        );
+        assert_eq!(
+            parse(&["config", "help"]).unwrap(),
+            Cli::Help(HelpTopic::Config)
+        );
+        assert_eq!(
+            parse(&["trust", "-h"]).unwrap(),
+            Cli::Help(HelpTopic::Trust)
+        );
+        assert_eq!(
+            parse(&["trust", "help"]).unwrap(),
+            Cli::Help(HelpTopic::Trust)
+        );
+        assert_eq!(
+            parse(&["clean", "--help"]).unwrap(),
+            Cli::Help(HelpTopic::Clean)
+        );
+        assert_eq!(
+            parse(&["export", "-h"]).unwrap(),
+            Cli::Help(HelpTopic::Export)
+        );
+    }
+
+    #[test]
+    fn a_positional_that_happens_to_read_help_is_not_swallowed() {
+        // `clean`/`resume`/`export` take free-form values in these slots; only
+        // the dashed forms (`--help`/`-h`) trigger help there, so a value
+        // that's literally spelled "help" still passes through untouched.
+        assert_eq!(
+            parse(&["clean", "help"]).unwrap(),
+            Cli::Clean(Some("help".into()))
+        );
+        assert_eq!(
+            parse(&["resume", "help"]).unwrap(),
+            Cli::Run(RunOpts {
+                resume: true,
+                resume_id: Some("help".into()),
+                ..RunOpts::default()
+            })
+        );
+        assert_eq!(
+            parse(&["export", "help"]).unwrap(),
+            Cli::Export {
+                session_id: None,
+                output_path: "help".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn every_help_topic_has_non_empty_text() {
+        for topic in [
+            HelpTopic::General,
+            HelpTopic::Init,
+            HelpTopic::Sessions,
+            HelpTopic::Resume,
+            HelpTopic::Config,
+            HelpTopic::Trust,
+            HelpTopic::Clean,
+            HelpTopic::Export,
+        ] {
+            assert!(!help_text(topic).is_empty());
+        }
     }
 }

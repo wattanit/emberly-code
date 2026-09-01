@@ -42,6 +42,10 @@ pub enum AppCommand {
     /// Open the reasoning-effort picker (P-9). `/effort <level>` sets it
     /// directly; with no argument (or from the palette) it opens the picker.
     Effort,
+    /// Materialize the project's `.agents/` scaffold — config, prompts,
+    /// permissions, `.gitignore` — creating only what's missing (C-2). The
+    /// in-session twin of `emberly init`; same content, never clobbers.
+    Init,
     /// Edit the project `.agents/config.toml` in `$EDITOR` (C-5).
     Config,
     /// Edit a prompt file in `$EDITOR` (C-5). `/prompt [system|compact]`.
@@ -56,9 +60,22 @@ pub enum AppCommand {
     /// (FR-7, Design §4.9) — "what could this skill tell the model to do" is
     /// inspectable before it ever runs.
     Skills,
+    /// List currently alive subagents and inspect one's activity read-only
+    /// (FR-9, Design §3.1/§4.13).
+    Agents,
+    /// List currently connected MCP servers and inspect one's discovered
+    /// tools read-only (FR-11, Design §4.15).
+    Mcp,
     /// Manually compact the conversation — summarize older turns into a
     /// summary at a clean boundary (Requirements §8.3, Tech Spec §7).
     Compact,
+    /// Attach an image to the prompt currently being composed (FR-10, Design
+    /// §4.14). `/attach <path>` validates and stages it immediately; the
+    /// engine replies with the attachment chip or a plain input-time error.
+    Attach,
+    /// Export this session — plus any subagents it spawned — to a
+    /// self-contained HTML file (FR-12, Design §8.11). `/export <path>`.
+    Export,
     /// Cancel the in-flight turn.
     Cancel,
     /// Exit emberly.
@@ -141,6 +158,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: AppCommand::Compact,
     },
     CommandSpec {
+        name: "attach",
+        plain: Plain::Same,
+        key: None,
+        desc: "Attach an image to the prompt (/attach <path>)",
+        cmd: AppCommand::Attach,
+    },
+    CommandSpec {
+        name: "export",
+        plain: Plain::Same,
+        key: None,
+        desc: "Export this session to a shareable HTML file (/export <path>)",
+        cmd: AppCommand::Export,
+    },
+    CommandSpec {
         name: "model",
         plain: Plain::Differs("Switch the active provider/model (/model <profile> [model])"),
         key: None,
@@ -197,6 +228,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: AppCommand::Cancel,
     },
     CommandSpec {
+        name: "init",
+        plain: Plain::Same,
+        key: None,
+        desc: "Create .agents/ (config, prompts, permissions) if missing",
+        cmd: AppCommand::Init,
+    },
+    CommandSpec {
         name: "config",
         plain: Plain::Differs("Print the .agents/config.toml path to edit, then /reload"),
         key: None,
@@ -230,6 +268,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         key: None,
         desc: "List available skills and inspect a skill's instructions",
         cmd: AppCommand::Skills,
+    },
+    CommandSpec {
+        name: "agents",
+        plain: Plain::Same,
+        key: None,
+        desc: "List currently alive subagents and inspect one's activity",
+        cmd: AppCommand::Agents,
+    },
+    CommandSpec {
+        name: "mcp",
+        plain: Plain::Same,
+        key: None,
+        desc: "List connected MCP servers and inspect a server's tools",
+        cmd: AppCommand::Mcp,
     },
     CommandSpec {
         name: "help",
@@ -309,6 +361,18 @@ pub fn matches(query: &str) -> Vec<usize> {
     scored.into_iter().map(|(_, i)| i).collect()
 }
 
+/// Tab-completion for a partially typed `/name`: the sole registry name that
+/// starts with `prefix` (case-sensitive — command names are lowercase), or
+/// `None` when no name matches or more than one still does. Completion only
+/// ever resolves an unambiguous prefix; ties are left for the user to keep
+/// typing or open the palette (Ctrl+P) to disambiguate (Design §3.3).
+#[must_use]
+pub fn complete(prefix: &str) -> Option<&'static str> {
+    let mut hits = COMMANDS.iter().filter(|c| c.name.starts_with(prefix));
+    let only = hits.next()?;
+    hits.next().is_none().then_some(only.name)
+}
+
 /// A small fuzzy subsequence score (case-insensitive). `None` if `query` is not
 /// a subsequence of `candidate`. Contiguous runs and early matches score
 /// higher — plenty for a handful of short command names.
@@ -357,6 +421,21 @@ mod tests {
         // A prefix ranks its command first.
         let m = matches("sid");
         assert_eq!(COMMANDS[m[0]].name, "sidebar");
+    }
+
+    #[test]
+    fn complete_resolves_an_unambiguous_prefix() {
+        assert_eq!(complete("qui"), Some("quit"));
+        // An exact match is a (trivially unambiguous) match on itself.
+        assert_eq!(complete("quit"), Some("quit"));
+    }
+
+    #[test]
+    fn complete_refuses_ambiguous_or_unknown_prefixes() {
+        // "model" and "mode" both start with "mo".
+        assert_eq!(complete("mo"), None);
+        assert_eq!(complete("zzz"), None);
+        assert_eq!(complete(""), None);
     }
 
     #[test]

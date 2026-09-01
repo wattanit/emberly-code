@@ -1,11 +1,11 @@
 # Emberly Code AI Coding Harness — Requirements Document
 
-**Version:** 0.10    
+**Version:** 0.12    
 **Status:** approved
-**Date:** 2026-07-30    
+**Date:** 2026-08-16    
 **Owner:** Wattanit    
-**Companion documents:** Design Guideline v0.10 (downstream), Technical  
-Specification v0.12 (downstream)
+**Companion documents:** Design Guideline v0.12 (downstream), Technical  
+Specification v0.14 (downstream)
 
 This document defines WHAT the harness must do and WHY. HOW it is built is
 deferred to the Technical Specification. UX, visual, and voice decisions are
@@ -148,10 +148,42 @@ the section cited; this list is the scope overview, not the requirement):
 model-authored temporary files, with a CLI command to reclaim its disk space
 (§8.9, FR-8; §5, T-17).
 
+Added in the 0.5 feature set (multi-agent capability — the primary agent
+delegating bounded, independent tool-use loops to subagents it creates,
+converses with, and ends; each item carries an ID and full statement in the
+section cited; this list is the scope overview, not the requirement):
+
+- A multi-agent subsystem: the primary agent may spawn one or more subagents
+concurrently, each with its own model-authored persona/task layered on the
+harness's own tool-use scaffold, its own selectable provider profile, and a
+tool set that is never a superset of the primary agent's own (§5, FR-9).
+- Four tools giving the primary agent the full lifecycle: spawn one or more
+subagents in one call (§5, T-18), send a further prompt to a specific
+still-alive subagent (§5, T-19), enumerate currently alive subagents (§5,
+T-20), and explicitly end one (§5, T-21).
+- Every subagent's activity is governed by the same permission rules, sandbox
+confinement, and workspace trust as the primary agent (no privileged path
+around the safety model, FR-9), is fully audited (extends HC-7), and its cost
+is rolled into the owning session's existing cost estimate (P-6).
+
+Added in the 0.5.1 feature set (three doors held open since earlier versions,
+requested together to round out v0.5's usability; each item carries an ID and
+full statement in the section cited; this list is the scope overview, not the
+requirement):
+
+- MCP client support: external Model Context Protocol servers, configured by
+the user (§7, C-8), present their own tools to the model through the
+harness's existing tool abstraction, governed by the same
+permission/sandbox/workspace-trust posture as any built-in tool (§5, FR-11).
+- User-attached image input: a frontend surface (paste, file-picker, and
+drag-and-drop where the terminal supports it) lets the user attach an image
+directly to a prompt, over the existing multimodal content path (§4, FR-10).
+- Session export: a portable, human-readable rendering of a complete
+session — conversation, tool activity, permission decisions, and cost
+summary — for sharing outside the harness (§8.10, FR-12).
+
 ### 2.2 Explicitly deferred (designed-for, not yet built)
 
-- **MCP client support.** The internal tool abstraction must permit a future
-MCP adapter, but no MCP implementation ships yet.
 - Headless / server / IDE frontends (enabled by the event-model boundary,
 not built).
 - **User theming.** Current scope ships a single built-in theme; all colors live in
@@ -159,21 +191,43 @@ one centralized theme definition so a theme system later is a data
 change, not a refactor.
 - **Windows support.** No Landlock/Seatbelt equivalent exists; shipping
 a platform in a weaker safety tier is declined (current scope).
-- **User-attached images.** Current scope ingests images the model reads
-from the project (T-12); a surface for the user to attach, paste, or drag
-an image into a prompt is deferred. The multimodal content path (P-11) is
-built so adding an attach surface later is a frontend affordance, needing
-no provider or engine change.
 - **Provider-native / server-side tools.** Web search is harness-owned and
 provider-agnostic by decision (§1, T-14); a provider's own server-side
 search (or other server-side tools) is not used, because a capability that
 works only on the vendors that offer it is not provider-agnostic. The tool
 abstraction (T-7) does not preclude wrapping such a capability later, but it
 must never become the only way a capability works.
+- **Recursive subagent spawning.** A subagent spawning its own subagent
+(depth beyond 1, FR-9) is deferred; v0.5 fixes the depth bound rather than
+making it a per-project setting, so raising it later is a config change to a
+door already designed for, not a re-architecture.
+- **Cross-session subagent reconnection.** A subagent is not automatically
+reconnected after the owning session crashes or is restarted (FR-9); the
+primary agent discovers a stale id as a structured failure and may spawn a
+fresh one. Preserving a live subagent's own conversation state across a
+crash/resume is a future door, not built now.
+- **A dedicated multi-agent live view.** v0.5 surfaces a subagent's activity
+through a per-agent inspector the user opens on demand (Design Guideline); a
+concurrent multi-pane view showing every alive subagent's activity at once,
+side by side, is a future display nicety, not required to make delegation
+usable or auditable.
+- **A built-in local/HuggingFace inference server.** Running inference
+locally against a Hugging Face model cache is not built into the harness
+(see the §2.3 out-of-scope note this deferral pairs with); the door it keeps
+open is P-8's existing endpoint-configurable adapters, which already reach
+any local server speaking a wire format an adapter parses — such a server
+needs zero harness code, only a configuration profile, whenever one exists.
+Whether the harness additionally gains a thin, provider-agnostic CLI
+convenience for starting/stopping a user-configured local server process
+(as distinct from hosting inference itself) is an open question (§13).
 
 ### 2.3 Out of scope
 
-- Model hosting or fine-tuning.
+- Model hosting or fine-tuning. This explicitly covers a harness-bundled
+local inference server (e.g. one serving models from a Hugging Face cache):
+running inference is model hosting, and building it into the harness would
+need an explicit reversal of this line, not a routine addition — see the
+deferred door above and the open question at §13.
 - Guaranteeing git history immortality (see §6.3 — the harness protects
 `.git/` from non-git writes; it does not prevent destructive but
 legitimate git operations).
@@ -302,6 +356,21 @@ token and cost accounting (P-6). Document support lives behind the Provider
 abstraction (P-1), not in the tool, so the read-document tool (T-16) is
 portable across providers rather than tied to one vendor — the same reasoning
 as P-11.
+- **FR-10 — User-attached image input.** The user must be able to attach one
+or more images directly to a prompt — at minimum a paste-from-clipboard
+action and an explicit file-picker/path affordance; drag-and-drop is
+included where the terminal and frontend support it (Design Guideline
+decides the exact gestures and how each degrades where a terminal cannot
+support one). An attached image enters context as an image content block
+over the existing multimodal path (P-11) — attaching is a frontend
+affordance constructing the same content block the read-image tool (T-12)
+already produces, needing no new provider or engine capability. Attached
+images are subject to the same format and per-image size caps as T-12
+(Technical Specification sets the exact values; §13); a provider or model
+without vision support returns the same structured unsupported-capability
+result (P-11, HC-6) rather than silently dropping the attachment. This
+graduates the user-attached-images item formerly deferred in §2.2 through
+its named door (see §13, "Resolved since v0.12").
 
 ## 5. Tool Suite
 
@@ -442,6 +511,120 @@ temporary script or intermediate output either lands in the user's tracked
 project (cluttering a repository the user did not ask to change) or costs a
 permission prompt on every write; this gives the model disposable working
 space that is neither.
+- **FR-9 — Multi-agent subsystem.** The harness lets the primary agent create,
+message, enumerate, and end **subagents** — independent, model-driven
+tool-use loops it delegates work to. Each subagent gets a name, a
+model-authored persona/task layered on the same harness-authored,
+baked-in tool-use scaffold every agent runs under (C-1) — never a raw prompt
+with no scaffold — and runs under a resolved provider profile (P-8),
+defaulting to the primary agent's own. A subagent is addressed by the id its
+spawn returned, so the primary agent can hold a multi-turn conversation with
+it across separate tool calls (T-18–T-21), not just a single delegate-and-
+forget round trip.
+  - **Bounded depth.** A subagent may not itself spawn a subagent in this
+  version — only the primary (top-level) agent loop may call T-18. This is a
+  hard bound for v0.5, not a per-project setting (§2.2).
+  - **Bounded concurrency.** A configurable ceiling caps how many subagents
+  may be alive at once per session (Technical Specification sets the initial
+  default); exceeding it is a structured tool failure (HC-6), never a silent
+  queue or a crash.
+  - **Tool ceiling.** A subagent's available tools are never a superset of
+  the primary agent's own — spawning grants no new capability, only a
+  subset the primary agent may narrow further per spawn (e.g. read-only
+  tools for a research subagent).
+  - **No privileged path around the safety model (honesty clause).** Every
+  subagent's own tool calls are governed by the exact same permission rules,
+  sandbox confinement, and workspace trust as the primary agent's (HC-4,
+  HC-5, §6) — spawning a subagent is never a way to act with less oversight,
+  and a subagent's system prompt cannot itself grant a permission, escape
+  the sandbox, or waive workspace trust. A subagent's own loop is bound by
+  the same loop-breaking guardrail (S-5) and, where checks are registered,
+  the same completion gate (S-6) as any agent loop — the same principle
+  FR-7/S-6 already state for skills and completion checks, extended here.
+  - **Complete audit trail (extends HC-7).** Every subagent's turns, tool
+  calls, tool results, and permission events are recorded durably and are
+  never lost to a crash, exactly as the primary session's are. The primary
+  agent's own spawn/message/list/end calls are themselves ordinary tool
+  calls and tool results in its own transcript (HC-7) — no separate
+  mechanism is needed for those to be complete.
+  - **Cost is never hidden.** A subagent's token usage and estimated cost
+  (P-6) are attributed to it individually and always roll into the owning
+  session's total — delegated work is still the session's spend, visible,
+  never a side channel.
+  - **Crash/resume honesty clause.** A subagent is not reconnected
+  automatically after a crash or process restart (§2.2); the primary agent
+  discovers a stale id as a structured "no such agent" result (HC-6) and may
+  spawn a fresh one.
+  - **Transparency (§1).** No subagent is a silent background process: its
+  existence, current status, and full activity are always inspectable by
+  the user, never only by the model (Design Guideline).
+- **T-18 — Spawn-agents tool.** A built-in tool the primary agent calls to
+create one or more subagents in a single call, each given a name, a
+task/persona system-prompt layer, and optionally a provider profile (P-8)
+and a restricted tool subset (FR-9's ceiling). Subagents given in the same
+call run concurrently — this is the harness's fan-out primitive: delegating
+three independent subtasks costs one round trip, not three sequential ones.
+The call returns once every subagent in it has reached its own first natural
+stop (an assistant turn with no further tool calls), each tagged with its id
+and either its answer, a structured reason it did not finish, or — past a
+configurable per-call timeout — a note that it is still running and remains
+addressable via T-19/T-20. A subagent that errors internally (e.g. a
+provider failure) reports that as its own structured failure within the
+batch result; one subagent's failure never aborts the others (HC-6).
+- **T-19 — Message-agent tool.** A built-in tool the primary agent calls to
+send a further prompt to a specific, still-alive subagent (by the id T-18
+returned), running that subagent's next turn to completion and returning
+its response — the "issue another prompt" half of a multi-turn delegation.
+A message to an id that is unknown or has ended returns a structured
+failure (HC-6) naming the reason, never a crash or a silent no-op.
+- **T-20 — List-agents tool.** A built-in tool the primary agent calls to
+enumerate currently alive subagents (id, name, and status), for situational
+awareness when an id has fallen out of the working context window (FR-3) or
+the model has simply lost track — the multi-agent analogue of the task list
+(T-11) staying legible across a long session.
+- **T-21 — End-agent tool.** A built-in tool the primary agent calls to
+explicitly terminate a subagent and free its resources before the session
+itself ends. Ending an already-ended or unknown id is a structured failure
+(HC-6), not a crash. Every subagent still alive when the owning session
+ends is ended with it — no subagent outlives its session.
+- **FR-11 — MCP client support.** The harness can connect, as a client, to
+external Model Context Protocol (MCP) servers configured by the user (C-8)
+and present each server's own tools to the model through the same internal
+tool abstraction (T-7) every built-in tool already uses — adding a new
+external tool is a server configuration, never an engine or provider
+change. Each externally-sourced tool is namespaced by its owning server so
+a name collision with a built-in tool, or between two servers, is never
+silently ambiguous (Technical Specification sets the exact naming
+convention).
+  - **No privileged path around the safety model (honesty clause).** An
+  MCP-sourced tool call is governed by the exact same permission rules,
+  sandbox confinement, and workspace trust as any built-in tool (§6) — an
+  external server grants the model no capability the harness's own
+  permission model does not already gate, and connecting to a server is
+  never itself a way to act with less oversight.
+  - **Trust gate on project-declared servers.** An MCP server is a
+  locally-run process (or a configured remote endpoint) the user chose to
+  point the harness at; where a server is declared in project
+  configuration rather than user-global configuration, it is neither
+  connected to nor surfaced to the model from a folder the user has not
+  trusted (FR-1) — the same posture already governing project-resident
+  skills (FR-7), because a project-declared MCP server is, like a skill's
+  bundled script, code execution the project itself named.
+  - **Untrusted content, like web search.** A tool result returned by an
+  MCP server may carry content the harness did not generate and cannot
+  vouch for (e.g. a ticket body, a database row); such results are treated
+  as untrusted content the model reads, never as instructions to the
+  harness — the same posture T-14 already takes with web-search results.
+  - **Complete audit trail (extends HC-7).** Connecting to a server, every
+  tool it exposes, and every call and result through it are transcript
+  events exactly like a built-in tool call — no separate mechanism and no
+  exemption from the audit trail.
+  - **Provider-agnostic by construction.** MCP client support is a
+  capability of the harness's tool layer, not of any one provider adapter
+  (P-1) — every configured provider reaches every connected server's tools
+  identically.
+This graduates the MCP-client-support item formerly deferred in §2.2
+through the door T-7 already held open (see §13, "Resolved since v0.12").
 
 ## 6. Permission and Safety Model
 
@@ -612,6 +795,18 @@ path. Guided setup is an additional path onto the same configuration, not a
 parallel system: raw editing (C-5) remains available as the fallback for any
 profile shape (per-model metadata, a non-standard auth scheme) the guided
 flow's fixed field set does not cover.
+- **C-8 — MCP server configuration.** The user declares each MCP server the
+harness may connect to as a named profile — at minimum a name, a transport
+(Technical Specification sets the initial supported transport(s), e.g.
+local stdio-launched servers), and whatever that transport needs to reach
+the server (a command and arguments, or an endpoint and auth reference) —
+mirroring the endpoint-configurable pattern already established for
+providers (P-8) and web search (T-14). Profiles follow the same
+two-tier-plus-project resolution (C-1) and provenance visibility (C-3) as
+every other configuration piece; a project-tier server profile is subject
+to the workspace-trust gate exactly as FR-11 states. Disabling a configured
+server, or the MCP subsystem entirely, must be a configuration change,
+never a code change.
 
 ### 7.1 Persistent memory
 
@@ -816,6 +1011,38 @@ not a cross-session memory mechanism (that is FR-6); losing scratch content
 to the clean command, or to disk loss, must never lose anything the harness
 depends on to function correctly.
 
+### 8.10 Session export
+
+- **FR-12 — Session export.** The user can export a session to a portable,
+human-readable file outside the harness's own session state. The value this
+adds over the transcript's existing raw JSONL (already a plain file the user
+could copy) is a rendering meant to be read and shared: the conversation,
+tool calls and their results (respecting the same truncation/reduction
+markers already in the transcript, §8.1/§8.5), permission decisions, mode
+changes, and a cost/usage summary (P-6), laid out for a reader who is not
+the harness. The Technical Specification names the exact output format(s)
+(at least one self-contained, dependency-free format such as static HTML)
+and whether more than one is offered. Export is a **user-invoked action**,
+available as a CLI command and/or an in-session command (Design Guideline
+decides the exact surface); like the scratch-space reclaim command (FR-8)
+and `init` (C-2), its output path is chosen by the user and may fall outside
+the project root — this is a user-initiated action, not an agent-initiated
+one, so HC-4 does not apply to where the export file lands.
+  - **Never mutates the transcript (extends HC-7).** Export reads the
+  transcript and any derived state; it never rewrites, prunes, or otherwise
+  changes the append-only log that remains the sole ground truth.
+  - **Subagents included (extends FR-9).** Exporting a session includes the
+  activity of any subagents it spawned (FR-9) — a session's full audited
+  activity, not only its primary agent's turns.
+  - **No content redaction (honesty clause).** Export does not attempt to
+  detect or redact secrets or sensitive content the transcript may already
+  contain (e.g. file contents, command output, a pasted API key) — the same
+  content already exists in the raw transcript on disk; export changes its
+  portability, not what it contains. The risk this changes is exposure
+  through sharing, not exposure through storage; warning the user at export
+  time is a Design Guideline concern, not a filtering guarantee this
+  document makes.
+
 ## 9. Architecture Requirements
 
 (Behavioral requirements only; structure belongs to the Technical Spec.)
@@ -943,6 +1170,40 @@ Tech Spec sets the initial scope; tune with use.
 - The scratch-space CLI reclaim command's exact verb, scope (current session,
 a named session, or every session), and whether it warns before deleting
 (FR-8, T-17). Tech Spec sets the initial scope; tune with use.
+- Default values for the multi-agent subsystem's resource bounds — maximum
+concurrent subagents per session, the per-call spawn timeout, and the
+idle-lifetime before an unattended subagent is reclaimed (FR-9). Tech Spec
+sets initial defaults; tune with use so the ceiling stops a runaway fan-out
+without cutting off a genuinely long-running delegation.
+- Whether a subagent's token/cost usage is shown as its own line in the
+sidebar or only rolled into the session total with detail on inspection
+(FR-9, P-6). Design Guideline decides.
+- MCP transport(s) supported initially (e.g. local stdio-launched servers
+only, vs. also remote SSE/HTTP), the per-server/per-tool default permission
+posture, and the tool-name collision/namespacing convention (FR-11). Tech
+Spec sets initial values; tune with use.
+- Maximum images (and combined size) attachable to a single prompt, and
+whether the existing per-image format/size caps (T-12, P-11) simply extend
+to the attach path or need their own limit (FR-10). Tech Spec sets initial
+values; tune with use.
+- Session export's exact output format(s), whether subagent transcripts are
+inlined or linked, and any size/streaming handling for a very large session
+(FR-12). Tech Spec sets initial values; tune with use.
+- **Owner decision needed: the local/HuggingFace inference-server request.**
+The harness's provider abstraction (P-2, P-8) already reaches any local
+server that speaks a wire format an adapter parses, at zero harness cost,
+once such a server exists — so nothing in the harness blocks pointing it at
+a local Hugging Face-backed server today. What is undecided is whether
+Emberly Code should additionally: (a) do nothing further, leaving such a
+server and its Hugging Face cache management as a separate project with its
+own SFD suite (per the shared-requirements project boundary), reached only
+through an ordinary provider profile; or (b) absorb a thin,
+provider-agnostic CLI convenience — start/stop/status of a user-configured
+local server *process* (not hosting inference itself) — as new Emberly Code
+scope. Option (b) does not by itself reverse the §2.3 "model hosting" line
+(it manages a process the user already configured; it runs no inference),
+but the boundary needs the owner's explicit call before either is drafted
+into scope.
 
 Resolved since v0.1: product/command name (Emberly Code / `emberly`,
 Design Guideline §1.1); default bash allowlist initial contents (Tech
@@ -1027,3 +1288,47 @@ with no confinement implementation — is deferred until a real platform need
 exists. A fourth request (compile-time tool profiles) was withdrawn by the
 requester before absorption. S-6, P-12, and T-16 are the IDs the Yggdrasil
 foundation suite will cite as their origin when drafted (G-24/G-25).
+
+Resolved since v0.11 (0.5 feature set): the multi-agent capability is scoped
+as a bounded delegation subsystem, not open-ended agent autonomy. Key
+routing decisions: depth is fixed at 1 (a subagent cannot itself spawn one)
+rather than a configurable ceiling, so the no-recursive-spawn guarantee
+cannot be loosened by a config edit (FR-9, §2.2); a subagent's tool access
+is a ceiling, never a superset of the primary agent's own, so spawning
+cannot be used to reach a capability the session itself lacks; permission,
+sandbox, and workspace-trust enforcement extend to subagents verbatim (no
+new safety mechanism, no privileged path — the same principle already
+governing skills, FR-7, and completion checks, S-6); and a subagent's cost
+is attributed and rolled into the session total rather than tracked
+separately outside P-6. The batch/addressable split — spawn one or more
+subagents in one call (T-18), then converse with a specific one across
+further calls (T-19) — was chosen over either a purely one-shot
+delegate-and-forget tool or a single tool overloaded with both spawn and
+message semantics, because the user's stated need was both fan-out
+(parallel workers on independent subtasks) and an ongoing conversation with
+a named subagent, and conflating them into one call shape would have made
+neither ergonomic. The Hugging Face / local-inference-server request is
+explicitly **not** absorbed this version: it is routed to a deferred door
+(§2.2) resting on the existing P-8 endpoint-configurable adapter, with the
+scope question of a harness-side process-management convenience left to the
+owner (§13) rather than decided here, since it bears on the existing §2.3
+"model hosting" out-of-scope line.
+
+Resolved since v0.12 (0.5.1 feature set): three doors are addressed together
+to round out v0.5's usability without reopening the shipped v0.5 release
+itself. **MCP client support** graduates through the door T-7 already held
+open since v0.1: external tools reach the model through the same tool
+abstraction every built-in tool uses, gated by a new server-configuration
+tier (C-8) and the same permission/sandbox/workspace-trust posture as any
+other tool (FR-11); the key routing decision is that a project-declared
+server is trust-gated exactly like a skill (FR-7), because it is user-chosen
+code execution the project itself named, not a passive capability. **User-
+attached image input** graduates through the door P-11/T-12 already held
+open since v0.4: attaching is a frontend affordance producing the same image
+content block the harness already carries, so no provider or engine change
+was needed (FR-10). **Session export** is new scope, not a graduated
+deferral — it was not previously named in §2.2 because the value of a
+shareable, human-readable rendering of a session's audit trail was not
+identified until use surfaced the gap; it is scoped as a read-only,
+user-invoked view over the existing transcript (HC-7), extended to include
+subagent activity (FR-9), and is never a second form of persistence (FR-12).

@@ -20,6 +20,7 @@ use ratatui::Frame;
 use crate::app::{
     App, ChoiceRow, ConvItem, Overlay, OverlayContent, SessionRow, WizardStep, WIZARD_ADAPTERS,
 };
+use crate::commands;
 use crate::hit::{ClickTarget, HitMap, PermissionChoice};
 use crate::text;
 use crate::theme::Theme;
@@ -200,6 +201,8 @@ enum RowKind {
     Session,
     Memory,
     Skill,
+    Agent,
+    Mcp,
 }
 
 impl RowKind {
@@ -209,6 +212,8 @@ impl RowKind {
             RowKind::Session => ClickTarget::SessionRow(row),
             RowKind::Memory => ClickTarget::MemoryRow(row),
             RowKind::Skill => ClickTarget::SkillRow(row),
+            RowKind::Agent => ClickTarget::AgentRow(row),
+            RowKind::Mcp => ClickTarget::McpServerRow(row),
         }
     }
 }
@@ -271,6 +276,16 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect, hit
             Vec::new(),
             None,
         ),
+        OverlayContent::AgentActivity { text, .. } => (
+            text.split('\n')
+                .flat_map(|l| text::wrap(l, body_w))
+                .map(|row| Line::from(Span::styled(row, theme.primary())))
+                .collect(),
+            None,
+            strings::agents::ACTIVITY_HINT.to_string(),
+            Vec::new(),
+            None,
+        ),
         OverlayContent::Sessions { rows, selected } => {
             let (lines, sel_line, map) = session_picker_lines(rows, *selected, theme);
             (
@@ -323,6 +338,26 @@ fn render_overlay(f: &mut Frame, app: &App, overlay: &Overlay, screen: Rect, hit
                 strings::skills::HINT.to_string(),
                 map,
                 Some(RowKind::Skill),
+            )
+        }
+        OverlayContent::AgentList { agents, selected } => {
+            let (lines, sel_line, map) = agent_list_lines(agents, *selected, theme);
+            (
+                lines,
+                Some(sel_line),
+                strings::agents::HINT.to_string(),
+                map,
+                Some(RowKind::Agent),
+            )
+        }
+        OverlayContent::McpServerList { servers, selected } => {
+            let (lines, sel_line, map) = mcp_server_list_lines(servers, *selected, theme);
+            (
+                lines,
+                Some(sel_line),
+                strings::mcp::HINT.to_string(),
+                map,
+                Some(RowKind::Mcp),
             )
         }
     };
@@ -592,6 +627,91 @@ fn skill_list_lines(
     (lines, sel_line, row_of_line)
 }
 
+/// The Agents inspector's list body (FR-9, Design §4.13) — mirrors
+/// `skill_list_lines`'s shape (marker, name, dimmed id) with no origin/
+/// description, since a subagent has neither.
+fn agent_list_lines(
+    agents: &[crate::app::AgentSummary],
+    selected: usize,
+    theme: &crate::theme::Theme,
+) -> PickerLines {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut row_of_line: Vec<Option<usize>> = Vec::new();
+    if agents.is_empty() {
+        lines.push(Line::from(Span::styled(
+            strings::agents::EMPTY.to_string(),
+            theme.chrome(),
+        )));
+        row_of_line.push(None);
+        return (lines, 0, row_of_line);
+    }
+    let mut sel_line = 0;
+    for (i, agent) in agents.iter().enumerate() {
+        if i == selected {
+            sel_line = lines.len();
+        }
+        let marker = if i == selected { "▶ " } else { "  " };
+        let name_style = if i == selected {
+            theme.strong()
+        } else {
+            theme.primary()
+        };
+        let suffix = if agent.ended {
+            format!("  ({}, ended)", agent.id)
+        } else {
+            format!("  ({})", agent.id)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(marker.to_string(), theme.accent()),
+            Span::styled(agent.name.clone(), name_style),
+            Span::styled(suffix, theme.chrome()),
+        ]));
+        row_of_line.push(Some(i));
+    }
+    (lines, sel_line, row_of_line)
+}
+
+/// The MCP inspector's list of connected servers (FR-11, Design §4.15) —
+/// mirrors `agent_list_lines` exactly: name plus a plain fact (here, how
+/// many tools it discovered) never carried by color alone (§7).
+fn mcp_server_list_lines(
+    servers: &[crate::app::McpServerSummary],
+    selected: usize,
+    theme: &crate::theme::Theme,
+) -> PickerLines {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut row_of_line: Vec<Option<usize>> = Vec::new();
+    if servers.is_empty() {
+        lines.push(Line::from(Span::styled(
+            strings::mcp::EMPTY.to_string(),
+            theme.chrome(),
+        )));
+        row_of_line.push(None);
+        return (lines, 0, row_of_line);
+    }
+    let mut sel_line = 0;
+    for (i, server) in servers.iter().enumerate() {
+        if i == selected {
+            sel_line = lines.len();
+        }
+        let marker = if i == selected { "▶ " } else { "  " };
+        let name_style = if i == selected {
+            theme.strong()
+        } else {
+            theme.primary()
+        };
+        let count = server.tools.len();
+        let suffix = format!("  ({count} tool{})", if count == 1 { "" } else { "s" });
+        lines.push(Line::from(vec![
+            Span::styled(marker.to_string(), theme.accent()),
+            Span::styled(server.name.clone(), name_style),
+            Span::styled(suffix, theme.chrome()),
+        ]));
+        row_of_line.push(Some(i));
+    }
+    (lines, sel_line, row_of_line)
+}
+
 /// A rectangle centered in `area` at the given width/height percentages.
 fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
     let [h] = Layout::horizontal([Constraint::Percentage(pct_w)])
@@ -609,9 +729,11 @@ fn render_conversation(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
     let theme = &app.theme;
 
     // No pane title — the wordmark lives in the sidebar. The conversation is a
-    // plain bordered transcript of both sides, top to bottom.
+    // plain bordered transcript of both sides, top to bottom. Only the top and
+    // bottom edges are drawn (no left/right verticals) so a terminal-selected
+    // copy of the transcript doesn't pick up border glyphs on every line.
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(theme.chrome());
     let inner = block.inner(area);
     let width = usize::from(inner.width);
@@ -683,6 +805,23 @@ fn conversation_lines(
                     "  ",
                     theme.primary(),
                 );
+            }
+            // A chip on the user's own message (FR-10, Design §4.14) —
+            // content the user attached, never tool activity, so it earns
+            // its own styling rather than reusing the tool-line register.
+            ConvItem::Attachment {
+                name,
+                width,
+                height,
+                format_label,
+            } => {
+                out.push(Line::from(vec![Span::styled(
+                    format!(
+                        "  {} {name} · {width}×{height} · {format_label} attached",
+                        markers::ATTACHMENT
+                    ),
+                    theme.chrome(),
+                )]));
             }
             ConvItem::Assistant(text) => {
                 // First-party markdown pass: fenced code (highlighted), bold,
@@ -899,6 +1038,8 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
     let mut modified_range: Option<(usize, usize)> = None;
     let mut memory_range: Option<(usize, usize)> = None;
     let mut skills_range: Option<(usize, usize)> = None;
+    let mut agents_range: Option<(usize, usize)> = None;
+    let mut mcp_range: Option<(usize, usize)> = None;
 
     // Wordmark + version (Design §1.1): ember `emberly`, dimmed `code` + version.
     // While the model is working, the wordmark breathes — the ember glowing
@@ -1086,6 +1227,47 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
         skills_range = Some((start, lines.len())); // clickable → open /skills
     }
 
+    // Currently alive subagents (FR-9, Design §3.1/§4.13): name + id per
+    // entry. Present only while at least one is alive — the same
+    // no-empty-stub rule as Tasks/Memory/Skills (Design §3.1); the section
+    // simply does not appear once the last subagent ends. Ended subagents
+    // stay in `app.agents` for the `/agents` inspector (§4.13), so this
+    // section filters down to the alive subset rather than reading the
+    // catalog directly.
+    let alive_agents: Vec<&crate::app::AgentSummary> =
+        app.agents.iter().filter(|a| !a.ended).collect();
+    if !alive_agents.is_empty() {
+        lines.push(Line::from(""));
+        let start = lines.len();
+        lines.push(Line::from(Span::styled("Agents", theme.chrome())));
+        for agent in &alive_agents {
+            let desc = format!("{} ({})", agent.name, agent.id);
+            lines.push(Line::from(Span::styled(fit(&desc, w), theme.primary())));
+        }
+        agents_range = Some((start, lines.len())); // clickable → open /agents
+    }
+
+    // Connected MCP servers (FR-11, Design §4.15): name + tool count per
+    // entry. Present only while at least one server is connected — the same
+    // no-empty-stub rule as Tasks/Memory/Skills/Agents; a project-scoped
+    // server withheld by workspace trust is simply absent, never shown as a
+    // pending/failed row (§4.9/§4.15 quiet-absence pattern).
+    if !app.mcp_servers.is_empty() {
+        lines.push(Line::from(""));
+        let start = lines.len();
+        lines.push(Line::from(Span::styled("MCP", theme.chrome())));
+        for server in &app.mcp_servers {
+            let desc = format!(
+                "{} ({} tool{})",
+                server.name,
+                server.tools.len(),
+                if server.tools.len() == 1 { "" } else { "s" }
+            );
+            lines.push(Line::from(Span::styled(fit(&desc, w), theme.primary())));
+        }
+        mcp_range = Some((start, lines.len())); // clickable → open /mcp
+    }
+
     // Render **without wrap** so each logical line is exactly one screen row
     // (ratatui truncates overflow) — this is what makes the sidebar's click
     // regions reliable (Design §3.4): line index `i` sits at screen row
@@ -1118,6 +1300,8 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap, intera
         push_section(modified_range, ClickTarget::OpenDiff);
         push_section(memory_range, ClickTarget::OpenMemoryInspector);
         push_section(skills_range, ClickTarget::OpenSkillsInspector);
+        push_section(agents_range, ClickTarget::OpenAgentsInspector);
+        push_section(mcp_range, ClickTarget::OpenMcpInspector);
     }
 }
 
@@ -1195,8 +1379,10 @@ fn context_style(theme: &Theme, pct: u8) -> ratatui::style::Style {
 
 fn render_input(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
+    // Top/bottom only (see render_conversation) so pasted terminal selections
+    // stay clean instead of picking up left/right border glyphs.
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(theme.chrome());
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1213,12 +1399,18 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
     let top = cursor_row.saturating_sub(rows.saturating_sub(1));
     let h_scroll = cursor_col.saturating_sub(text_width.saturating_sub(1));
 
+    // A leading '/' on the first line is a slash command (Design §3.3):
+    // colored live so it's obvious whether what's typed will resolve, rather
+    // than only finding out after Enter.
+    let slash_token = lines
+        .first()
+        .and_then(|first| slash_token_style(theme, first));
+
     for (screen_row, line_idx) in (top..top + rows).enumerate() {
         let Some(line) = lines.get(line_idx) else {
             break;
         };
         let start_col = if line_idx == cursor_row { h_scroll } else { 0 };
-        let visible = text::slice_cols(line, start_col, text_width);
         let y = inner.y + u16::try_from(screen_row).unwrap_or(0);
         let gutter = if line_idx == 0 {
             Span::styled(format!("{} ", markers::USER_PROMPT), theme.accent())
@@ -1231,13 +1423,43 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
             width: inner.width,
             height: 1,
         };
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                gutter,
-                Span::styled(visible, theme.primary()),
-            ])),
-            row_area,
-        );
+        let text_spans = if line_idx == 0 {
+            if let Some((token_end_byte, style)) = slash_token {
+                let token_end_col = text::col_at(line, token_end_byte);
+                let win_end = start_col + text_width;
+                let cmd_end = token_end_col.min(win_end);
+                let cmd_width = cmd_end.saturating_sub(start_col);
+                let rest_start = token_end_col.max(start_col);
+                let rest_width = win_end.saturating_sub(rest_start);
+                let mut spans = Vec::with_capacity(2);
+                if cmd_width > 0 {
+                    spans.push(Span::styled(
+                        text::slice_cols(line, start_col, cmd_width),
+                        style,
+                    ));
+                }
+                if rest_width > 0 {
+                    spans.push(Span::styled(
+                        text::slice_cols(line, rest_start, rest_width),
+                        theme.primary(),
+                    ));
+                }
+                spans
+            } else {
+                vec![Span::styled(
+                    text::slice_cols(line, start_col, text_width),
+                    theme.primary(),
+                )]
+            }
+        } else {
+            vec![Span::styled(
+                text::slice_cols(line, start_col, text_width),
+                theme.primary(),
+            )]
+        };
+        let mut spans = vec![gutter];
+        spans.extend(text_spans);
+        f.render_widget(Paragraph::new(Line::from(spans)), row_area);
     }
 
     if cursor_row >= top && cursor_row < top + rows {
@@ -1246,6 +1468,28 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
         let x = inner.x + GUTTER + u16::try_from(col_in_view).unwrap_or(0);
         f.set_cursor_position((x.min(inner.x + inner.width - 1), inner.y + screen_row));
     }
+}
+
+/// If `line` opens with `/`, the byte length of its `/name` token (leading
+/// slash included) and the style to paint it — resolved against the same
+/// registry [`commands::parse_slash`] uses on submit, so what lights up green
+/// here is exactly what runs on Enter. `None` when the line isn't a command.
+fn slash_token_style(theme: &Theme, line: &str) -> Option<(usize, ratatui::style::Style)> {
+    let rest = line.strip_prefix('/')?;
+    let name_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let name = &rest[..name_end];
+    let token_end_byte = 1 + name_end;
+    let style = if name.is_empty() {
+        // Just the slash so far — no verdict yet.
+        theme.dim_accent()
+    } else if commands::by_name(name).is_some() {
+        theme.success()
+    } else if commands::matches(name).is_empty() {
+        theme.warning()
+    } else {
+        theme.dim_accent()
+    };
+    Some((token_end_byte, style))
 }
 
 fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
@@ -1368,6 +1612,12 @@ fn render_permission(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
         format!("{}: {}", strings::permission::WHY_LABEL, r.reason),
         theme.chrome(),
     )));
+    if let Some(name) = &r.on_behalf_of {
+        header.push(Line::from(Span::styled(
+            format!("{} {name}", strings::permission::ON_BEHALF_OF_LABEL),
+            theme.chrome(),
+        )));
+    }
     if !r.affected_paths.is_empty() {
         header.push(Line::from(Span::styled(
             format!(
@@ -2010,6 +2260,16 @@ mod tests {
             .join("\n")
     }
 
+    /// Render a full frame to an off-screen buffer, for tests that need a
+    /// cell's actual style (e.g. slash-command colouring) rather than just
+    /// its symbol.
+    fn draw_buf(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("backend");
+        let mut hit = HitMap::new();
+        term.draw(|f| frame(f, app, &mut hit)).expect("draw");
+        term.backend().buffer().clone()
+    }
+
     /// Render a full frame and return the click hit-map it built, so tests can
     /// assert which screen positions resolve to which targets (Design §3.4).
     fn hit_map_of(app: &App, w: u16, h: u16) -> HitMap {
@@ -2025,6 +2285,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2047,6 +2309,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2081,6 +2345,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2122,6 +2388,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.apply_event(emberly_core::UiEvent::ReasoningDelta { text: "why".into() });
@@ -2139,6 +2407,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.files.modified.push(crate::app::ModifiedFile {
@@ -2153,12 +2423,128 @@ mod tests {
             description: "d".into(),
             origin: SkillOrigin::User,
         });
+        app.agents.push(crate::app::AgentSummary {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            ended: false,
+        });
         // Wide enough for the sidebar to show (>= COLLAPSE_BELOW).
         let hit = hit_map_of(&app, 120, 40);
         let has = |t: ClickTarget| (0..40).any(|y| (0..120).any(|x| hit.hit(x, y) == Some(t)));
         assert!(has(ClickTarget::OpenDiff), "modified files → open diff");
         assert!(has(ClickTarget::OpenMemoryInspector), "Memory → inspector");
         assert!(has(ClickTarget::OpenSkillsInspector), "Skills → inspector");
+        assert!(has(ClickTarget::OpenAgentsInspector), "Agents → inspector");
+    }
+
+    #[test]
+    fn agents_section_is_absent_while_no_subagent_is_alive() {
+        // The no-empty-stub rule (Design §3.1): the section simply does not
+        // appear until at least one subagent is alive.
+        let app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40)
+                .all(|y| (0..120).all(|x| hit.hit(x, y) != Some(ClickTarget::OpenAgentsInspector))),
+            "no Agents section without a live subagent"
+        );
+    }
+
+    #[test]
+    fn ended_agent_drops_from_the_sidebar_but_the_last_one_ending_hides_the_section() {
+        // Design §4.13: the sidebar shows only *currently alive* subagents,
+        // even though the catalog (`App.agents`) keeps ended ones for the
+        // `/agents` inspector. With one alive and one ended, the section
+        // still shows (for the alive one); once the last one ends, it goes
+        // away entirely — the catalog is non-empty but the section is gone.
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.agents.push(crate::app::AgentSummary {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            ended: true,
+        });
+        app.agents.push(crate::app::AgentSummary {
+            id: "agent-2".into(),
+            name: "tester".into(),
+            ended: false,
+        });
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40)
+                .any(|y| (0..120).any(|x| hit.hit(x, y) == Some(ClickTarget::OpenAgentsInspector))),
+            "one alive subagent keeps the section visible"
+        );
+
+        app.agents[1].ended = true; // the last alive one now ends too
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40)
+                .all(|y| (0..120).all(|x| hit.hit(x, y) != Some(ClickTarget::OpenAgentsInspector))),
+            "no alive subagents left → the section disappears, though the catalog is not empty"
+        );
+        assert_eq!(
+            app.agents.len(),
+            2,
+            "the catalog itself retains both entries"
+        );
+    }
+
+    #[test]
+    fn mcp_section_is_absent_without_a_connected_server() {
+        // The no-empty-stub rule (Design §4.15): the section simply does not
+        // appear until at least one MCP server is connected.
+        let app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40).all(|y| (0..120).all(|x| hit.hit(x, y) != Some(ClickTarget::OpenMcpInspector))),
+            "no MCP section without a connected server"
+        );
+    }
+
+    #[test]
+    fn mcp_section_appears_once_a_server_is_connected() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.mcp_servers.push(crate::app::McpServerSummary {
+            name: "jira".into(),
+            tools: vec!["mcp__jira__get_issue".into()],
+        });
+        let hit = hit_map_of(&app, 120, 40);
+        assert!(
+            (0..40).any(|y| (0..120).any(|x| hit.hit(x, y) == Some(ClickTarget::OpenMcpInspector))),
+            "a connected server makes the MCP section visible"
+        );
     }
 
     #[test]
@@ -2167,6 +2553,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2189,6 +2577,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.open_text_overlay("t", "some body text");
@@ -2209,6 +2599,7 @@ mod tests {
                 affected_paths: vec!["/etc/x".into()],
                 outside_root,
                 reason: "bash requires approval".into(),
+                on_behalf_of: None,
             },
         });
     }
@@ -2219,6 +2610,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2251,6 +2644,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         pending(&mut app, false, "rm -rf build");
@@ -2270,6 +2665,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         pending(&mut app, true, "rm -rf /etc/x");
@@ -2280,12 +2677,48 @@ mod tests {
         );
     }
 
+    /// A subagent's own action gets one added provenance line (FR-9, Design
+    /// §4.13/§5) — every other guarantee (full content, deny default, no
+    /// reserved-band dilution) is unchanged.
+    #[test]
+    fn permission_prompt_names_the_subagent_it_is_on_behalf_of() {
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.apply_event(UiEvent::PermissionRequest {
+            id: PermissionId(1),
+            rendering: PermissionRendering {
+                tool: "bash".into(),
+                summary: "run: make build".into(),
+                detail: "make build".into(),
+                affected_paths: Vec::new(),
+                outside_root: false,
+                reason: "bash requires approval".into(),
+                on_behalf_of: Some("db-migration".into()),
+            },
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(
+            screen.contains("on behalf of subagent db-migration"),
+            "names which subagent is asking: {screen}"
+        );
+        assert!(screen.contains("DENY"), "deny is still the default");
+    }
+
     #[test]
     fn long_content_reports_more_below() {
         let mut app = App::new(
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2305,6 +2738,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2338,6 +2773,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.apply_event(UiEvent::ToolStarted {
@@ -2364,6 +2801,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.apply_event(UiEvent::ToolStarted {
@@ -2385,6 +2824,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2412,6 +2853,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2442,6 +2885,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.apply_event(UiEvent::AssistantDelta {
@@ -2454,11 +2899,136 @@ mod tests {
     }
 
     #[test]
+    fn conversation_and_input_panels_have_no_side_borders() {
+        // Only the top/bottom edges are drawn on the chat and input panels, so
+        // a terminal-selected transcript line doesn't sweep up border glyphs
+        // on copy-paste (unlike the sidebar's own left divider, which is a
+        // different, still-full-height element).
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.apply_event(UiEvent::AssistantDelta {
+            text: "hello world".into(),
+        });
+        app.apply_event(UiEvent::AssistantDone);
+        // Narrower than the sidebar's collapse threshold, so the whole row
+        // width belongs to the chat/input column.
+        let screen = draw(&app, 80, 20);
+        let content_row = screen
+            .lines()
+            .find(|r| r.contains("hello world"))
+            .expect("assistant text rendered");
+        assert!(
+            !content_row.starts_with('│'),
+            "no left border on content row: {content_row:?}"
+        );
+        assert!(
+            !content_row.trim_end().ends_with('│'),
+            "no right border on content row: {content_row:?}"
+        );
+    }
+
+    #[test]
+    fn slash_token_style_matches_registry_recognition() {
+        let theme = Theme::rich();
+        // No leading slash — not a command line at all.
+        assert!(slash_token_style(&theme, "hello world").is_none());
+        // Bare slash — no verdict yet.
+        let (len, style) = slash_token_style(&theme, "/").expect("bare slash");
+        assert_eq!(len, 1);
+        assert_eq!(style, theme.dim_accent());
+        // A known command name (and its byte length up to the first space).
+        let (len, style) = slash_token_style(&theme, "/quit now").expect("quit");
+        assert_eq!(len, "/quit".len());
+        assert_eq!(style, theme.success());
+        // A prefix of a real command that hasn't fully resolved yet.
+        let (_, style) = slash_token_style(&theme, "/qu").expect("qu prefix");
+        assert_eq!(style, theme.dim_accent());
+        // Nothing in the registry could ever match this.
+        let (_, style) = slash_token_style(&theme, "/zzz").expect("zzz");
+        assert_eq!(style, theme.warning());
+    }
+
+    #[test]
+    fn slash_command_input_is_colored_live_by_recognition() {
+        // The input box colors the `/name` token as you type it — matching
+        // registry recognition, not waiting for Enter (Design §3.3).
+        let mut recognized = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        recognized.editor.insert_str("/quit");
+        let theme = recognized.theme;
+        let screen = draw(&recognized, 80, 20);
+        let row = screen
+            .lines()
+            .position(|r| r.contains("/quit"))
+            .expect("command line rendered");
+        let buf = draw_buf(&recognized, 80, 20);
+        let col = screen
+            .lines()
+            .nth(row)
+            .and_then(|line| line.find('/'))
+            .expect("slash present");
+        let cell = buf
+            .cell((u16::try_from(col).unwrap(), u16::try_from(row).unwrap()))
+            .expect("cell in bounds");
+        assert_eq!(
+            cell.style().fg,
+            theme.success().fg,
+            "known command → success"
+        );
+
+        let mut unknown = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        unknown.editor.insert_str("/zzz");
+        let screen = draw(&unknown, 80, 20);
+        let row = screen
+            .lines()
+            .position(|r| r.contains("/zzz"))
+            .expect("command line rendered");
+        let buf = draw_buf(&unknown, 80, 20);
+        let col = screen
+            .lines()
+            .nth(row)
+            .and_then(|line| line.find('/'))
+            .expect("slash present");
+        let cell = buf
+            .cell((u16::try_from(col).unwrap(), u16::try_from(row).unwrap()))
+            .expect("cell in bounds");
+        assert_eq!(
+            cell.style().fg,
+            theme.warning().fg,
+            "unresolvable → warning"
+        );
+    }
+
+    #[test]
     fn sidebar_hides_below_the_collapse_threshold() {
         let app = App::new(
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2473,6 +3043,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2501,6 +3073,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.apply_event(UiEvent::ContextUsage {
@@ -2527,6 +3101,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         pending(
@@ -2537,6 +3113,43 @@ mod tests {
         let screen = draw(&app, 100, 24);
         assert!(screen.contains("-old"));
         assert!(screen.contains("+new"));
+    }
+
+    #[test]
+    fn agent_activity_overlay_shows_text_and_the_live_refresh_hint() {
+        // Design §4.13: the activity overlay's hint names the live refresh so
+        // its text changing under the user's eyes reads as expected.
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.agents.push(crate::app::AgentSummary {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            ended: false,
+        });
+        app.run_command(crate::commands::AppCommand::Agents);
+        app.apply_event(UiEvent::AgentActivity {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            text: "assistant: reviewing the diff now".into(),
+        });
+        let screen = draw(&app, 100, 24);
+        assert!(screen.contains("reviewing the diff now"));
+        assert!(screen.contains("updates live"), "{screen:?}");
+
+        // Read-only: no click target is registered under it (mirrors the
+        // plain Text overlay's `a_read_only_overlay_blocks_click_through`).
+        let hit = hit_map_of(&app, 100, 24);
+        assert!(
+            (0..24).all(|y| (0..100).all(|x| hit.hit(x, y).is_none())),
+            "nothing under the activity overlay is clickable"
+        );
     }
 
     #[test]
@@ -2569,6 +3182,8 @@ mod tests {
             std::env::temp_dir(),
             Vec::new(),
             String::new(),
+            String::new(),
+            String::new(),
             test_provider_writer(),
         );
         app.apply_event(emberly_core::UiEvent::AssistantDelta {
@@ -2589,6 +3204,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );
@@ -2620,6 +3237,8 @@ mod tests {
             SessionInfo::default(),
             std::env::temp_dir(),
             Vec::new(),
+            String::new(),
+            String::new(),
             String::new(),
             test_provider_writer(),
         );

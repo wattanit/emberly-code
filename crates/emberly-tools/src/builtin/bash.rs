@@ -121,6 +121,22 @@ fn summarize(command: &str) -> String {
     }
 }
 
+/// A nudge appended to a denial when the rejected command chains `&&` and
+/// mentions `git` — the sandbox has no safe way to allowlist chained
+/// commands (chaining defeats prefix matching), so the fix is for the model
+/// to issue one `git` command per `bash` call instead.
+fn chained_git_hint(command: &str) -> Option<&'static str> {
+    let is_chained = command.contains("&&");
+    let mentions_git = command
+        .replace("&&", " ")
+        .split_whitespace()
+        .any(|token| token == "git");
+    (is_chained && mentions_git).then_some(
+        "Hint: run git commands one at a time — call `bash` separately for each, \
+         without chaining them with `&&`.",
+    )
+}
+
 fn render_output(output: &std::process::Output) -> ToolOutcome {
     let code = output.status.code();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -199,7 +215,12 @@ impl Tool for BashTool {
             outside_root: false,
         };
         if !ctx.authorize(request).await.is_allowed() {
-            return ToolOutcome::denied("run this command");
+            let mut outcome = ToolOutcome::denied("run this command");
+            if let Some(hint) = chained_git_hint(&args.command) {
+                outcome.content.push('\n');
+                outcome.content.push_str(hint);
+            }
+            return outcome;
         }
 
         // Ask the sandbox how to spawn: `/bin/sh -c …` directly when degraded,
@@ -263,5 +284,31 @@ impl Tool for BashTool {
                 "timed out",
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chained_git_hint;
+
+    #[test]
+    fn hints_on_chained_git() {
+        assert!(chained_git_hint("git add . && git commit -m wip").is_some());
+        assert!(chained_git_hint("git status&&git push").is_some());
+    }
+
+    #[test]
+    fn no_hint_without_chaining() {
+        assert!(chained_git_hint("git status").is_none());
+    }
+
+    #[test]
+    fn no_hint_without_git() {
+        assert!(chained_git_hint("echo one && echo two").is_none());
+    }
+
+    #[test]
+    fn no_false_positive_on_git_substring() {
+        assert!(chained_git_hint("echo legit && echo digit").is_none());
     }
 }

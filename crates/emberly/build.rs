@@ -3,7 +3,10 @@
 //! binary in hand is today's local build or last week's).
 
 fn main() {
-    println!("cargo:rustc-env=EMBERLY_BUILD_TIMESTAMP={}", build_timestamp());
+    println!(
+        "cargo:rustc-env=EMBERLY_BUILD_TIMESTAMP={}",
+        build_timestamp()
+    );
 }
 
 fn build_timestamp() -> String {

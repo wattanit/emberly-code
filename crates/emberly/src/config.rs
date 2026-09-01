@@ -71,6 +71,13 @@ pub struct ConfigFile {
     /// `[stream]` completion-stream liveness windows (issue #15).
     #[serde(default)]
     pub stream: StreamConfigFile,
+    /// `[agents]` multi-agent subsystem (FR-9, Tech Spec §8.4).
+    #[serde(default)]
+    pub agents: AgentsConfigFile,
+    /// `[mcp]` + `[mcp.servers.<name>]` MCP client subsystem (FR-11, C-8,
+    /// Tech Spec §5.6/§8.5).
+    #[serde(default)]
+    pub mcp: McpConfigFile,
 }
 
 /// `[ui]` — presentation toggles that shape what the interface shows without
@@ -150,12 +157,17 @@ pub struct ContextConfigFile {
     pub pin_task_list: Option<bool>,
 }
 
-/// `[image]` — the `read_image` size cap (P-11, Tech Spec §5.2). All optional;
-/// the engine applies the 5 MiB default when unset.
+/// `[image]` — the `read_image` size cap (P-11, Tech Spec §5.2) and the
+/// user-attach count cap (FR-10, Tech Spec §8). All optional; the engine
+/// applies defaults when unset.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct ImageConfigFile {
     /// Maximum image file size in bytes (default 5 MiB).
     pub max_bytes: Option<usize>,
+    /// Maximum images attachable to a single prompt via `/attach` (FR-10,
+    /// default 4). Reuses `max_bytes`/format checks per-attachment; this
+    /// caps only the count.
+    pub max_attachments: Option<usize>,
 }
 
 /// `[document]` — the `read_document` size cap (P-12, Tech Spec §5.2). All
@@ -182,6 +194,73 @@ pub struct MemoryConfigFile {
 pub struct SkillsConfigFile {
     /// Whether the skill system is enabled (default `true`).
     pub enabled: Option<bool>,
+}
+
+/// `[agents]` — the multi-agent subsystem (FR-9, Tech Spec §8.4). All
+/// optional; the engine applies defaults when unset. `max_depth` has no
+/// field here — it is a structural guarantee (Requirements §2.2), not a
+/// tunable a config file could relax.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct AgentsConfigFile {
+    /// Whether the multi-agent subsystem is enabled (default `true`).
+    pub enabled: Option<bool>,
+    /// The ceiling on subagents alive at once per session (default `3`).
+    pub max_concurrent: Option<u32>,
+    /// How long `spawn_agents`/`message_agent` wait for a subagent's turn
+    /// before reporting it `still running` (default 600s).
+    pub spawn_timeout_secs: Option<u64>,
+    /// How long a subagent may go without a `message_agent` call before it
+    /// is reclaimed as idle (default 1800s).
+    pub idle_timeout_secs: Option<u64>,
+}
+
+/// `[mcp]` — the MCP client subsystem (FR-11, Tech Spec §5.6/§8.5): named
+/// server profiles, mirroring the provider-profile pattern (P-8) so reaching
+/// a new external tool server is configuration, not code.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct McpConfigFile {
+    /// Whether the MCP subsystem is enabled at all (default `true`) — a
+    /// global kill switch alongside each server's own `enabled`.
+    pub enabled: Option<bool>,
+    /// Named server profiles (C-8), merged across tiers by name like
+    /// `[providers.<name>]`.
+    #[serde(default)]
+    pub servers: HashMap<String, McpServerConfigFile>,
+}
+
+/// A `[mcp.servers.<name>]` profile (C-8). `transport` names the wire
+/// mechanism; only `"stdio"` is supported this version (Requirements §13
+/// resolved) — an unsupported transport is a structured connection-time
+/// failure (HC-6), never a silent skip.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+pub struct McpServerConfigFile {
+    pub transport: Option<String>,
+    /// The command to launch for a `stdio` server.
+    pub command: Option<String>,
+    /// Arguments passed to `command`.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Whether this specific server is enabled (default `true`).
+    pub enabled: Option<bool>,
+}
+
+impl McpServerConfigFile {
+    /// Field-merge `higher` (higher precedence) onto `self`, mirroring
+    /// [`ProfileFile::merge`].
+    fn merge(&mut self, higher: McpServerConfigFile) {
+        if higher.transport.is_some() {
+            self.transport = higher.transport;
+        }
+        if higher.command.is_some() {
+            self.command = higher.command;
+        }
+        if !higher.args.is_empty() {
+            self.args = higher.args;
+        }
+        if higher.enabled.is_some() {
+            self.enabled = higher.enabled;
+        }
+    }
 }
 
 /// `[search]` — web-search backend (T-14, Tech Spec §5.5). Mirrors the provider
@@ -486,6 +565,27 @@ impl ConfigFile {
         if higher.skills.enabled.is_some() {
             self.skills.enabled = higher.skills.enabled;
         }
+        // `[agents]` (FR-9) merges field-by-field.
+        if higher.agents.enabled.is_some() {
+            self.agents.enabled = higher.agents.enabled;
+        }
+        if higher.agents.max_concurrent.is_some() {
+            self.agents.max_concurrent = higher.agents.max_concurrent;
+        }
+        if higher.agents.spawn_timeout_secs.is_some() {
+            self.agents.spawn_timeout_secs = higher.agents.spawn_timeout_secs;
+        }
+        if higher.agents.idle_timeout_secs.is_some() {
+            self.agents.idle_timeout_secs = higher.agents.idle_timeout_secs;
+        }
+        // `[mcp]` (FR-11) merges like `[providers.<name>]` — per-server
+        // field-merge by name, never a whole-map replace.
+        if higher.mcp.enabled.is_some() {
+            self.mcp.enabled = higher.mcp.enabled;
+        }
+        for (name, server) in higher.mcp.servers {
+            self.mcp.servers.entry(name).or_default().merge(server);
+        }
         // `[search]` (T-14) merges field-by-field, including nested auth.
         if higher.search.enabled.is_some() {
             self.search.enabled = higher.search.enabled;
@@ -565,6 +665,9 @@ pub struct Resolved {
     /// Resolved image size limit in bytes for `read_image` (P-11, Tech Spec
     /// §5.2). Default 5 MiB.
     pub image_max_bytes: usize,
+    /// Resolved cap on images attached to one prompt via `/attach` (FR-10,
+    /// Tech Spec §8). Default 4.
+    pub image_max_attachments: usize,
     /// Resolved document size limit in bytes for `read_document` (P-12, Tech
     /// Spec §5.2). Default 32 MiB.
     pub document_max_bytes: usize,
@@ -572,9 +675,16 @@ pub struct Resolved {
     pub memory: emberly_core::MemoryConfig,
     /// Resolved skills config (FR-7, Tech Spec §8.2), ready for the engine.
     pub skills: emberly_core::SkillsConfig,
+    /// Resolved multi-agent subsystem config (FR-9, Tech Spec §8.4), ready
+    /// for the engine.
+    pub agents: emberly_core::AgentsConfig,
     /// Resolved search config (T-14, Tech Spec §5.5). The binary conditionally
     /// registers the `web_search` tool when `enabled` and an endpoint is set.
     pub search: SearchConfig,
+    /// Resolved MCP client config (FR-11, C-8, Tech Spec §5.6/§8.5). The
+    /// binary connects each enabled, trust-permitted server and registers
+    /// its discovered tools (`provider_setup::build_tool_registry`).
+    pub mcp: McpConfigResolved,
     /// Resolved completion-stream liveness windows (issue #15), baked into
     /// each provider client at construction.
     pub stream_timeouts: emberly_providers::StreamTimeouts,
@@ -595,6 +705,36 @@ pub struct SearchConfig {
     pub auth: Option<AuthFile>,
     /// Maximum results sent to the model (default 5).
     pub max_results: usize,
+}
+
+/// Resolved MCP client config (FR-11, Tech Spec §5.6/§8.5). Carried in
+/// [`Resolved`] for the binary composition root; `provider_setup::build_tool_registry`
+/// connects each enabled server (subject to the `project_scoped` trust gate)
+/// and registers its discovered tools.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct McpConfigResolved {
+    /// Whether the MCP subsystem is enabled at all (default `true`).
+    pub enabled: bool,
+    pub servers: Vec<McpServerResolved>,
+}
+
+/// One resolved `[mcp.servers.<name>]` profile (C-8), ready to connect.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpServerResolved {
+    pub name: String,
+    /// Raw transport string as configured (default `"stdio"` when unset) —
+    /// validated at connection time, not here: an unsupported transport is a
+    /// structured connection failure (HC-6), never a silent skip.
+    pub transport: String,
+    /// `None` when no `command` was configured — also a connection-time
+    /// failure, not a silent skip.
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    /// Whether this profile was declared in *project*-tier config — gates
+    /// connecting behind workspace trust (FR-1/FR-11), mirroring the
+    /// project-skill trust check (FR-7). `false` for a user-global profile,
+    /// which is never trust-gated.
+    pub project_scoped: bool,
 }
 
 /// Command-line overrides (`--provider`/`--model`) — the highest-precedence
@@ -752,6 +892,18 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
     });
     provenance.file_field("skills.enabled", |c| c.skills.enabled.is_some());
 
+    // Multi-agent subsystem (FR-9).
+    provenance.file_field("agents.enabled", |c| c.agents.enabled.is_some());
+    provenance.file_field("agents.max_concurrent", |c| {
+        c.agents.max_concurrent.is_some()
+    });
+    provenance.file_field("agents.spawn_timeout_secs", |c| {
+        c.agents.spawn_timeout_secs.is_some()
+    });
+    provenance.file_field("agents.idle_timeout_secs", |c| {
+        c.agents.idle_timeout_secs.is_some()
+    });
+
     // Search (T-14).
     provenance.file_field("search.enabled", |c| c.search.enabled.is_some());
     provenance.file_field("search.adapter", |c| c.search.adapter.is_some());
@@ -868,6 +1020,7 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
             }
         },
         image_max_bytes: merged.image.max_bytes.unwrap_or(5 * 1024 * 1024),
+        image_max_attachments: merged.image.max_attachments.unwrap_or(4),
         document_max_bytes: merged.document.max_bytes.unwrap_or(32 * 1024 * 1024),
         memory: {
             let d = emberly_core::MemoryConfig::default();
@@ -885,12 +1038,58 @@ pub fn load(project_root: &Path, cli: &CliOverrides) -> anyhow::Result<Resolved>
                 enabled: merged.skills.enabled.unwrap_or(d.enabled),
             }
         },
+        agents: {
+            let d = emberly_core::AgentsConfig::default();
+            emberly_core::AgentsConfig {
+                enabled: merged.agents.enabled.unwrap_or(d.enabled),
+                max_concurrent: merged
+                    .agents
+                    .max_concurrent
+                    .map_or(d.max_concurrent, |v| v as usize),
+                spawn_timeout_secs: merged
+                    .agents
+                    .spawn_timeout_secs
+                    .unwrap_or(d.spawn_timeout_secs),
+                idle_timeout_secs: merged
+                    .agents
+                    .idle_timeout_secs
+                    .unwrap_or(d.idle_timeout_secs),
+            }
+        },
         search: SearchConfig {
             enabled: merged.search.enabled.unwrap_or(true),
             adapter: merged.search.adapter,
             endpoint: merged.search.endpoint,
             auth: merged.search.auth,
             max_results: merged.search.max_results.unwrap_or(5),
+        },
+        mcp: {
+            // A server name declared in the *project* tier's own file is
+            // trust-gated (FR-1/FR-11); one only in global config never is —
+            // the same distinction project skills already make (FR-7).
+            let project_scoped_names: std::collections::HashSet<&String> = project
+                .as_ref()
+                .map(|p| p.mcp.servers.keys().collect())
+                .unwrap_or_default();
+            McpConfigResolved {
+                enabled: merged.mcp.enabled.unwrap_or(true),
+                servers: merged
+                    .mcp
+                    .servers
+                    .into_iter()
+                    .filter(|(_, s)| s.enabled.unwrap_or(true))
+                    .map(|(name, s)| {
+                        let project_scoped = project_scoped_names.contains(&name);
+                        McpServerResolved {
+                            transport: s.transport.unwrap_or_else(|| "stdio".to_string()),
+                            command: s.command,
+                            args: s.args,
+                            project_scoped,
+                            name,
+                        }
+                    })
+                    .collect(),
+            }
         },
         stream_timeouts: {
             let d = emberly_providers::StreamTimeouts::default();
@@ -1632,6 +1831,26 @@ mod tests {
         base.merge(cfg);
         assert_eq!(base.loop_.enabled, Some(false));
         assert_eq!(base.loop_.repeat_window, Some(5));
+    }
+
+    #[test]
+    fn agents_config_parses_and_merges() {
+        let cfg = ConfigFile::parse(
+            "[agents]\nenabled = false\nmax_concurrent = 5\n\
+             spawn_timeout_secs = 60\nidle_timeout_secs = 120",
+        )
+        .expect("agents");
+        assert_eq!(cfg.agents.enabled, Some(false));
+        assert_eq!(cfg.agents.max_concurrent, Some(5));
+        assert_eq!(cfg.agents.spawn_timeout_secs, Some(60));
+        assert_eq!(cfg.agents.idle_timeout_secs, Some(120));
+        // [agents] merges normally — a project may tune the resource bounds.
+        let mut base = ConfigFile::default();
+        base.merge(cfg);
+        assert_eq!(base.agents.enabled, Some(false));
+        assert_eq!(base.agents.max_concurrent, Some(5));
+        assert_eq!(base.agents.spawn_timeout_secs, Some(60));
+        assert_eq!(base.agents.idle_timeout_secs, Some(120));
     }
 
     #[test]

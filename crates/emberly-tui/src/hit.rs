@@ -34,6 +34,12 @@ pub enum ClickTarget {
     /// A skills-inspector row — index into the skills list. Click = select it +
     /// inspector Enter (read-only body view).
     SkillRow(usize),
+    /// An Agents-inspector row — index into the alive-subagents list. Click =
+    /// select it + inspector Enter (read-only activity view).
+    AgentRow(usize),
+    /// An MCP-inspector row — index into the connected-servers list. Click =
+    /// select it + inspector Enter (read-only tool-list view).
+    McpServerRow(usize),
     /// The collapsed/expanded reasoning-trail line in the conversation. Click =
     /// toggle it, exactly as Ctrl+R does (`toggle_reasoning`).
     ReasoningToggle,
@@ -47,6 +53,12 @@ pub enum ClickTarget {
     /// The sidebar's Skills section. Click = open the skills inspector, exactly
     /// as `/skills` does.
     OpenSkillsInspector,
+    /// The sidebar's Agents section. Click = open the Agents inspector, exactly
+    /// as `/agents` does.
+    OpenAgentsInspector,
+    /// The sidebar's MCP section. Click = open the MCP inspector, exactly as
+    /// `/mcp` does.
+    OpenMcpInspector,
     /// A permission-prompt affordance (Design §5). A click here dispatches the
     /// **same** decision the matching key does, via `on_permission_key` — never
     /// a new path. Only the affordance text is registered (the gaps between them

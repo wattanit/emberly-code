@@ -85,6 +85,13 @@ impl App {
             // Shift+Tab cycles the auto-accept mode (crossterm delivers it as
             // BackTab). The engine gates the auto tiers on confinement.
             KeyCode::BackTab => self.run_command(AppCommand::CycleMode),
+            // Tab completes a partially typed `/command` name, but only when
+            // exactly one registry entry could still be meant (Design §3.3) —
+            // otherwise it's a no-op, same as Tab already was everywhere else.
+            KeyCode::Tab => {
+                self.complete_slash_command();
+                Action::None
+            }
             // Open the command palette (Design §3.3).
             KeyCode::Char('p') if ctrl => {
                 self.palette = Some(PaletteState::default());
@@ -122,6 +129,20 @@ impl App {
                         // Echo the prompt into the timeline so the main pane is
                         // a single top-to-bottom transcript of both sides.
                         self.timeline.items.push(ConvItem::User(text.clone()));
+                        // Any images staged via `/attach` ride along on this
+                        // send (the engine drains its own copy of
+                        // `Engine::pending_attachments` on `UserInput`); the
+                        // chip lands in the timeline now that the message is
+                        // actually sent (Design §4.14), and the compose-area
+                        // staging list is cleared to match.
+                        for image in self.pending_attachments.drain(..) {
+                            self.timeline.items.push(ConvItem::Attachment {
+                                name: image.name,
+                                width: image.width,
+                                height: image.height,
+                                format_label: image.format_label,
+                            });
+                        }
                         // Enter the "working" state (Design §6.3); the spinner
                         // runs from frame 0 until TurnEnded.
                         self.anim.busy = true;
@@ -164,6 +185,28 @@ impl App {
             }
             KeyCode::Char(c) => self.edit(|e| e.insert_char(c)),
             _ => Action::None,
+        }
+    }
+
+    /// Complete the `/command` name under the cursor if it unambiguously
+    /// resolves ([`commands::complete`]) — a no-op outside a single-line
+    /// input that's still mid-command-name with the cursor at its end (typing
+    /// args or a second line means the name is already settled).
+    fn complete_slash_command(&mut self) {
+        if self.editor.line_count() != 1 {
+            return;
+        }
+        let text = self.editor.text().to_string();
+        let Some(name) = text.strip_prefix('/') else {
+            return;
+        };
+        let (_, cursor_col) = self.editor.cursor_row_col();
+        if cursor_col != crate::text::width(&text) {
+            return;
+        }
+        if let Some(full) = commands::complete(name) {
+            let suffix = format!("{} ", &full[name.len()..]);
+            self.editor.insert_str(&suffix);
         }
     }
 
@@ -261,6 +304,16 @@ impl App {
                 self.set_skill_selection(row);
                 self.on_skills_inspector_key(KeyEvent::from(KeyCode::Enter))
             }
+            ClickTarget::AgentRow(row) => {
+                // Focus + Enter on the Agents inspector (read-only activity view).
+                self.set_agent_selection(row);
+                self.on_agents_inspector_key(KeyEvent::from(KeyCode::Enter))
+            }
+            ClickTarget::McpServerRow(row) => {
+                // Focus + Enter on the MCP inspector (read-only tool-list view).
+                self.set_mcp_selection(row);
+                self.on_mcp_inspector_key(KeyEvent::from(KeyCode::Enter))
+            }
             ClickTarget::ReasoningToggle => {
                 // Exactly the Ctrl+R action — toggle the most recent trail.
                 self.toggle_reasoning();
@@ -278,6 +331,14 @@ impl App {
             ClickTarget::OpenSkillsInspector => {
                 // Exactly the `/skills` action.
                 self.run_command(AppCommand::Skills)
+            }
+            ClickTarget::OpenAgentsInspector => {
+                // Exactly the `/agents` action.
+                self.run_command(AppCommand::Agents)
+            }
+            ClickTarget::OpenMcpInspector => {
+                // Exactly the `/mcp` action.
+                self.run_command(AppCommand::Mcp)
             }
             ClickTarget::PermissionChoice(choice) => {
                 // Reuse `on_permission_key` EXACTLY (Design §3.4/§5): a click on
@@ -336,6 +397,18 @@ impl App {
             Some(OverlayContent::SkillList { .. })
         ) {
             return self.on_skills_inspector_key(key);
+        }
+        if matches!(
+            self.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::AgentList { .. })
+        ) {
+            return self.on_agents_inspector_key(key);
+        }
+        if matches!(
+            self.overlays.last().map(|o| &o.content),
+            Some(OverlayContent::McpServerList { .. })
+        ) {
+            return self.on_mcp_inspector_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {

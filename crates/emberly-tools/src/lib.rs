@@ -15,6 +15,8 @@ pub mod ask_user;
 pub mod builtin;
 pub mod ctx;
 pub mod diff;
+pub mod image;
+pub mod mcp;
 pub mod memory;
 pub mod path;
 pub mod permission;
@@ -25,17 +27,23 @@ pub mod sandbox;
 pub mod scratch;
 pub mod search;
 pub mod skills;
+pub mod subagent;
 pub mod task_list;
 pub mod tool;
 pub mod truncate;
 
 pub use ask_user::{AskUserGate, AskUserOutcome};
 pub use builtin::{
-    default_registry, AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, MemoryTool,
-    ReadDocumentTool, ReadFileTool, ReadImageTool, RecallTool, ScratchWriteTool, SkillTool,
-    TaskListTool, WebSearchTool, WriteFileTool, DEFAULT_ENV_ALLOWLIST, DEFAULT_TIMEOUT_SECS,
+    default_registry, AskUserTool, BashTool, EditFileTool, EndAgentTool, GlobTool, GrepTool,
+    ListAgentsTool, MemoryTool, MessageAgentTool, ReadDocumentTool, ReadFileTool, ReadImageTool,
+    RecallTool, ScratchWriteTool, SkillTool, SpawnAgentsTool, TaskListTool, WebSearchTool,
+    WriteFileTool, DEFAULT_ENV_ALLOWLIST, DEFAULT_TIMEOUT_SECS,
 };
 pub use ctx::{ToolCtx, TruncateConfig};
+pub use image::{encode_image_bytes, EncodedImage};
+pub use mcp::{
+    build_mcp_tools, namespaced_tool_name, McpError, McpTool, McpToolSpec, McpTransport,
+};
 pub use memory::{
     slug, MemoryError, MemoryGate, MemoryOp, MemoryOutcome, MemoryRequest, MemoryScope,
 };
@@ -49,6 +57,11 @@ pub use scratch::{
 };
 pub use search::{SearchAuth, SearchClient, SearchError, SearchResult};
 pub use skills::{SkillError, SkillGate, SkillInvocation, SkillMeta, SkillOrigin};
+pub use subagent::{
+    SubagentEndOutcome, SubagentError, SubagentGate, SubagentListEntry, SubagentMessageOutcome,
+    SubagentMessageRequest, SubagentSpawnBatch, SubagentSpawnOutcome, SubagentSpawnResult,
+    SubagentSpawnSpec, SubagentStatus,
+};
 pub use task_list::{TaskItem, TaskListError, TaskListGate, TaskStatus};
 pub use tool::{FileChange, ImageContent, Tool, ToolOutcome, ToolSpec};
 pub use truncate::{truncate_output, Truncation};
