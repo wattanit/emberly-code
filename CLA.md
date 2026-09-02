@@ -14,8 +14,8 @@ Contribution You submit to the Project.
 **"You"** means the individual signing this Agreement.
 
 **"Contribution"** means any original work of authorship, including any
-modification of or addition to existing work, that You intentionally
-submit to the Project for inclusion in, or documentation of, the Project.
+modification of or addition to existing work, that You submit to the 
+Project for inclusion in, or documentation of, the Project.
 
 **"Submit"** means any form of communication sent to the Project or its
 maintainer for the purpose of discussing or improving the Project,
@@ -31,7 +31,7 @@ license to:
 
 **(a)** reproduce, prepare derivative works of, publicly display,
 publicly perform, and distribute Your Contribution, alone or as part of
-the Project, under the Project's then-current license
+the Project, under the Project's license
 (AGPL-3.0-or-later at the time of this Agreement, or any later version
 the maintainer adopts); and
 
@@ -39,12 +39,6 @@ the maintainer adopts); and
 the Project, under any other license terms of the maintainer's choosing —
 including proprietary or commercial terms — without further consent from
 or accounting to You.
-
-Clause (b) is what lets the maintainer offer a separate commercial
-license to parties who don't want AGPL's copyleft obligations, and what
-lets a future project-wide relicense happen without re-contacting every
-past contributor. It is the central purpose of this Agreement — read it
-alongside clause (a), not instead of it.
 
 ## 3. Grant of Patent License
 
@@ -78,13 +72,21 @@ behalf, or Your employer has waived such rights for Your Contributions;
 **(d)** You are legally entitled to grant the licenses in Sections 2 and
 3.
 
-## 5. No Warranty
+## 5. Warranty and Liability for Breach of Representations
 
-Your Contribution is provided "as is," without warranty of any kind,
-express or implied, including without limitation any warranty of
-merchantability, fitness for a particular purpose, or non-infringement.
-You are not required to provide support for Your Contribution, except to
-the extent You wish to.
+You represent and warrant that the statements in Section 4 are true and
+correct. If any statement in Section 4 is breached, You shall be liable
+for, and shall indemnify and hold harmless the maintainer against, any
+direct damages, losses, costs, and reasonable expenses (including legal
+fees) the maintainer incurs as a direct result of that breach — including
+where a third party asserts a claim against the maintainer or the Project
+arising from Your Contribution's breach of Section 4(a) or 4(b).
+
+Except for the warranties in this Section, Your Contribution is provided
+"as is," without warranty of any kind, express or implied, including
+without limitation any warranty of merchantability or fitness for a
+particular purpose. You are not required to provide support for Your
+Contribution, except to the extent You wish to.
 
 ## 6. No Obligation
 
@@ -106,6 +108,34 @@ maintainer in writing. Withdrawal applies only to Contributions submitted
 after the maintainer receives Your notice — it does not withdraw or
 affect the licenses already granted under Sections 2 and 3 for
 Contributions submitted before that point.
+
+## 9. General Provisions
+
+**(a) Entire Agreement.** This Agreement constitutes the entire agreement
+between You and the maintainer regarding its subject matter and
+supersedes any prior understanding or agreement, oral or written,
+regarding Your Contributions.
+
+**(b) Severability.** If any provision of this Agreement is held invalid
+or unenforceable, that provision shall be reformed to the minimum extent
+necessary to make it enforceable, and the remaining provisions shall
+remain in full force and effect.
+
+**(c) No Waiver.** A failure or delay by the maintainer in exercising any
+right under this Agreement does not waive that right.
+
+**(d) Assignment.** The maintainer may assign this Agreement, in whole or
+in part, to a successor in interest to the Project without Your consent.
+You may not assign this Agreement without the maintainer's prior written
+consent.
+
+**(e) Survival.** Sections 2, 3, 4, 5, and this Section 9 survive any
+termination or withdrawal of this Agreement.
+
+**(f) Notices.** A notice under this Agreement (including a withdrawal
+notice under Section 8) is effective when sent in writing to the
+maintainer's email or GitHub account of record, or to You at the email or
+GitHub account You used to sign this Agreement.
 
 ---
 
