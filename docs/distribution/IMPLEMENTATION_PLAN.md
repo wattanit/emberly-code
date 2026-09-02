@@ -121,6 +121,32 @@ project resolves from the registry.
 
 ---
 
+## Phase 1b — Contributor License Agreement — ✅ closed 2026-09-02
+
+**Goal:** Close the gap §13 identifies — a CLA granting relicensing
+rights must be in place *before* any external contribution is merged, or
+the commercial-exception grant in the license section stops being clean.
+Originally deferred (no external contributors yet); moved up because the
+owner already stood up the `cla-assistant` bot.
+
+**Landed:** `CLA.md` (repo root) — an Individual Contributor License
+Agreement modeled on the Apache ICLA / Project Harmony structure. Grants
+the maintainer (a) the ordinary right to distribute a Contribution under
+the Project's AGPL-3.0-or-later license and (b) a broad relicensing
+grant — the clause the commercial dual-license offer in §13 actually
+depends on — plus a standard patent grant with defensive termination,
+contributor representations, and a withdrawal clause.
+
+**Not done / flagged, not silently assumed:** governing law/jurisdiction
+is deliberately left unspecified (common for individual CLAs, but a
+choice, not an oversight); no Corporate/Entity CLA variant yet (only
+needed once a contributor submits on an employer's behalf — Section 4(c)
+covers the individual-permission case in the meantime); clause 2(b) has
+not had a lawyer's review — recommended before this is relied on for a
+real commercial-license sale.
+
+---
+
 ## Phase 3 — cargo-dist cross-platform binaries
 
 **Goal:** Every tagged release produces prebuilt binaries for the §13
@@ -161,9 +187,6 @@ matches the tagged release.
 
 ## Deliberately out of scope for this plan
 
-- **CLA tooling.** §13 makes a CLA a prerequisite before merging any
-  external contribution, but no tooling (e.g. a `cla-assistant` gate) is
-  built here — there are no external contributors yet.
 - **Reserving the five sub-crate names beyond what Phase 2 does.** Phase 2
   publishes them for real anyway (they're real dependencies of `emberly`),
   so this is moot for those five specifically — noted in §16 only because
