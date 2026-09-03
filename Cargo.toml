@@ -23,6 +23,19 @@ repository = "https://github.com/wattanit/emberly-code"
 # added to this table by the phase that introduces them — see
 # IMPLEMENTATION_PLAN.md and docs/emberly-code-tech-spec.md §12.
 [workspace.dependencies]
+# Internal crates, centralized here so each carries both `path` (for the
+# in-repo build) and `version` (required for a crates.io publish — a bare
+# `path` dependency is rejected by the registry). Publish order is forced by
+# this graph: emberly-providers/emberly-sandbox/emberly-tools first (no
+# internal dependency between them), then emberly-core, then emberly-tui,
+# then emberly (Tech Spec §13, docs/distribution/IMPLEMENTATION_PLAN.md
+# Phase 2).
+emberly-providers = { path = "crates/emberly-providers", version = "0.5.2" }
+emberly-tools = { path = "crates/emberly-tools", version = "0.5.2" }
+emberly-sandbox = { path = "crates/emberly-sandbox", version = "0.5.2" }
+emberly-core = { path = "crates/emberly-core", version = "0.5.2" }
+emberly-tui = { path = "crates/emberly-tui", version = "0.5.2" }
+
 tokio = { version = "1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -10,9 +10,9 @@ repository.workspace = true
 
 [dependencies]
 # Internal (one-way flow: core -> {providers, tools, sandbox} via traits).
-emberly-providers = { path = "../emberly-providers" }
-emberly-tools = { path = "../emberly-tools" }
-emberly-sandbox = { path = "../emberly-sandbox" }
+emberly-providers.workspace = true
+emberly-tools.workspace = true
+emberly-sandbox.workspace = true
 
 # External.
 # `io-util` added for the first-party MCP stdio client (FR-11, Tech Spec
