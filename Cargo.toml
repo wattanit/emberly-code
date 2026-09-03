@@ -106,3 +106,8 @@ imagesize = { version = "0.15", features = ["png", "jpeg", "gif", "webp"] }
 # Fully static musl builds (HC-2) prefer small, predictable binaries.
 strip = true
 lto = "thin"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
