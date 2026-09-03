@@ -1,6 +1,6 @@
 # Emberly Code — Implementation Plan (distribution & licensing)
 
-**Status:** 🚧 Phase 0 closed and approved; Phases 1–4 not started.
+**Status:** 🚧 Phases 0, 1, 1b, and 2 closed; Phases 3–4 not started.
 **Date:** 2026-09-02
 **Owner:** Wattanit
 **Source documents** (G-14 pin):
@@ -91,7 +91,7 @@ by the owner.
 
 ---
 
-## Phase 2 — Registry-ready dependencies & crates.io publish
+## Phase 2 — Registry-ready dependencies & crates.io publish — ✅ closed 2026-09-03
 
 **Goal:** All six workspace crates published for real, so `cargo install
 emberly` and `cargo add emberly-core` (etc.) work — and so the name
@@ -117,7 +117,25 @@ metadata before it will accept a publish).
 **Done when:** all six crates resolve on crates.io at the published
 version; `cargo install emberly` succeeds from a clean environment with no
 local path overrides; a fresh `cargo add emberly-core` in a scratch
-project resolves from the registry.
+project resolves from the registry. — ✅ all three verified: all six
+published (`emberly-providers`, `emberly-sandbox`, `emberly-tools`,
+`emberly-core`, `emberly-tui`, `emberly`, each confirmed via the crates.io
+API as `AGPL-3.0-or-later` and not yanked); `cargo install emberly`
+succeeds and the installed binary runs (`emberly v0.5.2 - Build
+20260903-083419`); `cargo add emberly-core` resolves from the registry in
+an unrelated scratch project.
+
+**Also landed, not originally scoped:** `cargo publish --dry-run` surfaced
+that `deny.toml`'s license allow-list was still Apache-2.0-project-era and
+rejected the project's own now-AGPL crates (would have failed CI's `deny`
+job on the next push, unrelated to the publish itself); fixed alongside a
+pre-existing `CDLA-Permissive-2.0` gap for `webpki-roots`, and one leftover
+wildcard-dependency finding (`emberly`'s dev-dependency on
+`emberly-sandbox` was still a bare `path`). `bans`/`licenses`/`sources` are
+clean; `advisories` still fails on a pre-existing, unrelated backlog
+(unmaintained crates, several real CVEs, the yanked `spin` this phase kept
+surfacing) traced to the unchanged `Cargo.lock` — flagged, not fixed here,
+needs its own pass.
 
 ---
 
