@@ -1,6 +1,6 @@
 # Emberly Code — Implementation Plan (distribution & licensing)
 
-**Status:** 🚧 Phases 0, 1, 1b, 2, and 3 closed; Phase 4 not started.
+**Status:** ✅ All phases (0, 1, 1b, 2, 3, 4) closed. Distribution & licensing plan complete.
 **Date:** 2026-09-02
 **Owner:** Wattanit
 **Source documents** (G-14 pin):
@@ -210,7 +210,7 @@ printed `emberly v0.5.2 - Build 20260905-153642`, and the bundled
 
 ---
 
-## Phase 4 — Homebrew tap
+## Phase 4 — Homebrew tap — ✅ closed 2026-09-05
 
 **Goal:** `brew install` works with no Rust toolchain required on the
 user's machine.
@@ -226,7 +226,26 @@ user's machine.
 
 **Done when:** `brew tap <owner>/emberly && brew install emberly` succeeds
 on a clean macOS machine (arm64 at minimum) and `emberly --version`
-matches the tagged release.
+matches the tagged release. — ✅ verified directly: `dist-workspace.toml`
+gained `installers = ["shell", "homebrew"]`, `tap = "wattanit/homebrew-
+emberly"`, and `publish-jobs = ["homebrew"]` (declaring `tap` alone wasn't
+enough — cargo-dist warned the publish job was still disabled until
+`publish-jobs` was set explicitly); `homepage` was also missing from
+`Cargo.toml` (same per-crate `.workspace = true` propagation gotcha as
+`repository` in Phase 1) and had to be added to all six crates. The tap
+repo (`wattanit/homebrew-emberly`, created by the owner) needed at least
+one commit on `main` before `actions/checkout` in the publish job could
+find anything to fetch — an empty repo isn't a valid checkout target,
+diagnosed from the job's own log. `v0.5.2`'s tag was moved a second time
+to include this config (same forced-tag situation as Phase 3, since
+`dist` still requires an exact version match); the old `v0.5.2` GitHub
+Release had to be deleted first too, since `gh release create` (used by
+the `host` job) has no overwrite/upsert behavior. Once both were in
+place, "Re-run failed jobs" succeeded end to end, including
+`publish-homebrew-formula`. `brew tap wattanit/emberly && brew install
+wattanit/emberly/emberly` run for real on the owner's own machine (not a
+disposable sandbox): correct native `arm64` Mach-O binary, `emberly
+--version` matched the tagged release, real AGPLv3 `LICENSE` bundled.
 
 ---
 
