@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "emberly"
@@ -15,13 +16,13 @@ path = "src/main.rs"
 # Internal. As the composition root, the binary also depends on the concrete
 # providers/tools crates to construct the provider and tool registry it wires
 # into the engine (Phase 3 builds the live providers here).
-emberly-core = { path = "../emberly-core" }
-emberly-tui = { path = "../emberly-tui" }
-emberly-providers = { path = "../emberly-providers" }
-emberly-tools = { path = "../emberly-tools" }
+emberly-core.workspace = true
+emberly-tui.workspace = true
+emberly-providers.workspace = true
+emberly-tools.workspace = true
 # The composition root also drives the self-exec Landlock shim (Phase 2 group 3),
 # which restricts the child then execs — so it depends on the sandbox directly.
-emberly-sandbox = { path = "../emberly-sandbox" }
+emberly-sandbox.workspace = true
 
 # External. anyhow is confined to the binary edge (Tech Spec §1, §11).
 anyhow.workspace = true
@@ -38,7 +39,7 @@ toml.workspace = true
 [dev-dependencies]
 # Escape-test suite (Phase 2 group 9) drives the confined-exec shim binary and
 # builds specs with the real type.
-emberly-sandbox = { path = "../emberly-sandbox" }
+emberly-sandbox.workspace = true
 # MCP connection tests (FR-11, Tech Spec §5.6) build tool-call args — already
 # a workspace dependency (emberly-core/emberly-tools), not a new crate.
 serde_json.workspace = true

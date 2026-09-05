@@ -5,7 +5,7 @@
 **Date:** 2026-08-16    
 **Owner:** Wattanit    
 **Companion documents:** Design Guideline v0.12 (downstream), Technical  
-Specification v0.14 (downstream)
+Specification v0.15 (downstream)
 
 This document defines WHAT the harness must do and WHY. HOW it is built is
 deferred to the Technical Specification. UX, visual, and voice decisions are

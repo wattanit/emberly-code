@@ -5,7 +5,7 @@
 **Date:** 2026-08-16
 **Owner:** Wattanit
 **Companion documents:** Requirements Document v0.12 (upstream), Technical
-Specification v0.14 (downstream — this document constrains it)
+Specification v0.15 (downstream — this document constrains it)
 
 This document defines how Emberly Code looks, feels, and speaks. It is the
 second of three project documents. Where a decision here has technical

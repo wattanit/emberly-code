@@ -6,10 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [dependencies]
 # Internal (tui -> core only; nothing depends on tui).
-emberly-core = { path = "../emberly-core" }
+emberly-core.workspace = true
 
 # External. The line-mode frontend needs only stdio + channels; the rich TUI
 # (Phase 4) adds ratatui + grapheme-aware text + syntax highlighting. crossterm

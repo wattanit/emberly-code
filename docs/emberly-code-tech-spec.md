@@ -1,8 +1,8 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.14 
+**Version:** 0.15 
 **Status:** approved
-**Date:** 2026-08-16
+**Date:** 2026-09-02
 **Owner:** Wattanit
 **Companion documents:** Requirements Document v0.12 (upstream contract),
 Design Guideline v0.12 (upstream for all UI/UX decisions)
@@ -1491,6 +1491,34 @@ test suite incl. degraded-mode and Thai-fixture tests, `cargo deny`,
 - Linux CI runs sandbox escape tests on a Landlock-enabled kernel
 (§14.3). Release checklist includes the name-collision check
 (Design §1.1) and a `--plain` smoke run.
+- **License: AGPL-3.0-or-later, dual-licensed.** The full workspace
+(`license.workspace = true`) carries AGPLv3's network-copyleft terms —
+chosen over the prior Apache-2.0 metadata (no `LICENSE` file had ever
+existed for it) specifically because plain GPL's copyleft triggers only on
+distribution, not on running a modified version as a network service;
+AGPL closes that gap. The repository owner is sole copyright holder and
+separately offers a negotiated commercial license to parties that want an
+exception to the copyleft terms. A CLA granting relicensing rights is a
+prerequisite before any external contribution is merged — without one, a
+merged contribution is AGPL-only from that contributor and the owner can
+no longer grant a clean commercial exception covering it.
+- **crates.io: real publish, not a name-only reservation.** All six
+workspace crates publish under their real names with their real
+functionality. `emberly-providers`, `emberly-sandbox`, and `emberly-tools`
+have no internal path dependency and publish first (any order);
+`emberly-core` depends on all three; `emberly-tui` depends on
+`emberly-core`; `emberly` (the binary) depends on all five — this order is
+required, since crates.io refuses a `path`-only dependency and each
+workspace-internal dependency needs a matching registry `version` once its
+target is published. `cargo add`-ing a library crate binds the importer to
+AGPL-3.0-or-later exactly as cloning the repository would; that friction is
+the deliberate point of the license choice above, not an oversight.
+- **Homebrew: prebuilt binary only, personal tap.** No build-from-source
+formula, and no submission to `homebrew-core`. A personal tap formula
+fetches a prebuilt binary — built for the release targets above — from the
+matching GitHub Release. `cargo-dist` owns both halves from one config:
+cross-compiling the release targets into GitHub Release artifacts, and
+keeping the tap formula's `url`/`sha256` in sync with each tagged release.
 
 ## 14. Testing Strategy
 
@@ -1673,6 +1701,29 @@ around the safety model, a second persistence mechanism, or a single new
 dependency (§12).*
 
 ## 16. Open Items
+
+**v0.15 (2026-09-02, distribution & licensing).** §13 Build & Release
+expanded with the project's first public distribution channels and a
+license change — the prior Apache-2.0 metadata (no `LICENSE` file had ever
+existed for it) replaced with AGPL-3.0-or-later, dual-licensed by the sole
+copyright holder. No product behavior changes: no new FR-n/HC-n/P-n/T-n
+IDs, no new `UiEvent`/`TranscriptEvent` variant, no `SCHEMA_VERSION` bump.
+Requirements and Design are untouched and remain pinned at v0.12 — this
+bump is Spec-only, since nothing about WHAT the harness does or how it
+looks/feels/speaks changed. Approved by the owner (2026-09-02) with no
+requested changes.
+
+Open items introduced by this scope:
+
+- **Sub-crate name reservation on crates.io.** This scope reserves
+`emberly` by publishing it for real; whether the five internal crate names
+are also worth reserving (low-cost insurance against squatting, independent
+of whether they see real external use) is left to the owner, not decided
+here.
+- **CLA mechanics.** §13 makes a CLA a prerequisite for merging any
+external contribution, but the concrete tooling (e.g. a `cla-assistant`
+gate) is not built as part of this scope — there are no external
+contributors yet, so nothing blocks on it today.
 
 **v0.14 (2026-08-16, 0.5.1 feature set).** Three capabilities graduated
 together from Requirements §2.2/new scope land as `emberly-core`/

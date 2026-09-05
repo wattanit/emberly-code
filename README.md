@@ -561,9 +561,19 @@ Release targets (v1): `x86_64-unknown-linux-musl`,
 
 - [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.12)
 - [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.12)
-- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.14)
+- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.15)
 - [`docs/version-0-5-1/IMPLEMENTATION_PLAN.md`](docs/version-0-5-1/IMPLEMENTATION_PLAN.md) — v0.5.1's phased build plan (v0.5.2 was a smaller, informal polish pass with no foundation-document revision)
+- [`docs/distribution/IMPLEMENTATION_PLAN.md`](docs/distribution/IMPLEMENTATION_PLAN.md) — the license change and distribution-channel plan below
 
 ## License
 
-Apache-2.0.
+**AGPL-3.0-or-later.** Free to use, modify, and redistribute — including as
+part of a commercial product — as long as your own project stays under a
+compatible copyleft license, source included. Running a modified version as
+a network service counts as distribution under AGPL: if you do, your users
+are entitled to that version's source too.
+
+**Commercial licensing.** If AGPL's terms don't work for your use case —
+you want to embed Emberly Code in a closed-source product without those
+obligations — a separate commercial license is available. Open an issue to
+start that conversation.
