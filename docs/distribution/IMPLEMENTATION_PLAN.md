@@ -1,6 +1,6 @@
 # Emberly Code — Implementation Plan (distribution & licensing)
 
-**Status:** 🚧 Phases 0, 1, 1b, and 2 closed; Phases 3–4 not started.
+**Status:** 🚧 Phases 0, 1, 1b, 2, and 3 closed; Phase 4 not started.
 **Date:** 2026-09-02
 **Owner:** Wattanit
 **Source documents** (G-14 pin):
@@ -165,7 +165,7 @@ real commercial-license sale.
 
 ---
 
-## Phase 3 — cargo-dist cross-platform binaries
+## Phase 3 — cargo-dist cross-platform binaries — ✅ closed 2026-09-05
 
 **Goal:** Every tagged release produces prebuilt binaries for the §13
 release targets as GitHub Release artifacts.
@@ -175,11 +175,38 @@ release targets as GitHub Release artifacts.
   `aarch64-unknown-linux-musl`, `aarch64-apple-darwin` (best-effort
   `x86_64-apple-darwin`) — the same target list §13 already commits to;
   this plan introduces no new target.
-- A release-triggered CI workflow (tag push), kept separate from the
-  existing PR-gated `ci.yml` checks.
+- A release-triggered CI workflow (tag push).
 
 **Done when:** a test tag produces a GitHub Release with binaries for
-every listed target, each downloadable and passing `emberly --version`.
+every listed target, each downloadable and passing `emberly --version`. —
+✅ verified: `dist init`/`dist generate` produced 296 lines of workflow at
+`.github/workflows/release.yml`; `dist init`'s target list came back
+broader than §13 (added two glibc Linux targets and Windows despite
+explicit `--target` flags) and was trimmed in `dist-workspace.toml` to
+exactly the four §13 targets. The `v0.5.2` tag (moved to the merged
+`main` tip — see below) triggered a real run, `conclusion: success`,
+producing a GitHub Release with all four target archives plus checksums,
+a shell installer, and a source tarball. Downloaded and ran the
+`aarch64-apple-darwin` archive: checksum matched, `emberly --version`
+printed `emberly v0.5.2 - Build 20260905-153642`, and the bundled
+`LICENSE` is the real AGPLv3 text.
+
+**Also landed, not originally scoped:**
+- Merged `distribution-licensing` → `develop` → `main` (owner decision) to
+  give the `v0.5.2` tag a real commit on `main` to point at — cargo-dist
+  requires the tag to exactly equal a package's declared version, so no
+  differently-numbered "disposable" test tag was actually possible; the
+  existing `v0.5.2` tag (pointing at the pre-relicense commit) was moved
+  rather than a new one created alongside it, since nothing depended on
+  its old position yet.
+- **`ci.yml` deleted entirely, on explicit owner instruction** — unrelated
+  to cargo-dist itself, but discovered in the same session: it had existed
+  since 2026-07-06 but (confirmed via GitHub's Actions API) had never once
+  run before this phase's `main` push — the project's history had simply
+  never triggered a `push: branches: [main]` or `pull_request` event on
+  GitHub until now. Its only-ever run failed. Owner was unambiguous that
+  no CI pipeline was ever wanted; removed, not trimmed. `release.yml` is
+  unaffected and unrelated to this decision.
 
 ---
 
