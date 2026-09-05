@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
 
 # Security-critical crate: dependency list is frozen harder than the rest
 # (Tech Spec §1, §15). Additions require explicit owner sign-off. Landlock
