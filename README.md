@@ -1,6 +1,6 @@
 # Emberly Code
 
-> **Currently on v0.5.2** — feature-complete for the milestone, install from source.
+> **Currently on v0.5.2** — feature-complete for the milestone, install via Homebrew, `cargo install`, or a prebuilt binary.
 
 **An AI coding agent for your terminal — provider-agnostic, fully auditable, and
 built in pure Rust.**
@@ -77,11 +77,30 @@ visible. You get longer, cheaper sessions without babysitting the context.
 
 ### Install
 
-No prebuilt binaries yet — build from source (needs a recent stable Rust
-toolchain; **no C toolchain required**):
+**Homebrew** (macOS/Linux, no Rust toolchain needed — just downloads a
+prebuilt binary):
 
 ```sh
-git clone <this-repo> && cd emberly-code
+brew install wattanit/emberly/emberly
+```
+
+**Cargo**, if you already have a Rust toolchain (builds from source, pulled
+from crates.io):
+
+```sh
+cargo install emberly
+```
+
+**Prebuilt binary**, no package manager: grab the archive for your platform
+from the [latest release](https://github.com/wattanit/emberly-code/releases/latest)
+(`x86_64`/`aarch64` musl-static Linux, `x86_64`/`aarch64` macOS), extract it,
+and put `emberly` on your `PATH`.
+
+**From source** (needs a recent stable Rust toolchain; **no C toolchain
+required**):
+
+```sh
+git clone https://github.com/wattanit/emberly-code && cd emberly-code
 cargo build --release
 # the binary is target/release/emberly — put it on your PATH, e.g.:
 install -m 0755 target/release/emberly ~/.local/bin/emberly
