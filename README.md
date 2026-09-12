@@ -460,11 +460,25 @@ blocks the rest of the session.
 
 #### Web search & image/document input
 
-- **Web search.** The `web_search` tool is registered by default but does
-  nothing until you point it at a search service — set `[search]` `adapter`
-  (`brave` / `tavily` / `searxng` / `json`), `endpoint`, and `auth`. The agent
-  then searches through your harness-owned endpoint (capped by `max_results`,
-  default 5). Set `enabled = false` to remove the tool entirely.
+- **Web search.** The `web_search` tool only exists for the model to call once
+  you've pointed `[search]` at a real backend — with no `endpoint` configured
+  (the default) it is never registered at all, so the agent will say it has no
+  search access rather than the tool silently failing. Nothing reaches the
+  internet, and nothing costs you anything, until you add a block like:
+
+  ```toml
+  [search]
+  adapter     = "brave"       # or "tavily" / "searxng" / "json"
+  endpoint    = "https://api.search.brave.com/res/v1/web/search"
+  auth        = { scheme = "header", header = "X-Subscription-Token", key = "brave" }   # reads BRAVE_API_KEY
+  max_results = 5              # results sent to the model per search; default 5
+  ```
+
+  Brave and Tavily both need a paid/free-tier API key from their own service;
+  a self-hosted SearXNG instance is often keyless (`auth` can be omitted). See
+  the commented `[search]` examples `emberly init` scaffolds for all three.
+  Set `enabled = false` to make the absence explicit even with an endpoint
+  configured.
 - **Image input, model-initiated.** For vision-capable models
   (`vision = true`), the agent can read an image file inside your project
   into the conversation via the `read_image` tool — point it at a screenshot

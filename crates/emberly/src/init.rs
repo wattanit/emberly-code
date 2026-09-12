@@ -111,6 +111,30 @@ pub const CONFIG_TEMPLATE: &str = r#"# emberly project configuration (.agents/co
 # args      = ["-y", "@some/mcp-server"]
 # enabled   = true
 
+# ── Web search ─────────────────────────────────────────────────────────────
+# Off until you point it at a real backend — there is no default endpoint, so
+# nothing reaches the internet (and nothing costs you anything) unless you set
+# this up yourself. Uncomment exactly one of the three blocks below; whichever
+# `adapter` you pick decides the request shape and how results are parsed.
+#
+# Brave Search API (needs a key: https://brave.com/search/api/):
+# [search]
+# adapter     = "brave"
+# endpoint    = "https://api.search.brave.com/res/v1/web/search"
+# auth        = { scheme = "header", header = "X-Subscription-Token", key = "brave" }   # reads BRAVE_API_KEY
+# max_results = 5     # results sent to the model per search; default 5
+#
+# Tavily Search API (needs a key: https://tavily.com/):
+# [search]
+# adapter  = "tavily"
+# endpoint = "https://api.tavily.com/search"
+# auth     = { scheme = "bearer", key = "tavily" }   # reads TAVILY_API_KEY
+#
+# A self-hosted SearXNG instance (often keyless):
+# [search]
+# adapter  = "searxng"
+# endpoint = "http://localhost:8080/search"
+
 # ── Interface ──────────────────────────────────────────────────────────────
 # [ui]
 # Whether a tool call gets a short, dim explanation of what it's doing,
