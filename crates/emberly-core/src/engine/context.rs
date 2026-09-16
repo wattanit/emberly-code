@@ -92,6 +92,12 @@ impl Engine {
         self.history.messages = rebuilt;
         self.history.turn_map = rebuilt_turns;
         self.context.compacted = true;
+        // The last provider-reported prompt size (§8.4) is now stale — it
+        // measured the pre-compaction conversation. Drop it so the usage
+        // emitted below falls back to the heuristic count (`context_tokens`)
+        // over the rebuilt, now-smaller conversation, rather than showing an
+        // unchanged number until the next turn's real `Usage` overwrites it.
+        self.context.tokens_authoritative = None;
 
         self.write_transcript(TranscriptEvent::Compaction {
             summary,
