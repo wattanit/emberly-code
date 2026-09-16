@@ -181,10 +181,31 @@ impl Harness {
     /// Collect events until the stream goes idle, auto-answering permission
     /// prompts with `answer` (if any).
     async fn collect(&mut self, answer: Option<PermissionDecision>) -> Vec<UiEvent> {
+        self.collect_with_idle(answer, Duration::from_millis(250))
+            .await
+    }
+
+    /// As [`collect`](Self::collect), but with a longer idle window — for
+    /// tests that drive the real `bash` tool (a genuine `fork`/`exec`, not the
+    /// scripted `FakeProvider`): under load — e.g. a concurrent `cargo build`
+    /// competing for CPU, as seen in practice — a real subprocess spawn/wait
+    /// can occasionally take longer than a couple hundred milliseconds, and
+    /// this loop has no way to tell "still working" apart from "done" other
+    /// than the gap between events. Kept as a separate, opt-in method rather
+    /// than raising the default so the other ~140 scripted-only tests here
+    /// stay at their current speed.
+    async fn collect_slow(&mut self, answer: Option<PermissionDecision>) -> Vec<UiEvent> {
+        self.collect_with_idle(answer, Duration::from_millis(1500))
+            .await
+    }
+
+    async fn collect_with_idle(
+        &mut self,
+        answer: Option<PermissionDecision>,
+        idle: Duration,
+    ) -> Vec<UiEvent> {
         let mut events = Vec::new();
-        while let Ok(Some(event)) =
-            tokio::time::timeout(Duration::from_millis(250), self.events_rx.recv()).await
-        {
+        while let Ok(Some(event)) = tokio::time::timeout(idle, self.events_rx.recv()).await {
             if let UiEvent::PermissionRequest { id, .. } = &event {
                 if let Some(decision) = answer {
                     self.send(Command::PermissionAnswer { id: *id, decision })
@@ -637,7 +658,7 @@ async fn full_workflow_read_edit_permission_bash() {
         text: "do the workflow".into(),
     })
     .await;
-    let events = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    let events = h.collect_slow(Some(PermissionDecision::AllowOnce)).await;
 
     // The edit landed and bash ran; the model produced its closing message.
     assert_eq!(
@@ -975,7 +996,7 @@ async fn allowlisted_bash_runs_without_a_prompt_when_confined() {
     let mut h = spawn_confined(scripts, root, RuleEngine::new(Vec::new(), true));
     h.send(Command::UserInput { text: "run".into() }).await;
     // No answer supplied: an allowlisted command must not raise a prompt.
-    let events = h.collect(None).await;
+    let events = h.collect_slow(None).await;
 
     assert_eq!(prompt_count(&events), 0, "echo is on the allowlist");
     assert!(has_tool_finished(&events, true));
@@ -992,7 +1013,7 @@ async fn offlist_bash_still_prompts_when_confined() {
     ];
     let mut h = spawn_confined(scripts, root, RuleEngine::new(Vec::new(), true));
     h.send(Command::UserInput { text: "run".into() }).await;
-    let events = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    let events = h.collect_slow(Some(PermissionDecision::AllowOnce)).await;
 
     assert_eq!(prompt_count(&events), 1, "`true` is off the allowlist");
     assert!(has_tool_finished(&events, true));
@@ -1096,7 +1117,7 @@ async fn auto_mode_runs_offlist_bash_without_prompting() {
     let mut h = spawn_confined(scripts, root, RuleEngine::new(Vec::new(), true));
     h.send(Command::SetMode { mode: Mode::Auto }).await;
     h.send(Command::UserInput { text: "run".into() }).await;
-    let events = h.collect(None).await;
+    let events = h.collect_slow(None).await;
 
     assert!(
         events
@@ -1124,7 +1145,9 @@ async fn allow_for_session_covers_the_next_identical_command() {
     .await;
     // Auto-answer any prompt with a session grant; the second call should not
     // raise one because the grant already covers it.
-    let events = h.collect(Some(PermissionDecision::AllowForSession)).await;
+    let events = h
+        .collect_slow(Some(PermissionDecision::AllowForSession))
+        .await;
 
     assert_eq!(
         prompt_count(&events),
@@ -2386,7 +2409,7 @@ async fn bash_reduction_collapses_progress_in_context() {
     ];
     let mut h = start_with_truncate(scripts, root.clone(), &path, TruncateConfig::default());
     h.send(Command::UserInput { text: "run".into() }).await;
-    let _ = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    let _ = h.collect_slow(Some(PermissionDecision::AllowOnce)).await;
     drop(h);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -6197,7 +6220,9 @@ async fn subagent_permission_ask_is_covered_by_an_existing_session_grant() {
         text: "build everything".into(),
     })
     .await;
-    let events = h.collect(Some(PermissionDecision::AllowForSession)).await;
+    let events = h
+        .collect_slow(Some(PermissionDecision::AllowForSession))
+        .await;
 
     assert_eq!(
         prompt_count(&events),
@@ -6731,7 +6756,7 @@ async fn a_new_subagent_permission_ask_queues_and_carries_the_subagent_tag() {
         text: "delegate".into(),
     })
     .await;
-    let events = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    let events = h.collect_slow(Some(PermissionDecision::AllowOnce)).await;
 
     let rendering = events.iter().find_map(|e| match e {
         UiEvent::PermissionRequest { rendering, .. } => Some(rendering.clone()),
@@ -7197,7 +7222,7 @@ async fn export_preserves_truncation_markers_never_claiming_false_completeness()
         text: "run it".into(),
     })
     .await;
-    let _ = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    let _ = h.collect_slow(Some(PermissionDecision::AllowOnce)).await;
 
     let output_path = sessions_dir.join("export.html");
     h.send(Command::ExportSession {
