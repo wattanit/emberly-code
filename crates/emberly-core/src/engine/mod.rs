@@ -1423,7 +1423,7 @@ impl Engine {
                         let attachments = std::mem::take(&mut self.pending_attachments);
                         let images_meta: Vec<AttachedImageMeta> =
                             attachments.iter().map(AttachedImageMeta::from).collect();
-                        self.record_user_message(&text, images_meta);
+                        self.record_user_message(&text, images_meta).await;
                         let user_message = self.build_user_message(text, attachments);
                         self.push_conversation_message(user_message);
                         self.emit_context_usage().await;
