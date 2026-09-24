@@ -181,10 +181,31 @@ impl Harness {
     /// Collect events until the stream goes idle, auto-answering permission
     /// prompts with `answer` (if any).
     async fn collect(&mut self, answer: Option<PermissionDecision>) -> Vec<UiEvent> {
+        self.collect_with_idle(answer, Duration::from_millis(250))
+            .await
+    }
+
+    /// As [`collect`](Self::collect), but with a longer idle window — for
+    /// tests that drive the real `bash` tool (a genuine `fork`/`exec`, not the
+    /// scripted `FakeProvider`): under load — e.g. a concurrent `cargo build`
+    /// competing for CPU, as seen in practice — a real subprocess spawn/wait
+    /// can occasionally take longer than a couple hundred milliseconds, and
+    /// this loop has no way to tell "still working" apart from "done" other
+    /// than the gap between events. Kept as a separate, opt-in method rather
+    /// than raising the default so the other ~140 scripted-only tests here
+    /// stay at their current speed.
+    async fn collect_slow(&mut self, answer: Option<PermissionDecision>) -> Vec<UiEvent> {
+        self.collect_with_idle(answer, Duration::from_millis(1500))
+            .await
+    }
+
+    async fn collect_with_idle(
+        &mut self,
+        answer: Option<PermissionDecision>,
+        idle: Duration,
+    ) -> Vec<UiEvent> {
         let mut events = Vec::new();
-        while let Ok(Some(event)) =
-            tokio::time::timeout(Duration::from_millis(250), self.events_rx.recv()).await
-        {
+        while let Ok(Some(event)) = tokio::time::timeout(idle, self.events_rx.recv()).await {
             if let UiEvent::PermissionRequest { id, .. } = &event {
                 if let Some(decision) = answer {
                     self.send(Command::PermissionAnswer { id: *id, decision })
@@ -391,6 +412,30 @@ async fn transcript_records_the_durable_session() {
         sink.records().last().map(|r| r.event.clone()),
         Some(TranscriptEvent::SessionEnd { .. })
     ));
+}
+
+#[tokio::test]
+async fn first_user_message_titles_the_session_live_not_only_on_resume() {
+    // The title was already durably correct from turn one (the transcript
+    // assertions above) — this guards the separate live-UI half: the sidebar
+    // must not stay pinned to "untitled session" until a `/resume` reloads the
+    // title from disk.
+    let root = temp_project();
+    let scripts = vec![ScriptedResponse::text("done")];
+    let (mut h, _sink) = start_capturing(scripts, root);
+    h.send(Command::UserInput {
+        text: "fix the flaky test suite".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            UiEvent::SessionMeta { title, .. } if title == "fix the flaky test suite"
+        )),
+        "expected a live SessionMeta carrying the derived title, got: {events:?}"
+    );
 }
 
 #[tokio::test]
@@ -637,7 +682,7 @@ async fn full_workflow_read_edit_permission_bash() {
         text: "do the workflow".into(),
     })
     .await;
-    let events = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    let events = h.collect_slow(Some(PermissionDecision::AllowOnce)).await;
 
     // The edit landed and bash ran; the model produced its closing message.
     assert_eq!(
@@ -975,7 +1020,7 @@ async fn allowlisted_bash_runs_without_a_prompt_when_confined() {
     let mut h = spawn_confined(scripts, root, RuleEngine::new(Vec::new(), true));
     h.send(Command::UserInput { text: "run".into() }).await;
     // No answer supplied: an allowlisted command must not raise a prompt.
-    let events = h.collect(None).await;
+    let events = h.collect_slow(None).await;
 
     assert_eq!(prompt_count(&events), 0, "echo is on the allowlist");
     assert!(has_tool_finished(&events, true));
@@ -992,7 +1037,7 @@ async fn offlist_bash_still_prompts_when_confined() {
     ];
     let mut h = spawn_confined(scripts, root, RuleEngine::new(Vec::new(), true));
     h.send(Command::UserInput { text: "run".into() }).await;
-    let events = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    let events = h.collect_slow(Some(PermissionDecision::AllowOnce)).await;
 
     assert_eq!(prompt_count(&events), 1, "`true` is off the allowlist");
     assert!(has_tool_finished(&events, true));
@@ -1096,7 +1141,7 @@ async fn auto_mode_runs_offlist_bash_without_prompting() {
     let mut h = spawn_confined(scripts, root, RuleEngine::new(Vec::new(), true));
     h.send(Command::SetMode { mode: Mode::Auto }).await;
     h.send(Command::UserInput { text: "run".into() }).await;
-    let events = h.collect(None).await;
+    let events = h.collect_slow(None).await;
 
     assert!(
         events
@@ -1124,7 +1169,9 @@ async fn allow_for_session_covers_the_next_identical_command() {
     .await;
     // Auto-answer any prompt with a session grant; the second call should not
     // raise one because the grant already covers it.
-    let events = h.collect(Some(PermissionDecision::AllowForSession)).await;
+    let events = h
+        .collect_slow(Some(PermissionDecision::AllowForSession))
+        .await;
 
     assert_eq!(
         prompt_count(&events),
@@ -2386,7 +2433,7 @@ async fn bash_reduction_collapses_progress_in_context() {
     ];
     let mut h = start_with_truncate(scripts, root.clone(), &path, TruncateConfig::default());
     h.send(Command::UserInput { text: "run".into() }).await;
-    let _ = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    let _ = h.collect_slow(Some(PermissionDecision::AllowOnce)).await;
     drop(h);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -3283,7 +3330,7 @@ fn high_usage_turn(text: &str) -> ScriptedResponse {
 }
 
 #[tokio::test]
-async fn auto_compaction_fires_at_clean_boundary_and_does_not_thrash() {
+async fn auto_compaction_fires_at_clean_boundary_and_rearms_after_a_genuine_drop() {
     let scripts = vec![
         ScriptedResponse::text("r1"),
         ScriptedResponse::text("r2"),
@@ -3294,7 +3341,9 @@ async fn auto_compaction_fires_at_clean_boundary_and_does_not_thrash() {
         high_usage_turn("r5"),
         // Consumed by the summarization call inside `compact()`.
         ScriptedResponse::text("AUTO SUMMARY"),
-        // A second high-usage turn — must NOT re-trigger (no-thrash latch).
+        // A second high-usage turn, after the compaction actually shrank the
+        // conversation — a fresh legitimate crossing, not a re-fire on the
+        // same still-high reading (which the latch would suppress).
         high_usage_turn("r6"),
     ];
     let provider: Arc<dyn Provider> = auto_compact_provider(scripts);
@@ -3343,8 +3392,70 @@ async fn auto_compaction_fires_at_clean_boundary_and_does_not_thrash() {
         "transcript should record trigger = auto"
     );
 
-    // No-thrash: a subsequent turn with the same high usage does NOT re-trigger
-    // (the latch disarmed and usage never dropped below the threshold).
+    // The compaction genuinely shrank the conversation, so the very next
+    // usage reading (recomputed immediately, not left stale — see
+    // `context_usage_reflects_compaction_immediately`) drops back below the
+    // threshold and re-arms the latch. A subsequent turn that reports high
+    // usage again is therefore a fresh crossing the latch must let through,
+    // not a thrash it should suppress.
+    h.send(Command::UserInput {
+        text: "msg 5".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert!(
+        events.iter().any(
+            |e| matches!(e, UiEvent::CompactionStatus { message } if message.contains("near full"))
+        ),
+        "a genuine second crossing, after the latch re-armed, must fire again"
+    );
+}
+
+/// The actual no-thrash guarantee: once compaction has nothing left to elide
+/// (Requirements FR-4), usage that stays above the threshold must not queue a
+/// new compaction attempt on every subsequent turn — there is nothing more
+/// for it to do, so repeating it would just be wasted model calls.
+#[tokio::test]
+async fn auto_compaction_latch_stays_disarmed_when_nothing_is_left_to_elide() {
+    let scripts = vec![
+        ScriptedResponse::text("r1"),
+        ScriptedResponse::text("r2"),
+        ScriptedResponse::text("r3"),
+        ScriptedResponse::text("r4"),
+        high_usage_turn("r5"),
+        high_usage_turn("r6"),
+    ];
+    let provider: Arc<dyn Provider> = auto_compact_provider(scripts);
+    let mut config = make_config(provider, temp_project(), EngineConfig::no_transcript());
+    config.context = ContextConfig {
+        // Larger than the turn count below, so there is never anything to
+        // elide (`compact` always takes its "nothing to compact yet" early
+        // return, before it ever reaches a real summarization call).
+        keep_recent_turns: 100,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn(config);
+
+    for i in 0..4 {
+        h.send(Command::UserInput {
+            text: format!("msg {i}"),
+        })
+        .await;
+        let _ = h.collect(None).await;
+    }
+
+    h.send(Command::UserInput {
+        text: "msg 4".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+    assert!(
+        events.iter().any(
+            |e| matches!(e, UiEvent::CompactionStatus { message } if message.contains("nothing to compact"))
+        ),
+        "the threshold crossing still attempts a compaction, which finds nothing to elide"
+    );
+
     h.send(Command::UserInput {
         text: "msg 5".into(),
     })
@@ -3354,7 +3465,8 @@ async fn auto_compaction_fires_at_clean_boundary_and_does_not_thrash() {
         !events
             .iter()
             .any(|e| matches!(e, UiEvent::CompactionStatus { .. })),
-        "auto-compaction must not re-fire while the latch is disarmed"
+        "usage never actually dropped (nothing was elided), so the latch \
+         must stay disarmed rather than retry every turn"
     );
 }
 
@@ -3420,6 +3532,84 @@ async fn auto_compact_disabled_never_auto_fires() {
             }
         )),
         "manual compaction records trigger = manual"
+    );
+}
+
+/// Regression: the displayed context usage must drop the moment compaction
+/// finishes, not stay pinned at the pre-compaction number until the next
+/// turn's `Usage` event happens to overwrite it. `emit_context_usage` prefers
+/// `tokens_authoritative` (the last provider-reported prompt size) over the
+/// heuristic count whenever it is set, so a compaction that doesn't also
+/// clear it leaves the UI showing a token count from a conversation that no
+/// longer exists.
+#[tokio::test]
+async fn context_usage_reflects_compaction_immediately() {
+    let scripts = vec![
+        ScriptedResponse::text("r1"),
+        ScriptedResponse::text("r2"),
+        ScriptedResponse::text("r3"),
+        ScriptedResponse::text("r4"),
+        // Establishes `tokens_authoritative = Some(800)`.
+        high_usage_turn("r5"),
+        // Consumed by the summarization call inside `compact()`.
+        ScriptedResponse::text("MANUAL SUMMARY"),
+    ];
+    let provider: Arc<dyn Provider> = auto_compact_provider(scripts);
+    let mut config = make_config(provider, temp_project(), EngineConfig::no_transcript());
+    config.context = ContextConfig {
+        auto_compact: false,
+        keep_recent_turns: 3,
+        ..ContextConfig::default()
+    };
+    let mut h = spawn(config);
+
+    for i in 0..4 {
+        h.send(Command::UserInput {
+            text: format!("msg {i}"),
+        })
+        .await;
+        let _ = h.collect(None).await;
+    }
+
+    h.send(Command::UserInput {
+        text: "msg 4".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+    let before = events
+        .iter()
+        .filter_map(|e| match e {
+            UiEvent::ContextUsage { tokens, .. } => Some(*tokens),
+            _ => None,
+        })
+        .next_back()
+        .expect("a ContextUsage event follows the high-usage turn");
+    assert_eq!(
+        before, 800,
+        "the provider's reported prompt size is shown verbatim"
+    );
+
+    h.send(Command::Compact).await;
+    let events = h.collect(None).await;
+    assert!(
+        events.iter().any(
+            |e| matches!(e, UiEvent::CompactionStatus { message } if message.contains("Compacted"))
+        ),
+        "compaction ran"
+    );
+    let after = events
+        .iter()
+        .filter_map(|e| match e {
+            UiEvent::ContextUsage { tokens, .. } => Some(*tokens),
+            _ => None,
+        })
+        .next_back()
+        .expect("compact() emits a ContextUsage once it finishes");
+    assert!(
+        after < before,
+        "usage must reflect the now-smaller, compacted conversation right away \
+         (got {after}, previously {before}), not stay pinned at the stale \
+         provider-reported number until the next turn's Usage arrives"
     );
 }
 
@@ -6197,7 +6387,9 @@ async fn subagent_permission_ask_is_covered_by_an_existing_session_grant() {
         text: "build everything".into(),
     })
     .await;
-    let events = h.collect(Some(PermissionDecision::AllowForSession)).await;
+    let events = h
+        .collect_slow(Some(PermissionDecision::AllowForSession))
+        .await;
 
     assert_eq!(
         prompt_count(&events),
@@ -6731,7 +6923,7 @@ async fn a_new_subagent_permission_ask_queues_and_carries_the_subagent_tag() {
         text: "delegate".into(),
     })
     .await;
-    let events = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    let events = h.collect_slow(Some(PermissionDecision::AllowOnce)).await;
 
     let rendering = events.iter().find_map(|e| match e {
         UiEvent::PermissionRequest { rendering, .. } => Some(rendering.clone()),
@@ -7197,7 +7389,7 @@ async fn export_preserves_truncation_markers_never_claiming_false_completeness()
         text: "run it".into(),
     })
     .await;
-    let _ = h.collect(Some(PermissionDecision::AllowOnce)).await;
+    let _ = h.collect_slow(Some(PermissionDecision::AllowOnce)).await;
 
     let output_path = sessions_dir.join("export.html");
     h.send(Command::ExportSession {

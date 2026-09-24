@@ -1,6 +1,6 @@
 # Emberly Code
 
-> **Currently on v0.5.2** — feature-complete for the milestone, install via Homebrew, `cargo install`, or a prebuilt binary.
+> **Currently on v0.5.3** — feature-complete for the milestone, install via Homebrew, `cargo install`, or a prebuilt binary.
 
 **An AI coding agent for your terminal — provider-agnostic, fully auditable, and
 built in pure Rust.**
@@ -135,6 +135,18 @@ Emberly still starts in an **offline placeholder mode** so you can explore the
 interface. To keep settings with a project instead of in your shell, run
 `emberly init`.
 
+**Terminal font, if you work in Thai/CJK/etc.:** Emberly's own text handling is
+fully Unicode-correct — grapheme clusters, column widths, and cursor motion are
+right for Thai combining marks and wide CJK glyphs alike (Requirements §2.1) —
+but glyph *rendering* is entirely your terminal's and its font's job, not
+this app's. Most programming monospace fonts (JetBrains Mono, Fira Code, Hack,
+Cascadia Code, Iosevka) don't include Thai glyphs at all; your terminal falls
+back to a system font for those codepoints, which is normal and not a bug. If
+that fallback looks wrong (misaligned marks, inconsistent spacing), make sure
+font fallback is enabled in your terminal — iTerm2, Kitty, WezTerm, and Windows
+Terminal all do this by default — and that a proper Thai font is actually
+installed (e.g. **Noto Sans Thai**, **Sarabun**, or **Consolas** on Windows).
+
 ### Configuration
 
 Everything is optional — Emberly runs on built-in defaults. Settings resolve in
@@ -217,26 +229,55 @@ untrusted external content, the same as a web search result.
 
 #### Config keys at a glance
 
+Every key below is the exact TOML name to set — no abbreviations — so you
+never have to go spelunking in source to find one (e.g. context tuning:
+`[context] keep_recent_turns`). Provider/model keys (`[providers.<name>]` and
+friends) and per-server MCP keys are introduced with worked examples above;
+this table is the complete reference for everything else.
+
 | Key | Default | What it controls |
 |---|---|---|
 | `reasoning` | `collapsed` | Thinking-trail view: `collapsed` / `expanded` / `hidden` |
 | `[ui] tool_explanations` | `true` | One-line captions under non-obvious tool calls |
 | `[ui] mouse` | `true` | Wheel-scroll + click-to-select in the rich TUI |
-| `[trust] trusted_dirs` | `[]` | Folders pre-approved for the trust gate (global config only) |
-| `[loop] enabled` | `true` | Loop-breaking guardrail (+ `repeat_window`, `max_no_progress_turns`) |
-| `[completion] enabled` | `true` | Completion gate: holds the loop to registered checks before "done" (+ `max_attempts`, `[[completion.check]]`) |
-| `[context] window_turns` | _auto_ | Adaptive context window (+ `keep_recent_turns`) |
-| `[context] auto_compact` | `true` | Auto-summarize older turns (+ `auto_compact_threshold`) |
-| `[context] pin_task_list` | `true` | Keep the agent's task list pinned in context |
-| `[truncate] reduce` | `true` | Salient reduction of tool output (+ `max_lines`/`max_bytes`/`head_lines`/`tail_lines`) |
-| `[image] max_bytes` | _limit_ | Max size for an image read into the conversation |
-| `[document] max_bytes` | _limit_ | Max size for a PDF read into the conversation |
-| `[memory] enabled` | `true` | Persistent cross-session memory (+ `max_index_entries`) |
-| `[skills] enabled` | `true` | The skill system |
-| `[agents] enabled` | `true` | Multi-agent delegation (+ `max_concurrent` default `3`, `spawn_timeout_secs` default `600`, `idle_timeout_secs` default `1800`) |
-| `[mcp] enabled` | `true` | The MCP subsystem overall (+ per-server `[mcp.servers.<name>]`, each with its own `enabled`) |
-| `[search] enabled` | `true` | Register the `web_search` tool (needs `adapter`/`endpoint`/`auth` to work; `max_results` caps results) |
-| `[stream] first_chunk_secs` | `300` | Seconds to wait for a completion stream's first chunk (+ `idle_secs`, default `90`, for the gap between later chunks) — raise both for a slow local/cloud inference backend |
+| `[trust] trusted_dirs` | `[]` | Folders pre-approved for the trust gate (**global config only**) |
+| `[loop] enabled` | `true` | Loop-breaking guardrail on/off |
+| `[loop] repeat_window` | `3` | Consecutive turns repeating the *same* tool-call signature before it trips |
+| `[loop] max_no_progress_turns` | `6` | Consecutive no-progress turns before it trips, even if the calls vary |
+| `[completion] enabled` | `true` | Completion gate on/off — inert until a check is registered |
+| `[completion] max_attempts` | `3` | Failed completion attempts allowed before halting to you |
+| `[[completion.check]]` | — | One registered pass/fail check: `name`, `command`, `expect_exit` (default `0`) |
+| `[context] window_turns` | `40` | Trailing turns sent to the provider; older ones are elided behind one marker |
+| `[context] keep_recent_turns` | `6` | Trailing turns `/compact` (manual or automatic) keeps verbatim |
+| `[context] auto_compact` | `true` | Automatic compaction on/off |
+| `[context] auto_compact_threshold` | `0.85` | Context-usage fraction that triggers auto-compaction; must be in `(0.0, 1.0]` |
+| `[context] pin_task_list` | `true` | Keep the agent's task list pinned in the sent context |
+| `[truncate] reduce` | `true` | Salient reduction of tool output on/off |
+| `[truncate] max_lines` | `400` | Truncate tool output once it exceeds this many lines |
+| `[truncate] max_bytes` | `65536` (64 KiB) | …or this many bytes |
+| `[truncate] head_lines` | `150` | Lines of head kept when truncating |
+| `[truncate] tail_lines` | `100` | Lines of tail kept when truncating |
+| `[image] max_bytes` | `5242880` (5 MiB) | Max size for an image read into the conversation |
+| `[image] max_attachments` | `4` | Max images attachable to a single prompt via `/attach` |
+| `[document] max_bytes` | `33554432` (32 MiB) | Max size for a PDF read into the conversation |
+| `[memory] enabled` | `true` | Persistent cross-session memory on/off |
+| `[memory] max_index_entries` | `50` | Soft warn threshold for memory index growth (does not truncate) |
+| `[skills] enabled` | `true` | The skill system on/off |
+| `[agents] enabled` | `true` | Multi-agent delegation on/off |
+| `[agents] max_concurrent` | `3` | Ceiling on subagents alive at once per session |
+| `[agents] spawn_timeout_secs` | `600` | Seconds `spawn_agents`/`message_agent` wait before reporting "still running" |
+| `[agents] idle_timeout_secs` | `1800` | Seconds a subagent may go without a message before it's reclaimed as idle |
+| `[mcp] enabled` | `true` | The MCP subsystem overall — a kill switch above each server's own `enabled` |
+| `[mcp.servers.<name>] transport` | `"stdio"` | Wire mechanism (only `"stdio"` is supported this version) |
+| `[mcp.servers.<name>] command` / `args` | — | Launch command and arguments for a stdio server |
+| `[mcp.servers.<name>] enabled` | `true` | This specific server on/off |
+| `[search] enabled` | `true` | Register the `web_search` tool |
+| `[search] adapter` | — | Response-shape parser: `brave` / `tavily` / `searxng` / `json` |
+| `[search] endpoint` | — | The search service endpoint URL |
+| `[search] auth` | — | `{ scheme, key }`, the same shape as a provider's `auth` |
+| `[search] max_results` | `5` | Results sent to the model per search |
+| `[stream] first_chunk_secs` | `300` | Seconds to wait for a completion stream's first chunk — raise it for a slow backend |
+| `[stream] idle_secs` | `90` | Seconds allowed between later chunks before the stream is considered dead |
 | `[sandbox] require` | `false` | Refuse to start without active OS confinement |
 
 **Environment variables:** `EMBERLY_PROVIDER`, `EMBERLY_MODEL`. For display,
@@ -419,11 +460,25 @@ blocks the rest of the session.
 
 #### Web search & image/document input
 
-- **Web search.** The `web_search` tool is registered by default but does
-  nothing until you point it at a search service — set `[search]` `adapter`
-  (`brave` / `tavily` / `searxng` / `json`), `endpoint`, and `auth`. The agent
-  then searches through your harness-owned endpoint (capped by `max_results`,
-  default 5). Set `enabled = false` to remove the tool entirely.
+- **Web search.** The `web_search` tool only exists for the model to call once
+  you've pointed `[search]` at a real backend — with no `endpoint` configured
+  (the default) it is never registered at all, so the agent will say it has no
+  search access rather than the tool silently failing. Nothing reaches the
+  internet, and nothing costs you anything, until you add a block like:
+
+  ```toml
+  [search]
+  adapter     = "brave"       # or "tavily" / "searxng" / "json"
+  endpoint    = "https://api.search.brave.com/res/v1/web/search"
+  auth        = { scheme = "header", header = "X-Subscription-Token", key = "brave" }   # reads BRAVE_API_KEY
+  max_results = 5              # results sent to the model per search; default 5
+  ```
+
+  Brave and Tavily both need a paid/free-tier API key from their own service;
+  a self-hosted SearXNG instance is often keyless (`auth` can be omitted). See
+  the commented `[search]` examples `emberly init` scaffolds for all three.
+  Set `enabled = false` to make the absence explicit even with an endpoint
+  configured.
 - **Image input, model-initiated.** For vision-capable models
   (`vision = true`), the agent can read an image file inside your project
   into the conversation via the `read_image` tool — point it at a screenshot
@@ -498,10 +553,10 @@ minimal terminals. Any subcommand with its own options — `config`, `trust`,
 
 ### Project status
 
-Feature-complete for the **v0.5.2** milestone, installable from source.
+Feature-complete for the **v0.5.3** milestone, installable from source.
 The interactive TUI, live providers, session persistence, the permission rule
 engine, auto-accept modes, and OS confinement (Linux Landlock, macOS Seatbelt)
-all work today, alongside the full 0.2–0.5.2 stack described below. **Not yet
+all work today, alongside the full 0.2–0.5.3 stack described below. **Not yet
 shipped:** prebuilt binaries and Windows support (no Landlock/Seatbelt
 equivalent).
 
@@ -524,6 +579,7 @@ as it grows. _(Affectionate, not official.)_
 | **v0.5.0** | M12 | 🔥 _Bonfire_ | Multi-agent delegation — the primary agent can spawn, message, list, and end subagents, each a real nested engine running under the exact same permission, sandbox, and workspace-trust posture as the primary agent, with its own selectable provider profile and a tool set that's never a superset of the primary agent's own. Concurrent by default, bounded to one level of depth (no recursive spawning), a configurable concurrency ceiling and idle reap, cost roll-up into the session total, and a per-agent inspector (sidebar Agents section, `/agents` command, permission-prompt provenance line) so no subagent is a silent background process. |
 | **v0.5.1** | M13 | 🔥 _Bonfire_ | Three independent slices: **MCP client support** (`[mcp.servers.*]`, `/mcp`, a first-party stdio JSON-RPC client — no vendor SDK — with discovered tools permission-gated and provenance-labeled exactly like a built-in tool's); **user-attached images** (`/attach <path>`, reusing the existing vision content-block path `read_image` already produces); and **session export** (`/export <path>` / `emberly export`, a read-only, self-contained HTML render of a session and any subagent it spawned). |
 | **v0.5.2** | — | 🔥 _Bonfire_ | A usability pass on the terminal and the CLI, no new capability. The chat and input panels keep only their top/bottom rule now, so a terminal-selected transcript copies cleanly instead of picking up border glyphs; a typed `/command` is colored live as you type it (recognized, still-ambiguous, or unresolvable) and Tab-completes when exactly one command matches; a fresh session opens with a short orientation instead of a blank pane; `/init` brings the CLI's `.agents/` scaffolding in-session; the `.agents/config.toml` template is now a clearly divided, fully-commented section per built-in provider instead of one flat block; a denied tool call now tells the model to ask you rather than spend the turn hunting for a workaround; and `emberly --help`/`-h`, plus per-subcommand help (`init`, `sessions`, `resume`, `config`, `trust`, `clean`, `export`), finally document the CLI's own surface. |
+| **v0.5.3** | M14 | 🔥 _Bonfire_ | Drag-to-select-and-copy: dragging over the conversation pane with no modifier held highlights the text under the pointer and copies it to the clipboard on release via an OSC 52 escape sequence, with a "Copied N characters." notice — replacing the fragile Shift-drag-then-Ctrl+C flow (native Shift-drag still works as the documented fallback). The status bar's hint line now also mentions Shift-Tab's existing mode-cycle binding. Plus a fix: a session's auto-generated title now reaches the sidebar live from the first message, instead of showing "untitled session" until the next `/resume`. |
 
 Prior as-built plans live under `docs/version-0-1/`, `docs/version-0-2/`,
 `docs/version-0-3/`, `docs/version-0-4/`, `docs/version-0-4-1/`,
@@ -578,10 +634,10 @@ Release targets (v1): `x86_64-unknown-linux-musl`,
 
 **Documents** (the SFD standard — Requirements → Design → Tech Spec):
 
-- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.12)
-- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.12)
-- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.15)
-- [`docs/version-0-5-1/IMPLEMENTATION_PLAN.md`](docs/version-0-5-1/IMPLEMENTATION_PLAN.md) — v0.5.1's phased build plan (v0.5.2 was a smaller, informal polish pass with no foundation-document revision)
+- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.13)
+- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.13)
+- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.17)
+- [`docs/version-0-5-1/IMPLEMENTATION_PLAN.md`](docs/version-0-5-1/IMPLEMENTATION_PLAN.md) — v0.5.1's phased build plan (v0.5.2 was a smaller, informal polish pass with no foundation-document revision; v0.5.3 bumped the foundation documents for drag-to-select-and-copy but likewise shipped without a dedicated Implementation Plan)
 - [`docs/distribution/IMPLEMENTATION_PLAN.md`](docs/distribution/IMPLEMENTATION_PLAN.md) — the license change and distribution-channel plan below
 
 ## License

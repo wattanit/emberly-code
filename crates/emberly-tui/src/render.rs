@@ -23,6 +23,7 @@ use crate::app::{
 use crate::commands;
 use crate::hit::{ClickTarget, HitMap, PermissionChoice};
 use crate::text;
+use crate::textmap::TextMap;
 use crate::theme::Theme;
 use crate::{strings, strings::markers};
 
@@ -42,7 +43,7 @@ const INLINE_DIFF_CAP: usize = 20;
 /// renderers ([`render_overlay`], [`render_palette`]) clear it before pushing
 /// their own regions, so it always reflects the layer that actually owns input
 /// — a click can never fall through a modal to the pane behind it.
-pub fn frame(f: &mut Frame, app: &App, hit: &mut HitMap) {
+pub fn frame(f: &mut Frame, app: &App, hit: &mut HitMap, text_map: &mut TextMap) {
     let area = f.area();
     let sidebar_shown = app.sidebar_visible && area.width >= COLLAPSE_BELOW;
 
@@ -84,7 +85,7 @@ pub fn frame(f: &mut Frame, app: &App, hit: &mut HitMap) {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(input_height)])
             .split(main);
-        render_conversation(f, app, main_rows[0], hit);
+        render_conversation(f, app, main_rows[0], hit, text_map);
         render_input(f, app, main_rows[1]);
     }
     if let Some(area) = sidebar {
@@ -725,7 +726,13 @@ fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
 
 // ---- conversation --------------------------------------------------------
 
-fn render_conversation(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
+fn render_conversation(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    hit: &mut HitMap,
+    text_map: &mut TextMap,
+) {
     let theme = &app.theme;
 
     // No pane title — the wordmark lives in the sidebar. The conversation is a
@@ -778,6 +785,18 @@ fn render_conversation(f: &mut Frame, app: &App, area: Rect, hit: &mut HitMap) {
         block
     };
     f.render_widget(block, area);
+
+    // Record this frame's plain text per visible row (Design §3.4/§8.12, Tech
+    // Spec §9 — 0.5.3) *before* overlaying the selection highlight below, so a
+    // drag resolves against the real content, not the highlight styling.
+    text_map.set(inner, visible.iter().map(line_plain_text).collect());
+
+    // Overlay the live/frozen selection highlight, if any (Design §3.4).
+    let visible = match app.selection {
+        Some(sel) => highlight_visible(visible, inner, sel, theme.selection()),
+        None => visible,
+    };
+
     f.render_widget(Paragraph::new(visible), inner);
 }
 
@@ -1018,6 +1037,111 @@ fn push_wrapped(
         };
         out.push(Line::from(vec![lead, Span::styled(row, body_style)]));
     }
+}
+
+/// The plain text of a `Line` — its spans' content concatenated, with styling
+/// dropped (Design §3.4/§8.12, Tech Spec §9 — 0.5.3): what a drag selection
+/// resolves to and what `TextMap` hit-tests against, not what is drawn.
+fn line_plain_text(line: &Line) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+/// Overlay `sel`'s highlight (Design §3.4) onto the rows of `visible` that it
+/// covers, translating its absolute screen coordinates into `inner`-relative
+/// row/column ranges. A no-op on the colourless theme (`bg` is `None` there;
+/// moot in practice since mouse capture — and so this feature — is off
+/// wherever the plain/degraded theme is used, Design §7).
+fn highlight_visible(
+    visible: Vec<Line<'static>>,
+    inner: Rect,
+    sel: crate::app::Selection,
+    style: ratatui::style::Style,
+) -> Vec<Line<'static>> {
+    let Some(bg) = style.bg else {
+        return visible;
+    };
+    let local = |pt: (u16, u16)| -> (i64, i64) {
+        (
+            i64::from(pt.1) - i64::from(inner.y),
+            i64::from(pt.0) - i64::from(inner.x),
+        )
+    };
+    let (mut a, mut b) = (local(sel.anchor), local(sel.current));
+    if a > b {
+        std::mem::swap(&mut a, &mut b);
+    }
+    let (a_row, a_col) = a;
+    let (b_row, b_col) = b;
+
+    visible
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let row = i as i64;
+            if row < a_row || row > b_row {
+                return line;
+            }
+            let line_w = text::width(&line_plain_text(&line)) as i64;
+            let start = if row == a_row {
+                a_col.clamp(0, line_w)
+            } else {
+                0
+            };
+            let end = if row == b_row {
+                b_col.clamp(0, line_w)
+            } else {
+                line_w
+            };
+            if start >= end {
+                return line;
+            }
+            highlight_span_range(line, start as usize, end as usize, bg)
+        })
+        .collect()
+}
+
+/// Split `line`'s spans at `[sel_start, sel_end)` (display columns) and patch
+/// only that range's background, keeping every span's own foreground and
+/// modifiers untouched outside and inside it — a highlight overlays styling,
+/// it never replaces it (Design §3.4: "the text's own foreground kept
+/// readable against it").
+fn highlight_span_range(
+    line: Line<'static>,
+    sel_start: usize,
+    sel_end: usize,
+    bg: Color,
+) -> Line<'static> {
+    let mut out = Vec::with_capacity(line.spans.len() + 2);
+    let mut col = 0usize;
+    for span in line.spans {
+        let content = span.content.into_owned();
+        let span_w = text::width(&content);
+        let (span_start, span_end) = (col, col + span_w);
+        col = span_end;
+        if span_end <= sel_start || span_start >= sel_end {
+            out.push(Span::styled(content, span.style));
+            continue;
+        }
+        let local_start = sel_start.saturating_sub(span_start);
+        let local_end = sel_end.min(span_end) - span_start;
+        if local_start > 0 {
+            out.push(Span::styled(
+                text::slice_cols(&content, 0, local_start),
+                span.style,
+            ));
+        }
+        out.push(Span::styled(
+            text::slice_cols(&content, local_start, local_end - local_start),
+            span.style.bg(bg),
+        ));
+        if local_end < span_w {
+            out.push(Span::styled(
+                text::slice_cols(&content, local_end, span_w - local_end),
+                span.style,
+            ));
+        }
+    }
+    Line::from(out)
 }
 
 // ---- sidebar -------------------------------------------------------------
@@ -1494,24 +1618,36 @@ fn slash_token_style(theme: &Theme, line: &str) -> Option<(usize, ratatui::style
 
 fn render_status(f: &mut Frame, app: &App, area: Rect, sidebar_shown: bool) {
     let theme = &app.theme;
-    let hints = if app.prompts.permission.is_some() {
-        strings::hints::PERMISSION
+    let hints: std::borrow::Cow<str> = if app.prompts.permission.is_some() {
+        strings::hints::PERMISSION.into()
     } else if app.prompts.ask.is_some() {
-        strings::ask_user::HINT
+        strings::ask_user::HINT.into()
     } else if let Some(halt) = &app.prompts.loop_halt {
         if halt.steering {
             strings::loop_halt::STEER_HINT
         } else {
             strings::loop_halt::HINT
         }
+        .into()
     } else if let Some(halt) = &app.prompts.completion_gate {
         if halt.steering {
             strings::completion_gate::STEER_HINT
         } else {
             strings::completion_gate::HINT
         }
+        .into()
+    } else if let Some(chars) = app.copy_flash {
+        // The drag-to-select confirmation (Design §8.12) — shown only when
+        // nothing more important (a decision prompt) needs the status line,
+        // and gone on the next input (`clear_transients`, not a timer).
+        format!(
+            "{}{chars}{}",
+            strings::status::COPIED_PREFIX,
+            strings::status::COPIED_SUFFIX
+        )
+        .into()
     } else {
-        strings::hints::NORMAL
+        strings::hints::NORMAL.into()
     };
     // Context % lives in the sidebar; show it on the status bar only when the
     // sidebar is collapsed, so it is never duplicated (Design §3.2). Mode is
@@ -2245,7 +2381,9 @@ mod tests {
     fn draw(app: &App, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).expect("backend");
         let mut hit = HitMap::new();
-        term.draw(|f| frame(f, app, &mut hit)).expect("draw");
+        let mut text_map = TextMap::new();
+        term.draw(|f| frame(f, app, &mut hit, &mut text_map))
+            .expect("draw");
         let buf = term.backend().buffer();
         let width = usize::from(buf.area.width);
         buf.content
@@ -2266,7 +2404,9 @@ mod tests {
     fn draw_buf(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
         let mut term = Terminal::new(TestBackend::new(w, h)).expect("backend");
         let mut hit = HitMap::new();
-        term.draw(|f| frame(f, app, &mut hit)).expect("draw");
+        let mut text_map = TextMap::new();
+        term.draw(|f| frame(f, app, &mut hit, &mut text_map))
+            .expect("draw");
         term.backend().buffer().clone()
     }
 
@@ -2275,8 +2415,21 @@ mod tests {
     fn hit_map_of(app: &App, w: u16, h: u16) -> HitMap {
         let mut term = Terminal::new(TestBackend::new(w, h)).expect("backend");
         let mut hit = HitMap::new();
-        term.draw(|f| frame(f, app, &mut hit)).expect("draw");
+        let mut text_map = TextMap::new();
+        term.draw(|f| frame(f, app, &mut hit, &mut text_map))
+            .expect("draw");
         hit
+    }
+
+    /// Render a full frame and return the text-map it built, so tests can
+    /// assert what a drag selection would resolve to (Design §3.4/§8.12).
+    fn text_map_of(app: &App, w: u16, h: u16) -> TextMap {
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("backend");
+        let mut hit = HitMap::new();
+        let mut text_map = TextMap::new();
+        term.draw(|f| frame(f, app, &mut hit, &mut text_map))
+            .expect("draw");
+        text_map
     }
 
     #[test]
@@ -2896,6 +3049,92 @@ mod tests {
         let screen = draw(&app, 120, 20);
         assert!(screen.contains("ที่"), "stacked Thai cluster rendered");
         assert!(screen.contains("สวัสดี"), "Thai word rendered");
+    }
+
+    #[test]
+    fn text_map_resolves_to_the_actual_rendered_conversation_text() {
+        // Drag-to-select hit-testing (Design §3.4/§8.12, Tech Spec §9 —
+        // 0.5.3): the text map must reflect exactly what is on screen.
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.apply_event(UiEvent::AssistantDelta {
+            text: "hello world".into(),
+        });
+        app.apply_event(UiEvent::AssistantDone);
+        let screen = draw(&app, 40, 10);
+        let row = screen
+            .lines()
+            .position(|l| l.contains("hello world"))
+            .expect("assistant text rendered");
+        let col = screen
+            .lines()
+            .nth(row)
+            .unwrap()
+            .find("hello world")
+            .unwrap();
+        let (row, col) = (u16::try_from(row).unwrap(), u16::try_from(col).unwrap());
+
+        let tm = text_map_of(&app, 40, 10);
+        assert_eq!(tm.text_between((col, row), (col + 5, row)), "hello");
+    }
+
+    #[test]
+    fn a_drag_selection_highlights_only_its_own_span() {
+        // The highlight overlays background only, over exactly the covered
+        // columns — the text's own foreground/modifiers are untouched, and
+        // nothing outside the span is touched at all (Design §3.4).
+        let mut app = App::new(
+            SessionInfo::default(),
+            std::env::temp_dir(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            test_provider_writer(),
+        );
+        app.apply_event(UiEvent::AssistantDelta {
+            text: "hello world".into(),
+        });
+        app.apply_event(UiEvent::AssistantDone);
+        let screen = draw(&app, 40, 10);
+        let row = screen
+            .lines()
+            .position(|l| l.contains("hello world"))
+            .expect("assistant text rendered");
+        let col = screen
+            .lines()
+            .nth(row)
+            .unwrap()
+            .find("hello world")
+            .unwrap();
+        let (row, col) = (u16::try_from(row).unwrap(), u16::try_from(col).unwrap());
+
+        app.selection = Some(crate::app::Selection {
+            anchor: (col, row),
+            current: (col + 5, row),
+            dragging: false,
+        });
+        let buf = draw_buf(&app, 40, 10);
+        let bg_at = |x: u16| buf.cell((x, row)).expect("in bounds").style().bg;
+        let selection_bg = app.theme.selection().bg;
+        assert_eq!(bg_at(col), selection_bg, "start of the span is highlighted");
+        assert_eq!(
+            bg_at(col + 4),
+            selection_bg,
+            "still inside the half-open [start, end) span"
+        );
+        assert_ne!(
+            bg_at(col + 6),
+            selection_bg,
+            "past the selection's end — not highlighted"
+        );
     }
 
     #[test]

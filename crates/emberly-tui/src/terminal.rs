@@ -14,10 +14,12 @@
 
 use std::io::{self, Stdout};
 
+use base64::{engine::general_purpose, Engine as _};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
+use crossterm::style::Print;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
     LeaveAlternateScreen,
@@ -141,6 +143,18 @@ pub fn restore_terminal() -> io::Result<()> {
 #[must_use]
 pub fn mouse_capture_enabled(rich: bool, ui_mouse: bool) -> bool {
     rich && ui_mouse
+}
+
+/// Write a drag-selected span to the system clipboard via an OSC 52 escape
+/// sequence (Design §3.4/§8.12, Tech Spec §9 — 0.5.3), over the same
+/// direct-to-stdout path used for every other raw sequence in this module.
+/// Best-effort and fire-and-forget by construction: OSC 52 has no delivery
+/// acknowledgment, so a write that succeeds at the OS level is already all
+/// the confirmation this layer can ever have (the Design §8.12 honesty
+/// clause exists because of exactly this).
+pub fn copy_to_clipboard(text: &str) -> io::Result<()> {
+    let encoded = general_purpose::STANDARD.encode(text.as_bytes());
+    execute!(io::stdout(), Print(format!("\x1b]52;c;{encoded}\x07")))
 }
 
 /// Wrap the current panic hook so the terminal is restored before the existing

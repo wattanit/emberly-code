@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 rust-version = "1.96"
 license = "AGPL-3.0-or-later"
@@ -31,11 +31,11 @@ homepage = "https://github.com/wattanit/emberly-code"
 # internal dependency between them), then emberly-core, then emberly-tui,
 # then emberly (Tech Spec §13, docs/distribution/IMPLEMENTATION_PLAN.md
 # Phase 2).
-emberly-providers = { path = "crates/emberly-providers", version = "0.5.2" }
-emberly-tools = { path = "crates/emberly-tools", version = "0.5.2" }
-emberly-sandbox = { path = "crates/emberly-sandbox", version = "0.5.2" }
-emberly-core = { path = "crates/emberly-core", version = "0.5.2" }
-emberly-tui = { path = "crates/emberly-tui", version = "0.5.2" }
+emberly-providers = { path = "crates/emberly-providers", version = "0.5.3" }
+emberly-tools = { path = "crates/emberly-tools", version = "0.5.3" }
+emberly-sandbox = { path = "crates/emberly-sandbox", version = "0.5.3" }
+emberly-core = { path = "crates/emberly-core", version = "0.5.3" }
+emberly-tui = { path = "crates/emberly-tui", version = "0.5.3" }
 
 tokio = { version = "1", default-features = false }
 serde = { version = "1", features = ["derive"] }

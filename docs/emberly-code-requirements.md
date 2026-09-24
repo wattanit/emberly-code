@@ -1,11 +1,11 @@
 # Emberly Code AI Coding Harness — Requirements Document
 
-**Version:** 0.12    
+**Version:** 0.13    
 **Status:** approved
-**Date:** 2026-08-16    
+**Date:** 2026-09-24    
 **Owner:** Wattanit    
-**Companion documents:** Design Guideline v0.12 (downstream), Technical  
-Specification v0.15 (downstream)
+**Companion documents:** Design Guideline v0.13 (downstream), Technical  
+Specification v0.17 (downstream)
 
 This document defines WHAT the harness must do and WHY. HOW it is built is
 deferred to the Technical Specification. UX, visual, and voice decisions are
@@ -181,6 +181,20 @@ directly to a prompt, over the existing multimodal content path (§4, FR-10).
 - Session export: a portable, human-readable rendering of a complete
 session — conversation, tool activity, permission decisions, and cost
 summary — for sharing outside the harness (§8.10, FR-12).
+
+Added in the 0.5.3 feature set (a TUI interaction refinement — copying
+conversation text out of the terminal was a fragile hold-Shift-while-dragging
+gesture on some terminal emulators; this list is the scope overview, not the
+requirement):
+
+- Drag-to-select-and-copy: dragging the mouse over rendered TUI content
+selects it, and releasing the mouse copies the selection to the system
+clipboard immediately, confirmed to the user. This extends, rather than
+replaces, the existing pointer-interaction scope above — native
+terminal-selection reachability is unchanged. Its visual treatment,
+confirmation wording, and terminal-support honesty clause are an interaction
+decision and belong to the Design Guideline; Requirements holds no separate
+ID for it (same routing as pointer interaction generally, §2.1 above).
 
 ### 2.2 Explicitly deferred (designed-for, not yet built)
 

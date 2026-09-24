@@ -12,6 +12,9 @@ impl App {
     /// deliberate allow keys approve, and everything else (including Enter and
     /// Esc) denies — deny is the safe default (Design §5).
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
+        // A key is "the next input" that dismisses a lingering selection
+        // highlight/copy notice (Design §8.12).
+        self.clear_transients();
         // The command palette is modal while open (Design §3.3).
         if self.palette.is_some() {
             return self.on_palette_key(key);
@@ -220,6 +223,10 @@ impl App {
     /// overlay, the permission prompt, or the conversation history. `up` means
     /// scrolling toward older content.
     pub fn on_scroll(&mut self, up: bool) {
+        // Scrolling changes which text is at which screen row, which would
+        // otherwise leave a frozen selection's coordinates pointing at the
+        // wrong content — clear it, same as any other "next input" (§8.12).
+        self.clear_transients();
         let step = 3;
         // Modal priority mirrors `on_key` (palette > overlay > permission >
         // conversation, Design §3.3/§3.4): the wheel scrolls the focused
@@ -365,6 +372,7 @@ impl App {
     /// prompt or overlay is open — nothing may be typed into a decision, and an
     /// overlay is read-only (Design §5, §4.2).
     pub fn on_paste(&mut self, text: &str) {
+        self.clear_transients();
         if !self.is_deciding() && self.overlays.is_empty() && self.palette.is_none() {
             self.editor.insert_str(text);
         }

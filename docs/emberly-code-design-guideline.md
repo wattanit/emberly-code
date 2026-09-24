@@ -1,11 +1,11 @@
 # Emberly Code — Design Guideline
 
-**Version:** 0.12 
+**Version:** 0.13 
 **Status:** approved
-**Date:** 2026-08-16
+**Date:** 2026-09-24
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.12 (upstream), Technical
-Specification v0.15 (downstream — this document constrains it)
+**Companion documents:** Requirements Document v0.13 (upstream), Technical
+Specification v0.17 (downstream — this document constrains it)
 
 This document defines how Emberly Code looks, feels, and speaks. It is the
 second of three project documents. Where a decision here has technical
@@ -168,13 +168,28 @@ overlay; a click selects — a sidebar entry (opening its diff or inspector,
 §4.2/§4.9), a command-palette row, a model/effort picker row, a collapsed
 reasoning trail or task list to expand it (§4.4, §4.7). Clicking is a
 shortcut for "focus + Enter," nothing more.
-- **Text selection is preserved.** Capturing the mouse for the above would
-otherwise steal the terminal's own click-drag-to-copy — a real loss in a
-tool people read constantly. Emberly keeps native selection reachable: hold
-the terminal's selection modifier (Shift in most terminals) to drag-select
-and copy as usual, and this is stated in `/help`. Users who want their
-terminal's selection unconditionally can set `mouse = false` (below), which
-releases the mouse entirely.
+- **Dragging selects and copies (0.5.3).** Dragging over any scrollable pane
+— conversation, diff, reasoning trail, anywhere text renders — performs an
+app-managed selection: the dragged span highlights live in a moderate-contrast
+selection tint (a solid, legible background block with the text's own
+foreground kept readable against it — calm and clearly visible, distinct from
+both the terminal's harsh full-invert and the barely-there dimmed
+secondary-text gray, §2) rather than the terminal's own selection overlay.
+Releasing the mouse copies the selection to the system clipboard immediately
+— no Ctrl+C, no second gesture — confirmed in one calm line (§8.12). This is
+the primary, no-modifier gesture, matching the convention of Claude Code and
+other terminal tools users already know, so copying scrollback finally takes
+one motion instead of a hold-Shift-while-dragging gesture that some terminals
+drop the instant Shift releases a beat early.
+- **Native selection remains the documented fallback.** The clipboard write
+travels through a terminal escape sequence (Tech Spec §9) that not every
+terminal or multiplexer honors, and the harness has no way to confirm the OS
+clipboard actually received it (§8.12's honesty clause). Holding the
+terminal's selection modifier (Shift in most terminals) still bypasses
+Emberly's capture entirely, exactly as before, reaching the terminal's own
+guaranteed-native drag-select and copy — stated in `/help` alongside the new
+default gesture. Users who want their terminal's selection unconditionally
+can set `mouse = false` (below), which releases the mouse entirely.
 - **The pointer never weakens a decision.** On a permission prompt (§5), a
 click may land on Deny/Allow exactly as a keypress would, but every §5
 guarantee holds unchanged: no click "approves whatever is focused," no
@@ -1007,6 +1022,25 @@ so it carries none of the trust-gate/`clean`-command "are you sure" weight.
 ("exporting") if the write takes visible time; the finished line names the
 output path, exactly like a clean exit's session summary (§8.3).
 
+### 8.12 Copying a selection
+
+Releasing a drag (§3.4) is a harness-world moment (§6.1) the instant it
+happens: one calm line confirms it, in the same voice and register as
+compaction's "Compacted 24 turns into a summary." (§8.6) — "Copied 214
+characters." — styled as a transient notice, not a permanent scrollback
+entry, and gone on the next input rather than lingering.
+
+- **The wording never overclaims.** The harness can prove it *sent* the
+clipboard write; it cannot prove the terminal or an intermediate multiplexer
+*applied* it — there is no delivery acknowledgment for the escape sequence
+this rides on (Tech Spec §9). The line says "Copied," never "Copied — check
+your clipboard" or any phrasing that implies a guarantee the harness cannot
+make. This is the same "calm under load" honesty this document asks for
+everywhere else (§1.2, §8.6's resume fallback) — a limitation stated plainly
+next to the thing that works, not hidden behind confident wording.
+- **Nothing to copy, nothing claimed.** A drag that resolves to no text (an
+empty selection, a click without a drag) shows no notice at all.
+
 ## 9. Design-Driven Requirements Feedback
 
 Decisions in this document that add to or refine the Requirements doc,
@@ -1138,6 +1172,12 @@ usable" principle (Requirements §6.7).
 Requirements FR-12's "Design Guideline concern, not a filtering guarantee"
 honesty clause as a specific, non-blocking disclosure line shown at export
 time.
+- **Drag-to-select-and-copy extends, not replaces, native selection** (§3.4,
+§8.12) — extends the Requirements §2.1 pointer-interaction scope item with a
+0.5.3 addition: the default drag gesture is now app-managed and
+auto-copying, with the terminal's native Shift-drag kept as the documented
+fallback rather than withdrawn. The Tech Spec absorbs the selection
+hit-testing model and the clipboard-write mechanism.
 
 ## 10. Open Questions
 
@@ -1161,9 +1201,6 @@ capable terminals ask; never a default, never load-bearing.
 - Web-search result density — how many hits and how long a snippet reads well
 in the flow without becoming a context flood (§4.10); pairs with the Tech
 Spec's caps. Tune with use.
-- Whether clicking should also select *text* within a pane (beyond entries),
-or leave in-pane text selection entirely to the terminal via the Shift
-modifier (§3.4). Lean to the latter until a real need appears.
 - Completion-gate halt wording and how the registered-checks status reads in the
 sidebar (§8.7) — candidate lines are examples; tune against real gated sessions
 so the halt informs without nagging when a check fails repeatedly.
@@ -1184,6 +1221,13 @@ notice than the quiet §8.10 line. Tune with use.
 - Exact wording of the export sensitive-content line, and whether a very
 large session's export should show byte/turn progress rather than only
 the §6.3 spinner (§8.11). Tune with use.
+- Exact selection-tint color value (§3.4) — "moderate-contrast, legible
+background block" states the requirement; the final palette mapping is an
+eye-tuning pass against the built interface, same as final palette values
+above.
+- Whether drag-select should reach overlay content (diff view, reasoning
+trail, inspectors, §4) or the conversation pane only at first (§3.4/§8.12,
+Tech Spec §9). Tune with use once the base gesture is in daily use.
 
 Resolved since v0.4: reasoning-trail default view — `collapsed` (§4.4,
 owner); tool-call explanation line — on by default, config-defeatable
@@ -1260,3 +1304,16 @@ where — plus one calm, non-blocking line naming that the exported file may
 carry sensitive content already in the transcript, since redaction is
 explicitly not attempted (Requirements FR-12). All three degrade to plain,
 tested, meaning-preserving output (§7).
+
+Resolved since v0.13 (0.5.3 feature set): the standing open question "whether
+clicking should also select text within a pane, or leave it to the terminal"
+is resolved in favor of app-managed selection — dragging (no modifier) now
+selects and, on release, copies to the system clipboard automatically,
+confirmed in the compaction-style calm-notice register (§3.4, §8.12). This
+was chosen over leaving text selection to the terminal because the terminal
+path (hold Shift while dragging) proved fragile in practice on some terminal
+emulators, which drop the whole selection if Shift releases a beat early —
+the exact problem this resolution exists to fix. Native Shift-drag is kept,
+not withdrawn, as the escape hatch for terminals/multiplexers where the new
+path's clipboard write (an unconfirmable escape sequence, Tech Spec §9)
+silently fails.

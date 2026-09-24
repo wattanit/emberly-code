@@ -119,6 +119,10 @@ pub mod status {
     /// rich sidebar and the degraded-mode banner (same wording, matching
     /// "one reload story for every path").
     pub const NO_PROVIDER_CUE: &str = "none configured — /model to add a provider";
+    /// The drag-to-select copy confirmation (Design §8.12), the character
+    /// count inserted between the two — e.g. "Copied 214 characters."
+    pub const COPIED_PREFIX: &str = "Copied ";
+    pub const COPIED_SUFFIX: &str = " characters.";
 }
 
 /// The guided provider/model setup wizard (Requirements C-7, Design §4.6).
@@ -219,7 +223,8 @@ pub mod export {
 /// Keybinding hints for the status bar (Design §3.1, §6.2 — 2–5 words each).
 /// Hints change with state; the permission set is shown while a prompt is open.
 pub mod hints {
-    pub const NORMAL: &str = "Enter send · Alt+Enter newline · Ctrl-P commands · Ctrl-D quit";
+    pub const NORMAL: &str =
+        "Enter send · Alt+Enter newline · Shift-Tab mode · Ctrl-P commands · Ctrl-D quit";
     pub const PERMISSION: &str = "y allow · s session · Enter deny";
 }
 
