@@ -195,7 +195,12 @@ impl Engine {
     /// (FR-10) — always recorded regardless of whether the active model has
     /// vision, since it states what the *user* attached, not what reached
     /// the model.
-    pub(super) fn record_user_message(&mut self, text: &str, images: Vec<AttachedImageMeta>) {
+    ///
+    /// On the first message, also emits `UiEvent::SessionMeta` so the live
+    /// sidebar picks up the new title immediately — without this the title
+    /// was durably correct from turn one but the running TUI stayed on
+    /// "untitled session" until the next `/resume` reloaded it from disk.
+    pub(super) async fn record_user_message(&mut self, text: &str, images: Vec<AttachedImageMeta>) {
         let original_task = !self.session.original_task_recorded;
         self.write_transcript(TranscriptEvent::UserMessage {
             text: text.to_string(),
@@ -204,9 +209,18 @@ impl Engine {
         });
         if original_task {
             self.session.original_task_recorded = true;
+            let title = clip_title(text);
             self.write_transcript(TranscriptEvent::SessionTitle {
-                title: clip_title(text),
+                title: title.clone(),
             });
+            self.emit(UiEvent::SessionMeta {
+                session_id: self.session.id,
+                title,
+                provider: self.provider.label.clone(),
+                model: self.provider.model.clone(),
+                project_root: self.project_root.display().to_string(),
+            })
+            .await;
         }
     }
 

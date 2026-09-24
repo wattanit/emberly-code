@@ -415,6 +415,30 @@ async fn transcript_records_the_durable_session() {
 }
 
 #[tokio::test]
+async fn first_user_message_titles_the_session_live_not_only_on_resume() {
+    // The title was already durably correct from turn one (the transcript
+    // assertions above) — this guards the separate live-UI half: the sidebar
+    // must not stay pinned to "untitled session" until a `/resume` reloads the
+    // title from disk.
+    let root = temp_project();
+    let scripts = vec![ScriptedResponse::text("done")];
+    let (mut h, _sink) = start_capturing(scripts, root);
+    h.send(Command::UserInput {
+        text: "fix the flaky test suite".into(),
+    })
+    .await;
+    let events = h.collect(None).await;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            UiEvent::SessionMeta { title, .. } if title == "fix the flaky test suite"
+        )),
+        "expected a live SessionMeta carrying the derived title, got: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn file_sink_session_resumes_to_an_identical_view() {
     // Group 10 round-trip (A-2, §3.3): run a scripted session through the real
     // on-disk FileTranscript sink, then resume from the written file and assert
