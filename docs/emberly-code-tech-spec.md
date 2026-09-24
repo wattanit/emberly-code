@@ -1,6 +1,6 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.16 
+**Version:** 0.17 
 **Status:** approved
 **Date:** 2026-09-24
 **Owner:** Wattanit
@@ -129,14 +129,14 @@ the outgoing `user_message` the TUI already constructs and sends (§4.1),
 rendered from that message's own content blocks (Design §4.14) rather than
 a separate notification.
 
-The 0.5.3 feature set adds `SelectionCopied{chars: u64}` (Design §3.4/§8.12)
-when a drag-to-select gesture is released and its resolved span is written to
-the system clipboard (§9) — the only data source for the Design §8.12
-confirmation line. It carries no `TranscriptEvent` counterpart: a UI-local
-clipboard action fits none of HC-7's listed categories (§3.2), and unlike
-`ContextUsage`/`SessionUsage` it is not derivable from anything the
-transcript already records, so there is nothing to reconstruct on resume —
-the notice simply does not replay.
+Drag-to-select-and-copy (Design §3.4/§8.12) adds **no** `UiEvent` (0.5.3,
+corrected in v0.17 — see §16): it is entirely a TUI-frontend concern, with no
+engine-side state, no permission gate, and no transcript relevance, so it
+never crosses the engine↔frontend channel at all (§9 covers the mechanism).
+This mirrors workspace trust below in kind, not in cause — both skip
+`UiEvent`, but because the deciding/owning logic lives entirely on one side
+of the channel in each case: trust because it resolves before the engine
+loop exists, copy-to-clipboard because the engine has nothing to do with it.
 
 Workspace trust (FR-1) is **not** a `UiEvent`: it is a pre-engine gate in the
 binary (§6.7), resolved before the engine loop starts and before any project
@@ -1368,26 +1368,35 @@ ticker) so capture is off whenever `ui.mouse = false`, degraded mode, or
 modifier) map to focus+select on interactive rows (sidebar entries, palette,
 pickers, collapsed reasoning/task blocks) and never synthesize an approval on
 a permission prompt (Design §5, §3.4).
-- **Drag-to-select-and-copy (Design §3.4/§8.12):** an unmodified
-`Down`→`Drag`→`Up` sequence — previously delivered to the app and silently
-discarded so a native Shift-drag selection could render through unbroken —
-now drives a selection model. `Drag` resolves the current pointer cell
-against the conversation pane's rendered text (a hit-testing extension
-alongside the existing interactive-row `HitMap`) and extends the in-progress
-selection, rendered live in the Design §3.4 selection tint. `Up` writes the
-resolved span to the system clipboard as an OSC 52 escape sequence
+- **Drag-to-select-and-copy (Design §3.4/§8.12, entirely frontend-local —
+corrected in v0.17, see §16):** an unmodified `Down`→`Drag`→`Up` sequence —
+previously delivered to the app and silently discarded so a native
+Shift-drag selection could render through unbroken — now drives a selection
+model owned entirely by `App`, with no `Command`/`UiEvent` crossing the
+engine↔frontend channel for any part of it (§3.1). `Drag` resolves the
+current pointer cell against the conversation pane's rendered text via a
+small sibling lookup built alongside the existing per-frame line-rebuild
+pass (row → source text; `HitMap` itself is untouched, staying row/region
+click dispatch only, §9 above) and extends the in-progress selection,
+rendered live in the Design §3.4 selection tint. `Up` writes the resolved
+span to the system clipboard as an OSC 52 escape sequence
 (`\x1b]52;c;<base64>\x07`) over the same direct-to-stdout control-sequence
-path already used elsewhere in this section — zero new dependencies (§12),
-HC-2 untouched — then emits `UiEvent::SelectionCopied{chars}` (§3.1) driving
-the Design §8.12 notice. OSC 52 has no delivery acknowledgment, so the
-sequence is written best-effort and the event fires regardless of whether
-any terminal or multiplexer in the chain actually applied it — the Design
-§8.12 honesty clause exists because this layer cannot do better. The
-modifier check that already gates `click`, above, extends to `Drag`/`Up`: a
-Shift-held drag is still not consumed here and passes through completely
-unintercepted, so native selection-and-copy keeps working exactly as before
-on any terminal where OSC 52 is not honored; users who want the terminal to
-own the mouse entirely still set `ui.mouse = false`.
+path already used elsewhere in this section — zero new dependencies (§12;
+`base64` is already workspace-vendored), HC-2 untouched — then sets a plain
+frontend-local flag (the copied character count) that drives the Design
+§8.12 confirmation line. No timer: the flag is cleared by the same "next
+input" hook everywhere else the confirmation line's caller already runs (a
+key, click, scroll, paste, or new drag), matching Design §8.12's own wording
+exactly rather than adding a time-based expiry it never asked for. OSC 52
+has no delivery acknowledgment, so the sequence is written best-effort and
+the confirmation appears regardless of whether any terminal or multiplexer
+in the chain actually applied it — the Design §8.12 honesty clause exists
+because this layer cannot do better. The modifier check that already gates
+`click`, above, extends to `Drag`/`Up`: a Shift-held drag is still not
+consumed here and passes through completely unintercepted, so native
+selection-and-copy keeps working exactly as before on any terminal where
+OSC 52 is not honored; users who want the terminal to own the mouse
+entirely still set `ui.mouse = false`.
 - **Strings:** all interface strings in one module/table
 (Design §6.2 discipline) — not a localization framework, just no
 scattered literals.
@@ -1737,6 +1746,27 @@ constraint or safety model.*
 
 ## 16. Open Items
 
+**v0.17 (2026-09-24, 0.5.3 feature set — correction).** v0.16 (below)
+specified `UiEvent::SelectionCopied` as the copy-confirmation's data source.
+Implementation research done before any code was written found this to be
+an architecture error: clipboard-copy is a pure TUI-frontend concern with no
+engine-side state, no permission gate, and no transcript relevance, so it
+should never have crossed the engine↔frontend channel at all — the same
+principle already governing why workspace trust (§3.1, below) isn't a
+`UiEvent` either, applied here for a different, purely-local reason.
+Corrected: the confirmation is a plain frontend-local `App` flag (the copied
+character count), cleared on the next input rather than by a timer — Design
+§8.12 only ever asked for "gone on the next input," so that is what is
+built — with no `Command`/`UiEvent` involved anywhere in the feature (§3.1,
+§9, both updated in place to describe the corrected mechanism — this entry
+and v0.16's are both left in §16 rather than one silently overwriting the
+other, per this standard's rule against open items disappearing without a
+pointer). No other
+part of v0.16 changes: same milestone (M14), same open items (below,
+unaffected by this correction), same Requirements/Design pins (v0.13/v0.13
+unchanged — this is a Spec-only fix, nothing about WHAT the harness does or
+how it looks/feels/speaks changed).
+
 **v0.16 (2026-09-24, 0.5.3 feature set).** Drag-to-select-and-copy (Design
 §3.4, §8.12) replaces the fragile Shift-drag-then-Ctrl+C flow with a
 harness-owned selection over rendered scrollback: a no-modifier
@@ -1750,10 +1780,10 @@ Native Shift-drag selection remains the documented fallback (Design §3.4)
 for terminals/multiplexers that do not apply OSC 52; the harness has no
 delivery acknowledgment for that sequence, so the Design §8.12 confirmation
 line reports only that the copy was *sent*, never that it was *received* —
-an honesty clause, not a caveat to fix. A new additive
-`UiEvent::SelectionCopied{chars: u64}` (§3.1) drives that notice; no
-`TranscriptEvent` counterpart (a UI-local moment fits none of HC-7's listed
-categories) and no `SCHEMA_VERSION` bump. No new FR-n/HC-n/P-n/T-n ID is
+an honesty clause, not a caveat to fix. The confirmation is driven by
+frontend-local `App` state (§3.1, §9) — no `UiEvent`, no `TranscriptEvent`,
+no `SCHEMA_VERSION` bump, and no engine involvement of any kind, since
+nothing about this feature is engine-owned state. No new FR-n/HC-n/P-n/T-n ID is
 realized — this is the same routing as the original mouse addition
 (Requirements §13, "Resolved since v0.6" entry): an interaction pattern is
 Design's, not Requirements'. Minor, additive bump; Requirements bumped to
