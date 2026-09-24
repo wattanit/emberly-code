@@ -119,6 +119,10 @@ pub mod status {
     /// rich sidebar and the degraded-mode banner (same wording, matching
     /// "one reload story for every path").
     pub const NO_PROVIDER_CUE: &str = "none configured — /model to add a provider";
+    /// The drag-to-select copy confirmation (Design §8.12), the character
+    /// count inserted between the two — e.g. "Copied 214 characters."
+    pub const COPIED_PREFIX: &str = "Copied ";
+    pub const COPIED_SUFFIX: &str = " characters.";
 }
 
 /// The guided provider/model setup wizard (Requirements C-7, Design §4.6).
