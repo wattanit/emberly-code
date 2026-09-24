@@ -48,6 +48,12 @@ pub struct Palette {
     pub safety_fg: Color,
     /// Background of the reserved outside-root safety band.
     pub safety_bg: Color,
+    /// Background of a drag-to-select highlight (Design §3.4/§8.12): a
+    /// moderate-contrast, legible block distinct from both the terminal's
+    /// harsh full-invert and `chrome`'s barely-there dim. Not the accent —
+    /// selection is a utility affordance, not identity (Design §2's "colour
+    /// never carries meaning").
+    pub selection_bg: Color,
 }
 
 impl Palette {
@@ -69,6 +75,10 @@ impl Palette {
             // for outside-root prompts only (Design §5).
             safety_fg: Color::Rgb(0xF6, 0xE9, 0xE6),
             safety_bg: Color::Rgb(0x6E, 0x1F, 0x1A),
+            // A step up from `raised` — visible against `background` without
+            // the harshness of a full invert (Design §3.4 candidate; tune by
+            // eye per Design §10's open question).
+            selection_bg: Color::Rgb(0x3D, 0x35, 0x2A),
         }
     }
 
@@ -88,6 +98,9 @@ impl Palette {
             warning: Color::Rgb(0x9A, 0x6E, 0x18),
             safety_fg: Color::Rgb(0xFB, 0xF3, 0xF1),
             safety_bg: Color::Rgb(0x8A, 0x24, 0x1E),
+            // A step down from `background` — a deeper warm tan, visible
+            // without being harsh against the light theme's dark text.
+            selection_bg: Color::Rgb(0xDC, 0xCB, 0xA9),
         }
     }
 }
@@ -224,6 +237,21 @@ impl Theme {
     #[must_use]
     pub fn diff_del(&self) -> Style {
         self.fg(self.palette.error)
+    }
+
+    /// A drag-to-select highlight (Design §3.4/§8.12): the text's own primary
+    /// foreground kept readable, on the selection background. `None` (no-op)
+    /// under [`Theme::plain`] — moot in practice, since mouse capture (and so
+    /// this feature) is off wherever the colourless theme is used.
+    #[must_use]
+    pub fn selection(&self) -> Style {
+        if self.color {
+            Style::default()
+                .fg(self.palette.primary)
+                .bg(self.palette.selection_bg)
+        } else {
+            Style::default()
+        }
     }
 
     /// **Reserved.** The outside-project-root permission band (Design §5) and

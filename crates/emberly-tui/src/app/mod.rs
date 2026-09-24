@@ -605,6 +605,22 @@ pub(crate) struct FilesState {
     pub(crate) last: Option<String>,
 }
 
+/// A drag-based text selection over the conversation pane (Design §3.4/§8.12,
+/// Tech Spec §9 — 0.5.3), entirely frontend-local (no engine involvement,
+/// Tech Spec §3.1). Coordinates are absolute screen positions; resolving them
+/// to actual text is [`crate::textmap::TextMap`]'s job at render/finish time.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Selection {
+    /// Where the drag started.
+    pub(crate) anchor: (u16, u16),
+    /// The pointer's current (while dragging) or final (once released)
+    /// position.
+    pub(crate) current: (u16, u16),
+    /// Whether the pointer has actually moved since `anchor` was set — an
+    /// unmoved click must never be treated as a (trivial) selection.
+    pub(crate) dragging: bool,
+}
+
 /// Animation and busy state (Design §6.3, §6.4). `tick` advances every counter
 /// here and `is_animating` reads every one of them, so they are one unit.
 pub(crate) struct MotionState {
@@ -709,6 +725,19 @@ pub struct App {
     /// `render::frame` and stored here by the `tui` loop after each draw, so a
     /// click resolves against the geometry actually on screen.
     pub(crate) hit_map: crate::hit::HitMap,
+    /// The conversation pane's text from the last rendered frame (Design
+    /// §3.4/§8.12, Tech Spec §9 — 0.5.3), mirroring `hit_map`: rebuilt by
+    /// `render::frame` and stored here after each draw, so a drag resolves
+    /// against exactly what is on screen.
+    pub(crate) text_map: crate::textmap::TextMap,
+    /// An in-progress or just-finished drag selection, if any (Design
+    /// §3.4/§8.12). `None` when nothing is selected.
+    pub(crate) selection: Option<Selection>,
+    /// The "Copied N characters." confirmation (Design §8.12) — the character
+    /// count of the most recent copy. Cleared on the next input (a key, click,
+    /// scroll, paste, or new drag), never by a timer: this is a frontend-local
+    /// notice, not a `ConvItem::Notice` (never a permanent scrollback entry).
+    pub(crate) copy_flash: Option<usize>,
     /// The active theme (Design §2). One source the renderer reads; swapping it
     /// (mode/light-fallback later) is a value change, not a refactor.
     pub(crate) theme: Theme,
@@ -728,6 +757,7 @@ mod memory;
 mod overlays;
 mod pickers;
 mod prompts;
+mod selection;
 mod session;
 mod skills;
 mod wizard;
@@ -811,6 +841,9 @@ impl App {
             overlays: Vec::new(),
             palette: None,
             hit_map: crate::hit::HitMap::new(),
+            text_map: crate::textmap::TextMap::new(),
+            selection: None,
+            copy_flash: None,
             theme: Theme::rich(),
         }
     }

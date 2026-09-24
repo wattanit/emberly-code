@@ -27,6 +27,11 @@ crossterm = { workspace = true }
 syntect = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
+# Already workspace-vendored (emberly-tools uses it for image/document
+# encoding) — this adds a visibility line, not a new crate to the graph.
+# Needed to base64-encode a drag selection for the OSC 52 clipboard write
+# (Tech Spec §9 — 0.5.3).
+base64 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

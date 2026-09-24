@@ -644,6 +644,7 @@ dependencies = [
 name = "emberly-tui"
 version = "0.5.2"
 dependencies = [
+ "base64",
  "crossterm",
  "emberly-core",
  "ratatui",

@@ -23,6 +23,7 @@ pub mod render;
 pub mod strings;
 pub mod terminal;
 pub mod text;
+pub mod textmap;
 pub mod theme;
 pub mod tui;
 

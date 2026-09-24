@@ -23,6 +23,7 @@ use crate::app::{Action, App, PendingMemoryEdit, SessionInfo};
 use crate::hit::HitMap;
 use crate::render;
 use crate::terminal::TerminalGuard;
+use crate::textmap::TextMap;
 
 /// Run the rich TUI until the user quits or the engine closes its event stream.
 /// Sets up and tears down the terminal via [`TerminalGuard`] (HC-3). `history`
@@ -153,8 +154,12 @@ pub async fn run(
                         // keypress does, so the mouse adds no new authority. Only
                         // an **unmodified** left button is consumed — Shift/Ctrl/
                         // Alt clicks are left to the terminal so its native
-                        // selection still works (Design §3.4).
+                        // selection still works (Design §3.4). This also starts
+                        // tracking a potential drag selection (Design §3.4/§8.12,
+                        // Tech Spec §9 — 0.5.3); an unmoved click still resolves
+                        // to nothing selected (`finish_selection`, on `Up`).
                         MouseEventKind::Down(MouseButton::Left) if mouse.modifiers.is_empty() => {
+                            app.begin_selection(mouse.column, mouse.row);
                             let action = app.on_click(mouse.column, mouse.row);
                             if handle_action(
                                 action,
@@ -168,13 +173,35 @@ pub async fn run(
                                 break;
                             }
                         }
-                        // Drag/move/right/up and modified clicks: not consumed
+                        // Extend the live selection highlight (Design §3.4). A
+                        // no-op if nothing is being tracked (the matching `Down`
+                        // carried a modifier and was left to the terminal).
+                        MouseEventKind::Drag(MouseButton::Left) if mouse.modifiers.is_empty() => {
+                            app.extend_selection(mouse.column, mouse.row);
+                        }
+                        // Finish the selection: a genuine drag that resolved to
+                        // non-empty text is copied to the clipboard and the
+                        // Design §8.12 notice is armed; a plain click or an
+                        // empty resolution does nothing further.
+                        MouseEventKind::Up(MouseButton::Left) if mouse.modifiers.is_empty() => {
+                            if let Some(text) = app.finish_selection() {
+                                let chars = crate::text::cluster_count(&text);
+                                if crate::terminal::copy_to_clipboard(&text).is_ok() {
+                                    app.copy_flash = Some(chars);
+                                }
+                            }
+                        }
+                        // Move/right/up and modified clicks/drags: not consumed
                         // (no redraw, so a native Shift-drag selection is smooth).
                         _ => continue,
                     }
                     redraw(&mut guard, &mut app)?;
                 }
                 Some(Event::Resize(_, _)) => {
+                    // A resize re-wraps everything, so a frozen selection's
+                    // screen coordinates no longer point at the same content
+                    // (Design §8.12).
+                    app.clear_transients();
                     redraw(&mut guard, &mut app)?;
                 }
                 Some(_) => {} // focus events — ignored
@@ -191,11 +218,13 @@ pub async fn run(
 /// subsequent click resolves against exactly what is on screen.
 fn redraw(guard: &mut TerminalGuard, app: &mut App) -> io::Result<()> {
     let mut hit_map = HitMap::new();
+    let mut text_map = TextMap::new();
     let view: &App = app;
     guard
         .terminal()
-        .draw(|f| render::frame(f, view, &mut hit_map))?;
+        .draw(|f| render::frame(f, view, &mut hit_map, &mut text_map))?;
     app.hit_map = hit_map;
+    app.text_map = text_map;
     Ok(())
 }
 
