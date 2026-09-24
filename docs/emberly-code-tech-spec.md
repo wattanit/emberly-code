@@ -1,11 +1,11 @@
 # Emberly Code — Technical Specification
 
-**Version:** 0.15 
+**Version:** 0.16 
 **Status:** approved
-**Date:** 2026-09-02
+**Date:** 2026-09-24
 **Owner:** Wattanit
-**Companion documents:** Requirements Document v0.12 (upstream contract),
-Design Guideline v0.12 (upstream for all UI/UX decisions)
+**Companion documents:** Requirements Document v0.13 (upstream contract),
+Design Guideline v0.13 (upstream for all UI/UX decisions)
 
 This document defines HOW Emberly Code is built. Requirements-level
 identifiers (HC-n, FR-n, P-n, T-n, C-n, S-n, A-n) refer to the Requirements
@@ -128,6 +128,15 @@ no per-call event. A user-attached image needs no new `UiEvent`: it rides
 the outgoing `user_message` the TUI already constructs and sends (§4.1),
 rendered from that message's own content blocks (Design §4.14) rather than
 a separate notification.
+
+The 0.5.3 feature set adds `SelectionCopied{chars: u64}` (Design §3.4/§8.12)
+when a drag-to-select gesture is released and its resolved span is written to
+the system clipboard (§9) — the only data source for the Design §8.12
+confirmation line. It carries no `TranscriptEvent` counterpart: a UI-local
+clipboard action fits none of HC-7's listed categories (§3.2), and unlike
+`ContextUsage`/`SessionUsage` it is not derivable from anything the
+transcript already records, so there is nothing to reconstruct on resume —
+the notice simply does not replay.
 
 Workspace trust (FR-1) is **not** a `UiEvent`: it is a pre-engine gate in the
 binary (§6.7), resolved before the engine loop starts and before any project
@@ -1355,12 +1364,30 @@ overlay — this is a command, not a picker.
 - **Mouse (Design §3.4):** `crossterm` `EnableMouseCapture` gated on
 `ui.mouse` and rich mode — a single control point (like the §6.4 animation
 ticker) so capture is off whenever `ui.mouse = false`, degraded mode, or
-`--plain`. Wheel events scroll the focused pane/overlay; click events map to
-focus+select on interactive rows (sidebar entries, palette, pickers,
-collapsed reasoning/task blocks) and never synthesize an approval on a
-permission prompt (Design §5, §3.4). The terminal's own Shift-modified
-selection passes through unintercepted, so native copy still works; users who
-want the terminal to own the mouse entirely set `ui.mouse = false`.
+`--plain`. Wheel events scroll the focused pane/overlay; click events (no
+modifier) map to focus+select on interactive rows (sidebar entries, palette,
+pickers, collapsed reasoning/task blocks) and never synthesize an approval on
+a permission prompt (Design §5, §3.4).
+- **Drag-to-select-and-copy (Design §3.4/§8.12):** an unmodified
+`Down`→`Drag`→`Up` sequence — previously delivered to the app and silently
+discarded so a native Shift-drag selection could render through unbroken —
+now drives a selection model. `Drag` resolves the current pointer cell
+against the conversation pane's rendered text (a hit-testing extension
+alongside the existing interactive-row `HitMap`) and extends the in-progress
+selection, rendered live in the Design §3.4 selection tint. `Up` writes the
+resolved span to the system clipboard as an OSC 52 escape sequence
+(`\x1b]52;c;<base64>\x07`) over the same direct-to-stdout control-sequence
+path already used elsewhere in this section — zero new dependencies (§12),
+HC-2 untouched — then emits `UiEvent::SelectionCopied{chars}` (§3.1) driving
+the Design §8.12 notice. OSC 52 has no delivery acknowledgment, so the
+sequence is written best-effort and the event fires regardless of whether
+any terminal or multiplexer in the chain actually applied it — the Design
+§8.12 honesty clause exists because this layer cannot do better. The
+modifier check that already gates `click`, above, extends to `Drag`/`Up`: a
+Shift-held drag is still not consumed here and passes through completely
+unintercepted, so native selection-and-copy keeps working exactly as before
+on any terminal where OSC 52 is not honored; users who want the terminal to
+own the mouse entirely still set `ui.mouse = false`.
 - **Strings:** all interface strings in one module/table
 (Design §6.2 discipline) — not a localization framework, just no
 scattered literals.
@@ -1699,8 +1726,54 @@ its subagents, over the existing transcript and derived-view state. *Proves
 the 0.5.1 scope: three usability gaps close without a privileged path
 around the safety model, a second persistence mechanism, or a single new
 dependency (§12).*
+M14 — 0.5.3 feature set: drag-to-select-and-copy (Design §3.4, §8.12) — a
+TUI-owned selection model over rendered scrollback, replacing the fragile
+Shift-drag-then-Ctrl+C flow with a single no-modifier drag that copies on
+release via an OSC 52 escape sequence, native Shift-drag kept as the
+documented fallback. *Proves the 0.5.3 scope: copying conversation text out
+of the terminal takes one motion, on every terminal that honors the escape
+sequence, with zero new dependencies (§12) and no change to any hard
+constraint or safety model.*
 
 ## 16. Open Items
+
+**v0.16 (2026-09-24, 0.5.3 feature set).** Drag-to-select-and-copy (Design
+§3.4, §8.12) replaces the fragile Shift-drag-then-Ctrl+C flow with a
+harness-owned selection over rendered scrollback: a no-modifier
+`Down`→`Drag`→`Up` sequence — previously delivered to the app and
+explicitly discarded (§9) so a native Shift-drag selection could render
+through — now resolves to a text span via a hit-testing extension (§9) and,
+on release, writes it to the system clipboard as an OSC 52 escape sequence
+through the same direct-to-stdout path the harness already uses for other
+terminal control sequences (§9) — no new dependency (§12), HC-2 untouched.
+Native Shift-drag selection remains the documented fallback (Design §3.4)
+for terminals/multiplexers that do not apply OSC 52; the harness has no
+delivery acknowledgment for that sequence, so the Design §8.12 confirmation
+line reports only that the copy was *sent*, never that it was *received* —
+an honesty clause, not a caveat to fix. A new additive
+`UiEvent::SelectionCopied{chars: u64}` (§3.1) drives that notice; no
+`TranscriptEvent` counterpart (a UI-local moment fits none of HC-7's listed
+categories) and no `SCHEMA_VERSION` bump. No new FR-n/HC-n/P-n/T-n ID is
+realized — this is the same routing as the original mouse addition
+(Requirements §13, "Resolved since v0.6" entry): an interaction pattern is
+Design's, not Requirements'. Minor, additive bump; Requirements bumped to
+v0.13 and Design to v0.13 in lockstep (pins refreshed). Approved by the
+owner (2026-09-24) with no requested changes.
+
+Open items introduced by the 0.5.3 scope:
+
+- **OSC 52 terminal/multiplexer support matrix (Design §3.4/§8.12, §9).**
+Which terminals and multiplexers (tmux/screen passthrough in particular)
+apply OSC 52 out of the box, which need explicit configuration, and which
+silently drop it is unverified; document the gaps the same way the
+existing Shift-passthrough open item (v0.8, below) documents
+native-selection gaps, and consider whether an in-app capability probe is
+worth adding if the gap list turns out to be large.
+- **Selection-span hit-testing scope (§9).** The initial hit-testing
+extension resolves a drag against the conversation pane's rendered text;
+whether it should also reach overlay content (diff view, reasoning trail,
+inspectors) is deferred to a tune-with-use pass once the base gesture is in
+daily use (mirrors the Design §10 open question).
 
 **v0.15 (2026-09-02, distribution & licensing).** §13 Build & Release
 expanded with the project's first public distribution channels and a
