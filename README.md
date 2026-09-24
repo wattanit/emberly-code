@@ -1,6 +1,6 @@
 # Emberly Code
 
-> **Currently on v0.5.2** — feature-complete for the milestone, install via Homebrew, `cargo install`, or a prebuilt binary.
+> **Currently on v0.5.3** — feature-complete for the milestone, install via Homebrew, `cargo install`, or a prebuilt binary.
 
 **An AI coding agent for your terminal — provider-agnostic, fully auditable, and
 built in pure Rust.**
@@ -553,10 +553,10 @@ minimal terminals. Any subcommand with its own options — `config`, `trust`,
 
 ### Project status
 
-Feature-complete for the **v0.5.2** milestone, installable from source.
+Feature-complete for the **v0.5.3** milestone, installable from source.
 The interactive TUI, live providers, session persistence, the permission rule
 engine, auto-accept modes, and OS confinement (Linux Landlock, macOS Seatbelt)
-all work today, alongside the full 0.2–0.5.2 stack described below. **Not yet
+all work today, alongside the full 0.2–0.5.3 stack described below. **Not yet
 shipped:** prebuilt binaries and Windows support (no Landlock/Seatbelt
 equivalent).
 
@@ -579,6 +579,7 @@ as it grows. _(Affectionate, not official.)_
 | **v0.5.0** | M12 | 🔥 _Bonfire_ | Multi-agent delegation — the primary agent can spawn, message, list, and end subagents, each a real nested engine running under the exact same permission, sandbox, and workspace-trust posture as the primary agent, with its own selectable provider profile and a tool set that's never a superset of the primary agent's own. Concurrent by default, bounded to one level of depth (no recursive spawning), a configurable concurrency ceiling and idle reap, cost roll-up into the session total, and a per-agent inspector (sidebar Agents section, `/agents` command, permission-prompt provenance line) so no subagent is a silent background process. |
 | **v0.5.1** | M13 | 🔥 _Bonfire_ | Three independent slices: **MCP client support** (`[mcp.servers.*]`, `/mcp`, a first-party stdio JSON-RPC client — no vendor SDK — with discovered tools permission-gated and provenance-labeled exactly like a built-in tool's); **user-attached images** (`/attach <path>`, reusing the existing vision content-block path `read_image` already produces); and **session export** (`/export <path>` / `emberly export`, a read-only, self-contained HTML render of a session and any subagent it spawned). |
 | **v0.5.2** | — | 🔥 _Bonfire_ | A usability pass on the terminal and the CLI, no new capability. The chat and input panels keep only their top/bottom rule now, so a terminal-selected transcript copies cleanly instead of picking up border glyphs; a typed `/command` is colored live as you type it (recognized, still-ambiguous, or unresolvable) and Tab-completes when exactly one command matches; a fresh session opens with a short orientation instead of a blank pane; `/init` brings the CLI's `.agents/` scaffolding in-session; the `.agents/config.toml` template is now a clearly divided, fully-commented section per built-in provider instead of one flat block; a denied tool call now tells the model to ask you rather than spend the turn hunting for a workaround; and `emberly --help`/`-h`, plus per-subcommand help (`init`, `sessions`, `resume`, `config`, `trust`, `clean`, `export`), finally document the CLI's own surface. |
+| **v0.5.3** | M14 | 🔥 _Bonfire_ | Drag-to-select-and-copy: dragging over the conversation pane with no modifier held highlights the text under the pointer and copies it to the clipboard on release via an OSC 52 escape sequence, with a "Copied N characters." notice — replacing the fragile Shift-drag-then-Ctrl+C flow (native Shift-drag still works as the documented fallback). The status bar's hint line now also mentions Shift-Tab's existing mode-cycle binding. Plus a fix: a session's auto-generated title now reaches the sidebar live from the first message, instead of showing "untitled session" until the next `/resume`. |
 
 Prior as-built plans live under `docs/version-0-1/`, `docs/version-0-2/`,
 `docs/version-0-3/`, `docs/version-0-4/`, `docs/version-0-4-1/`,
@@ -633,10 +634,10 @@ Release targets (v1): `x86_64-unknown-linux-musl`,
 
 **Documents** (the SFD standard — Requirements → Design → Tech Spec):
 
-- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.12)
-- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.12)
-- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.15)
-- [`docs/version-0-5-1/IMPLEMENTATION_PLAN.md`](docs/version-0-5-1/IMPLEMENTATION_PLAN.md) — v0.5.1's phased build plan (v0.5.2 was a smaller, informal polish pass with no foundation-document revision)
+- [`docs/emberly-code-requirements.md`](docs/emberly-code-requirements.md) — WHAT and WHY (v0.13)
+- [`docs/emberly-code-design-guideline.md`](docs/emberly-code-design-guideline.md) — how it looks, feels, speaks (v0.13)
+- [`docs/emberly-code-tech-spec.md`](docs/emberly-code-tech-spec.md) — HOW it is built (v0.17)
+- [`docs/version-0-5-1/IMPLEMENTATION_PLAN.md`](docs/version-0-5-1/IMPLEMENTATION_PLAN.md) — v0.5.1's phased build plan (v0.5.2 was a smaller, informal polish pass with no foundation-document revision; v0.5.3 bumped the foundation documents for drag-to-select-and-copy but likewise shipped without a dedicated Implementation Plan)
 - [`docs/distribution/IMPLEMENTATION_PLAN.md`](docs/distribution/IMPLEMENTATION_PLAN.md) — the license change and distribution-channel plan below
 
 ## License
