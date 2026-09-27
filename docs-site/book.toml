@@ -1,0 +1,16 @@
+[book]
+title = "Emberly Code"
+description = "User guide for Emberly Code — an AI coding agent for your terminal."
+authors = ["Emberly Code contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/wattanit/emberly-code"
+edit-url-template = "https://github.com/wattanit/emberly-code/edit/develop/docs-site/{path}"
+
+[output.html.search]
+enable = true
+limit-results = 20

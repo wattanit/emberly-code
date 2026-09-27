@@ -1,0 +1,21 @@
+# Summary
+
+[Introduction](./introduction.md)
+
+- [Installation](./installation.md)
+- [Quick Start](./quickstart.md)
+- [Configuration](./configuration/index.md)
+  - [Providers, Models & Keys](./configuration/providers.md)
+  - [MCP Servers](./configuration/mcp-servers.md)
+  - [Config Keys Reference](./configuration/reference.md)
+  - [Editing Config From a Session](./configuration/editing-in-session.md)
+- [Interface & Commands](./guide/interface-and-commands.md)
+- [Safety: Permissions, Sandbox & Trust](./guide/safety.md)
+- [Reasoning Effort & Thinking Trail](./guide/reasoning-effort.md)
+- [Persistent Memory](./guide/memory.md)
+- [Skills](./guide/skills.md)
+- [Multi-Agent Delegation](./guide/multi-agent-delegation.md)
+- [Using MCP Servers](./guide/mcp-usage.md)
+- [Web Search & Image/Document Input](./guide/web-search-and-input.md)
+- [Sessions & Long Conversations](./guide/sessions.md)
+- [CLI Reference](./cli-reference.md)
